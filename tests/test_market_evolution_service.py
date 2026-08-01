@@ -11,7 +11,7 @@ from scripts.market_evolution_service import (
     Genome, add_derived_features, attach_causal_normalization, brain_feedback_score,
     attach_news_features, crossover, dataset_signature, evaluation_scope,
     evaluation_signature, decompose_returns, fit_regime_decomposed_regressor,
-    introduce_calibration_variants,
+    introduce_calibration_variants, introduce_directional_frontier_variants,
     introduce_missing_learner_species,
     load_dataset_cached, mutate, passes_floor,
     passes_prescreen, program_name, program_value, recover_pending_gate,
@@ -226,14 +226,14 @@ def test_dataset_cache_rejects_invalid_payload_and_round_trips(tmp_path, monkeyp
 
 
 def test_diverse_elites_preserve_learner_species_without_overriding_fitness():
-    population = seed_genomes(5, random.Random(9))
+    population = seed_genomes(6, random.Random(9))
     for index, genome in enumerate(population):
         genome.fitness = 100.0 - index
-    elites = select_diverse_elites(population, 5)
+    elites = select_diverse_elites(population, 6)
     assert elites[0].genome_id == population[0].genome_id
     assert {genome.learner_kind for genome in elites} == {
         "classifier", "regressor", "extra_trees", "decomposed_regressor",
-        "regime_regressor",
+        "regime_regressor", "regime_decomposed_regressor",
     }
 
 
@@ -287,3 +287,19 @@ def test_regime_decomposed_species_routes_market_and_residual_specialists():
     prediction = model.predict(values[:8])
     assert prediction.shape == (8,)
     assert np.isfinite(prediction).all()
+
+
+def test_directional_frontier_seeds_calibration_without_changing_sign_model():
+    population = seed_genomes(12, random.Random(12))
+    base = population[1]
+    base.calibration_safety = 1.0
+    base.result = {"summary": {
+        "min_accuracy": .59, "min_mcc": .13, "min_expectancy": .002,
+        "max_ece": .30,
+    }}
+    updated = introduce_directional_frontier_variants(population, [base], 4)
+    variants = updated[-2:]
+    assert [genome.calibration_safety for genome in variants] == [4.0, 8.0]
+    assert all(genome.learner_kind == base.learner_kind for genome in variants)
+    assert all(genome.features == base.features for genome in variants)
+    assert all(genome.parents == [base.genome_id] for genome in variants)

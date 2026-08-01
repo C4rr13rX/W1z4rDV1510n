@@ -1288,8 +1288,8 @@ def select_diverse_elites(population: Sequence[Genome], count: int,
             seen.add(genome.genome_id)
             selected.append(genome_from_dict(asdict(genome)))
 
-    for genome in ranked[:max(2, count // 2)]:
-        retain(genome)
+    if ranked:
+        retain(ranked[0])
     for learner in LEARNER_KINDS:
         candidate = next((genome for genome in ranked if genome.learner_kind == learner), None)
         if candidate is not None:
@@ -1302,6 +1302,44 @@ def select_diverse_elites(population: Sequence[Genome], count: int,
     for genome in ranked:
         retain(genome)
     return selected
+
+
+def introduce_directional_frontier_variants(
+    population: list[Genome], evaluated: Sequence[Genome], generation: int,
+) -> list[Genome]:
+    """Preserve useful signs while testing materially safer confidence scales."""
+    frontier = [
+        genome for genome in evaluated
+        if genome.learner_kind in {
+            "regressor", "decomposed_regressor", "regime_regressor",
+            "regime_decomposed_regressor",
+        }
+        and (genome.result or {}).get("summary", {}).get("min_accuracy", 0) >= FLOOR["accuracy"]
+        and (genome.result or {}).get("summary", {}).get("min_expectancy", 0) > 0
+        and (genome.result or {}).get("summary", {}).get("max_ece", 0) > FLOOR["ece"]
+    ]
+    if not frontier or len(population) < len(LEARNER_KINDS) + 2:
+        return population
+    base = max(frontier, key=lambda genome: (
+        (genome.result or {}).get("summary", {}).get("min_accuracy", 0),
+        (genome.result or {}).get("summary", {}).get("min_mcc", -1),
+    ))
+    known = {genome.genome_id for genome in population}
+    variants = []
+    for multiplier in (4.0, 8.0):
+        payload = asdict(base)
+        payload.update({
+            "calibration_safety": min(12.0, max(1.0, base.calibration_safety * multiplier)),
+            "generation": generation, "parents": [base.genome_id],
+            "fitness": None, "result": None, "genome_id": "",
+        })
+        variant = Genome(**payload).finalize()
+        if variant.genome_id not in known:
+            known.add(variant.genome_id)
+            variants.append(variant)
+    if variants:
+        population[-len(variants):] = variants
+    return population
 
 
 def main() -> int:
@@ -1496,7 +1534,7 @@ def main() -> int:
                                  genome_id=pending_gate_genome, report=str(gate_out))
                     pending_gate_genome = None
             generation += 1
-            elite_count = max(4, round(args.population * .40))
+            elite_count = max(len(LEARNER_KINDS), round(args.population * .40))
             elites = select_diverse_elites(population, elite_count, neural_scores)
             next_population = elites[:]
             known_ids = {genome.genome_id for genome in next_population}
@@ -1508,7 +1546,9 @@ def main() -> int:
                 if child.genome_id not in known_ids:
                     known_ids.add(child.genome_id)
                     next_population.append(child)
-            population = next_population
+            population = introduce_directional_frontier_variants(
+                next_population, population, generation
+            )
             state = {
                 "schema": EVOLUTION_SCHEMA, "updated_at": utc_now(), "generation": generation,
                 "configuration": {key: str(value) if isinstance(value, Path) else value
