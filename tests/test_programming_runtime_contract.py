@@ -20,9 +20,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from scripts.programming_integrated_retention import mutation_enabled
+from scripts.programming_integrated_retention import foundation_eval, mutation_enabled
 from scripts.independent_snapshot import publish_independent_copy
-from scripts.programming_brain_eval import BrainClient as FoundationBrainClient
+from scripts.programming_brain_eval import (
+    BrainClient as FoundationBrainClient,
+    K12,
+    OOV,
+    TODDLER,
+)
 from scripts.programming_curriculum_supervisor import (
     AdmissionInfrastructureError,
     CanaryInfrastructureError,
@@ -145,6 +150,40 @@ from tools.training_standard.drive_corpora_brain import (
 
 
 class ProgrammingRuntimeContractTests(unittest.TestCase):
+    def test_foundation_report_preserves_exact_oov_failure_evidence(self) -> None:
+        accepted = {prompt: {"accepted"} for prompt in K12}
+
+        def reply(_endpoint: str, prompt: str) -> dict:
+            toddler = dict(TODDLER)
+            if prompt in toddler:
+                return {"reply": toddler[prompt]}
+            if prompt in accepted:
+                return {"reply": "accepted"}
+            if prompt == OOV[1]:
+                return {
+                    "reply": "incorrect learned answer",
+                    "grounding": {"outside_grounding": False},
+                    "route": {"decoder": "trained_binding"},
+                }
+            return {
+                "reply": None,
+                "grounding": {"outside_grounding": True},
+            }
+
+        with patch(
+            "scripts.programming_integrated_retention.chat",
+            side_effect=reply,
+        ):
+            report = foundation_eval("http://brain", accepted)
+
+        self.assertEqual(report["toddler"], report["toddler_total"])
+        self.assertEqual(report["k12"], report["k12_total"])
+        self.assertEqual(report["oov"], 2)
+        failed = [row for row in report["oov_rows"] if not row["passed"]]
+        self.assertEqual(failed[0]["prompt"], OOV[1])
+        self.assertEqual(failed[0]["reply"], "incorrect learned answer")
+        self.assertEqual(failed[0]["route"]["decoder"], "trained_binding")
+
     def test_memory_floor_requires_forward_durable_progress(self) -> None:
         gib = 1024 * 1024 * 1024
         self.assertFalse(memory_floor_breached(6.0, 100, 100, 100, 1 * gib))

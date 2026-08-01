@@ -50,18 +50,52 @@ def chat(endpoint: str, prompt: str) -> dict:
 
 
 def foundation_eval(endpoint: str, accepted: dict[str, set[str]]) -> dict:
-    toddler = sum(chat(endpoint, prompt).get("reply") == expected
-                   for prompt, expected in TODDLER)
-    k12 = sum(chat(endpoint, prompt).get("reply") in accepted.get(prompt, set())
-              for prompt in K12)
-    oov = 0
+    toddler_rows = []
+    for prompt, expected in TODDLER:
+        result = chat(endpoint, prompt)
+        passed = result.get("reply") == expected
+        toddler_rows.append({
+            "prompt": prompt,
+            "expected": expected,
+            "reply": result.get("reply"),
+            "passed": passed,
+        })
+    k12_rows = []
+    for prompt in K12:
+        result = chat(endpoint, prompt)
+        expected = sorted(accepted.get(prompt, set()))
+        passed = result.get("reply") in expected
+        k12_rows.append({
+            "prompt": prompt,
+            "accepted": expected,
+            "reply": result.get("reply"),
+            "passed": passed,
+        })
+    oov_rows = []
     for prompt in OOV:
         result = chat(endpoint, prompt)
-        oov += bool(not result.get("reply")
-                    and (result.get("grounding") or {}).get("outside_grounding"))
-    return {"toddler": toddler, "toddler_total": len(TODDLER),
-            "k12": k12, "k12_total": len(K12),
-            "oov": oov, "oov_total": len(OOV)}
+        passed = bool(
+            not result.get("reply")
+            and (result.get("grounding") or {}).get("outside_grounding")
+        )
+        oov_rows.append({
+            "prompt": prompt,
+            "reply": result.get("reply"),
+            "grounding": result.get("grounding") or {},
+            "route": result.get("route") or {},
+            "passed": passed,
+        })
+    return {
+        "toddler": sum(row["passed"] for row in toddler_rows),
+        "toddler_total": len(TODDLER),
+        "toddler_rows": toddler_rows,
+        "k12": sum(row["passed"] for row in k12_rows),
+        "k12_total": len(K12),
+        "k12_rows": k12_rows,
+        "oov": sum(row["passed"] for row in oov_rows),
+        "oov_total": len(OOV),
+        "oov_rows": oov_rows,
+    }
 
 
 def code_eval(endpoint: str) -> dict:

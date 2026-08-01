@@ -225,3 +225,8 @@ The runtime contains:
 - `brain/*.last-good.*`: unresolved rollback state, present only while a candidate is under review.
 
 Do not declare a reproduced brain equivalent merely because the process exits successfully. Verify the final state file, every completion gate, the strict enterprise report, execution results, OOV honesty, and the final brain identity together.
+For every failing retention family, preserve row-level evidence before rollback:
+the prompt, expected or accepted output, actual reply, grounding decision,
+route diagnostics, and assertion result. Aggregate counts locate a broken
+contract but cannot support a later causal repair once the candidate state has
+been discarded.
