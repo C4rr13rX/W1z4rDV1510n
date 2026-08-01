@@ -133,3 +133,9 @@ Schema 7 evolves a bounded conservative multiplier on regression temperature.
 It cannot change a score's sign or confidence rank, so it cannot manufacture
 accuracy or choose easier observations; it only prevents a directionally
 useful lineage from expressing confidence unsupported by protected future data.
+
+Schema 8 composes regime routing with market/residual decomposition as a
+separate preserved learner species. Each observable-state expert independently
+learns broad-market motion and instrument-specific residual motion; the evolved
+market weight recombines them. Future returns remain supervised targets only,
+and the router sees only decision-time context.

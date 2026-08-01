@@ -10,7 +10,8 @@ import scripts.market_evolution_service as evolution
 from scripts.market_evolution_service import (
     Genome, add_derived_features, attach_causal_normalization, brain_feedback_score,
     attach_news_features, crossover, dataset_signature, evaluation_scope,
-    evaluation_signature, decompose_returns, introduce_calibration_variants,
+    evaluation_signature, decompose_returns, fit_regime_decomposed_regressor,
+    introduce_calibration_variants,
     introduce_missing_learner_species,
     load_dataset_cached, mutate, passes_floor,
     passes_prescreen, program_name, program_value, recover_pending_gate,
@@ -267,3 +268,22 @@ def test_new_calibration_gene_is_seeded_at_wide_monotonic_scales():
         genome.finalize()
     updated = introduce_calibration_variants(population, 11)
     assert {genome.calibration_safety for genome in updated} >= {1.0, 2.0, 4.0, 8.0}
+
+
+def test_regime_decomposed_species_routes_market_and_residual_specialists():
+    genome = seed_genomes(6, random.Random(8))[5]
+    genome.features = [genome.features[0], genome.features[1]]
+    genome.regime_feature = genome.features[0]
+    genome.regime_bins = 2
+    genome.min_samples_leaf = 8
+    genome.max_iter = 80
+    values = np.asarray([[float(index % 2), float(index)]
+                         for index in range(240)], dtype=np.float32)
+    market = np.asarray([.01 if row[0] else -.01 for row in values])
+    residual = np.asarray([.001 * math.sin(row[1]) for row in values])
+    model = fit_regime_decomposed_regressor(
+        genome, values, market, residual, np.ones(len(values)), 17,
+    )
+    prediction = model.predict(values[:8])
+    assert prediction.shape == (8,)
+    assert np.isfinite(prediction).all()

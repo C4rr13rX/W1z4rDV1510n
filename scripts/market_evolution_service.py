@@ -44,10 +44,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 FEATURE_SCHEMA = 4
-EVOLUTION_SCHEMA = 7
+EVOLUTION_SCHEMA = 8
 LEARNER_KINDS = (
     "classifier", "regressor", "extra_trees", "decomposed_regressor",
-    "regime_regressor",
+    "regime_regressor", "regime_decomposed_regressor",
 )
 REGIME_FEATURES = (
     "rv24", "volatility_ratio", "market_breadth_r6", "market_median_r6",
@@ -330,6 +330,19 @@ class RegimeRegressor:
         return result
 
 
+@dataclass
+class DecomposedRegressor:
+    """Recombine independently learned market and instrument-residual motion."""
+    residual_model: Any
+    market_model: Any
+    market_weight: float
+
+    def predict(self, values: np.ndarray) -> np.ndarray:
+        residual = np.asarray(self.residual_model.predict(values), dtype=np.float64)
+        market = np.asarray(self.market_model.predict(values), dtype=np.float64)
+        return residual + self.market_weight * market
+
+
 def regression_probability_scale(scores: np.ndarray, labels: np.ndarray) -> float:
     """Fit confidence temperature while preserving the score-zero boundary."""
     scores = np.asarray(scores, dtype=np.float64)
@@ -390,6 +403,43 @@ def fit_regime_regressor(genome: Genome, values: np.ndarray, target: np.ndarray,
         experts.append(
             new_return_regressor(genome, random_state + 100 + bucket).fit(
                 values[mask], target[mask], sample_weight=weights[mask]
+            ) if int(mask.sum()) >= max(100, genome.min_samples_leaf * 3) else None
+        )
+    return RegimeRegressor(fallback, experts, feature_index, edges)
+
+
+def fit_decomposed_regressor(genome: Genome, values: np.ndarray,
+                             market_target: np.ndarray, residual_target: np.ndarray,
+                             weights: np.ndarray, random_state: int) -> DecomposedRegressor:
+    market_model = new_return_regressor(genome, random_state).fit(
+        values, market_target, sample_weight=weights
+    )
+    residual_model = new_return_regressor(genome, random_state + 1000).fit(
+        values, residual_target, sample_weight=weights
+    )
+    return DecomposedRegressor(residual_model, market_model, genome.market_weight)
+
+
+def fit_regime_decomposed_regressor(
+    genome: Genome, values: np.ndarray, market_target: np.ndarray,
+    residual_target: np.ndarray, weights: np.ndarray, random_state: int,
+) -> RegimeRegressor:
+    """Route among market/residual specialists using observable context only."""
+    fallback = fit_decomposed_regressor(
+        genome, values, market_target, residual_target, weights, random_state
+    )
+    feature_index = genome.features.index(genome.regime_feature)
+    regime_values = values[:, feature_index]
+    bins = max(2, genome.regime_bins)
+    edges = np.unique(np.quantile(regime_values, np.arange(1, bins) / bins))
+    assignments = np.digitize(regime_values, edges)
+    experts = []
+    for bucket in range(len(edges) + 1):
+        mask = assignments == bucket
+        experts.append(
+            fit_decomposed_regressor(
+                genome, values[mask], market_target[mask], residual_target[mask],
+                weights[mask], random_state + 100 + bucket,
             ) if int(mask.sum()) >= max(100, genome.min_samples_leaf * 3) else None
         )
     return RegimeRegressor(fallback, experts, feature_index, edges)
@@ -728,9 +778,11 @@ def seed_genomes(population: int, rng: random.Random) -> list[Genome]:
     derivatives = list(FEATURE_GROUPS["derivatives"])
     breadth = list(FEATURE_GROUPS["breadth"])
     seeds = [price, price + flow, price + flow + derivatives,
-             price + flow + breadth, price + flow + derivatives + breadth]
+             price + flow + breadth, price + flow + derivatives + breadth,
+             price + flow + derivatives + breadth]
     seed_learners = (
         "classifier", "regressor", "extra_trees", "decomposed_regressor", "regime_regressor",
+        "regime_decomposed_regressor",
     )
     result = [Genome(
         features=features, learning_rate=.06, max_iter=180, max_leaf_nodes=24,
@@ -877,7 +929,8 @@ def evaluate_genome(genome: Genome, dataset: dict[str, Any], *, folds: int,
                 (1.0 / asset_counts[str(row["asset"])])
                 * ((1.0 / class_counts[int(row["target"])])
                    if genome.learner_kind not in {
-                       "regressor", "decomposed_regressor", "regime_regressor"
+                       "regressor", "decomposed_regressor", "regime_regressor",
+                       "regime_decomposed_regressor",
                    } else 1.0)
                 * math.exp(-math.log(2) * (fit_stop - float(row["timestamp"]))
                            / half_life_seconds)
@@ -885,25 +938,22 @@ def evaluate_genome(genome: Genome, dataset: dict[str, Any], *, folds: int,
             ], dtype=np.float64)
             weights *= len(weights) / max(weights.sum(), 1e-12)
             if genome.learner_kind in {
-                "regressor", "decomposed_regressor", "regime_regressor"
+                "regressor", "decomposed_regressor", "regime_regressor",
+                "regime_decomposed_regressor",
             }:
                 raw_model = new_return_regressor(genome, 1700 + fold)
                 if genome.learner_kind == "decomposed_regressor":
                     market_target, residual_target = decompose_returns(fit)
-                    market_model = raw_model.fit(
-                        x_fit, market_target, sample_weight=weights,
+                    decomposed = fit_decomposed_regressor(
+                        genome, x_fit, market_target, residual_target, weights, 1700 + fold,
                     )
-                    residual_model = HistGradientBoostingRegressor(
-                        learning_rate=genome.learning_rate, max_iter=genome.max_iter,
-                        max_leaf_nodes=genome.max_leaf_nodes,
-                        min_samples_leaf=genome.min_samples_leaf,
-                        l2_regularization=genome.l2_regularization,
-                        random_state=2700 + fold,
-                    ).fit(x_fit, residual_target, sample_weight=weights)
-                    model = Surrogate(
-                        residual_model, "decomposed_regressor",
-                        market_model=market_model, market_weight=genome.market_weight,
+                    model = Surrogate(decomposed, "regressor")
+                elif genome.learner_kind == "regime_decomposed_regressor":
+                    market_target, residual_target = decompose_returns(fit)
+                    raw_model = fit_regime_decomposed_regressor(
+                        genome, x_fit, market_target, residual_target, weights, 1700 + fold,
                     )
+                    model = Surrogate(raw_model, "regime_decomposed_regressor")
                 elif genome.learner_kind == "regime_regressor":
                     raw_model = fit_regime_regressor(
                         genome, x_fit,
@@ -936,7 +986,8 @@ def evaluate_genome(genome: Genome, dataset: dict[str, Any], *, folds: int,
                 model = Surrogate(raw_model, "classifier")
             x_cal = np.asarray([feature_vector(row, genome) for row in calibration], dtype=np.float32)
             if genome.learner_kind in {
-                "regressor", "decomposed_regressor", "regime_regressor"
+                "regressor", "decomposed_regressor", "regime_regressor",
+                "regime_decomposed_regressor",
             }:
                 calibration_scores = model.raw_score(x_cal)
                 calibration_labels = np.asarray(
@@ -1160,7 +1211,9 @@ def introduce_missing_learner_species(population: list[Genome], generation: int,
             "learner_kind": learner,
             "market_weight": rng.uniform(.25, 1.75),
             "regime_feature": rng.choice(REGIME_FEATURES),
-            "regime_bins": rng.randint(2, 3) if learner == "regime_regressor" else 1,
+            "regime_bins": (rng.randint(2, 3) if learner in {
+                "regime_regressor", "regime_decomposed_regressor"
+            } else 1),
             "training_horizons": sorted({12, rng.choice(AUXILIARY_HORIZONS)}),
             "pool_thresholds": {
                 name: rng.randint(3, 8) for name in EVOLVABLE_POOL_NAMES
