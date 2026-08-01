@@ -1,4 +1,4 @@
-from scripts.market_evolution_brain_gate import feature_frame, quantize, render_identity
+from scripts.market_evolution_brain_gate import available_port, feature_frame, quantize, render_identity
 from scripts.market_evolution_service import Genome
 
 
@@ -24,3 +24,8 @@ def test_rendered_identity_applies_brain_genes_without_lowering_outcome_threshol
     assert "binding_emergence_threshold = 7" in text
     assert 'kind = "SensoryInput"\nconcept_emergence_threshold = 9' in text
     assert 'kind = "Action"\nconcept_emergence_threshold = 3' in text
+
+
+def test_dynamic_gate_port_can_be_reserved():
+    port = available_port()
+    assert 1024 < port <= 65535

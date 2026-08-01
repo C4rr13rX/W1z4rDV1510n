@@ -8,6 +8,7 @@ import json
 import math
 import os
 import re
+import socket
 import statistics
 import subprocess
 import sys
@@ -90,6 +91,12 @@ def wait_health(endpoint: str, process: subprocess.Popen, timeout: float = 45) -
     raise TimeoutError("brain server did not become healthy")
 
 
+def available_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        return int(listener.getsockname()[1])
+
+
 def evenly_spaced(rows: Sequence[dict[str, Any]], count: int) -> list[dict[str, Any]]:
     if len(rows) <= count:
         return list(rows)
@@ -135,7 +142,7 @@ def add_baselines(metrics: dict[str, Any], rows: Sequence[dict[str, Any]]) -> No
 
 def run_fold(fold: int, cutoff: float, genome: Genome, dataset: dict[str, Any], args,
              identity: Path) -> dict[str, Any]:
-    fold_root = args.runtime / genome.genome_id / f"fold-{fold}"
+    fold_root = args.attempt_root / f"fold-{fold}"
     if fold_root.exists() and any(fold_root.iterdir()):
         raise RuntimeError(f"refusing to overwrite micro-brain {fold_root}")
     fold_root.mkdir(parents=True, exist_ok=True)
@@ -158,11 +165,12 @@ def run_fold(fold: int, cutoff: float, genome: Genome, dataset: dict[str, Any], 
     calibration = select_per_asset(calibration, args.calibration_per_asset)
     known = select_per_asset(known, args.test_per_asset)
     unseen = select_per_asset(unseen, args.test_per_asset)
+    port = args.port + fold if args.port else available_port()
     environment = os.environ.copy()
     environment.update({
         "W1Z4RD_NODE_BRAIN_DIR": str(fold_root.resolve()),
         "W1Z4RD_BRAIN_IDENTITY": str(identity.resolve()),
-        "W1Z4RD_BRAIN_PORT": str(args.port + fold), "W1Z4RD_BRAIN_BIND": "127.0.0.1",
+        "W1Z4RD_BRAIN_PORT": str(port), "W1Z4RD_BRAIN_BIND": "127.0.0.1",
         "W1Z4RD_TIER_MIN_SYS_AVAIL_MB": "4096",
     })
     creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
@@ -171,7 +179,7 @@ def run_fold(fold: int, cutoff: float, genome: Genome, dataset: dict[str, Any], 
         process = subprocess.Popen([str(args.binary.resolve())], cwd=ROOT, env=environment,
                                    stdout=stdout, stderr=stderr, creationflags=creationflags)
         try:
-            endpoint = f"http://127.0.0.1:{args.port + fold}"
+            endpoint = f"http://127.0.0.1:{port}"
             wait_health(endpoint, process)
             client = BrainClient(endpoint, timeout=90)
             failures = 0
@@ -220,7 +228,8 @@ def main() -> int:
     parser.add_argument("--binary", type=Path,
                         default=ROOT / "target/debug/w1z4rd_brain_server.exe")
     parser.add_argument("--runtime", type=Path, default=ROOT / "runtime/market-evolution/brain-gates")
-    parser.add_argument("--port", type=int, default=19150)
+    parser.add_argument("--port", type=int, default=0,
+                        help="base port; zero reserves a free loopback port per fold")
     parser.add_argument("--horizon", type=int, default=12)
     parser.add_argument("--stride", type=int, default=12)
     parser.add_argument("--folds", type=int, default=3)
@@ -234,9 +243,11 @@ def main() -> int:
     args = parser.parse_args()
     payload = json.loads(args.candidate.read_text(encoding="utf-8"))
     genome = Genome(**payload).finalize()
+    attempt = datetime.now(timezone.utc).strftime("attempt-%Y%m%dT%H%M%S-%fZ")
+    args.attempt_root = args.runtime / genome.genome_id / attempt
     dataset = load_dataset(args.manifest, args.supplemental_root,
                            args.horizon, args.stride, "market-perpetual-v1", args.news)
-    identity = args.runtime / genome.genome_id / "identity.toml"
+    identity = args.attempt_root / "identity.toml"
     render_identity(args.identity_template, identity, genome)
     test_seconds = args.test_days * 86400
     final_seconds = args.final_days * 86400
@@ -253,6 +264,7 @@ def main() -> int:
         "started_at": started, "finished_at": datetime.now(timezone.utc).isoformat(),
         "stage": ("isolated_wizard_full_gate" if args.folds >= 3
                   else "isolated_wizard_smoke_gate"), "folds": folds,
+        "attempt_runtime": str(args.attempt_root),
         "all_brain_floor_gates": passed,
         "promotion": "eligible_for_untouched_final" if passed else "quarantined",
     }
