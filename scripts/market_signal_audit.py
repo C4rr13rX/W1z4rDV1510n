@@ -113,6 +113,32 @@ def derive_supplemental_features(rows: Sequence[dict[str, Any]]) -> dict[int, di
     basis = [float(row.get("futures_spot_basis") or 0.0) for row in rows]
     premium = [float(row.get("premium_close") or 0.0) for row in rows]
     funding = [float(row.get("funding_rate") or 0.0) for row in rows]
+    def prefix_moments(values: Sequence[float]) -> tuple[list[float], list[float]]:
+        sums = [0.0]
+        squares = [0.0]
+        for value in values:
+            sums.append(sums[-1] + value)
+            squares.append(squares[-1] + value * value)
+        return sums, squares
+
+    basis_sums, basis_squares = prefix_moments(basis)
+    funding_sums, funding_squares = prefix_moments(funding)
+
+    def moment_mean(sums: Sequence[float], index: int, window: int) -> float:
+        start = max(0, index - window + 1)
+        return (sums[index + 1] - sums[start]) / (index + 1 - start)
+
+    def moment_z(values: Sequence[float], sums: Sequence[float], squares: Sequence[float],
+                 index: int, window: int) -> float:
+        start = max(0, index - window + 1)
+        count = index + 1 - start
+        if count < 6:
+            return 0.0
+        mean = (sums[index + 1] - sums[start]) / count
+        square_mean = (squares[index + 1] - squares[start]) / count
+        deviation = math.sqrt(max(0.0, square_mean - mean * mean))
+        return (values[index] - mean) / max(deviation, 1e-12)
+
     spot_imbalances: list[float] = []
     futures_imbalances: list[float] = []
     for index, row in enumerate(rows):
@@ -138,13 +164,6 @@ def derive_supplemental_features(rows: Sequence[dict[str, Any]]) -> dict[int, di
         def rolling_mean(values: Sequence[float], window: int) -> float:
             return statistics.fmean(values[max(0, index - window + 1):index + 1])
 
-        def rolling_z(values: Sequence[float], window: int) -> float:
-            selected = values[max(0, index - window + 1):index + 1]
-            if len(selected) < 6:
-                return 0.0
-            deviation = statistics.pstdev(selected)
-            return (values[index] - statistics.fmean(selected)) / max(deviation, 1e-12)
-
         spot_mean6 = rolling_mean(spot_imbalances, 6)
         spot_mean24 = rolling_mean(spot_imbalances, 24)
         futures_mean6 = rolling_mean(futures_imbalances, 6)
@@ -166,10 +185,10 @@ def derive_supplemental_features(rows: Sequence[dict[str, Any]]) -> dict[int, di
             "spot_trade_ratio24": ratio("spot_trade_count", spot_trades),
             "futures_trade_ratio24": ratio("futures_trade_count", futures_trades),
             "futures_spot_quote_ratio": futures_quote / max(spot_quote, 1e-12),
-            "basis_z24": rolling_z(basis, 24),
-            "basis_z168": rolling_z(basis, 168),
-            "funding_mean24": rolling_mean(funding, 24),
-            "funding_z168": rolling_z(funding, 168),
+            "basis_z24": moment_z(basis, basis_sums, basis_squares, index, 24),
+            "basis_z168": moment_z(basis, basis_sums, basis_squares, index, 168),
+            "funding_mean24": moment_mean(funding_sums, index, 24),
+            "funding_z168": moment_z(funding, funding_sums, funding_squares, index, 168),
             "spot_imbalance_mean6": spot_mean6,
             "spot_imbalance_mean24": spot_mean24,
             "futures_imbalance_mean6": futures_mean6,
