@@ -97,6 +97,29 @@ def available_port() -> int:
         return int(listener.getsockname()[1])
 
 
+def settle_brain(client: BrainClient) -> dict[str, Any]:
+    """Create the neuron-addressable rest boundary required before evaluation."""
+    before = client.get("/brain/stats")
+    sleep = client.post("/brain/sleep", {
+        # Serialize without pruning fresh low-use neurons.  Evaluation must
+        # demand-page the learned fabric instead of inheriting train residency.
+        "min_use_count": 0,
+        "stale_ticks": 9_223_372_036_854_775_807,
+    })
+    if sleep.get("error"):
+        raise RuntimeError(f"brain settlement failed: {sleep}")
+    checkpoint = client.post("/brain/checkpoint", {})
+    if checkpoint.get("ok") is False:
+        raise RuntimeError(f"settled checkpoint failed: {checkpoint}")
+    after = client.get("/brain/stats")
+    resident = int(after.get("resident_terminals") or 0)
+    if resident != 0:
+        raise RuntimeError(
+            f"settled brain retained {resident} terminals before evaluation"
+        )
+    return {"before": before, "sleep": sleep, "checkpoint": checkpoint, "after": after}
+
+
 def evenly_spaced(rows: Sequence[dict[str, Any]], count: int) -> list[dict[str, Any]]:
     if len(rows) <= count:
         return list(rows)
@@ -188,6 +211,7 @@ def run_fold(fold: int, cutoff: float, genome: Genome, dataset: dict[str, Any], 
                 for _ in range(genome.presentations):
                     if not client.consolidate(streams(row, genome, args.horizon), outcome):
                         failures += 1
+            settlement = settle_brain(client)
             calibration_predictions = predict_rows(client, calibration, genome, args.horizon)
             confidences = sorted(row["confidence"] for row in calibration_predictions)
             threshold_index = round((len(confidences) - 1) * genome.confidence_quantile)
@@ -201,6 +225,7 @@ def run_fold(fold: int, cutoff: float, genome: Genome, dataset: dict[str, Any], 
             return {
                 "fold": fold, "cutoff": cutoff, "training_rows": len(train),
                 "presentations": genome.presentations, "training_failures": failures,
+                "settlement": settlement,
                 "calibration_rows": len(calibration), "confidence_floor": confidence_floor,
                 "sections": sections,
             }

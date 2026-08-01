@@ -316,6 +316,11 @@ class BrainClient:
         with urllib.request.urlopen(req, timeout=self.timeout) as response:
             return json.loads(response.read())
 
+    def get(self, path: str) -> dict[str, Any]:
+        req = urllib.request.Request(self.endpoint + path, method="GET")
+        with urllib.request.urlopen(req, timeout=self.timeout) as response:
+            return json.loads(response.read())
+
     def consolidate(self, streams: Sequence[tuple[int, str]], outcome: str) -> bool:
         reply = self.post("/brain/consolidate/multi", {
             "streams": [{"pool_id": pool, "frame": b64(frame)} for pool, frame in streams],

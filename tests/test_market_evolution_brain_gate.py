@@ -1,4 +1,10 @@
-from scripts.market_evolution_brain_gate import available_port, feature_frame, quantize, render_identity
+from scripts.market_evolution_brain_gate import (
+    available_port,
+    feature_frame,
+    quantize,
+    render_identity,
+    settle_brain,
+)
 from scripts.market_evolution_service import Genome
 
 
@@ -29,3 +35,33 @@ def test_rendered_identity_applies_brain_genes_without_lowering_outcome_threshol
 def test_dynamic_gate_port_can_be_reserved():
     port = available_port()
     assert 1024 < port <= 65535
+
+
+def test_neural_gate_settles_without_pruning_before_evaluation():
+    class Client:
+        def __init__(self):
+            self.posts = []
+            self.stats = iter([
+                {"resident_terminals": 2048, "tick": 12},
+                {"resident_terminals": 0, "tick": 12},
+            ])
+
+        def get(self, path):
+            assert path == "/brain/stats"
+            return next(self.stats)
+
+        def post(self, path, payload):
+            self.posts.append((path, payload))
+            return {"ok": True}
+
+    client = Client()
+    report = settle_brain(client)
+    assert report["before"]["resident_terminals"] == 2048
+    assert report["after"]["resident_terminals"] == 0
+    assert client.posts == [
+        ("/brain/sleep", {
+            "min_use_count": 0,
+            "stale_ticks": 9_223_372_036_854_775_807,
+        }),
+        ("/brain/checkpoint", {}),
+    ]
