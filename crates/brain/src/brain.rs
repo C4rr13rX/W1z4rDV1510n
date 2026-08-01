@@ -4147,6 +4147,20 @@ impl Brain {
         query_pools: &[PoolId],
         target_pool: PoolId,
     ) -> Option<Vec<u8>> {
+        self.decode_best_trained_binding_multi_scored(query_pools, target_pool)
+            .map(|(bytes, _score)| bytes)
+    }
+
+    /// Scored form of `decode_best_trained_binding_multi`.  The score is the
+    /// bounded geometric mean of per-pool evidence coverage before recurrence
+    /// is used to rank otherwise equivalent bindings.  Keeping confidence
+    /// separate from use-count prevents a frequently repeated market regime
+    /// from claiming certainty merely because it is common.
+    pub fn decode_best_trained_binding_multi_scored(
+        &mut self,
+        query_pools: &[PoolId],
+        target_pool: PoolId,
+    ) -> Option<(Vec<u8>, f32)> {
         let mut query_ids: Vec<PoolId> = query_pools
             .iter()
             .copied()
@@ -4209,8 +4223,9 @@ impl Brain {
 
         let binding_handle = self.fabric.pool(self.binding_pool_id)?;
         let bindings = binding_handle.read();
-        // binding id, exact-sequence pool count, joint score, target size
-        let mut best: Option<(NeuronId, usize, f32, usize)> = None;
+        // binding id, exact-sequence pool count, ranked score, target size,
+        // bounded evidence confidence
+        let mut best: Option<(NeuronId, usize, f32, usize, f32)> = None;
         for binding_id in candidate_binding_ids {
             let Some(binding) = bindings.get(binding_id) else {
                 continue;
@@ -4290,11 +4305,18 @@ impl Brain {
             if joint_score < min_joint_score {
                 continue;
             }
+            let evidence_confidence = joint_score.clamp(0.0, 1.0);
             joint_score *= 1.0 + (binding.use_count.max(1) as f32).ln();
-            let candidate = (binding.id, exact_count, joint_score, target_members.len());
+            let candidate = (
+                binding.id,
+                exact_count,
+                joint_score,
+                target_members.len(),
+                evidence_confidence,
+            );
             let replace = match best {
                 None => true,
-                Some((_, best_exact, best_score, best_size)) => {
+                Some((_, best_exact, best_score, best_size, _)) => {
                     exact_count > best_exact
                         || (exact_count == best_exact && joint_score > best_score)
                         || (exact_count == best_exact
@@ -4307,7 +4329,7 @@ impl Brain {
             }
         }
 
-        let (binding_id, _, _, _) = best?;
+        let (binding_id, _, _, _, evidence_confidence) = best?;
         let binding = bindings.get(binding_id)?;
         let target_handle = self.fabric.pool(target_pool)?;
         let target = target_handle.read();
@@ -4327,7 +4349,11 @@ impl Brain {
         } else {
             target.decode_concept_members(&atoms)
         };
-        if bytes.is_empty() { None } else { Some(bytes) }
+        if bytes.is_empty() {
+            None
+        } else {
+            Some((bytes, evidence_confidence))
+        }
     }
 
     /// Wake only bindings reachable from the active query atoms or their

@@ -743,7 +743,11 @@ async fn h_predict_multi(
         brain.activate_for_indexed_prediction(*pool_id, frame);
         query_pools.push(*pool_id);
     }
-    let answer = brain.decode_best_trained_binding_multi(&query_pools, target_pool);
+    let scored = brain.decode_best_trained_binding_multi_scored(&query_pools, target_pool);
+    let (answer, integrated_confidence) = match scored {
+        Some((bytes, score)) => (Some(bytes), score),
+        None => (None, 0.0),
+    };
     let paged_neurons_released = match brain.finish_read_only_inference() {
         Ok(count) => count,
         Err(error) => {
@@ -755,6 +759,7 @@ async fn h_predict_multi(
         "query_pools": query_pools,
         "target_pool": target_pool,
         "answer": answer.map(|bytes| b64_url_no_pad(&bytes)),
+        "integrated_confidence": integrated_confidence,
         "paged_neurons_released": paged_neurons_released,
     }))
 }
@@ -1100,6 +1105,90 @@ async fn h_consolidate(
     brain.advance_tick();
     Json(json!({"consolidated": true, "input_fired": input_fired,
                 "outcome_fired": outcome_fired, "learning": true}))
+}
+
+/// Consolidate several feature-specific sensor streams with one confirmed
+/// outcome in a single Hebbian moment.  This is the supervised counterpart to
+/// `/predict/multi`: callers keep raw OHLCV, temporal/regime, volume, news,
+/// cross-market context, and horizon evidence in separate pools instead of
+/// flattening them into one pseudo-token stream.
+async fn h_consolidate_multi(
+    State(s): State<BrainApiState>,
+    Json(req): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    if let Some(reply) = ingest_backpressure() {
+        return reply;
+    }
+    let Some(streams) = req.get("streams").and_then(|v| v.as_array()) else {
+        return Json(json!({"consolidated": false,
+            "error": "streams must be an array of {pool_id, frame}"}));
+    };
+    if streams.is_empty() {
+        return Json(json!({"consolidated": false,
+            "error": "at least one input stream is required"}));
+    }
+    let mut decoded = Vec::with_capacity(streams.len().min(64));
+    for stream in streams.iter().take(64) {
+        let Some(pool_id) = stream.get("pool_id").and_then(|v| v.as_u64()) else {
+            return Json(json!({"consolidated": false,
+                "error": "each stream requires pool_id"}));
+        };
+        let Some(frame) = stream.get("frame").and_then(|v| v.as_str()) else {
+            return Json(json!({"consolidated": false,
+                "error": "each stream requires a base64url frame"}));
+        };
+        match b64_url_decode(frame) {
+            Ok(bytes) => decoded.push((pool_id as PoolId, bytes)),
+            Err(error) => return Json(json!({"consolidated": false,
+                "error": format!("bad stream frame base64: {}", error)})),
+        }
+    }
+    let outcome = match b64_url_decode(
+        req.get("outcome_frame").and_then(|v| v.as_str()).unwrap_or(""),
+    ) {
+        Ok(bytes) => bytes,
+        Err(error) => return Json(json!({"consolidated": false,
+            "error": format!("bad outcome base64: {}", error)})),
+    };
+
+    let mut brain = s.brain.lock().await;
+    let outcome_pool = req
+        .get("outcome_pool")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as PoolId)
+        .or_else(|| brain.action_pool_id())
+        .unwrap_or(POOL_ACTION);
+    for (pool_id, _) in &decoded {
+        if *pool_id == outcome_pool {
+            return Json(json!({"consolidated": false,
+                "error": "an input stream cannot use the outcome pool"}));
+        }
+        if brain.fabric().pool(*pool_id).is_none() {
+            return Json(json!({"consolidated": false,
+                "error": format!("unknown input pool id {}", pool_id)}));
+        }
+    }
+    if brain.fabric().pool(outcome_pool).is_none() {
+        return Json(json!({"consolidated": false,
+            "error": format!("unknown outcome pool id {}", outcome_pool)}));
+    }
+
+    let mut fired = Vec::with_capacity(decoded.len());
+    for (pool_id, frame) in &decoded {
+        fired.push(json!({
+            "pool_id": pool_id,
+            "fired": brain.observe(*pool_id, frame).len(),
+        }));
+    }
+    let outcome_fired = brain.observe(outcome_pool, &outcome).len();
+    brain.advance_tick();
+    Json(json!({
+        "consolidated": true,
+        "streams": fired,
+        "outcome_pool": outcome_pool,
+        "outcome_fired": outcome_fired,
+        "learning": true,
+    }))
 }
 
 /// Admit a semantic pathway only when the caller supplies an externally
@@ -4489,6 +4578,7 @@ pub fn brain_routes(state: BrainApiState) -> Router {
         .route("/integrate", post(h_integrate))
         .route("/predict", post(h_predict))
         .route("/consolidate", post(h_consolidate))
+        .route("/consolidate/multi", post(h_consolidate_multi))
         .route("/logic/consolidate", post(h_logic_consolidate))
         .route("/logic/compose", post(h_logic_compose))
         .route("/logic/crystallize", post(h_logic_crystallize))

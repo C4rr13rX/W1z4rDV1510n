@@ -1,0 +1,151 @@
+name = "market_predictor_v2"
+version = "0.1.0"
+binding_emergence_threshold = 3
+moment_history_window = 256
+min_atom_score = 0.94
+
+# Every view remains byte/character atom grounded.  The pools separate causal
+# feature families so the binding fabric can learn which combinations matter
+# without flattening OHLCV, news, horizon, and instrument identity together.
+[[pools]]
+name = "ohlcv_geometry"
+id = 1
+prototype = "byte-passthrough"
+atom_encoding_prefix = "market_geometry"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 65536
+max_concept_member_count = 24
+concept_emergence_threshold = 5
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "temporal_returns"
+id = 2
+prototype = "byte-passthrough"
+atom_encoding_prefix = "market_temporal"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 65536
+max_concept_member_count = 24
+concept_emergence_threshold = 5
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "volume_flow"
+id = 3
+prototype = "byte-passthrough"
+atom_encoding_prefix = "market_flow"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 32768
+max_concept_member_count = 16
+concept_emergence_threshold = 5
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "volatility_range"
+id = 4
+prototype = "byte-passthrough"
+atom_encoding_prefix = "market_volatility"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 32768
+max_concept_member_count = 16
+concept_emergence_threshold = 5
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "market_regime"
+id = 5
+prototype = "byte-passthrough"
+atom_encoding_prefix = "market_regime"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 16384
+max_concept_member_count = 12
+concept_emergence_threshold = 5
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "cross_market"
+id = 6
+prototype = "byte-passthrough"
+atom_encoding_prefix = "market_cross"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 32768
+max_concept_member_count = 16
+concept_emergence_threshold = 5
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "news_entities"
+id = 7
+prototype = "byte-passthrough"
+atom_encoding_prefix = "market_news_entities"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 65536
+max_concept_member_count = 24
+concept_emergence_threshold = 5
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "news_state"
+id = 8
+prototype = "byte-passthrough"
+atom_encoding_prefix = "market_news_state"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 32768
+max_concept_member_count = 16
+concept_emergence_threshold = 5
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "forecast_horizon"
+id = 9
+prototype = "byte-passthrough"
+atom_encoding_prefix = "market_horizon"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 4096
+max_concept_member_count = 8
+concept_emergence_threshold = 5
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "instrument_context"
+id = 10
+prototype = "byte-passthrough"
+atom_encoding_prefix = "market_instrument"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 16384
+max_concept_member_count = 12
+concept_emergence_threshold = 5
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "future_outcome"
+id = 11
+prototype = "byte-passthrough"
+atom_encoding_prefix = "market_future"
+kind = "Action"
+frame_rate = 1
+recent_atoms_window = 16384
+max_concept_member_count = 16
+concept_emergence_threshold = 3
+decay_rate = 0.00002
+prune_floor = 0.001

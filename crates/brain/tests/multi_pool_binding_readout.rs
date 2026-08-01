@@ -69,3 +69,29 @@ fn joint_readout_rejects_a_binding_missing_a_requested_evidence_pool() {
         None,
     );
 }
+
+#[test]
+fn joint_readout_reports_bounded_evidence_confidence_separately_from_repetition() {
+    let mut config = BrainConfig::default();
+    config.binding_emergence_threshold = 3;
+    config.tentative_emergence_threshold = 3;
+    let mut brain = Brain::new(config);
+    let ohlcv = pool(&mut brain, 1, "ohlcv", "o");
+    let news = pool(&mut brain, 2, "news", "n");
+    let outcome = pool(&mut brain, 3, "outcome", "f");
+    for _ in 0..8 {
+        brain.observe(ohlcv, b"trend=up volatility=low");
+        brain.observe(news, b"sentiment=positive");
+        brain.observe(outcome, b"future rally");
+        brain.advance_tick();
+    }
+
+    brain.activate_for_prediction(ohlcv, b"trend=up volatility=low");
+    brain.activate_for_prediction(news, b"sentiment=positive");
+    let (answer, confidence) = brain
+        .decode_best_trained_binding_multi_scored(&[ohlcv, news], outcome)
+        .expect("exact multi-pool market episode should decode");
+    assert_eq!(answer, b"future rally");
+    assert!((0.0..=1.0).contains(&confidence));
+    assert_eq!(confidence, 1.0);
+}

@@ -1,0 +1,13 @@
+instance_id = "market-predictor-v2-local"
+identity_path = "brains/market_predictor_v2.identity.toml"
+data_dir = "runtime/brains/market-predictor-v2-local"
+
+[resource_budget]
+max_resident_bytes = 4294967296
+max_neurons = 1500000
+max_propagation_steps = 64
+max_learning_steps_per_second = 2000
+
+# Prediction error is trained as a later confirmed experience.  It is not fed
+# back into sensory pools during supervised consolidation because that pathway
+# previously reduced market-brain recall from 100% to 30%.
