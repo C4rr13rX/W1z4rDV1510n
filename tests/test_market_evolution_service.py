@@ -8,7 +8,7 @@ import numpy as np
 import scripts.market_evolution_service as evolution
 
 from scripts.market_evolution_service import (
-    Genome, add_derived_features, attach_causal_normalization,
+    Genome, add_derived_features, attach_causal_normalization, brain_feedback_score,
     attach_news_features, crossover, dataset_signature, evaluation_scope,
     evaluation_signature, decompose_returns, introduce_missing_learner_species,
     load_dataset_cached, mutate, passes_floor,
@@ -226,10 +226,11 @@ def test_diverse_elites_preserve_learner_species_without_overriding_fitness():
     population = seed_genomes(5, random.Random(9))
     for index, genome in enumerate(population):
         genome.fitness = 100.0 - index
-    elites = select_diverse_elites(population, 4)
+    elites = select_diverse_elites(population, 5)
     assert elites[0].genome_id == population[0].genome_id
     assert {genome.learner_kind for genome in elites} == {
         "classifier", "regressor", "extra_trees", "decomposed_regressor",
+        "regime_regressor",
     }
 
 
@@ -242,3 +243,16 @@ def test_resumed_population_immediately_receives_new_learner_species():
                       if genome.learner_kind == "decomposed_regressor")
     assert decomposed.generation == 9
     assert decomposed.parents == [population[0].genome_id]
+
+
+def test_neural_feedback_is_bounded_and_uses_weakest_section():
+    report = {"folds": [{"sections": {
+        "known": {"metrics": {"directional_accuracy": .8,
+                                "directional_balanced_accuracy": .8,
+                                "mcc": .6, "profit_factor": 2}},
+        "unseen": {"metrics": {"directional_accuracy": .4,
+                                 "directional_balanced_accuracy": .4,
+                                 "mcc": -.2, "profit_factor": .5}},
+    }}]}
+    assert -25 <= brain_feedback_score(report) < 0
+    assert brain_feedback_score(None) == -25

@@ -12,7 +12,7 @@ no classifier state is copied into the Wizard brain. Numeric relationships
 enter neural validation as deterministic named character/atom magnitude frames
 through `brains/market_predictor_evolution.identity.toml`.
 
-Evolution schema 2 also evolves bounded causal feature programs and a recency
+Evolution schema 6 evolves bounded causal feature programs and a recency
 half-life. Programs combine only same-moment or prior-derived inputs with
 canonical operations (addition, subtraction, product, stabilized ratio,
 absolute gap, signed square-root product, regime gate, and bounded nonlinear
@@ -29,6 +29,16 @@ and genetically weights their recombination; future market aggregates are
 targets only and never enter a decision feature. This is an information and
 relationship-discovery gene only: learner parameters and fitted weights are
 never installed in the Wizard brain.
+
+The same genome now describes a bounded developmental graph: an observable
+regime feature and one-to-three specialist regions, a 1/6/12/24-hour temporal
+curriculum, broad-market versus instrument-residual weighting, and explicit
+regime, arbitration, and realized-experience pools. The Wizard brain still
+learns the associations and motifs; the genome supplies scopes and wiring, not
+answers. Small isolated neural gates contribute a bounded tie-breaking score
+inside a candidate's protected fold stage, so neural evidence can steer brain
+genes but can never promote a candidate or outrank earning another complete
+protected fold.
 
 ## Protected stages
 
@@ -95,7 +105,7 @@ Generated state is ignored below `runtime/market-evolution/`:
 - `brain-gate-reports/` and `brain-gates/` hold neural evidence/state.
 
 The causal feature matrix is fingerprinted and cached at
-`runtime/cache/market-evolution-dataset-v3.joblib`; primary OHLCV files,
+`runtime/cache/market-evolution-dataset-v4.joblib`; primary OHLCV files,
 supplemental derivatives, news, horizon, stride, seed, and evolution schema all
 participate in cache invalidation. Use `scripts/market_evolution_validate.py`
 to rerun a micro-sweep winner on the complete protected three-fold contract
@@ -111,3 +121,10 @@ stream and exposes causal event-regime counts (regulation/macro, security,
 institutional, liquidation, exchange, stablecoin, network, and whale) plus
 asset-specific sentiment acceleration. These are neutral observations: their
 directional meaning must be learned and survive every protected fold.
+
+Schema 6 retains bounded future returns at multiple horizons as supervised
+outcomes only. They are never decision features. Presentation density is
+shared across horizons, preventing the temporal curriculum from multiplying
+neural growth. Confirmed ghost outcomes can be encoded as after-cost success
+or failure in the experience pool and are evaluated by the same weakest-regime
+contract.

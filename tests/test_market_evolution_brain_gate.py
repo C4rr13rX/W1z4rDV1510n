@@ -50,6 +50,8 @@ def test_feature_families_fire_in_separate_atom_grounded_pools():
     assert feature_family("funding_rate") == "derivatives"
     assert any("r6=" in frame for _, frame in fired)
     assert any("funding_rate=" in frame for _, frame in fired)
+    assert any("regime_feature=" in frame for _, frame in fired)
+    assert any("specialists=" in frame for _, frame in fired)
 
 
 def test_rendered_identity_applies_brain_genes_without_lowering_outcome_threshold(tmp_path):

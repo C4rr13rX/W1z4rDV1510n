@@ -43,8 +43,23 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-FEATURE_SCHEMA = 3
-EVOLUTION_SCHEMA = 5
+FEATURE_SCHEMA = 4
+EVOLUTION_SCHEMA = 6
+LEARNER_KINDS = (
+    "classifier", "regressor", "extra_trees", "decomposed_regressor",
+    "regime_regressor",
+)
+REGIME_FEATURES = (
+    "rv24", "volatility_ratio", "market_breadth_r6", "market_median_r6",
+    "futures_spot_basis", "funding_rate", "flow_divergence", "news_polarity_24h",
+)
+AUXILIARY_HORIZONS = (1, 6, 12, 24)
+EVOLVABLE_POOL_NAMES = (
+    "forecast_horizon", "instrument_context", "price_geometry", "trade_flow",
+    "cross_market_context", "derivatives_state", "market_breadth", "news_state",
+    "evolved_causal_relationships", "regime_context", "specialist_arbitration",
+    "realized_ghost_experience",
+)
 
 from scripts.market_brain_experiment import load_bars  # noqa: E402
 from scripts.market_signal_audit import (  # noqa: E402
@@ -152,6 +167,10 @@ class Genome:
     recency_half_life_days: float = 720.0
     learner_kind: str = "classifier"
     market_weight: float = 1.0
+    regime_feature: str = "rv24"
+    regime_bins: int = 1
+    training_horizons: list[int] = field(default_factory=lambda: [12])
+    pool_thresholds: dict[str, int] = field(default_factory=dict)
     generation: int = 0
     parents: list[str] = field(default_factory=list)
     genome_id: str = ""
@@ -163,12 +182,30 @@ class Genome:
         for key in ("genome_id", "fitness", "result"):
             payload.pop(key, None)
         self.features = sorted(set(self.features))
+        if self.regime_feature not in REGIME_FEATURES:
+            self.regime_feature = "rv24"
+        self.regime_bins = max(1, min(3, int(self.regime_bins)))
+        self.training_horizons = sorted(
+            {12, *(int(value) for value in self.training_horizons
+                   if int(value) in AUXILIARY_HORIZONS)}
+        )
+        self.pool_thresholds = {
+            name: max(2, min(12, int(value)))
+            for name, value in sorted(self.pool_thresholds.items())
+            if name in EVOLVABLE_POOL_NAMES
+        }
+        if self.regime_bins > 1:
+            self.features = sorted(set(self.features) | {self.regime_feature})
         self.feature_programs = sorted(
             (normalize_program(program) for program in self.feature_programs),
             key=lambda program: json.dumps(program, sort_keys=True, separators=(",", ":")),
         )
         payload["features"] = self.features
         payload["feature_programs"] = self.feature_programs
+        payload["regime_feature"] = self.regime_feature
+        payload["regime_bins"] = self.regime_bins
+        payload["training_horizons"] = self.training_horizons
+        payload["pool_thresholds"] = self.pool_thresholds
         self.genome_id = hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()[:16]
@@ -272,6 +309,24 @@ class Surrogate:
         return np.where(self.probability(values) >= .5, 1, -1).astype(np.int8)
 
 
+@dataclass
+class RegimeRegressor:
+    """Observable-state router over independently fitted return specialists."""
+    fallback: Any
+    experts: list[Any]
+    feature_index: int
+    edges: np.ndarray
+
+    def predict(self, values: np.ndarray) -> np.ndarray:
+        result = np.asarray(self.fallback.predict(values), dtype=np.float64)
+        buckets = np.digitize(values[:, self.feature_index], self.edges)
+        for bucket, expert in enumerate(self.experts):
+            mask = buckets == bucket
+            if mask.any() and expert is not None:
+                result[mask] = expert.predict(values[mask])
+        return result
+
+
 def regression_probability_scale(scores: np.ndarray, labels: np.ndarray) -> float:
     """Fit confidence temperature while preserving the score-zero boundary."""
     scores = np.asarray(scores, dtype=np.float64)
@@ -304,6 +359,37 @@ def decompose_returns(rows: Sequence[dict[str, Any]]) -> tuple[np.ndarray, np.nd
     )
     realized = np.asarray([row["return"] for row in rows], dtype=np.float64)
     return market, realized - market
+
+
+def new_return_regressor(genome: Genome, random_state: int) -> HistGradientBoostingRegressor:
+    return HistGradientBoostingRegressor(
+        learning_rate=genome.learning_rate, max_iter=genome.max_iter,
+        max_leaf_nodes=genome.max_leaf_nodes,
+        min_samples_leaf=genome.min_samples_leaf,
+        l2_regularization=genome.l2_regularization, random_state=random_state,
+    )
+
+
+def fit_regime_regressor(genome: Genome, values: np.ndarray, target: np.ndarray,
+                         weights: np.ndarray, random_state: int) -> RegimeRegressor:
+    """Fit bounded specialists routed only by an observable decision feature."""
+    fallback = new_return_regressor(genome, random_state).fit(
+        values, target, sample_weight=weights
+    )
+    feature_index = genome.features.index(genome.regime_feature)
+    regime_values = values[:, feature_index]
+    bins = max(2, genome.regime_bins)
+    edges = np.unique(np.quantile(regime_values, np.arange(1, bins) / bins))
+    assignments = np.digitize(regime_values, edges)
+    experts = []
+    for bucket in range(len(edges) + 1):
+        mask = assignments == bucket
+        experts.append(
+            new_return_regressor(genome, random_state + 100 + bucket).fit(
+                values[mask], target[mask], sample_weight=weights[mask]
+            ) if int(mask.sum()) >= max(100, genome.min_samples_leaf * 3) else None
+        )
+    return RegimeRegressor(fallback, experts, feature_index, edges)
 
 
 def utc_now() -> str:
@@ -641,7 +727,7 @@ def seed_genomes(population: int, rng: random.Random) -> list[Genome]:
     seeds = [price, price + flow, price + flow + derivatives,
              price + flow + breadth, price + flow + derivatives + breadth]
     seed_learners = (
-        "classifier", "regressor", "classifier", "extra_trees", "decomposed_regressor",
+        "classifier", "regressor", "extra_trees", "decomposed_regressor", "regime_regressor",
     )
     result = [Genome(
         features=features, learning_rate=.06, max_iter=180, max_leaf_nodes=24,
@@ -665,10 +751,14 @@ def seed_genomes(population: int, rng: random.Random) -> list[Genome]:
             presentations=rng.randint(2, 7),
             feature_programs=[random_program(rng) for _ in range(rng.randint(1, 5))],
             recency_half_life_days=10 ** rng.uniform(math.log10(90), math.log10(1500)),
-            learner_kind=rng.choice(
-                ("classifier", "regressor", "extra_trees", "decomposed_regressor")
-            ),
+            learner_kind=rng.choice(LEARNER_KINDS),
             market_weight=rng.uniform(0.25, 1.75),
+            regime_feature=rng.choice(REGIME_FEATURES),
+            regime_bins=rng.randint(1, 3),
+            training_horizons=sorted({12, *rng.sample(
+                list(AUXILIARY_HORIZONS), rng.randint(1, len(AUXILIARY_HORIZONS))
+            )}),
+            pool_thresholds={name: rng.randint(3, 8) for name in EVOLVABLE_POOL_NAMES},
         ).finalize())
     return result
 
@@ -782,19 +872,18 @@ def evaluate_genome(genome: Genome, dataset: dict[str, Any], *, folds: int,
             weights = np.asarray([
                 (1.0 / asset_counts[str(row["asset"])])
                 * ((1.0 / class_counts[int(row["target"])])
-                   if genome.learner_kind not in {"regressor", "decomposed_regressor"} else 1.0)
+                   if genome.learner_kind not in {
+                       "regressor", "decomposed_regressor", "regime_regressor"
+                   } else 1.0)
                 * math.exp(-math.log(2) * (fit_stop - float(row["timestamp"]))
                            / half_life_seconds)
                 for row in fit
             ], dtype=np.float64)
             weights *= len(weights) / max(weights.sum(), 1e-12)
-            if genome.learner_kind in {"regressor", "decomposed_regressor"}:
-                raw_model = HistGradientBoostingRegressor(
-                    learning_rate=genome.learning_rate, max_iter=genome.max_iter,
-                    max_leaf_nodes=genome.max_leaf_nodes,
-                    min_samples_leaf=genome.min_samples_leaf,
-                    l2_regularization=genome.l2_regularization, random_state=1700 + fold,
-                )
+            if genome.learner_kind in {
+                "regressor", "decomposed_regressor", "regime_regressor"
+            }:
+                raw_model = new_return_regressor(genome, 1700 + fold)
                 if genome.learner_kind == "decomposed_regressor":
                     market_target, residual_target = decompose_returns(fit)
                     market_model = raw_model.fit(
@@ -811,6 +900,13 @@ def evaluate_genome(genome: Genome, dataset: dict[str, Any], *, folds: int,
                         residual_model, "decomposed_regressor",
                         market_model=market_model, market_weight=genome.market_weight,
                     )
+                elif genome.learner_kind == "regime_regressor":
+                    raw_model = fit_regime_regressor(
+                        genome, x_fit,
+                        np.asarray([row["return"] for row in fit], dtype=np.float64),
+                        weights, 1700 + fold,
+                    )
+                    model = Surrogate(raw_model, "regime_regressor")
                 else:
                     raw_model = raw_model.fit(
                         x_fit, np.asarray([row["return"] for row in fit], dtype=np.float64),
@@ -835,7 +931,9 @@ def evaluate_genome(genome: Genome, dataset: dict[str, Any], *, folds: int,
                 ).fit(x_fit, y_fit, sample_weight=weights)
                 model = Surrogate(raw_model, "classifier")
             x_cal = np.asarray([feature_vector(row, genome) for row in calibration], dtype=np.float32)
-            if genome.learner_kind in {"regressor", "decomposed_regressor"}:
+            if genome.learner_kind in {
+                "regressor", "decomposed_regressor", "regime_regressor"
+            }:
                 calibration_scores = model.raw_score(x_cal)
                 calibration_labels = np.asarray(
                     [row["target"] for row in calibration], dtype=np.int8
@@ -927,6 +1025,11 @@ def mutate(parent: Genome, generation: int, rng: random.Random) -> Genome:
     features = set(parent.features)
     programs = [dict(program) for program in parent.feature_programs]
     universe = list(BASE_FEATURES) + list(DERIVED_FEATURES)
+    pool_thresholds = dict(parent.pool_thresholds)
+    if rng.random() < .55:
+        pool_name = rng.choice(EVOLVABLE_POOL_NAMES)
+        current = pool_thresholds.get(pool_name, parent.concept_threshold)
+        pool_thresholds[pool_name] = min(12, max(2, current + rng.choice((-1, 1))))
     for _ in range(rng.randint(1, 4)):
         if rng.random() < .55 and len(features) < 42:
             features.add(rng.choice(universe))
@@ -963,11 +1066,16 @@ def mutate(parent: Genome, generation: int, rng: random.Random) -> Genome:
         feature_programs=programs,
         recency_half_life_days=min(2200, max(45, parent.recency_half_life_days
                                            * math.exp(rng.gauss(0, .25)))),
-        learner_kind=(rng.choice(
-            ("classifier", "regressor", "extra_trees", "decomposed_regressor")
-        )
+        learner_kind=(rng.choice(LEARNER_KINDS)
                       if rng.random() < .12 else parent.learner_kind),
         market_weight=min(2.5, max(0.0, parent.market_weight + rng.gauss(0, .15))),
+        regime_feature=(rng.choice(REGIME_FEATURES) if rng.random() < .20
+                        else parent.regime_feature),
+        regime_bins=min(3, max(1, parent.regime_bins + rng.choice((-1, 0, 0, 1)))),
+        training_horizons=sorted({12, *(horizon for horizon in AUXILIARY_HORIZONS
+                                        if ((horizon in parent.training_horizons)
+                                            != (rng.random() < .12)))}),
+        pool_thresholds=pool_thresholds,
         generation=generation, parents=[parent.genome_id],
     )
     return child.finalize()
@@ -1001,6 +1109,16 @@ def crossover(left: Genome, right: Genome, generation: int, rng: random.Random) 
                                      right.recency_half_life_days),
         learner_kind=choose(left.learner_kind, right.learner_kind),
         market_weight=choose(left.market_weight, right.market_weight),
+        regime_feature=choose(left.regime_feature, right.regime_feature),
+        regime_bins=choose(left.regime_bins, right.regime_bins),
+        training_horizons=sorted({12, *(horizon for horizon in AUXILIARY_HORIZONS
+                                        if horizon in choose(left.training_horizons,
+                                                             right.training_horizons))}),
+        pool_thresholds={
+            name: choose(left.pool_thresholds.get(name, left.concept_threshold),
+                         right.pool_thresholds.get(name, right.concept_threshold))
+            for name in EVOLVABLE_POOL_NAMES
+        },
         generation=generation, parents=[left.genome_id, right.genome_id],
     ).finalize()
     return mutate(child, generation, rng) if rng.random() < .7 else child
@@ -1012,13 +1130,17 @@ def genome_from_dict(payload: dict[str, Any]) -> Genome:
     compatible.setdefault("recency_half_life_days", 720.0)
     compatible.setdefault("learner_kind", "classifier")
     compatible.setdefault("market_weight", 1.0)
+    compatible.setdefault("regime_feature", "rv24")
+    compatible.setdefault("regime_bins", 1)
+    compatible.setdefault("training_horizons", [12])
+    compatible.setdefault("pool_thresholds", {})
     return Genome(**compatible)
 
 
 def introduce_missing_learner_species(population: list[Genome], generation: int,
                                       rng: random.Random) -> list[Genome]:
     """Guarantee architecture upgrades enter a resumed population immediately."""
-    learners = ("classifier", "extra_trees", "regressor", "decomposed_regressor")
+    learners = LEARNER_KINDS
     present = {genome.learner_kind for genome in population}
     if not population:
         return population
@@ -1028,6 +1150,12 @@ def introduce_missing_learner_species(population: list[Genome], generation: int,
         payload.update({
             "learner_kind": learner,
             "market_weight": rng.uniform(.25, 1.75),
+            "regime_feature": rng.choice(REGIME_FEATURES),
+            "regime_bins": rng.randint(2, 3) if learner == "regime_regressor" else 1,
+            "training_horizons": sorted({12, rng.choice(AUXILIARY_HORIZONS)}),
+            "pool_thresholds": {
+                name: rng.randint(3, 8) for name in EVOLVABLE_POOL_NAMES
+            },
             "generation": generation,
             "parents": [base.genome_id],
             "fitness": None,
@@ -1039,14 +1167,39 @@ def introduce_missing_learner_species(population: list[Genome], generation: int,
     return population
 
 
-def select_diverse_elites(population: Sequence[Genome], count: int) -> list[Genome]:
+def brain_feedback_score(report: dict[str, Any] | None) -> float:
+    """Bound neural smoke evidence so it guides but cannot bypass fold stages."""
+    sections = [
+        section.get("metrics", {})
+        for fold in (report or {}).get("folds", [])
+        for section in fold.get("sections", {}).values()
+    ]
+    if not sections:
+        return -25.0
+    accuracy = min(float(row.get("directional_accuracy", 0)) for row in sections)
+    balanced = min(float(row.get("directional_balanced_accuracy", 0)) for row in sections)
+    mcc = min(float(row.get("mcc", -1)) for row in sections)
+    profit = min(float(row.get("profit_factor") or 0) for row in sections)
+    score = (80 * (accuracy - .5) + 35 * (balanced - .5)
+             + 12 * mcc + 4 * (profit - 1.0))
+    return max(-25.0, min(25.0, score))
+
+
+def selection_fitness(genome: Genome, neural_scores: dict[str, float] | None = None) -> float:
+    return float(genome.fitness if genome.fitness is not None else -math.inf) + float(
+        (neural_scores or {}).get(genome.genome_id, 0.0)
+    )
+
+
+def select_diverse_elites(population: Sequence[Genome], count: int,
+                          neural_scores: dict[str, float] | None = None) -> list[Genome]:
     """Retain fitness leaders plus viable behavioral species.
 
     Species preservation keeps evolution capable of revisiting learner and
     expression behaviors after a regime change without allowing novelty to
     satisfy any admission metric.
     """
-    ranked = sorted(population, key=lambda genome: genome.fitness or -math.inf,
+    ranked = sorted(population, key=lambda genome: selection_fitness(genome, neural_scores),
                     reverse=True)
     selected: list[Genome] = []
     seen: set[str] = set()
@@ -1058,7 +1211,7 @@ def select_diverse_elites(population: Sequence[Genome], count: int) -> list[Geno
 
     for genome in ranked[:max(2, count // 2)]:
         retain(genome)
-    for learner in ("classifier", "extra_trees", "regressor", "decomposed_regressor"):
+    for learner in LEARNER_KINDS:
         candidate = next((genome for genome in ranked if genome.learner_kind == learner), None)
         if candidate is not None:
             retain(candidate)
@@ -1082,7 +1235,7 @@ def main() -> int:
                         default=Path(r"D:\Projects\CoolCryptoUtilities\data\news\historical_deduplicated.json"))
     parser.add_argument("--state-dir", type=Path, default=ROOT / "runtime/market-evolution")
     parser.add_argument("--dataset-cache", type=Path,
-                        default=ROOT / "runtime/cache/market-evolution-dataset-v3.joblib")
+                        default=ROOT / "runtime/cache/market-evolution-dataset-v4.joblib")
     parser.add_argument("--population", type=int, default=12)
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--max-generations", type=int, default=0,
@@ -1111,6 +1264,7 @@ def main() -> int:
     gate_genome: str | None = None
     gate_out: Path | None = None
     pending_gate_genome: str | None = None
+    neural_scores: dict[str, float] = {}
     owner = claim_service(args.state_dir)
     rng = random.Random(args.seed)
     while available_memory_gb() < args.min_free_memory_gb:
@@ -1137,6 +1291,8 @@ def main() -> int:
         population = [genome_from_dict(row) for row in state["population"]]
         champion = genome_from_dict(state["champion"]) if state.get("champion") else None
         pending_gate_genome = state.get("pending_brain_gate")
+        neural_scores = {str(key): float(value)
+                         for key, value in state.get("neural_scores", {}).items()}
         if state.get("dataset_signature") != signature:
             for genome in population:
                 genome.fitness = None
@@ -1161,7 +1317,10 @@ def main() -> int:
                                if gate_out is not None and gate_out.is_file() else None)
                 append_event(events_path, "brain_gate_finished", genome_id=gate_genome,
                              returncode=gate_process.returncode,
-                             passed=(gate_report or {}).get("all_brain_floor_gates"))
+                             passed=(gate_report or {}).get("all_brain_floor_gates"),
+                             feedback_score=brain_feedback_score(gate_report))
+                if gate_genome is not None:
+                    neural_scores[gate_genome] = brain_feedback_score(gate_report)
                 if gate_report and gate_report.get("all_brain_floor_gates"):
                     atomic_json(args.state_dir / "untouched-final-queue.json", {
                         "queued_at": utc_now(), "genome_id": gate_genome,
@@ -1199,7 +1358,7 @@ def main() -> int:
                                  summary=(genome.result or {}).get("summary"))
                     print(f"generation {generation} {genome.genome_id} fitness={genome.fitness:.4f} "
                           f"{(genome.result or {}).get('status')}", flush=True)
-            population.sort(key=lambda genome: genome.fitness if genome.fitness is not None else -math.inf,
+            population.sort(key=lambda genome: selection_fitness(genome, neural_scores),
                             reverse=True)
             champion_changed = (champion is None
                                 or (population[0].fitness or -math.inf) > (champion.fitness or -math.inf))
@@ -1258,7 +1417,7 @@ def main() -> int:
                     pending_gate_genome = None
             generation += 1
             elite_count = max(4, round(args.population * .40))
-            elites = select_diverse_elites(population, elite_count)
+            elites = select_diverse_elites(population, elite_count, neural_scores)
             next_population = elites[:]
             known_ids = {genome.genome_id for genome in next_population}
             attempts = 0
@@ -1278,6 +1437,7 @@ def main() -> int:
                 "working_target": WORKING_TARGET,
                 "dataset_signature": signature,
                 "pending_brain_gate": pending_gate_genome,
+                "neural_scores": neural_scores,
                 "population": [asdict(genome) for genome in population],
                 "champion": asdict(champion) if champion else None,
             }

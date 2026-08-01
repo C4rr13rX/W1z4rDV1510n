@@ -353,16 +353,25 @@ def continuous_features(
 def build_rows(record: dict[str, Any], bars: Sequence[dict[str, float]], *,
                reference: Sequence[dict[str, float]], reference_times: Sequence[float],
                horizon: int, stride: int, direction_threshold: float = 0.003,
-               supplemental: dict[int, dict[str, float]] | None = None) -> list[dict[str, Any]]:
+               supplemental: dict[int, dict[str, float]] | None = None,
+               auxiliary_horizons: Sequence[int] = (1, 6, 12, 24),
+               ) -> list[dict[str, Any]]:
     rows = []
-    for index in range(168, len(bars) - horizon, stride):
+    target_horizons = sorted({horizon, *(int(value) for value in auxiliary_horizons
+                                        if int(value) > 0)})
+    for index in range(168, len(bars) - max(target_horizons), stride):
         realized = safe_return(bars[index + horizon]["close"], bars[index]["close"])
+        future_returns = {
+            str(value): safe_return(bars[index + value]["close"], bars[index]["close"])
+            for value in target_horizons
+        }
         rows.append({
             "asset": record["base_asset"],
             "timestamp": bars[index]["timestamp"],
             "return": realized,
             "target": (1 if realized > direction_threshold else
                        -1 if realized < -direction_threshold else 0),
+            "future_returns": future_returns,
             "features": continuous_features(bars, index, reference, reference_times, supplemental),
         })
     return rows

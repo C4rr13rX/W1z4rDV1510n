@@ -1,5 +1,5 @@
 from scripts.market_signal_audit import (
-    attach_market_breadth, derive_supplemental_features, select_primary_assets,
+    attach_market_breadth, build_rows, derive_supplemental_features, select_primary_assets,
 )
 
 
@@ -49,3 +49,18 @@ def test_market_breadth_uses_current_features_not_future_targets():
     attach_market_breadth(rows)
     assert [row["features"] for row in rows] == before
     assert rows[0]["features"]["market_breadth_r6"] == 2 / 3
+
+
+def test_build_rows_retains_bounded_multi_horizon_training_outcomes(monkeypatch):
+    bars = [{"timestamp": index * 3600, "close": 100.0 + index}
+            for index in range(220)]
+    monkeypatch.setattr("scripts.market_signal_audit.continuous_features",
+                        lambda *args, **kwargs: {})
+    rows = build_rows(
+        {"base_asset": "TEST"}, bars, reference=bars,
+        reference_times=[row["timestamp"] for row in bars], horizon=12, stride=12,
+        auxiliary_horizons=(1, 6, 24),
+    )
+    assert rows
+    assert set(rows[0]["future_returns"]) == {"1", "6", "12", "24"}
+    assert rows[-1]["timestamp"] + 24 * 3600 < bars[-1]["timestamp"] + 3600

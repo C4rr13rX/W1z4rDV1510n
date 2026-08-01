@@ -45,6 +45,9 @@ FEATURE_POOLS = {
     "news": 20,
 }
 POOL_EVOLVED = 21
+POOL_REGIME = 22
+POOL_ARBITRATION = 23
+POOL_EXPERIENCE = 24
 
 
 def quantize(value: float) -> str:
@@ -104,8 +107,30 @@ def streams(row: dict[str, Any], genome: Genome, horizon: int) -> list[tuple[int
     result.extend([
         (POOL_HORIZON, f"horizon_bars={horizon}"),
         (POOL_INSTRUMENT, f"base={str(row['asset']).lower()} market=crypto"),
+        (POOL_REGIME,
+         f"regime_feature={genome.regime_feature} "
+         f"regime_value={quantize(float(row['features'].get(genome.regime_feature, 0.0)))} "
+         f"resolution={genome.regime_bins}"),
+        (POOL_ARBITRATION,
+         f"market_weight={quantize(genome.market_weight)} "
+         f"specialists=market,residual,event,derivatives,momentum,reversal "
+         f"training_horizons={','.join(map(str, genome.training_horizons))}"),
     ])
     return result
+
+
+def experience_stream(row: dict[str, Any], horizon: int, cost_bps: float,
+                      predicted_direction: int | None = None) -> tuple[int, str]:
+    realized = float(row.get("future_returns", {}).get(str(horizon), row["return"]))
+    direction = 1 if realized > 0 else -1
+    net_magnitude = ((direction * predicted_direction * abs(realized))
+                     if predicted_direction is not None else abs(realized)) - cost_bps / 10_000
+    if predicted_direction is None:
+        result = "historical_tradeable" if net_magnitude > 0 else "historical_below_cost"
+    else:
+        result = "success" if net_magnitude > 0 else "failure"
+    return (POOL_EXPERIENCE,
+            f"ghost_result={result} after_cost={quantize(net_magnitude)} horizon={horizon}")
 
 
 def render_identity(template: Path, destination: Path, genome: Genome) -> None:
@@ -117,8 +142,11 @@ def render_identity(template: Path, destination: Path, genome: Genome) -> None:
     blocks = text.split("[[pools]]")
     for index in range(1, len(blocks)):
         if 'kind = "SensoryInput"' in blocks[index]:
+            name_match = re.search(r'name = "([^"]+)"', blocks[index])
+            pool_name = name_match.group(1) if name_match else ""
+            threshold = genome.pool_thresholds.get(pool_name, genome.concept_threshold)
             blocks[index] = re.sub(r"concept_emergence_threshold = \d+",
-                                   f"concept_emergence_threshold = {genome.concept_threshold}",
+                                   f"concept_emergence_threshold = {threshold}",
                                    blocks[index])
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text("[[pools]]".join(blocks), encoding="utf-8")
@@ -276,10 +304,24 @@ def run_fold(fold: int, cutoff: float, genome: Genome, dataset: dict[str, Any], 
             client = BrainClient(endpoint, timeout=90)
             failures = 0
             for row in train:
-                outcome = "future updraft" if row["target"] > 0 else "future downshift"
-                for _ in range(genome.presentations):
-                    if not client.consolidate(streams(row, genome, args.horizon), outcome):
-                        failures += 1
+                horizons = [value for value in genome.training_horizons
+                            if str(value) in row.get("future_returns", {})]
+                if args.horizon not in horizons:
+                    horizons.append(args.horizon)
+                repetitions = max(1, math.ceil(genome.presentations / len(horizons)))
+                for horizon in sorted(set(horizons)):
+                    realized = float(row.get("future_returns", {}).get(
+                        str(horizon), row["return"]
+                    ))
+                    if abs(realized) <= .003:
+                        continue
+                    outcome = "future updraft" if realized > 0 else "future downshift"
+                    moment = streams(row, genome, horizon) + [
+                        experience_stream(row, horizon, args.cost_bps)
+                    ]
+                    for _ in range(repetitions):
+                        if not client.consolidate(moment, outcome):
+                            failures += 1
             # Current nodes create a neuron-addressable container before their
             # first observation, so they can settle in-place without writing a
             # second monolithic copy.  Only old binaries/checkpoints need the
@@ -351,7 +393,7 @@ def main() -> int:
                         default=ROOT / "target/debug/w1z4rd_brain_migrate.exe")
     parser.add_argument("--runtime", type=Path, default=ROOT / "runtime/market-evolution/brain-gates")
     parser.add_argument("--dataset-cache", type=Path,
-                        default=ROOT / "runtime/cache/market-evolution-dataset-v3.joblib")
+                        default=ROOT / "runtime/cache/market-evolution-dataset-v4.joblib")
     parser.add_argument("--port", type=int, default=0,
                         help="base port; zero reserves a free loopback port per fold")
     parser.add_argument("--horizon", type=int, default=12)

@@ -137,3 +137,42 @@ max_concept_member_count = 12
 concept_emergence_threshold = 5
 decay_rate = 0.00002
 prune_floor = 0.001
+
+[[pools]]
+name = "regime_context"
+id = 22
+prototype = "byte-passthrough"
+atom_encoding_prefix = "market_regime"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 2048
+max_concept_member_count = 12
+concept_emergence_threshold = 5
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "specialist_arbitration"
+id = 23
+prototype = "byte-passthrough"
+atom_encoding_prefix = "market_arbitration"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 2048
+max_concept_member_count = 12
+concept_emergence_threshold = 5
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "realized_ghost_experience"
+id = 24
+prototype = "byte-passthrough"
+atom_encoding_prefix = "market_experience"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 2048
+max_concept_member_count = 12
+concept_emergence_threshold = 5
+decay_rate = 0.00002
+prune_floor = 0.001
