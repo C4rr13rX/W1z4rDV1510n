@@ -106,6 +106,25 @@ def wait_for_health(endpoint: str, process: subprocess.Popen, timeout: float = 3
     raise TimeoutError(f"brain server did not become healthy at {endpoint}")
 
 
+def stop_process(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
+def progress(message: str) -> None:
+    """Progress must never make a detached training supervisor fail."""
+    try:
+        print(message, flush=True)
+    except (BrokenPipeError, OSError):
+        pass
+
+
 def market_rows(record: dict[str, Any], bars: Sequence[dict[str, float]], indices: Sequence[int],
                 client: BrainClient, *, horizon: int, news, reference_bars,
                 active_pools: set[int], cost_bps: float) -> list[dict[str, Any]]:
@@ -180,6 +199,8 @@ def main() -> int:
                         default=ROOT / "brains" / "market_predictor_v2.identity.toml")
     parser.add_argument("--binary", type=Path,
                         default=ROOT / "target" / "debug" / "w1z4rd_brain_server.exe")
+    parser.add_argument("--migration-binary", type=Path,
+                        default=ROOT / "target" / "debug" / "w1z4rd_brain_migrate.exe")
     parser.add_argument("--runtime", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--port", type=int, required=True)
@@ -274,12 +295,33 @@ def main() -> int:
 
             settlement = None
             if args.settle_before_eval:
+                checkpoint = client.post("/brain/checkpoint", {})
+                if checkpoint.get("ok") is not True:
+                    raise RuntimeError(f"pre-settlement checkpoint failed: {checkpoint}")
+                # Fresh brains begin in the compatibility format.  Conversion
+                # requires a stopped server, after which the same identity is
+                # restored from the neuron-addressable package.
+                stop_process(process)
+                migration = subprocess.run(
+                    [str(args.migration_binary.resolve()), str(args.runtime.resolve())],
+                    cwd=ROOT, env=env, stdout=stdout, stderr=stderr,
+                    creationflags=creationflags, timeout=600,
+                )
+                if migration.returncode != 0:
+                    raise RuntimeError(f"brain migration failed with exit {migration.returncode}")
+                process = subprocess.Popen([str(args.binary.resolve())], cwd=ROOT, env=env,
+                                           stdout=stdout, stderr=stderr,
+                                           creationflags=creationflags)
+                wait_for_health(endpoint, process)
+                client = BrainClient(endpoint, timeout=60.0)
                 settlement = client.post("/brain/sleep", {
                     "min_use_count": 0,
                     "stale_ticks": 9_223_372_036_854_775_807,
                 })
                 if settlement.get("error"):
                     raise RuntimeError(f"brain settlement failed: {settlement['error']}")
+                settlement["checkpoint"] = checkpoint
+                settlement["migration"] = "legacy_to_neuron_addressable"
 
             evaluation: dict[str, Any] = {}
             for name, records in (("known_asset_future", training_records[:args.known_eval_pairs]),
@@ -303,8 +345,8 @@ def main() -> int:
                     add_baselines(market_metrics, market)
                     per_market.append({"chain": record["chain"], "symbol": record["symbol"],
                                        "family": record["family"], "metrics": market_metrics})
-                    print(f"evaluated {name} {len(per_market)}/{len(records)} "
-                          f"{record['chain']}:{record['symbol']}", flush=True)
+                    progress(f"evaluated {name} {len(per_market)}/{len(records)} "
+                             f"{record['chain']}:{record['symbol']}")
                 metrics = evaluate_rows(rows, args.cost_bps)
                 add_baselines(metrics, rows)
                 clustered_rows = cluster_asset_time_rows(rows)
@@ -340,12 +382,7 @@ def main() -> int:
             print(json.dumps({name: section["metrics"] for name, section in evaluation.items()},
                              indent=2, allow_nan=False))
         finally:
-            process.terminate()
-            try:
-                process.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
+            stop_process(process)
     return 0
 
 

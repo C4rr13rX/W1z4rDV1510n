@@ -1,5 +1,6 @@
 from scripts.market_multipair_lab import (
     cluster_asset_time_rows, derive_cutoff, eligible_indices, evenly_spaced, partition_assets,
+    progress,
 )
 
 
@@ -51,3 +52,11 @@ def test_chain_copies_collapse_to_one_asset_time_vote():
     assert collapsed[0]["actual"] == "updraft"
     assert collapsed[0]["predicted"] == "updraft"
     assert collapsed[0]["cluster_members"] == 3
+
+
+def test_detached_progress_pipe_cannot_abort(monkeypatch):
+    def broken(*_args, **_kwargs):
+        raise BrokenPipeError("detached")
+
+    monkeypatch.setattr("builtins.print", broken)
+    progress("still safe")
