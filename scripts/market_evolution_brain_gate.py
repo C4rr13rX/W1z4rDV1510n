@@ -28,14 +28,23 @@ from scripts.market_brain_experiment import (  # noqa: E402
     BrainClient, direction, evaluate_rows, parse_prediction,
 )
 from scripts.market_evolution_service import (  # noqa: E402
-    FLOOR, Genome, evaluation_scope, genome_from_dict, genome_uses_derivatives,
-    load_dataset_cached, passes_floor, program_name, program_value,
+    DERIVATIVE_FEATURES, FEATURE_GROUPS, FLOOR, Genome, evaluation_scope,
+    genome_from_dict, genome_uses_derivatives, load_dataset_cached, passes_floor,
+    program_name, program_value,
 )
 
 POOL_HORIZON = 9
 POOL_INSTRUMENT = 10
 POOL_OUTCOME = 11
-POOL_EVOLVED = 15
+FEATURE_POOLS = {
+    "price": 15,
+    "flow": 16,
+    "cross": 17,
+    "derivatives": 18,
+    "breadth": 19,
+    "news": 20,
+}
+POOL_EVOLVED = 21
 
 
 def quantize(value: float) -> str:
@@ -64,12 +73,39 @@ def genome_feature_frame(row: dict[str, Any], genome: Genome) -> str:
     return " ".join(part for part in (base, evolved) if part)
 
 
+def feature_family(name: str) -> str:
+    """Route one causal feature to an independently firing sensory pool."""
+    if name in DERIVATIVE_FEATURES:
+        return "derivatives"
+    if "news_" in name or name.startswith(("asset_news", "global_news")):
+        return "news"
+    for family in ("flow", "breadth", "cross", "price"):
+        if any(name == source or name.endswith("_" + source)
+               for source in FEATURE_GROUPS[family]):
+            return family
+    return "price"
+
+
 def streams(row: dict[str, Any], genome: Genome, horizon: int) -> list[tuple[int, str]]:
-    return [
-        (POOL_EVOLVED, genome_feature_frame(row, genome)),
+    grouped: dict[str, list[str]] = defaultdict(list)
+    for name in genome.features:
+        grouped[feature_family(name)].append(name)
+    result = [
+        (FEATURE_POOLS[family], feature_frame(row, names))
+        for family, names in sorted(grouped.items(), key=lambda item: FEATURE_POOLS[item[0]])
+        if names
+    ]
+    evolved = " ".join(
+        f"{program_name(program)}={quantize(program_value(row['features'], program))}"
+        for program in genome.feature_programs
+    )
+    if evolved:
+        result.append((POOL_EVOLVED, evolved))
+    result.extend([
         (POOL_HORIZON, f"horizon_bars={horizon}"),
         (POOL_INSTRUMENT, f"base={str(row['asset']).lower()} market=crypto"),
-    ]
+    ])
+    return result
 
 
 def render_identity(template: Path, destination: Path, genome: Genome) -> None:

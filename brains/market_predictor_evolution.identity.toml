@@ -4,9 +4,10 @@ binding_emergence_threshold = 3
 moment_history_window = 512
 min_atom_score = 0.94
 
-# The evolving relationship pool is deliberately atom-grounded: genomes may
-# select and combine causal numeric features, but every value still enters as
-# named characters and deterministic buckets rather than opaque token IDs.
+# Causal feature families fire in parallel and bind in the same moment. Every
+# value remains a named, character-grounded quantity rather than an opaque
+# token; the separation prevents unrelated character sequences from creating
+# a combinatorial concept window in one oversized pool.
 [[pools]]
 name = "forecast_horizon"
 id = 9
@@ -47,14 +48,92 @@ decay_rate = 0.00002
 prune_floor = 0.001
 
 [[pools]]
-name = "evolved_causal_relationships"
+name = "price_geometry"
 id = 15
+prototype = "byte-passthrough"
+atom_encoding_prefix = "market_price"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 2048
+max_concept_member_count = 12
+concept_emergence_threshold = 5
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "trade_flow"
+id = 16
+prototype = "byte-passthrough"
+atom_encoding_prefix = "market_flow"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 2048
+max_concept_member_count = 12
+concept_emergence_threshold = 5
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "cross_market_context"
+id = 17
+prototype = "byte-passthrough"
+atom_encoding_prefix = "market_cross"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 2048
+max_concept_member_count = 12
+concept_emergence_threshold = 5
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "derivatives_state"
+id = 18
+prototype = "byte-passthrough"
+atom_encoding_prefix = "market_derivatives"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 2048
+max_concept_member_count = 12
+concept_emergence_threshold = 5
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "market_breadth"
+id = 19
+prototype = "byte-passthrough"
+atom_encoding_prefix = "market_breadth"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 2048
+max_concept_member_count = 12
+concept_emergence_threshold = 5
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "news_state"
+id = 20
+prototype = "byte-passthrough"
+atom_encoding_prefix = "market_news"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 2048
+max_concept_member_count = 12
+concept_emergence_threshold = 5
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "evolved_causal_relationships"
+id = 21
 prototype = "byte-passthrough"
 atom_encoding_prefix = "market_evolved"
 kind = "SensoryInput"
 frame_rate = 1
-recent_atoms_window = 4096
-max_concept_member_count = 16
+recent_atoms_window = 2048
+max_concept_member_count = 12
 concept_emergence_threshold = 5
 decay_rate = 0.00002
 prune_floor = 0.001

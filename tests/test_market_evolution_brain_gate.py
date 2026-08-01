@@ -1,11 +1,13 @@
 from scripts.market_evolution_brain_gate import (
     available_port,
+    feature_family,
     feature_frame,
     genome_feature_frame,
     quantize,
     retain_attempt,
     render_identity,
     settle_brain,
+    streams,
 )
 from scripts.market_evolution_service import Genome
 
@@ -34,6 +36,19 @@ def test_genome_feature_frame_includes_heritable_expression():
     )
     assert "evolved_" in frame
     assert "=p9e-3" in frame
+
+
+def test_feature_families_fire_in_separate_atom_grounded_pools():
+    candidate = genome()
+    candidate.features = ["r6", "funding_rate"]
+    row = {"asset": "ETH", "features": {"r6": .01, "funding_rate": .001}}
+    fired = streams(row, candidate, 12)
+    pool_ids = [pool_id for pool_id, _ in fired]
+    assert len(pool_ids) == len(set(pool_ids))
+    assert feature_family("r6") == "price"
+    assert feature_family("funding_rate") == "derivatives"
+    assert any("r6=" in frame for _, frame in fired)
+    assert any("funding_rate=" in frame for _, frame in fired)
 
 
 def test_rendered_identity_applies_brain_genes_without_lowering_outcome_threshold(tmp_path):
