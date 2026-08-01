@@ -23,7 +23,10 @@ decays old observations according to the evolved half-life. These genes are
 rendered into named atom-grounded frames for the Wizard gate rather than
 copying the screening model.
 The screening learner family may mutate among directional gradient boosting,
-return regression, and extremely randomized trees. This is an information and
+return regression, broad-market-plus-instrument-residual regression, and
+extremely randomized trees. The decomposed family learns two supervised heads
+and genetically weights their recombination; future market aggregates are
+targets only and never enter a decision feature. This is an information and
 relationship-discovery gene only: learner parameters and fitted weights are
 never installed in the Wizard brain.
 

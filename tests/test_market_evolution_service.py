@@ -10,7 +10,8 @@ import scripts.market_evolution_service as evolution
 from scripts.market_evolution_service import (
     Genome, add_derived_features, attach_causal_normalization,
     attach_news_features, crossover, dataset_signature, evaluation_scope,
-    evaluation_signature, load_dataset_cached, mutate, passes_floor,
+    evaluation_signature, decompose_returns, introduce_missing_learner_species,
+    load_dataset_cached, mutate, passes_floor,
     passes_prescreen, program_name, program_value, recover_pending_gate,
     regression_probability_scale, seed_genomes, select_diverse_elites,
 )
@@ -157,6 +158,17 @@ def test_regression_temperature_preserves_zero_boundary():
     assert (scores / scale >= 0).tolist() == (scores >= 0).tolist()
 
 
+def test_return_decomposition_reconstructs_each_observation_without_features():
+    rows = [
+        {"timestamp": 1, "return": .03}, {"timestamp": 1, "return": .01},
+        {"timestamp": 2, "return": -.02}, {"timestamp": 2, "return": .04},
+    ]
+    market, residual = decompose_returns(rows)
+    realized = np.asarray([row["return"] for row in rows])
+    assert np.allclose(market + residual, realized)
+    assert market.tolist() == pytest.approx([.02, .02, .01, .01])
+
+
 def test_evolved_program_is_deterministic_bounded_and_same_moment():
     program = {"op": "regime_gate", "left": "r6", "right": "funding_rate", "scale": 2}
     assert program_name(program) == program_name(dict(reversed(list(program.items()))))
@@ -217,5 +229,16 @@ def test_diverse_elites_preserve_learner_species_without_overriding_fitness():
     elites = select_diverse_elites(population, 4)
     assert elites[0].genome_id == population[0].genome_id
     assert {genome.learner_kind for genome in elites} == {
-        "classifier", "regressor", "extra_trees",
+        "classifier", "regressor", "extra_trees", "decomposed_regressor",
     }
+
+
+def test_resumed_population_immediately_receives_new_learner_species():
+    population = seed_genomes(4, random.Random(2))
+    population = [genome for genome in population if genome.learner_kind != "decomposed_regressor"]
+    population.append(genome_from := Genome(**population[-1].__dict__))
+    updated = introduce_missing_learner_species(population, 9, random.Random(3))
+    decomposed = next(genome for genome in updated
+                      if genome.learner_kind == "decomposed_regressor")
+    assert decomposed.generation == 9
+    assert decomposed.parents == [population[0].genome_id]

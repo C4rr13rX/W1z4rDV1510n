@@ -44,7 +44,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 FEATURE_SCHEMA = 3
-EVOLUTION_SCHEMA = 4
+EVOLUTION_SCHEMA = 5
 
 from scripts.market_brain_experiment import load_bars  # noqa: E402
 from scripts.market_signal_audit import (  # noqa: E402
@@ -151,6 +151,7 @@ class Genome:
     feature_programs: list[dict[str, Any]] = field(default_factory=list)
     recency_half_life_days: float = 720.0
     learner_kind: str = "classifier"
+    market_weight: float = 1.0
     generation: int = 0
     parents: list[str] = field(default_factory=list)
     genome_id: str = ""
@@ -250,11 +251,20 @@ class Surrogate:
     model: Any
     kind: str
     score_scale: float = 1.0
+    market_model: Any = None
+    market_weight: float = 1.0
+
+    def raw_score(self, values: np.ndarray) -> np.ndarray:
+        if self.kind == "decomposed_regressor":
+            residual = np.asarray(self.model.predict(values), dtype=np.float64)
+            market = np.asarray(self.market_model.predict(values), dtype=np.float64)
+            return residual + self.market_weight * market
+        return np.asarray(self.model.predict(values), dtype=np.float64)
 
     def probability(self, values: np.ndarray) -> np.ndarray:
         if self.kind in {"classifier", "extra_trees"}:
             return self.model.predict_proba(values)[:, list(self.model.classes_).index(1)]
-        score = np.asarray(self.model.predict(values), dtype=np.float64)
+        score = self.raw_score(values)
         normalized = np.clip(score / max(self.score_scale, 1e-9), -30, 30)
         return 1.0 / (1.0 + np.exp(-normalized))
 
@@ -274,6 +284,26 @@ def regression_probability_scale(scores: np.ndarray, labels: np.ndarray) -> floa
     ).fit(scores.reshape(-1, 1), (labels > 0).astype(np.int8))
     coefficient = float(calibrator.coef_[0, 0])
     return 1.0 / coefficient if coefficient > 1e-9 else fallback
+
+
+def decompose_returns(rows: Sequence[dict[str, Any]]) -> tuple[np.ndarray, np.ndarray]:
+    """Split future return into a same-time market component and asset residual.
+
+    These are supervised targets used only while fitting. No future aggregate is
+    added to a decision row, so inference remains strictly causal.
+    """
+    by_time: dict[float, list[float]] = defaultdict(list)
+    for row in rows:
+        by_time[float(row["timestamp"])].append(float(row["return"]))
+    market_by_time = {
+        timestamp: float(statistics.median(returns))
+        for timestamp, returns in by_time.items()
+    }
+    market = np.asarray(
+        [market_by_time[float(row["timestamp"])] for row in rows], dtype=np.float64
+    )
+    realized = np.asarray([row["return"] for row in rows], dtype=np.float64)
+    return market, realized - market
 
 
 def utc_now() -> str:
@@ -610,13 +640,16 @@ def seed_genomes(population: int, rng: random.Random) -> list[Genome]:
     breadth = list(FEATURE_GROUPS["breadth"])
     seeds = [price, price + flow, price + flow + derivatives,
              price + flow + breadth, price + flow + derivatives + breadth]
-    seed_learners = ("classifier", "regressor", "classifier", "extra_trees", "regressor")
+    seed_learners = (
+        "classifier", "regressor", "classifier", "extra_trees", "decomposed_regressor",
+    )
     result = [Genome(
         features=features, learning_rate=.06, max_iter=180, max_leaf_nodes=24,
         min_samples_leaf=20, l2_regularization=1.0, confidence_quantile=.20,
         binding_threshold=3, concept_threshold=5, presentations=3,
         feature_programs=[], recency_half_life_days=720.0,
         learner_kind=seed_learners[index],
+        market_weight=1.0,
     ).finalize() for index, features in enumerate(seeds[:population])]
     all_features = list(BASE_FEATURES) + list(DERIVED_FEATURES)
     while len(result) < population:
@@ -632,7 +665,10 @@ def seed_genomes(population: int, rng: random.Random) -> list[Genome]:
             presentations=rng.randint(2, 7),
             feature_programs=[random_program(rng) for _ in range(rng.randint(1, 5))],
             recency_half_life_days=10 ** rng.uniform(math.log10(90), math.log10(1500)),
-            learner_kind=rng.choice(("classifier", "regressor", "extra_trees")),
+            learner_kind=rng.choice(
+                ("classifier", "regressor", "extra_trees", "decomposed_regressor")
+            ),
+            market_weight=rng.uniform(0.25, 1.75),
         ).finalize())
     return result
 
@@ -746,23 +782,41 @@ def evaluate_genome(genome: Genome, dataset: dict[str, Any], *, folds: int,
             weights = np.asarray([
                 (1.0 / asset_counts[str(row["asset"])])
                 * ((1.0 / class_counts[int(row["target"])])
-                   if genome.learner_kind != "regressor" else 1.0)
+                   if genome.learner_kind not in {"regressor", "decomposed_regressor"} else 1.0)
                 * math.exp(-math.log(2) * (fit_stop - float(row["timestamp"]))
                            / half_life_seconds)
                 for row in fit
             ], dtype=np.float64)
             weights *= len(weights) / max(weights.sum(), 1e-12)
-            if genome.learner_kind == "regressor":
+            if genome.learner_kind in {"regressor", "decomposed_regressor"}:
                 raw_model = HistGradientBoostingRegressor(
                     learning_rate=genome.learning_rate, max_iter=genome.max_iter,
                     max_leaf_nodes=genome.max_leaf_nodes,
                     min_samples_leaf=genome.min_samples_leaf,
                     l2_regularization=genome.l2_regularization, random_state=1700 + fold,
-                ).fit(
-                    x_fit, np.asarray([row["return"] for row in fit], dtype=np.float64),
-                    sample_weight=weights,
                 )
-                model = Surrogate(raw_model, "regressor")
+                if genome.learner_kind == "decomposed_regressor":
+                    market_target, residual_target = decompose_returns(fit)
+                    market_model = raw_model.fit(
+                        x_fit, market_target, sample_weight=weights,
+                    )
+                    residual_model = HistGradientBoostingRegressor(
+                        learning_rate=genome.learning_rate, max_iter=genome.max_iter,
+                        max_leaf_nodes=genome.max_leaf_nodes,
+                        min_samples_leaf=genome.min_samples_leaf,
+                        l2_regularization=genome.l2_regularization,
+                        random_state=2700 + fold,
+                    ).fit(x_fit, residual_target, sample_weight=weights)
+                    model = Surrogate(
+                        residual_model, "decomposed_regressor",
+                        market_model=market_model, market_weight=genome.market_weight,
+                    )
+                else:
+                    raw_model = raw_model.fit(
+                        x_fit, np.asarray([row["return"] for row in fit], dtype=np.float64),
+                        sample_weight=weights,
+                    )
+                    model = Surrogate(raw_model, "regressor")
             elif genome.learner_kind == "extra_trees":
                 raw_model = ExtraTreesClassifier(
                     n_estimators=min(240, max(80, genome.max_iter)),
@@ -781,8 +835,8 @@ def evaluate_genome(genome: Genome, dataset: dict[str, Any], *, folds: int,
                 ).fit(x_fit, y_fit, sample_weight=weights)
                 model = Surrogate(raw_model, "classifier")
             x_cal = np.asarray([feature_vector(row, genome) for row in calibration], dtype=np.float32)
-            if genome.learner_kind == "regressor":
-                calibration_scores = np.asarray(raw_model.predict(x_cal), dtype=np.float64)
+            if genome.learner_kind in {"regressor", "decomposed_regressor"}:
+                calibration_scores = model.raw_score(x_cal)
                 calibration_labels = np.asarray(
                     [row["target"] for row in calibration], dtype=np.int8
                 )
@@ -909,8 +963,11 @@ def mutate(parent: Genome, generation: int, rng: random.Random) -> Genome:
         feature_programs=programs,
         recency_half_life_days=min(2200, max(45, parent.recency_half_life_days
                                            * math.exp(rng.gauss(0, .25)))),
-        learner_kind=(rng.choice(("classifier", "regressor", "extra_trees"))
+        learner_kind=(rng.choice(
+            ("classifier", "regressor", "extra_trees", "decomposed_regressor")
+        )
                       if rng.random() < .12 else parent.learner_kind),
+        market_weight=min(2.5, max(0.0, parent.market_weight + rng.gauss(0, .15))),
         generation=generation, parents=[parent.genome_id],
     )
     return child.finalize()
@@ -943,6 +1000,7 @@ def crossover(left: Genome, right: Genome, generation: int, rng: random.Random) 
         recency_half_life_days=choose(left.recency_half_life_days,
                                      right.recency_half_life_days),
         learner_kind=choose(left.learner_kind, right.learner_kind),
+        market_weight=choose(left.market_weight, right.market_weight),
         generation=generation, parents=[left.genome_id, right.genome_id],
     ).finalize()
     return mutate(child, generation, rng) if rng.random() < .7 else child
@@ -953,7 +1011,32 @@ def genome_from_dict(payload: dict[str, Any]) -> Genome:
     compatible.setdefault("feature_programs", [])
     compatible.setdefault("recency_half_life_days", 720.0)
     compatible.setdefault("learner_kind", "classifier")
+    compatible.setdefault("market_weight", 1.0)
     return Genome(**compatible)
+
+
+def introduce_missing_learner_species(population: list[Genome], generation: int,
+                                      rng: random.Random) -> list[Genome]:
+    """Guarantee architecture upgrades enter a resumed population immediately."""
+    learners = ("classifier", "extra_trees", "regressor", "decomposed_regressor")
+    present = {genome.learner_kind for genome in population}
+    if not population:
+        return population
+    base = population[0]
+    for offset, learner in enumerate(kind for kind in learners if kind not in present):
+        payload = asdict(base)
+        payload.update({
+            "learner_kind": learner,
+            "market_weight": rng.uniform(.25, 1.75),
+            "generation": generation,
+            "parents": [base.genome_id],
+            "fitness": None,
+            "result": None,
+            "genome_id": "",
+        })
+        replacement = Genome(**payload).finalize()
+        population[-(offset + 1)] = replacement
+    return population
 
 
 def select_diverse_elites(population: Sequence[Genome], count: int) -> list[Genome]:
@@ -975,7 +1058,7 @@ def select_diverse_elites(population: Sequence[Genome], count: int) -> list[Geno
 
     for genome in ranked[:max(2, count // 2)]:
         retain(genome)
-    for learner in ("classifier", "extra_trees", "regressor"):
+    for learner in ("classifier", "extra_trees", "regressor", "decomposed_regressor"):
         candidate = next((genome for genome in ranked if genome.learner_kind == learner), None)
         if candidate is not None:
             retain(candidate)
@@ -1058,6 +1141,7 @@ def main() -> int:
             for genome in population:
                 genome.fitness = None
                 genome.result = None
+            population = introduce_missing_learner_species(population, generation, rng)
             champion = None
             append_event(events_path, "dataset_changed", previous=state.get("dataset_signature"),
                          current=signature, action="population_revalidation")
