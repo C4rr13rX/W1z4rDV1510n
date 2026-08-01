@@ -170,6 +170,15 @@ def append_event(path: Path, event: str, **payload: Any) -> None:
                                 separators=(",", ":"), allow_nan=False) + "\n")
 
 
+def recover_pending_gate(state_dir: Path, champion: Genome | None,
+                         pending: str | None) -> str | None:
+    """Restore a neural-validation obligation that was not yet recorded."""
+    if pending or champion is None:
+        return pending
+    report = state_dir / "brain-gate-reports" / f"{champion.genome_id}.smoke.json"
+    return None if report.is_file() else champion.genome_id
+
+
 def add_derived_features(rows: Sequence[dict[str, Any]]) -> None:
     for row in rows:
         features = row["features"]
@@ -547,6 +556,7 @@ def main() -> int:
     gate_process: subprocess.Popen | None = None
     gate_genome: str | None = None
     gate_out: Path | None = None
+    pending_gate_genome: str | None = None
     owner = claim_service(args.state_dir)
     rng = random.Random(args.seed)
     while available_memory_gb() < args.min_free_memory_gb:
@@ -566,6 +576,7 @@ def main() -> int:
         generation = int(state["generation"])
         population = [genome_from_dict(row) for row in state["population"]]
         champion = genome_from_dict(state["champion"]) if state.get("champion") else None
+        pending_gate_genome = state.get("pending_brain_gate")
         if state.get("dataset_signature") != signature:
             for genome in population:
                 genome.fitness = None
@@ -573,6 +584,9 @@ def main() -> int:
             champion = None
             append_event(events_path, "dataset_changed", previous=state.get("dataset_signature"),
                          current=signature, action="population_revalidation")
+        pending_gate_genome = recover_pending_gate(
+            args.state_dir, champion, pending_gate_genome
+        )
         append_event(events_path, "resumed", generation=generation, population=len(population))
     else:
         generation = 0
@@ -635,21 +649,28 @@ def main() -> int:
                              genome_id=champion.genome_id, fitness=champion.fitness,
                              summary=(champion.result or {}).get("summary"),
                              brain_gate="pending_isolated_wizard_validation")
-            should_gate = (gate_process is None and champion is not None
-                           and (generation == 0
-                                or (champion_changed and generation % max(1, args.brain_gate_every) == 0)
-                                or (champion.result or {}).get("status") in {
-                                    "surrogate_floor_pass", "surrogate_working_target_pass"}))
-            if should_gate:
-                candidate_path = args.state_dir / "candidates" / f"{champion.genome_id}.json"
-                gate_out = args.state_dir / "brain-gate-reports" / f"{champion.genome_id}.smoke.json"
+                if (generation == 0
+                        or generation % max(1, args.brain_gate_every) == 0
+                        or (champion.result or {}).get("status") in {
+                            "surrogate_floor_pass", "surrogate_working_target_pass"}):
+                    # A gate can be much slower than statistical screening.
+                    # Retain the newest obligation while an older gate runs.
+                    pending_gate_genome = champion.genome_id
+            if gate_process is None and pending_gate_genome is not None:
+                candidate_path = (args.state_dir / "candidates"
+                                  / f"{pending_gate_genome}.json")
+                gate_out = (args.state_dir / "brain-gate-reports"
+                            / f"{pending_gate_genome}.smoke.json")
                 if candidate_path.is_file() and not gate_out.exists():
+                    gate_candidate = genome_from_dict(
+                        json.loads(candidate_path.read_text(encoding="utf-8"))
+                    )
                     gate_out.parent.mkdir(parents=True, exist_ok=True)
                     gate_stdout = (args.state_dir / "brain-gate-reports"
-                                   / f"{champion.genome_id}.stdout.log").open("wb")
+                                   / f"{pending_gate_genome}.stdout.log").open("wb")
                     gate_stderr = (args.state_dir / "brain-gate-reports"
-                                   / f"{champion.genome_id}.stderr.log").open("wb")
-                    full_gate = ((champion.result or {}).get("status")
+                                   / f"{pending_gate_genome}.stderr.log").open("wb")
+                    full_gate = ((gate_candidate.result or {}).get("status")
                                  == "surrogate_working_target_pass")
                     command = [
                         sys.executable, str(ROOT / "scripts/market_evolution_brain_gate.py"),
@@ -665,10 +686,15 @@ def main() -> int:
                                                     creationflags=creationflags)
                     gate_stdout.close()
                     gate_stderr.close()
-                    gate_genome = champion.genome_id
+                    gate_genome = pending_gate_genome
+                    pending_gate_genome = None
                     append_event(events_path, "brain_gate_started", genome_id=gate_genome,
                                  pid=gate_process.pid,
                                  stage="full" if full_gate else "smoke", command=command)
+                elif gate_out.exists():
+                    append_event(events_path, "brain_gate_already_recorded",
+                                 genome_id=pending_gate_genome, report=str(gate_out))
+                    pending_gate_genome = None
             generation += 1
             elite_count = max(2, round(args.population * .25))
             elites = [genome_from_dict(asdict(genome)) for genome in population[:elite_count]]
@@ -690,6 +716,7 @@ def main() -> int:
                 "contract": str(ROOT / "docs/MARKET_BRAIN_GHOST_TRADING_ADMISSION.md"),
                 "working_target": WORKING_TARGET,
                 "dataset_signature": signature,
+                "pending_brain_gate": pending_gate_genome,
                 "population": [asdict(genome) for genome in population],
                 "champion": asdict(champion) if champion else None,
             }

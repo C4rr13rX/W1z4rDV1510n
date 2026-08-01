@@ -2,7 +2,7 @@ import random
 
 from scripts.market_evolution_service import (
     Genome, add_derived_features, attach_news_features, crossover, mutate,
-    passes_floor, seed_genomes,
+    passes_floor, recover_pending_gate, seed_genomes,
 )
 
 
@@ -60,3 +60,13 @@ def test_news_features_do_not_read_future_publications(tmp_path):
     attach_news_features(rows, path)
     assert rows[0]["features"]["asset_news_count_24h"] > 0
     assert rows[0]["features"]["asset_news_sentiment_24h"] == 1.0
+
+
+def test_unfinished_champion_gate_is_recovered_after_restart(tmp_path):
+    champion = seed_genomes(4, random.Random(7))[0]
+    assert recover_pending_gate(tmp_path, champion, None) == champion.genome_id
+    report = tmp_path / "brain-gate-reports" / f"{champion.genome_id}.smoke.json"
+    report.parent.mkdir(parents=True)
+    report.write_text("{}")
+    assert recover_pending_gate(tmp_path, champion, None) is None
+    assert recover_pending_gate(tmp_path, champion, "newer") == "newer"
