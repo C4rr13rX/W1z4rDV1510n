@@ -219,6 +219,8 @@ def main() -> int:
                         help="instrument pool 10 is excluded by default to permit unseen-asset transfer")
     parser.add_argument("--settle-before-eval", action=argparse.BooleanOptionalAction, default=True,
                         help="serialize the trained overlay neuron-by-neuron before read-only evaluation")
+    parser.add_argument("--evaluation-only", action="store_true",
+                        help="reuse an existing settled runtime and regenerate only the read-only report")
     args = parser.parse_args()
 
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
@@ -242,8 +244,10 @@ def main() -> int:
     reference_bars = load_bars(Path(reference_record["path"]))
     news = load_news(args.news if args.news.exists() else None)
 
-    if args.runtime.exists() and any(args.runtime.iterdir()):
+    if args.runtime.exists() and any(args.runtime.iterdir()) and not args.evaluation_only:
         raise RuntimeError(f"refusing to overwrite non-empty runtime {args.runtime}")
+    if args.evaluation_only and not (args.runtime / "brain.wbrain").is_file():
+        raise RuntimeError("evaluation-only requires an existing runtime/brain.wbrain")
     args.runtime.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env.update({
@@ -254,8 +258,9 @@ def main() -> int:
     })
     creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     started = datetime.now(timezone.utc)
-    with (args.runtime / "stdout.log").open("wb") as stdout, \
-            (args.runtime / "stderr.log").open("wb") as stderr:
+    log_mode = "ab" if args.evaluation_only else "wb"
+    with (args.runtime / "stdout.log").open(log_mode) as stdout, \
+            (args.runtime / "stderr.log").open(log_mode) as stderr:
         process = subprocess.Popen([str(args.binary.resolve())], cwd=ROOT, env=env,
                                    stdout=stdout, stderr=stderr, creationflags=creationflags)
         try:
@@ -264,38 +269,39 @@ def main() -> int:
             client = BrainClient(endpoint, timeout=60.0)
             training_candidates = []
             loaded_training: dict[str, list[dict[str, float]]] = {}
-            for record in training_records:
-                bars = load_bars(Path(record["path"]))
-                loaded_training[record["relative_path"]] = bars
-                train_indices, _ = eligible_indices(bars, cutoff, args.horizon)
-                for index in evenly_spaced(train_indices, args.train_per_pair):
-                    training_candidates.append((record, bars, index))
-            # Preserve corpus prevalence but bound any one direction attractor.
-            by_label: dict[str, list[tuple]] = defaultdict(list)
-            for item in training_candidates:
-                record, bars, index = item
-                by_label[target_label(actual_return(bars, index, args.horizon), "direction3")].append(item)
-            counts = sorted(len(items) for items in by_label.values() if items)
-            cap = round(statistics.median(counts) * 2) if counts else 0
-            training_candidates = sorted(
-                (item for items in by_label.values() for item in items[-cap:]),
-                key=lambda item: (item[2] and item[1][item[2]]["timestamp"], item[0]["relative_path"]),
-            )
             failures = 0
             label_counts: Counter[str] = Counter()
-            for record, bars, index in training_candidates:
-                streams = feature_streams(
-                    bars, index, symbol=record["symbol"], chain=record["chain"],
-                    horizon=args.horizon, news=news, reference_bars=reference_bars,
-                    active_pools=active_pools,
+            if not args.evaluation_only:
+                for record in training_records:
+                    bars = load_bars(Path(record["path"]))
+                    loaded_training[record["relative_path"]] = bars
+                    train_indices, _ = eligible_indices(bars, cutoff, args.horizon)
+                    for index in evenly_spaced(train_indices, args.train_per_pair):
+                        training_candidates.append((record, bars, index))
+                # Preserve corpus prevalence but bound any one direction attractor.
+                by_label: dict[str, list[tuple]] = defaultdict(list)
+                for item in training_candidates:
+                    record, bars, index = item
+                    by_label[target_label(actual_return(bars, index, args.horizon), "direction3")].append(item)
+                counts = sorted(len(items) for items in by_label.values() if items)
+                cap = round(statistics.median(counts) * 2) if counts else 0
+                training_candidates = sorted(
+                    (item for items in by_label.values() for item in items[-cap:]),
+                    key=lambda item: (item[1][item[2]]["timestamp"], item[0]["relative_path"]),
                 )
-                label = target_label(actual_return(bars, index, args.horizon), "direction3")
-                label_counts[label] += 1
-                if not client.consolidate(streams, f"future {label}"):
-                    failures += 1
+                for record, bars, index in training_candidates:
+                    streams = feature_streams(
+                        bars, index, symbol=record["symbol"], chain=record["chain"],
+                        horizon=args.horizon, news=news, reference_bars=reference_bars,
+                        active_pools=active_pools,
+                    )
+                    label = target_label(actual_return(bars, index, args.horizon), "direction3")
+                    label_counts[label] += 1
+                    if not client.consolidate(streams, f"future {label}"):
+                        failures += 1
 
-            settlement = None
-            if args.settle_before_eval:
+            settlement = {"reused_neuron_addressable_runtime": True} if args.evaluation_only else None
+            if args.settle_before_eval and not args.evaluation_only:
                 checkpoint = client.post("/brain/checkpoint", {})
                 if checkpoint.get("ok") is not True:
                     raise RuntimeError(f"pre-settlement checkpoint failed: {checkpoint}")
@@ -375,7 +381,8 @@ def main() -> int:
                     "active_pools": sorted(active_pools), "cost_bps": args.cost_bps,
                 },
                 "training": {"episodes": len(training_candidates), "failures": failures,
-                             "label_counts": dict(label_counts), "settlement": settlement},
+                             "label_counts": dict(label_counts), "settlement": settlement,
+                             "evaluation_only": args.evaluation_only},
                 "evaluation": evaluation,
             }
             args.out.parent.mkdir(parents=True, exist_ok=True)
