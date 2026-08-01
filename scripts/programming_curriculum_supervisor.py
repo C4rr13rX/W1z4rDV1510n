@@ -753,6 +753,66 @@ def start_runtime_node(runtime: Path, executable: Path, endpoint: str,
     raise RuntimeError(f"recovered brain server did not become ready within {timeout}s")
 
 
+def recycle_settled_runtime_node(args: argparse.Namespace, runtime: Path,
+                                 phase: Phase, trained_rows: int,
+                                 status_path: Path) -> dict:
+    """Release allocator-retained RAM after neuron-wise durable settlement.
+
+    Serializing every neuron correctly reduces logical residency to zero, but
+    a long-lived allocator is allowed to retain the released pages in its
+    process arena.  Waiting on the host-memory floor can therefore deadlock:
+    the process responsible for the pressure is already idle and will never
+    return more pages without exiting.  Reopen the exact checkpoint and prove
+    its stable topology before another corpus worker may start.
+    """
+    before = endpoint_json(args.endpoint, "/brain/stats", timeout=120.0)
+    if int(before.get("resident_terminals", -1)) != 0:
+        raise RuntimeError(
+            "refusing memory recycle before every neuron is serialized: "
+            f"resident_terminals={before.get('resident_terminals')}"
+        )
+    available_before = int(psutil.virtual_memory().available)
+    old_pid = stop_runtime_node(runtime, args.endpoint)
+    replacement = start_runtime_node(runtime, args.node_bin, args.endpoint)
+    after = endpoint_json(args.endpoint, "/brain/stats", timeout=120.0)
+    fields = (
+        "tick", "pool_count", "total_neurons", "total_concepts",
+        "total_binding", "total_terminals",
+    )
+    mismatches = {
+        field: {"before": before.get(field), "after": after.get(field)}
+        for field in fields if before.get(field) != after.get(field)
+    }
+    if int(after.get("resident_terminals", -1)) != 0:
+        mismatches["resident_terminals"] = {
+            "before": before.get("resident_terminals"),
+            "after": after.get("resident_terminals"),
+        }
+    if mismatches:
+        stop_runtime_node(runtime, args.endpoint)
+        raise RuntimeError(
+            f"settled brain topology changed across memory recycle: {mismatches}"
+        )
+    report = {
+        "kind": "settled_node_memory_recycle",
+        "passed": True,
+        "phase": phase.name,
+        "trained_rows": trained_rows,
+        "old_pid": old_pid,
+        "replacement_pid": replacement.pid,
+        "available_bytes_before": available_before,
+        "available_bytes_after": int(psutil.virtual_memory().available),
+        "topology": after,
+        "updated_unix": time.time(),
+    }
+    append_health_event(runtime, report)
+    publish(status_path, {
+        "state": "resource_node_recycled",
+        **{key: value for key, value in report.items() if key != "kind"},
+    })
+    return report
+
+
 def guarded_block_target(runtime: Path, phase: Phase, current_row: int,
                          gate_rows: int) -> int:
     """Keep one immutable retention boundary across worker/supervisor restarts."""
@@ -3104,6 +3164,24 @@ def main() -> int:
                 disk_floor_bytes = int(
                     args.min_free_disk_gb * 1024 * 1024 * 1024
                 )
+                if (
+                    floor_bytes > 0
+                    and int(psutil.virtual_memory().available) < floor_bytes
+                ):
+                    try:
+                        recycle_settled_runtime_node(
+                            args, runtime, phase, durable_after, status_path
+                        )
+                    except (RuntimeError, OSError, psutil.Error) as exc:
+                        publish(status_path, {
+                            "state": "resource_node_recycle_failed",
+                            "phase": phase.name,
+                            "ram_next_row": ram_after,
+                            "durable_next_row": durable_after,
+                            "error": str(exc),
+                            "updated_unix": time.time(),
+                        })
+                        return 1
                 while (
                     (
                         floor_bytes > 0

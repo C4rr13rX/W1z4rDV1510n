@@ -44,6 +44,7 @@ from scripts.programming_curriculum_supervisor import (
     latest_passing_canary_row,
     disk_floor_breached,
     memory_floor_breached,
+    recycle_settled_runtime_node,
     mark_phase_forward_harvested,
     next_suspect_start,
     phase_offsets,
@@ -168,6 +169,88 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             "not attach_recovered and not attached_resource_settled",
             source,
         )
+
+    def test_settled_node_recycle_requires_zero_residency_and_stable_topology(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            status = runtime / "status.json"
+            phase = Phase("corpus", "script", runtime / "corpus.jsonl", 10)
+            args = SimpleNamespace(
+                endpoint="http://127.0.0.1:18095",
+                node_bin=runtime / "brain-server",
+            )
+            topology = {
+                "tick": 42,
+                "pool_count": 3,
+                "total_neurons": 100,
+                "total_concepts": 50,
+                "total_binding": 40,
+                "total_terminals": 500,
+                "resident_terminals": 0,
+            }
+            replacement = SimpleNamespace(pid=222)
+            memory = [
+                SimpleNamespace(available=4 * 1024**3),
+                SimpleNamespace(available=12 * 1024**3),
+            ]
+            with (
+                patch(
+                    "scripts.programming_curriculum_supervisor.endpoint_json",
+                    side_effect=[dict(topology), dict(topology)],
+                ),
+                patch(
+                    "scripts.programming_curriculum_supervisor.stop_runtime_node",
+                    return_value=111,
+                ) as stop,
+                patch(
+                    "scripts.programming_curriculum_supervisor.start_runtime_node",
+                    return_value=replacement,
+                ) as start,
+                patch(
+                    "scripts.programming_curriculum_supervisor.psutil.virtual_memory",
+                    side_effect=memory,
+                ),
+                patch(
+                    "scripts.programming_curriculum_supervisor.append_health_event"
+                ) as health,
+            ):
+                report = recycle_settled_runtime_node(
+                    args, runtime, phase, 8, status
+                )
+
+            self.assertEqual(report["old_pid"], 111)
+            self.assertEqual(report["replacement_pid"], 222)
+            self.assertEqual(report["available_bytes_after"], 12 * 1024**3)
+            stop.assert_called_once_with(runtime, args.endpoint)
+            start.assert_called_once_with(runtime, args.node_bin, args.endpoint)
+            health.assert_called_once()
+            self.assertEqual(
+                json.loads(status.read_text(encoding="utf-8"))["state"],
+                "resource_node_recycled",
+            )
+
+    def test_settled_node_recycle_refuses_resident_neurons(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            phase = Phase("corpus", "script", runtime / "corpus.jsonl", 10)
+            args = SimpleNamespace(
+                endpoint="http://127.0.0.1:18095",
+                node_bin=runtime / "brain-server",
+            )
+            with (
+                patch(
+                    "scripts.programming_curriculum_supervisor.endpoint_json",
+                    return_value={"resident_terminals": 1},
+                ),
+                patch(
+                    "scripts.programming_curriculum_supervisor.stop_runtime_node"
+                ) as stop,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "every neuron"):
+                    recycle_settled_runtime_node(
+                        args, runtime, phase, 8, runtime / "status.json"
+                    )
+            stop.assert_not_called()
 
     def test_foundation_gate_allows_saturated_host_response_window(self) -> None:
         client = FoundationBrainClient(

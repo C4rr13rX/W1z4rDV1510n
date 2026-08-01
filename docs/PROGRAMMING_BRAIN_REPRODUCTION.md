@@ -27,10 +27,14 @@ The supervisor also keeps a `6 GiB` host-available-memory floor by default.
 When active training crosses that floor, it stops the corpus worker only after
 three consecutive observations at an exact WAL-durable row, performs the
 normal neuron-wise sleep and checkpoint without admitting the partial block,
-waits for host memory to recover above the floor, and resumes from that same
-row under the existing rollback guard. This treats memory pressure as a
-lifecycle yield, not as a learned failure or a reason to quarantine correct
-corpus data. Set
+then checks logical and physical release separately. If every terminal is
+serialized but the allocator still retains enough released pages to remain
+below the floor, it recycles the node, reopens the checkpoint, and requires an
+identical tick and stable topology before continuing. It waits only when
+host-wide memory remains low after that verified recycle, then resumes from
+the same row under the existing rollback guard. This treats memory pressure
+as a lifecycle yield, not as a learned failure or a reason to quarantine
+correct corpus data. Set
 `--min-free-memory-gb 0` only when an external resource supervisor provides an
 equivalent safeguard.
 
