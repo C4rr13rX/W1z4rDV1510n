@@ -240,15 +240,19 @@ def run_fold(fold: int, cutoff: float, genome: Genome, dataset: dict[str, Any], 
                 for _ in range(genome.presentations):
                     if not client.consolidate(streams(row, genome, args.horizon), outcome):
                         failures += 1
-            checkpoint = client.post("/brain/checkpoint", {})
-            if checkpoint.get("ok") is False:
-                raise RuntimeError(f"pre-migration checkpoint failed: {checkpoint}")
-            # Fresh brain directories start in the compatibility layout.  The
-            # all-neuron rest transition is available only after conversion to
-            # the individually addressable `.wbrain` package.
-            stop_brain_process(process)
-            migration_mode = "already_neuron_addressable"
-            if not (fold_root / "brain.wbrain").is_file():
+            # Current nodes create a neuron-addressable container before their
+            # first observation, so they can settle in-place without writing a
+            # second monolithic copy.  Only old binaries/checkpoints need the
+            # compatibility checkpoint and one-time migration.
+            migration_mode = "native_neuron_addressable"
+            checkpoint = {"skipped": "native .wbrain persists at idle boundary"}
+            if (fold_root / "brain.wbrain").is_file():
+                settlement = settle_brain(client)
+            else:
+                checkpoint = client.post("/brain/checkpoint", {})
+                if checkpoint.get("ok") is False:
+                    raise RuntimeError(f"pre-migration checkpoint failed: {checkpoint}")
+                stop_brain_process(process)
                 migration = subprocess.run(
                     [str(args.migration_binary.resolve()), str(fold_root.resolve())],
                     cwd=ROOT, env=environment, stdout=stdout, stderr=stderr,
@@ -259,13 +263,13 @@ def run_fold(fold: int, cutoff: float, genome: Genome, dataset: dict[str, Any], 
                         f"brain migration failed with exit {migration.returncode}"
                     )
                 migration_mode = "legacy_to_neuron_addressable"
-            process = subprocess.Popen(
-                [str(args.binary.resolve())], cwd=ROOT, env=environment,
-                stdout=stdout, stderr=stderr, creationflags=creationflags,
-            )
-            wait_health(endpoint, process)
-            client = BrainClient(endpoint, timeout=90)
-            settlement = settle_brain(client)
+                process = subprocess.Popen(
+                    [str(args.binary.resolve())], cwd=ROOT, env=environment,
+                    stdout=stdout, stderr=stderr, creationflags=creationflags,
+                )
+                wait_health(endpoint, process)
+                client = BrainClient(endpoint, timeout=90)
+                settlement = settle_brain(client)
             settlement["pre_migration_checkpoint"] = checkpoint
             settlement["storage_migration"] = migration_mode
             calibration_predictions = predict_rows(client, calibration, genome, args.horizon)

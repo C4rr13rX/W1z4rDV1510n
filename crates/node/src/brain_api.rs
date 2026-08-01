@@ -296,6 +296,12 @@ fn restore_encodings(
 pub fn load_or_build_brain(data_dir: &Path) -> Result<Brain> {
     let checkpoint = data_dir.join("brain.bin");
     let wbrain = data_dir.join("brain.wbrain");
+    // A genuinely new brain should be neuron-addressable from its first
+    // observation.  Starting it in the legacy monolithic layout forces an
+    // expensive full hydration and conversion before the normal idle/sleep
+    // transition can serialize neurons independently.  Existing checkpoints
+    // retain their explicit, fail-safe migration path below.
+    let is_fresh = !wbrain.exists() && !checkpoint.exists();
     let identity = configured_identity(data_dir)?;
     let mut brain = if wbrain.exists() {
         match Brain::restore_wbrain(&wbrain, restore_encodings(identity.as_ref())?) {
@@ -346,6 +352,9 @@ pub fn load_or_build_brain(data_dir: &Path) -> Result<Brain> {
             None => build_default_brain()?,
         }
     };
+    if is_fresh {
+        attach_fresh_wbrain(&mut brain, &wbrain)?;
+    }
     // Recover mutations accepted after brain.bin's last SnapshotMarker
     // before attaching the live writer. Applying through the initial
     // NoopStore avoids echoing recovered events back into the WAL.
@@ -424,6 +433,16 @@ pub fn load_or_build_brain(data_dir: &Path) -> Result<Brain> {
         }
     }
     Ok(brain)
+}
+
+fn attach_fresh_wbrain(brain: &mut Brain, path: &Path) -> Result<usize> {
+    brain.attach_wbrain(path).map_err(|error| {
+        anyhow::anyhow!(
+            "attach fresh neuron-addressable brain container {}: {}",
+            path.display(),
+            error
+        )
+    })
 }
 
 /// Convert the existing checkpoint without deleting or replacing it. This is
@@ -4731,6 +4750,34 @@ fn brain_phase_routes_impl(state: BrainApiState, include_core_routes: bool) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fresh_brain_uses_neuron_addressable_storage_from_first_observation() {
+        let unique = format!(
+            "w1z4rd_fresh_wbrain_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let data_dir = std::env::temp_dir().join(unique);
+        let path = data_dir.join("brain.wbrain");
+        let mut brain = build_default_brain().unwrap();
+
+        let attached = attach_fresh_wbrain(&mut brain, &path).unwrap();
+        assert!(attached > 0);
+        assert!(brain.uses_wbrain_storage());
+        brain.observe(POOL_TEXT, b"fresh neuron-addressable storage");
+        assert!(brain.serialize_all_neurons_for_idle().unwrap() > 0);
+        assert!(path.is_file());
+
+        let (restored, missing) =
+            Brain::restore_wbrain(&path, restore_encodings(None).unwrap()).unwrap();
+        assert!(missing.is_empty());
+        assert!(restored.uses_wbrain_storage());
+        std::fs::remove_dir_all(data_dir).ok();
+    }
 
     #[test]
     fn completed_raw_migration_promotes_stale_raw_stage_without_reconversion() {

@@ -6,7 +6,7 @@ from scripts.market_evolution_service import (
     Genome, add_derived_features, attach_causal_normalization,
     attach_news_features, crossover, dataset_signature, evaluation_scope,
     load_dataset_cached, mutate, passes_floor, program_name, program_value,
-    recover_pending_gate, seed_genomes,
+    recover_pending_gate, seed_genomes, select_diverse_elites,
 )
 
 
@@ -151,3 +151,14 @@ def test_dataset_cache_rejects_invalid_payload_and_round_trips(tmp_path, monkeyp
     second = load_dataset_cached(manifest, supplemental, 12, 12, "seed", None, cache)
     assert first == expected
     assert second == expected
+
+
+def test_diverse_elites_preserve_learner_species_without_overriding_fitness():
+    population = seed_genomes(5, random.Random(9))
+    for index, genome in enumerate(population):
+        genome.fitness = 100.0 - index
+    elites = select_diverse_elites(population, 4)
+    assert elites[0].genome_id == population[0].genome_id
+    assert {genome.learner_kind for genome in elites} == {
+        "classifier", "regressor", "extra_trees",
+    }

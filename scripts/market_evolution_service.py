@@ -849,6 +849,39 @@ def genome_from_dict(payload: dict[str, Any]) -> Genome:
     return Genome(**compatible)
 
 
+def select_diverse_elites(population: Sequence[Genome], count: int) -> list[Genome]:
+    """Retain fitness leaders plus viable behavioral species.
+
+    Species preservation keeps evolution capable of revisiting learner and
+    expression behaviors after a regime change without allowing novelty to
+    satisfy any admission metric.
+    """
+    ranked = sorted(population, key=lambda genome: genome.fitness or -math.inf,
+                    reverse=True)
+    selected: list[Genome] = []
+    seen: set[str] = set()
+
+    def retain(genome: Genome) -> None:
+        if genome.genome_id not in seen and len(selected) < count:
+            seen.add(genome.genome_id)
+            selected.append(genome_from_dict(asdict(genome)))
+
+    for genome in ranked[:max(2, count // 2)]:
+        retain(genome)
+    for learner in ("classifier", "extra_trees", "regressor"):
+        candidate = next((genome for genome in ranked if genome.learner_kind == learner), None)
+        if candidate is not None:
+            retain(candidate)
+    for has_programs in (True, False):
+        candidate = next((genome for genome in ranked
+                          if bool(genome.feature_programs) is has_programs), None)
+        if candidate is not None:
+            retain(candidate)
+    for genome in ranked:
+        retain(genome)
+    return selected
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path,
@@ -1028,8 +1061,8 @@ def main() -> int:
                                  genome_id=pending_gate_genome, report=str(gate_out))
                     pending_gate_genome = None
             generation += 1
-            elite_count = max(2, round(args.population * .25))
-            elites = [genome_from_dict(asdict(genome)) for genome in population[:elite_count]]
+            elite_count = max(4, round(args.population * .40))
+            elites = select_diverse_elites(population, elite_count)
             next_population = elites[:]
             known_ids = {genome.genome_id for genome in next_population}
             attempts = 0
