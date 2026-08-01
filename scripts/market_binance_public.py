@@ -30,7 +30,9 @@ DEFAULT_SYMBOLS = (
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT",
     "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT", "LTCUSDT", "BCHUSDT",
     "TRXUSDT", "AAVEUSDT", "UNIUSDT", "NEARUSDT", "ARBUSDT", "OPUSDT",
-    "PENDLEUSDT", "SUIUSDT", "PEPEUSDT", "SHIBUSDT",
+    "PENDLEUSDT", "SUIUSDT", "PEPEUSDT", "SHIBUSDT", "CAKEUSDT",
+    "COMPUSDT", "CRVUSDT", "ETHFIUSDT", "LDOUSDT", "MKRUSDT", "PAXGUSDT",
+    "SANDUSDT", "SNXUSDT", "STGUSDT", "SUSHIUSDT", "WLDUSDT", "ZROUSDT",
 )
 KIND_PATHS = {
     "spot": "spot/monthly/klines/{symbol}/1h/{symbol}-1h-{month}.zip",
@@ -205,7 +207,8 @@ def build_symbol(root: Path, symbol: str) -> dict[str, object]:
     payload = {
         "source": "https://data.binance.vision/",
         "symbol": symbol,
-        "causality": "funding is forward-filled only after calc_time; all klines use open_time",
+        "causality": ("funding is forward-filled only after calc_time; kline open_time identifies "
+                      "the completed hourly bar used at its close"),
         "rows": rows,
     }
     temporary = output.with_suffix(".json.tmp")
@@ -253,7 +256,13 @@ def main() -> int:
         "symbols": symbols, "kinds": kinds, "downloads": counts, "series": built,
     }
     args.root.mkdir(parents=True, exist_ok=True)
-    (args.root / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    identity = hashlib.sha256(
+        (",".join(symbols) + "|" + args.start + "|" + args.end).encode()
+    ).hexdigest()[:12]
+    manifests = args.root / "manifests"
+    manifests.mkdir(parents=True, exist_ok=True)
+    (manifests / f"{args.start}-{args.end}-{identity}.json").write_text(
+        json.dumps(manifest, indent=2), encoding="utf-8")
     print(json.dumps(manifest, indent=2))
     return 0
 

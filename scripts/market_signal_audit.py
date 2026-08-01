@@ -48,6 +48,13 @@ FEATURE_GROUPS = {
         "relative_r1", "relative_r6", "relative_r12", "relative_r24",
         "rolling_beta", "residual_r12",
     ),
+    "derivatives": (
+        "cex_dex_basis", "futures_spot_basis", "basis_delta6", "basis_delta24",
+        "premium_close", "premium_delta6", "funding_rate", "funding_delta24",
+        "spot_taker_imbalance", "futures_taker_imbalance", "flow_divergence",
+        "spot_quote_ratio24", "futures_quote_ratio24", "spot_trade_ratio24",
+        "futures_trade_ratio24", "futures_spot_quote_ratio",
+    ),
 }
 
 
@@ -79,11 +86,77 @@ def _returns(bars: Sequence[dict[str, float]], index: int) -> dict[int, float]:
             for window in (1, 2, 3, 6, 12, 24, 72, 168)}
 
 
+def supplemental_symbol(base_asset: str) -> str:
+    return {"WBTC": "BTCUSDT", "WETH": "ETHUSDT"}.get(base_asset, f"{base_asset}USDT")
+
+
+def derive_supplemental_features(rows: Sequence[dict[str, Any]]) -> dict[int, dict[str, float]]:
+    """Build rolling features from information published at or before each row."""
+    result: dict[int, dict[str, float]] = {}
+    basis = [float(row.get("futures_spot_basis") or 0.0) for row in rows]
+    premium = [float(row.get("premium_close") or 0.0) for row in rows]
+    funding = [float(row.get("funding_rate") or 0.0) for row in rows]
+    for index, row in enumerate(rows):
+        spot_volume = float(row.get("spot_base_volume") or 0.0)
+        futures_volume = float(row.get("futures_base_volume") or 0.0)
+        spot_buy = float(row.get("spot_taker_buy_base") or 0.0)
+        futures_buy = float(row.get("futures_taker_buy_base") or 0.0)
+        spot_quote = float(row.get("spot_quote_volume") or 0.0)
+        futures_quote = float(row.get("futures_quote_volume") or 0.0)
+        spot_trades = float(row.get("spot_trade_count") or 0.0)
+        futures_trades = float(row.get("futures_trade_count") or 0.0)
+        start = max(0, index - 23)
+
+        def ratio(key: str, current: float) -> float:
+            history = [float(value.get(key) or 0.0) for value in rows[start:index + 1]]
+            return current / max(statistics.median(history), 1e-12)
+
+        spot_imbalance = 2.0 * spot_buy / spot_volume - 1.0 if spot_volume else 0.0
+        futures_imbalance = 2.0 * futures_buy / futures_volume - 1.0 if futures_volume else 0.0
+        result[int(row["timestamp"])] = {
+            "binance_spot_close": float(row.get("spot_close") or 0.0),
+            "futures_spot_basis": basis[index],
+            "basis_delta6": basis[index] - basis[max(0, index - 6)],
+            "basis_delta24": basis[index] - basis[max(0, index - 24)],
+            "premium_close": premium[index],
+            "premium_delta6": premium[index] - premium[max(0, index - 6)],
+            "funding_rate": funding[index],
+            "funding_delta24": funding[index] - funding[max(0, index - 24)],
+            "spot_taker_imbalance": spot_imbalance,
+            "futures_taker_imbalance": futures_imbalance,
+            "flow_divergence": futures_imbalance - spot_imbalance,
+            "spot_quote_ratio24": ratio("spot_quote_volume", spot_quote),
+            "futures_quote_ratio24": ratio("futures_quote_volume", futures_quote),
+            "spot_trade_ratio24": ratio("spot_trade_count", spot_trades),
+            "futures_trade_ratio24": ratio("futures_trade_count", futures_trades),
+            "futures_spot_quote_ratio": futures_quote / max(spot_quote, 1e-12),
+        }
+    return result
+
+
+def load_supplemental(root: Path, records: Sequence[dict[str, Any]]) -> dict[str, dict[int, dict[str, float]]]:
+    loaded = {}
+    cache: dict[Path, dict[int, dict[str, float]]] = {}
+    for record in records:
+        asset = str(record["base_asset"])
+        path = root / "features" / f"{supplemental_symbol(asset)}.json"
+        if not path.is_file():
+            continue
+        if path not in cache:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            cache[path] = derive_supplemental_features(payload.get("rows", []))
+        features = cache[path]
+        if features:
+            loaded[asset] = features
+    return loaded
+
+
 def continuous_features(
     bars: Sequence[dict[str, float]],
     index: int,
     reference: Sequence[dict[str, float]],
     reference_times: Sequence[float],
+    supplemental: dict[int, dict[str, float]] | None = None,
 ) -> dict[str, float]:
     """Produce causal features using rows at or before the decision timestamp."""
     bar = bars[index]
@@ -101,6 +174,8 @@ def continuous_features(
     rolling_low = min(row["low"] for row in rolling)
     total_flow = bar["buy_volume"] + bar["sell_volume"]
     dt = datetime.fromtimestamp(bar["timestamp"], timezone.utc)
+    external = (supplemental or {}).get(int(bar["timestamp"]), {})
+    binance_spot = external.get("binance_spot_close", 0.0)
 
     ref_index = bisect.bisect_right(reference_times, bar["timestamp"]) - 1
     reference_returns = {window: 0.0 for window in (1, 6, 12, 24)}
@@ -122,7 +197,7 @@ def continuous_features(
     beta = (float(np.cov(aligned_asset, aligned_reference, ddof=0)[0, 1]) / ref_variance
             if ref_variance > 1e-12 else 0.0)
 
-    return {
+    features = {
         "body": (close - opened) / denom,
         "range": max(0.0, high - low) / denom,
         "position": (close - low) / (high - low) if high > low else 0.5,
@@ -153,11 +228,16 @@ def continuous_features(
         "rolling_beta": beta,
         "residual_r12": values[12] - beta * reference_returns[12],
     }
+    features.update({name: float(external.get(name, 0.0))
+                     for name in FEATURE_GROUPS["derivatives"] if name != "cex_dex_basis"})
+    features["cex_dex_basis"] = safe_return(close, binance_spot) if binance_spot else 0.0
+    return features
 
 
 def build_rows(record: dict[str, Any], bars: Sequence[dict[str, float]], *,
                reference: Sequence[dict[str, float]], reference_times: Sequence[float],
-               horizon: int, stride: int) -> list[dict[str, Any]]:
+               horizon: int, stride: int,
+               supplemental: dict[int, dict[str, float]] | None = None) -> list[dict[str, Any]]:
     rows = []
     for index in range(168, len(bars) - horizon, stride):
         realized = safe_return(bars[index + horizon]["close"], bars[index]["close"])
@@ -168,7 +248,7 @@ def build_rows(record: dict[str, Any], bars: Sequence[dict[str, float]], *,
             "timestamp": bars[index]["timestamp"],
             "return": realized,
             "target": 1 if realized > 0 else -1,
-            "features": continuous_features(bars, index, reference, reference_times),
+            "features": continuous_features(bars, index, reference, reference_times, supplemental),
         })
     return rows
 
@@ -207,6 +287,8 @@ def main() -> int:
     parser.add_argument("--holdout-fraction", type=float, default=0.25)
     parser.add_argument("--cost-bps", type=float, default=20.0)
     parser.add_argument("--seed", default="market-signal-audit-v1")
+    parser.add_argument("--supplemental-root", type=Path,
+                        default=Path(r"D:\Projects\CoolCryptoUtilities\data\binance_public"))
     args = parser.parse_args()
 
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
@@ -217,6 +299,7 @@ def main() -> int:
     )
     reference = load_bars(Path(reference_record["path"]))
     reference_times = [row["timestamp"] for row in reference]
+    supplemental = load_supplemental(args.supplemental_root, records)
     all_rows: list[dict[str, Any]] = []
     data_quality = Counter()
     for position, record in enumerate(records, 1):
@@ -226,7 +309,8 @@ def main() -> int:
             bool(row["buy_volume"] + row["sell_volume"]) for row in bars
         )
         rows = build_rows(record, bars, reference=reference, reference_times=reference_times,
-                          horizon=args.horizon, stride=args.stride)
+                          horizon=args.horizon, stride=args.stride,
+                          supplemental=supplemental.get(str(record["base_asset"])))
         all_rows.extend(rows)
         print(f"[{position}/{len(records)}] {record['base_asset']}: {len(rows)} directional moments", flush=True)
 
@@ -241,31 +325,51 @@ def main() -> int:
         "price": FEATURE_GROUPS["price"],
         "price_flow": FEATURE_GROUPS["price"] + FEATURE_GROUPS["flow"],
         "price_flow_cross": FEATURE_GROUPS["price"] + FEATURE_GROUPS["flow"] + FEATURE_GROUPS["cross"],
+        "price_flow_derivatives": (FEATURE_GROUPS["price"] + FEATURE_GROUPS["flow"]
+                                   + FEATURE_GROUPS["derivatives"]),
+        "price_flow_cross_derivatives": (FEATURE_GROUPS["price"] + FEATURE_GROUPS["flow"]
+                                         + FEATURE_GROUPS["cross"]
+                                         + FEATURE_GROUPS["derivatives"]),
     }
     report: dict[str, Any] = {
         "purpose": "diagnostic_only_not_a_candidate_trading_model",
-        "configuration": vars(args) | {"manifest": str(args.manifest), "out": str(args.out)},
+        "configuration": vars(args) | {
+            "manifest": str(args.manifest), "out": str(args.out),
+            "supplemental_root": str(args.supplemental_root),
+        },
         "reference": {key: reference_record[key] for key in ("base_asset", "symbol", "chain", "path")},
         "assets": {"training": sorted(training_assets), "holdout": sorted(holdout_assets)},
         "data_quality": dict(data_quality),
+        "supplemental_assets": sorted(supplemental),
         "feature_sets": {},
     }
     for set_name, names in feature_sets.items():
+        eligible_assets = (set(supplemental) if "derivatives" in set_name
+                           else {row["asset"] for row in all_rows})
         folds = []
         for fold_index, cutoff in enumerate(cutoffs):
             train = [row for row in all_rows
                      if row["asset"] in training_assets
+                     and row["asset"] in eligible_assets
                      and row["timestamp"] < cutoff - args.horizon * 3600]
             known = [row for row in all_rows
-                     if row["asset"] in training_assets and cutoff <= row["timestamp"] < cutoff + test_seconds]
+                     if row["asset"] in training_assets and row["asset"] in eligible_assets
+                     and cutoff <= row["timestamp"] < cutoff + test_seconds]
             unseen = [row for row in all_rows
-                      if row["asset"] in holdout_assets and cutoff <= row["timestamp"] < cutoff + test_seconds]
+                      if row["asset"] in holdout_assets and row["asset"] in eligible_assets
+                      and cutoff <= row["timestamp"] < cutoff + test_seconds]
+            if not train or not known or not unseen:
+                folds.append({"fold": fold_index, "skipped": "insufficient eligible rows"})
+                continue
             x_train = np.asarray([[row["features"][name] for name in names] for row in train], dtype=np.float32)
             y_train = np.asarray([row["target"] for row in train], dtype=np.int8)
             model = HistGradientBoostingClassifier(
                 learning_rate=0.06, max_iter=180, max_leaf_nodes=24,
                 l2_regularization=1.0, random_state=17,
             ).fit(x_train, y_train)
+            train_probability = model.predict_proba(x_train)[:, list(model.classes_).index(1)]
+            train_confidence = np.maximum(train_probability, 1.0 - train_probability)
+            confidence_threshold = float(np.quantile(train_confidence, 0.30))
             sections = {}
             for section_name, selected in (("known_asset_future", known), ("unseen_asset_future", unseen)):
                 x = np.asarray([[row["features"][name] for name in names] for row in selected], dtype=np.float32)
@@ -277,6 +381,18 @@ def main() -> int:
                 momentum = np.asarray([1 if row["features"]["r12"] > 0 else -1 for row in selected], dtype=np.int8)
                 section_metrics["momentum_accuracy"] = float((momentum == actual).mean())
                 section_metrics["inverse_momentum_accuracy"] = float((-momentum == actual).mean())
+                confidence = np.maximum(probability, 1.0 - probability)
+                acted = confidence >= confidence_threshold
+                if acted.any():
+                    selective = metrics(actual[acted], predicted[acted], probability[acted],
+                                        realized[acted], args.cost_bps)
+                    selective["coverage"] = float(acted.mean())
+                    selective["acted_observations"] = int(acted.sum())
+                    selective["momentum_accuracy"] = float((momentum[acted] == actual[acted]).mean())
+                    selective["inverse_momentum_accuracy"] = float((-momentum[acted] == actual[acted]).mean())
+                else:
+                    selective = {"coverage": 0.0, "acted_observations": 0}
+                section_metrics["selective_70"] = selective
                 sections[section_name] = section_metrics
             sample = known[:min(2500, len(known))]
             if sample:
@@ -291,6 +407,7 @@ def main() -> int:
                 "fold": fold_index,
                 "cutoff": datetime.fromtimestamp(cutoff, timezone.utc).isoformat(),
                 "training_rows": len(train),
+                "training_confidence_threshold": confidence_threshold,
                 "sections": sections,
                 "top_permutation_features": [{"feature": name, "importance": float(value)} for name, value in top],
             })
