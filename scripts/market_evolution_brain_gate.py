@@ -217,6 +217,10 @@ def predict_rows(client: BrainClient, rows: Sequence[dict[str, Any]], genome: Ge
 
 
 def add_baselines(metrics: dict[str, Any], rows: Sequence[dict[str, Any]]) -> None:
+    # Normalize the shared evaluator's descriptive key to the perpetual GA's
+    # admission-contract key. Without this alias, an otherwise valid neural
+    # fold can never satisfy the minimum-action gate.
+    metrics["acted_observations"] = int(metrics.get("acted_directional_n", 0))
     actual = [direction(row["actual"]) for row in rows]
     momentum = [row["momentum_direction"] for row in rows]
     direct = statistics.fmean(a == m for a, m in zip(actual, momentum)) if rows else 0.0

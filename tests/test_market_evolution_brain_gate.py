@@ -1,4 +1,5 @@
 from scripts.market_evolution_brain_gate import (
+    add_baselines,
     available_port,
     feature_family,
     feature_frame,
@@ -101,3 +102,14 @@ def test_only_passing_or_explicitly_retained_gate_keeps_generated_brain():
     assert retain_attempt(True, False)
     assert retain_attempt(False, True)
     assert not retain_attempt(False, False)
+
+
+def test_shared_metrics_are_normalized_to_admission_action_count():
+    metrics = {"acted_directional_n": 7, "directional_accuracy": .5}
+    rows = [
+        {"actual": "updraft", "momentum_direction": 1},
+        {"actual": "downshift", "momentum_direction": -1},
+    ]
+    add_baselines(metrics, rows)
+    assert metrics["acted_observations"] == 7
+    assert metrics["best_baseline_accuracy"] == 1.0
