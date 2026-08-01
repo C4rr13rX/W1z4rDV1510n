@@ -10,7 +10,8 @@ import scripts.market_evolution_service as evolution
 from scripts.market_evolution_service import (
     Genome, add_derived_features, attach_causal_normalization, brain_feedback_score,
     attach_news_features, crossover, dataset_signature, evaluation_scope,
-    evaluation_signature, decompose_returns, introduce_missing_learner_species,
+    evaluation_signature, decompose_returns, introduce_calibration_variants,
+    introduce_missing_learner_species,
     load_dataset_cached, mutate, passes_floor,
     passes_prescreen, program_name, program_value, recover_pending_gate,
     regression_probability_scale, seed_genomes, select_diverse_elites,
@@ -23,6 +24,7 @@ def test_genome_identity_is_deterministic_and_mutation_stays_bounded():
     assert clone.genome_id == parent.genome_id
     child = mutate(parent, 2, random.Random(3))
     assert 0 <= child.confidence_quantile <= .30
+    assert 1 <= child.calibration_safety <= 12
     assert 2 <= child.binding_threshold <= 9
     assert len(child.features) >= 8
 
@@ -256,3 +258,12 @@ def test_neural_feedback_is_bounded_and_uses_weakest_section():
     }}]}
     assert -25 <= brain_feedback_score(report) < 0
     assert brain_feedback_score(None) == -25
+
+
+def test_new_calibration_gene_is_seeded_at_wide_monotonic_scales():
+    population = seed_genomes(5, random.Random(4))
+    for genome in population:
+        genome.calibration_safety = 1.0
+        genome.finalize()
+    updated = introduce_calibration_variants(population, 11)
+    assert {genome.calibration_safety for genome in updated} >= {1.0, 2.0, 4.0, 8.0}

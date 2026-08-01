@@ -128,3 +128,8 @@ shared across horizons, preventing the temporal curriculum from multiplying
 neural growth. Confirmed ghost outcomes can be encoded as after-cost success
 or failure in the experience pool and are evaluated by the same weakest-regime
 contract.
+
+Schema 7 evolves a bounded conservative multiplier on regression temperature.
+It cannot change a score's sign or confidence rank, so it cannot manufacture
+accuracy or choose easier observations; it only prevents a directionally
+useful lineage from expressing confidence unsupported by protected future data.

@@ -44,7 +44,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 FEATURE_SCHEMA = 4
-EVOLUTION_SCHEMA = 6
+EVOLUTION_SCHEMA = 7
 LEARNER_KINDS = (
     "classifier", "regressor", "extra_trees", "decomposed_regressor",
     "regime_regressor",
@@ -171,6 +171,7 @@ class Genome:
     regime_bins: int = 1
     training_horizons: list[int] = field(default_factory=lambda: [12])
     pool_thresholds: dict[str, int] = field(default_factory=dict)
+    calibration_safety: float = 1.0
     generation: int = 0
     parents: list[str] = field(default_factory=list)
     genome_id: str = ""
@@ -194,6 +195,7 @@ class Genome:
             for name, value in sorted(self.pool_thresholds.items())
             if name in EVOLVABLE_POOL_NAMES
         }
+        self.calibration_safety = max(1.0, min(12.0, float(self.calibration_safety)))
         if self.regime_bins > 1:
             self.features = sorted(set(self.features) | {self.regime_feature})
         self.feature_programs = sorted(
@@ -206,6 +208,7 @@ class Genome:
         payload["regime_bins"] = self.regime_bins
         payload["training_horizons"] = self.training_horizons
         payload["pool_thresholds"] = self.pool_thresholds
+        payload["calibration_safety"] = self.calibration_safety
         self.genome_id = hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()[:16]
@@ -759,6 +762,7 @@ def seed_genomes(population: int, rng: random.Random) -> list[Genome]:
                 list(AUXILIARY_HORIZONS), rng.randint(1, len(AUXILIARY_HORIZONS))
             )}),
             pool_thresholds={name: rng.randint(3, 8) for name in EVOLVABLE_POOL_NAMES},
+            calibration_safety=10 ** rng.uniform(0, math.log10(8)),
         ).finalize())
     return result
 
@@ -940,7 +944,7 @@ def evaluate_genome(genome: Genome, dataset: dict[str, Any], *, folds: int,
                 )
                 model.score_scale = regression_probability_scale(
                     calibration_scores, calibration_labels
-                )
+                ) * genome.calibration_safety
             cal_probability = model.probability(x_cal)
             cal_confidence = np.maximum(cal_probability, 1 - cal_probability)
             threshold = float(np.quantile(cal_confidence, genome.confidence_quantile))
@@ -1076,6 +1080,9 @@ def mutate(parent: Genome, generation: int, rng: random.Random) -> Genome:
                                         if ((horizon in parent.training_horizons)
                                             != (rng.random() < .12)))}),
         pool_thresholds=pool_thresholds,
+        calibration_safety=min(12.0, max(
+            1.0, parent.calibration_safety * math.exp(rng.gauss(0, .25))
+        )),
         generation=generation, parents=[parent.genome_id],
     )
     return child.finalize()
@@ -1119,6 +1126,7 @@ def crossover(left: Genome, right: Genome, generation: int, rng: random.Random) 
                          right.pool_thresholds.get(name, right.concept_threshold))
             for name in EVOLVABLE_POOL_NAMES
         },
+        calibration_safety=choose(left.calibration_safety, right.calibration_safety),
         generation=generation, parents=[left.genome_id, right.genome_id],
     ).finalize()
     return mutate(child, generation, rng) if rng.random() < .7 else child
@@ -1134,6 +1142,7 @@ def genome_from_dict(payload: dict[str, Any]) -> Genome:
     compatible.setdefault("regime_bins", 1)
     compatible.setdefault("training_horizons", [12])
     compatible.setdefault("pool_thresholds", {})
+    compatible.setdefault("calibration_safety", 1.0)
     return Genome(**compatible)
 
 
@@ -1156,6 +1165,7 @@ def introduce_missing_learner_species(population: list[Genome], generation: int,
             "pool_thresholds": {
                 name: rng.randint(3, 8) for name in EVOLVABLE_POOL_NAMES
             },
+            "calibration_safety": 10 ** rng.uniform(0, math.log10(8)),
             "generation": generation,
             "parents": [base.genome_id],
             "fitness": None,
@@ -1164,6 +1174,22 @@ def introduce_missing_learner_species(population: list[Genome], generation: int,
         })
         replacement = Genome(**payload).finalize()
         population[-(offset + 1)] = replacement
+    return population
+
+
+def introduce_calibration_variants(population: list[Genome], generation: int) -> list[Genome]:
+    """Seed a new monotonic calibration gene without waiting for genetic drift."""
+    if len(population) < 4 or len({round(g.calibration_safety, 3) for g in population}) > 1:
+        return population
+    base = population[0]
+    for offset, safety in enumerate((2.0, 4.0, 8.0), 1):
+        payload = asdict(base)
+        payload.update({
+            "calibration_safety": safety, "generation": generation,
+            "parents": [base.genome_id], "fitness": None, "result": None,
+            "genome_id": "",
+        })
+        population[-offset] = Genome(**payload).finalize()
     return population
 
 
@@ -1297,6 +1323,7 @@ def main() -> int:
             for genome in population:
                 genome.fitness = None
                 genome.result = None
+            population = introduce_calibration_variants(population, generation)
             population = introduce_missing_learner_species(population, generation, rng)
             champion = None
             append_event(events_path, "dataset_changed", previous=state.get("dataset_signature"),
