@@ -1,6 +1,7 @@
 from scripts.market_brain_experiment import (
     NewsItem,
     chronological_fold_indices,
+    evaluate_rows,
     feature_streams,
     return_label,
     target_label,
@@ -62,3 +63,31 @@ def test_direction_target_is_disjoint_and_preserves_flat_band():
     assert target_label(-0.01, "direction3") == "downshift"
     assert target_label(0.0, "direction3") == "sideways"
     assert target_label(0.01, "direction3") == "updraft"
+
+
+def test_evaluation_does_not_count_sideways_or_missing_as_directional_coverage():
+    rows = [
+        {"timestamp": 1, "actual": "updraft", "predicted": "updraft",
+         "return": .02, "confidence": .8, "latency_seconds": .01},
+        {"timestamp": 2, "actual": "downshift", "predicted": "sideways",
+         "return": -.02, "confidence": .8, "latency_seconds": .01},
+        {"timestamp": 3, "actual": "updraft", "predicted": None,
+         "return": .01, "confidence": 0, "latency_seconds": .01},
+    ]
+    metrics = evaluate_rows(rows, cost_bps=20)
+    assert metrics["prediction_coverage"] == 2 / 3
+    assert metrics["action_coverage"] == 1 / 3
+    assert metrics["coverage"] == 1 / 3
+    assert metrics["directional_accuracy"] == 1 / 3
+    assert metrics["acted_directional_accuracy"] == 1.0
+
+
+def test_drawdown_equal_weights_simultaneous_positions():
+    rows = [
+        {"timestamp": 1, "actual": "downshift", "predicted": "updraft",
+         "return": -.10, "confidence": .8, "latency_seconds": .01},
+        {"timestamp": 1, "actual": "downshift", "predicted": "updraft",
+         "return": -.20, "confidence": .8, "latency_seconds": .01},
+    ]
+    metrics = evaluate_rows(rows, cost_bps=0)
+    assert abs(metrics["max_portfolio_drawdown"] - .15) < 1e-12

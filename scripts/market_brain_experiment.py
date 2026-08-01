@@ -15,7 +15,7 @@ import math
 import statistics
 import time
 import urllib.request
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -358,27 +358,54 @@ def chronological_fold_indices(length: int, horizon: int, folds: int,
 
 
 def evaluate_rows(rows: Sequence[dict[str, Any]], cost_bps: float) -> dict[str, Any]:
+    """Evaluate an abstaining directional strategy without hiding abstentions.
+
+    ``coverage`` historically counted every parsed label, including
+    ``sideways``.  That allowed a model to report complete coverage while
+    taking no position.  The admission contract instead uses
+    ``action_coverage``: the fraction of truly directional opportunities for
+    which the model emitted an actionable up/down prediction.
+
+    Portfolio drawdown is calculated from the equal-weight mean of concurrent
+    positions.  Summing every correlated market at a timestamp implicitly
+    allocates the full bankroll to each one and makes the percentage gate
+    meaningless.
+    """
     covered = [row for row in rows if row["predicted"] is not None]
-    directional = [row for row in covered if direction(row["actual"]) and direction(row["predicted"])]
-    correct = sum(direction(row["actual"]) == direction(row["predicted"]) for row in directional)
+    actual_directional = [row for row in rows if direction(row["actual"])]
+    acted_directional = [row for row in actual_directional if direction(row["predicted"])]
+    acted = [row for row in rows if direction(row["predicted"])]
+    correct = sum(direction(row["actual"]) == direction(row["predicted"])
+                  for row in actual_directional)
     classes = (-1, 1)
     recalls = []
     for cls in classes:
-        actual_cls = [row for row in directional if direction(row["actual"]) == cls]
+        actual_cls = [row for row in actual_directional if direction(row["actual"]) == cls]
         recalls.append(sum(direction(row["predicted"]) == cls for row in actual_cls) / max(1, len(actual_cls)))
-    tp = sum(direction(r["actual"]) == 1 and direction(r["predicted"]) == 1 for r in directional)
-    tn = sum(direction(r["actual"]) == -1 and direction(r["predicted"]) == -1 for r in directional)
-    fp = sum(direction(r["actual"]) == -1 and direction(r["predicted"]) == 1 for r in directional)
-    fn = sum(direction(r["actual"]) == 1 and direction(r["predicted"]) == -1 for r in directional)
+    # An abstention on a directional observation is an admission-gate miss,
+    # rather than silently disappearing from MCC and accuracy denominators.
+    tp = sum(direction(r["actual"]) == 1 and direction(r["predicted"]) == 1
+             for r in actual_directional)
+    tn = sum(direction(r["actual"]) == -1 and direction(r["predicted"]) == -1
+             for r in actual_directional)
+    fp = sum(direction(r["actual"]) == -1 and direction(r["predicted"]) != -1
+             for r in actual_directional)
+    fn = sum(direction(r["actual"]) == 1 and direction(r["predicted"]) != 1
+             for r in actual_directional)
     denominator = math.sqrt(max(1, (tp + fp) * (tp + fn) * (tn + fp) * (tn + fn)))
     mcc = (tp * tn - fp * fn) / denominator
     cost = cost_bps / 10_000.0
-    pnl = [direction(row["predicted"]) * row["return"] - cost for row in directional]
+    pnl = [direction(row["predicted"]) * row["return"] - cost for row in acted]
     gains = sum(value for value in pnl if value > 0)
     losses = -sum(value for value in pnl if value < 0)
+    concurrent_pnl: dict[float | int, list[float]] = defaultdict(list)
+    for sequence, row in enumerate(acted):
+        key = row.get("timestamp", sequence)
+        concurrent_pnl[key].append(direction(row["predicted"]) * row["return"] - cost)
     equity = peak = 0.0
     max_drawdown = 0.0
-    for value in pnl:
+    for timestamp in sorted(concurrent_pnl):
+        value = statistics.fmean(concurrent_pnl[timestamp])
         equity += value
         peak = max(peak, equity)
         max_drawdown = max(max_drawdown, peak - equity)
@@ -395,14 +422,24 @@ def evaluate_rows(rows: Sequence[dict[str, Any]], cost_bps: float) -> dict[str, 
             ece += len(selected) / max(1, len(covered)) * abs(mean_confidence - accuracy)
     return {
         "observations": len(rows),
-        "coverage": len(covered) / max(1, len(rows)),
-        "directional_n": len(directional),
-        "directional_accuracy": correct / max(1, len(directional)),
+        "prediction_coverage": len(covered) / max(1, len(rows)),
+        "action_coverage": len(acted_directional) / max(1, len(actual_directional)),
+        # Compatibility alias now has the admission-contract meaning.
+        "coverage": len(acted_directional) / max(1, len(actual_directional)),
+        "directional_n": len(actual_directional),
+        "acted_directional_n": len(acted_directional),
+        "acted_n": len(acted),
+        "directional_accuracy": correct / max(1, len(actual_directional)),
+        "acted_directional_accuracy": (
+            sum(direction(row["actual"]) == direction(row["predicted"])
+                for row in acted_directional) / max(1, len(acted_directional))
+        ),
         "directional_balanced_accuracy": statistics.fmean(recalls),
         "mcc": mcc,
         "ece": ece,
         "net_expectancy": statistics.fmean(pnl) if pnl else 0.0,
         "profit_factor": gains / losses if losses else (None if gains else 0.0),
+        "max_portfolio_drawdown": max_drawdown,
         "max_additive_drawdown": max_drawdown,
         "latency_p95": latencies[round((len(latencies) - 1) * .95)] if latencies else 0.0,
     }

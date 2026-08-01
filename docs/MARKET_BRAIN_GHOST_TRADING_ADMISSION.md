@@ -45,6 +45,12 @@ All values are measured after estimated spread, slippage, and fees.
 | p95 cold neuron-paged inference | 750 ms on the training host |
 | Stable topology/tick during evaluation | Required |
 
+Directional coverage is actionable up/down predictions divided by all
+directional outcomes; parsed abstentions or `sideways` predictions do not
+count as coverage.  Drawdown uses timestamp-ordered, equal-weight portfolio
+returns so simultaneous correlated markets do not each receive an implicit
+100% capital allocation.
+
 The working target is deliberately above the floor: at least 62% directional
 accuracy, 58% balanced accuracy, 0.25 MCC, profit factor 1.35, and positive net
 expectancy across every fold and the untouched final period.  Accuracy may not
