@@ -1,6 +1,6 @@
 from scripts.market_multipair_lab import (
     cluster_asset_time_rows, derive_cutoff, eligible_indices, evenly_spaced, partition_assets,
-    progress,
+    market_rows, progress,
 )
 
 
@@ -60,3 +60,18 @@ def test_detached_progress_pipe_cannot_abort(monkeypatch):
 
     monkeypatch.setattr("builtins.print", broken)
     progress("still safe")
+
+
+def test_market_rows_carry_asset_cluster_identity():
+    class Client:
+        def predict(self, _streams):
+            return "future updraft", .5, .01
+
+    bars = [{"timestamp": index * 3600.0, "open": 100 + index / 100,
+             "high": 101 + index / 100, "low": 99 + index / 100,
+             "close": 100.5 + index / 100, "volume": 10,
+             "buy_volume": 6, "sell_volume": 4} for index in range(600)]
+    record = {"chain": "base", "symbol": "AAVE-USDC", "base_asset": "AAVE"}
+    rows = market_rows(record, bars, [520], Client(), horizon=12, news=[],
+                       reference_bars=None, active_pools={2, 5, 9}, cost_bps=20)
+    assert rows[0]["base_asset"] == "AAVE"

@@ -144,6 +144,7 @@ def market_rows(record: dict[str, Any], bars: Sequence[dict[str, float]], indice
         ))
         rows.append({
             "chain": record["chain"], "symbol": record["symbol"],
+            "base_asset": record["base_asset"],
             "index": index, "timestamp": bars[index]["timestamp"], "return": realized,
             "actual": actual, "predicted": predicted, "confidence": confidence,
             "latency_seconds": latency, "momentum_direction": momentum,
