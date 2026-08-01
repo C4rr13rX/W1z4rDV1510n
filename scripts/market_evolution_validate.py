@@ -23,7 +23,7 @@ def main() -> int:
     parser.add_argument("--news", type=Path,
                         default=Path(r"D:\Projects\CoolCryptoUtilities\data\news\historical_deduplicated.json"))
     parser.add_argument("--dataset-cache", type=Path,
-                        default=ROOT / "runtime/cache/market-evolution-dataset-v2.joblib")
+                        default=ROOT / "runtime/cache/market-evolution-dataset-v3.joblib")
     parser.add_argument("--folds", type=int, default=3)
     parser.add_argument("--test-days", type=int, default=42)
     parser.add_argument("--calibration-days", type=int, default=30)

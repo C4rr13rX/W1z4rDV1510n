@@ -42,7 +42,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-EVOLUTION_SCHEMA = 2
+EVOLUTION_SCHEMA = 3
 
 from scripts.market_brain_experiment import load_bars  # noqa: E402
 from scripts.market_signal_audit import (  # noqa: E402
@@ -96,8 +96,24 @@ NEWS_FEATURES = (
     "news_count_6h", "news_count_24h", "news_count_72h",
     "news_sentiment_6h", "news_sentiment_24h", "news_sentiment_72h",
     "news_polarity_24h", "asset_news_count_24h", "asset_news_count_72h",
-    "asset_news_sentiment_24h",
+    "asset_news_sentiment_6h", "asset_news_sentiment_24h",
+    "asset_news_sentiment_72h", "asset_news_sentiment_acceleration",
+    "news_negative_share_24h", "news_regulation_24h", "news_macro_24h",
+    "news_security_24h", "news_institutional_24h", "news_liquidation_24h",
+    "news_exchange_24h", "news_stablecoin_24h", "news_network_24h",
+    "news_whale_24h",
 )
+NEWS_CATEGORIES = {
+    "regulation": ("REGULAT", " SEC ", "CFTC", "LAWMAKER", "LEGISLAT", "COURT"),
+    "macro": ("FED ", "FEDERAL RESERVE", "INTEREST RATE", "INFLATION", "CPI", "JOBS REPORT"),
+    "security": ("HACK", "EXPLOIT", "BREACH", "ATTACK", "VULNERAB", "DRAIN"),
+    "institutional": (" ETF", "INSTITUTION", "TREASURY", "BLACKROCK", "FIDELITY"),
+    "liquidation": ("LIQUIDAT", "LEVERAGE", "MARGIN CALL", "SHORT SQUEEZE"),
+    "exchange": ("EXCHANGE", "BINANCE", "COINBASE", "KRAKEN", "BYBIT"),
+    "stablecoin": ("STABLECOIN", "USDT", "USDC", "TETHER", "CIRCLE"),
+    "network": ("UPGRADE", "FORK", "MAINNET", "OUTAGE", "VALIDATOR", "PROTOCOL"),
+    "whale": ("WHALE", "LARGE HOLDER", "ON-CHAIN", "ONCHAIN"),
+}
 BASE_FEATURES = tuple(dict.fromkeys(
     FEATURE_GROUPS["price"] + FEATURE_GROUPS["flow"]
     + FEATURE_GROUPS["cross"] + FEATURE_GROUPS["derivatives"]
@@ -410,7 +426,21 @@ def attach_news_features(rows: Sequence[dict[str, Any]], path: Path | None) -> N
             sentiment = float(sentiment_map.get(str(raw).lower(), raw))
             tokens = {str(token).upper() for token in article.get("tokens", []) if token}
             headline = str(article.get("headline") or "").upper()
-            normalized.append((timestamp, max(-1.0, min(1.0, sentiment)), tokens, headline))
+            source = str(article.get("source") or "")
+            # Generic software advisories are not global crypto-market news.
+            # Keep an advisory only when its structured tokens name a traded asset.
+            if source == "GitHub Security Advisories" and not (
+                tokens & {"BTC", "BITCOIN", "ETH", "ETHEREUM", "SOL", "SOLANA",
+                          "LINK", "CHAINLINK", "AAVE", "UNI", "UNISWAP", "DOGE"}
+            ):
+                continue
+            article_text = (headline + " " + str(article.get("article") or "").upper())[:12000]
+            categories = {
+                category for category, needles in NEWS_CATEGORIES.items()
+                if any(needle in article_text for needle in needles)
+            }
+            normalized.append((timestamp, max(-1.0, min(1.0, sentiment)),
+                               tokens, headline, categories))
         except (KeyError, TypeError, ValueError):
             continue
     normalized.sort(key=lambda item: item[0])
@@ -431,18 +461,29 @@ def attach_news_features(rows: Sequence[dict[str, Any]], path: Path | None) -> N
         row["features"]["news_polarity_24h"] = (
             statistics.fmean(1.0 if item[1] > 0 else -1.0 if item[1] < 0 else 0.0
                              for item in selected24) if selected24 else 0.0)
+        row["features"]["news_negative_share_24h"] = (
+            statistics.fmean(item[1] < 0 for item in selected24) if selected24 else 0.0
+        )
+        for category in NEWS_CATEGORIES:
+            row["features"][f"news_{category}_24h"] = math.log1p(
+                sum(category in item[4] for item in selected24)
+            )
         asset = str(row["asset"]).upper()
         alias = aliases.get(asset, asset)
         asset_windows = {}
-        for hours in (24, 72):
+        for hours in (6, 24, 72):
             relevant = [item for item in windows[hours]
                         if asset in item[2] or alias in item[2]
                         or re_word(alias, item[3])]
             asset_windows[hours] = relevant
             row["features"][f"asset_news_count_{hours}h"] = math.log1p(len(relevant))
-        relevant24 = asset_windows[24]
-        row["features"]["asset_news_sentiment_24h"] = (
-            statistics.fmean(item[1] for item in relevant24) if relevant24 else 0.0)
+            row["features"][f"asset_news_sentiment_{hours}h"] = (
+                statistics.fmean(item[1] for item in relevant) if relevant else 0.0
+            )
+        row["features"]["asset_news_sentiment_acceleration"] = (
+            row["features"]["asset_news_sentiment_6h"]
+            - row["features"]["asset_news_sentiment_72h"]
+        )
 
 
 def re_word(value: str, text: str) -> bool:
@@ -918,7 +959,7 @@ def main() -> int:
                         default=Path(r"D:\Projects\CoolCryptoUtilities\data\news\historical_deduplicated.json"))
     parser.add_argument("--state-dir", type=Path, default=ROOT / "runtime/market-evolution")
     parser.add_argument("--dataset-cache", type=Path,
-                        default=ROOT / "runtime/cache/market-evolution-dataset-v2.joblib")
+                        default=ROOT / "runtime/cache/market-evolution-dataset-v3.joblib")
     parser.add_argument("--population", type=int, default=12)
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--max-generations", type=int, default=0,

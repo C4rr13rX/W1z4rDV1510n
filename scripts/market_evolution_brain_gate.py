@@ -351,7 +351,7 @@ def main() -> int:
                         default=ROOT / "target/debug/w1z4rd_brain_migrate.exe")
     parser.add_argument("--runtime", type=Path, default=ROOT / "runtime/market-evolution/brain-gates")
     parser.add_argument("--dataset-cache", type=Path,
-                        default=ROOT / "runtime/cache/market-evolution-dataset-v2.joblib")
+                        default=ROOT / "runtime/cache/market-evolution-dataset-v3.joblib")
     parser.add_argument("--port", type=int, default=0,
                         help="base port; zero reserves a free loopback port per fold")
     parser.add_argument("--horizon", type=int, default=12)
