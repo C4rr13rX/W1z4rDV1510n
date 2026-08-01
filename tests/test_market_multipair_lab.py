@@ -1,5 +1,5 @@
 from scripts.market_multipair_lab import (
-    derive_cutoff, eligible_indices, evenly_spaced, partition_assets,
+    cluster_asset_time_rows, derive_cutoff, eligible_indices, evenly_spaced, partition_assets,
 )
 
 
@@ -36,3 +36,18 @@ def test_cutoff_and_spacing_are_deterministic():
     cutoff = derive_cutoff(records(), test_n=40, horizon=12)
     assert isinstance(cutoff, float)
     assert evenly_spaced(list(range(100)), 5) == [0, 25, 50, 74, 99]
+
+
+def test_chain_copies_collapse_to_one_asset_time_vote():
+    common = {"base_asset": "AAVE", "timestamp": 1.0, "return": .02,
+              "confidence": .6, "latency_seconds": .1, "momentum_direction": 1}
+    rows = [
+        {**common, "actual": "updraft", "predicted": "updraft"},
+        {**common, "actual": "updraft", "predicted": "updraft"},
+        {**common, "actual": "downshift", "predicted": "downshift"},
+    ]
+    collapsed = cluster_asset_time_rows(rows)
+    assert len(collapsed) == 1
+    assert collapsed[0]["actual"] == "updraft"
+    assert collapsed[0]["predicted"] == "updraft"
+    assert collapsed[0]["cluster_members"] == 3

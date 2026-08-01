@@ -143,6 +143,33 @@ def add_baselines(metrics: dict[str, Any], rows: Sequence[dict[str, Any]]) -> No
                     "baseline_margin": metrics["directional_accuracy"] - max(momentum, inverse)})
 
 
+def cluster_asset_time_rows(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse correlated chain/quote copies to one base-asset/time decision."""
+    groups: dict[tuple[str, float], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        groups[(row["base_asset"], row["timestamp"])].append(row)
+    collapsed = []
+    for (_asset, _timestamp), members in sorted(groups.items()):
+        actual_votes = Counter(direction(row["actual"]) for row in members)
+        predicted_votes = Counter(direction(row["predicted"]) for row in members
+                                  if row["predicted"] is not None)
+        actual_direction = actual_votes.most_common(1)[0][0]
+        predicted_direction = predicted_votes.most_common(1)[0][0] if predicted_votes else None
+        label = {-1: "downshift", 0: "sideways", 1: "updraft"}
+        representative = dict(members[0])
+        representative.update({
+            "actual": label[actual_direction],
+            "predicted": label[predicted_direction] if predicted_direction is not None else None,
+            "return": statistics.fmean(row["return"] for row in members),
+            "confidence": statistics.fmean(row["confidence"] for row in members),
+            "latency_seconds": max(row["latency_seconds"] for row in members),
+            "momentum_direction": Counter(row["momentum_direction"] for row in members).most_common(1)[0][0],
+            "cluster_members": len(members),
+        })
+        collapsed.append(representative)
+    return collapsed
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path,
@@ -162,6 +189,7 @@ def main() -> int:
     parser.add_argument("--train-per-pair", type=int, default=80)
     parser.add_argument("--max-train-pairs", type=int, default=96)
     parser.add_argument("--max-holdout-pairs", type=int, default=32)
+    parser.add_argument("--known-eval-pairs", type=int, default=24)
     parser.add_argument("--holdout-fraction", type=float, default=.25)
     parser.add_argument("--cost-bps", type=float, default=20.0)
     parser.add_argument("--seed", default="market-v2-asset-holdout")
@@ -254,7 +282,7 @@ def main() -> int:
                     raise RuntimeError(f"brain settlement failed: {settlement['error']}")
 
             evaluation: dict[str, Any] = {}
-            for name, records in (("known_asset_future", training_records),
+            for name, records in (("known_asset_future", training_records[:args.known_eval_pairs]),
                                   ("unseen_asset_future", holdout_records)):
                 rows = []
                 per_market = []
@@ -263,7 +291,9 @@ def main() -> int:
                     if bars is None:
                         bars = load_bars(Path(record["path"]))
                     _, test_indices = eligible_indices(bars, cutoff, args.horizon)
-                    selected_test = test_indices[:args.test_n]
+                    # Cover the full unseen interval instead of scoring one
+                    # highly autocorrelated block immediately after cutoff.
+                    selected_test = evenly_spaced(test_indices, args.test_n)
                     market = market_rows(record, bars, selected_test, client,
                                          horizon=args.horizon, news=news,
                                          reference_bars=reference_bars,
@@ -277,7 +307,12 @@ def main() -> int:
                           f"{record['chain']}:{record['symbol']}", flush=True)
                 metrics = evaluate_rows(rows, args.cost_bps)
                 add_baselines(metrics, rows)
-                evaluation[name] = {"metrics": metrics, "markets": per_market, "rows": rows}
+                clustered_rows = cluster_asset_time_rows(rows)
+                clustered_metrics = evaluate_rows(clustered_rows, args.cost_bps)
+                add_baselines(clustered_metrics, clustered_rows)
+                evaluation[name] = {"metrics": metrics,
+                                    "asset_time_clustered_metrics": clustered_metrics,
+                                    "markets": per_market, "rows": rows}
 
             report = {
                 "contract": "docs/MARKET_BRAIN_GHOST_TRADING_ADMISSION.md",
