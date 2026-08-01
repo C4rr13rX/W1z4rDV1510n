@@ -95,7 +95,8 @@ EVOLVED_OPS = (
 NEWS_FEATURES = (
     "news_count_6h", "news_count_24h", "news_count_72h",
     "news_sentiment_6h", "news_sentiment_24h", "news_sentiment_72h",
-    "news_polarity_24h", "asset_news_count_24h", "asset_news_count_72h",
+    "news_polarity_24h", "asset_news_count_6h", "asset_news_count_24h",
+    "asset_news_count_72h",
     "asset_news_sentiment_6h", "asset_news_sentiment_24h",
     "asset_news_sentiment_72h", "asset_news_sentiment_acceleration",
     "news_negative_share_24h", "news_regulation_24h", "news_macro_24h",

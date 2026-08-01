@@ -1,4 +1,8 @@
+import json
+import math
 import random
+
+import pytest
 
 import scripts.market_evolution_service as evolution
 
@@ -79,6 +83,24 @@ def test_news_features_do_not_read_future_publications(tmp_path):
     attach_news_features(rows, path)
     assert rows[0]["features"]["asset_news_count_24h"] > 0
     assert rows[0]["features"]["asset_news_sentiment_24h"] == 1.0
+
+
+def test_news_features_filter_generic_advisories_and_expose_event_regimes(tmp_path):
+    path = tmp_path / "news.json"
+    path.write_text(json.dumps({"articles": [
+        {"timestamp": 100, "headline": "generic package vulnerability",
+         "article": "software advisory", "tokens": ["SECURITY"],
+         "sentiment": "negative", "source": "GitHub Security Advisories"},
+        {"timestamp": 110, "headline": "Bitcoin ETF receives regulatory approval",
+         "article": "institutional fund launch", "tokens": ["BTC"],
+         "sentiment": "positive", "source": "CoinDesk"},
+    ]}))
+    rows = [{"timestamp": 120, "asset": "WBTC", "features": {}}]
+    attach_news_features(rows, path)
+    features = rows[0]["features"]
+    assert features["news_count_24h"] == pytest.approx(math.log1p(1))
+    assert features["news_institutional_24h"] > 0
+    assert features["asset_news_sentiment_acceleration"] == 0
 
 
 def test_unfinished_champion_gate_is_recovered_after_restart(tmp_path):
