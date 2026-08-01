@@ -176,3 +176,16 @@ max_concept_member_count = 12
 concept_emergence_threshold = 5
 decay_rate = 0.00002
 prune_floor = 0.001
+
+[[pools]]
+name = "competitive_reflexivity"
+id = 25
+prototype = "byte-passthrough"
+atom_encoding_prefix = "market_reflexivity"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 256
+max_concept_member_count = 12
+concept_emergence_threshold = 5
+decay_rate = 0.00002
+prune_floor = 0.001

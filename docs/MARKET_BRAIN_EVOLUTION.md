@@ -145,3 +145,11 @@ directional frontier above the accuracy floor but outside the calibration gate
 also produces monotonic 4x and 8x temperature descendants. Those descendants
 preserve its features and sign model exactly, allowing confidence honesty to be
 tested without waiting for unrelated mutations or losing the lineage.
+
+Schema 9 adds competitive reflexivity as an independent causal feature pool.
+It observes bounded participant direction, consensus, disagreement, leverage
+intensity, price alignment, and pressure acceleration from decision-time flow,
+basis, funding, and price state. These are neutral relationships, not a rule to
+follow or fade the crowd. The brain learns continuation, squeeze, reversal, and
+abstention motifs from subsequent after-cost outcomes; the GA decides when this
+pool and its cross-pool bindings participate.

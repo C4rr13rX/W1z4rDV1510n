@@ -48,6 +48,7 @@ def test_feature_families_fire_in_separate_atom_grounded_pools():
     assert len(pool_ids) == len(set(pool_ids))
     assert feature_family("r6") == "price"
     assert feature_family("funding_rate") == "derivatives"
+    assert feature_family("participant_consensus") == "reflexivity"
     assert any("r6=" in frame for _, frame in fired)
     assert any("funding_rate=" in frame for _, frame in fired)
     assert any("regime_feature=" in frame for _, frame in fired)

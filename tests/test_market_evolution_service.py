@@ -72,11 +72,18 @@ def test_derived_features_use_only_present_causal_values():
         "r6": .02, "r24": .04, "rv24": .01, "rv168": .02,
         "market_median_r6": .01, "trend_vote": 3, "market_breadth_r6": .6,
         "futures_quote_ratio24": 1.4, "spot_quote_ratio24": 1.1,
+        "basis_z24": .8, "funding_z168": -.2,
+        "imbalance_acceleration": .05, "basis_delta6": .001,
+        "funding_delta24": .00001,
     }
     rows = [{"features": features}]
     add_derived_features(rows)
     assert rows[0]["features"]["flow_consensus"] == .05
     assert abs(rows[0]["features"]["breadth_gap_r6"] - .01) < 1e-12
+    assert -1 <= rows[0]["features"]["participant_direction"] <= 1
+    assert 0 <= rows[0]["features"]["participant_consensus"] <= 1
+    assert rows[0]["features"]["participant_disagreement"] >= 0
+    assert 0 <= rows[0]["features"]["crowding_intensity"] <= 1
 
 
 def test_news_features_do_not_read_future_publications(tmp_path):

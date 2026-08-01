@@ -28,7 +28,7 @@ from scripts.market_brain_experiment import (  # noqa: E402
     BrainClient, direction, evaluate_rows, parse_prediction,
 )
 from scripts.market_evolution_service import (  # noqa: E402
-    DERIVATIVE_FEATURES, FEATURE_GROUPS, FLOOR, Genome, evaluation_scope,
+    DERIVATIVE_FEATURES, FEATURE_GROUPS, FLOOR, REFLEXIVITY_FEATURES, Genome, evaluation_scope,
     genome_from_dict, genome_uses_derivatives, load_dataset_cached, passes_floor,
     program_name, program_value,
 )
@@ -43,6 +43,7 @@ FEATURE_POOLS = {
     "derivatives": 18,
     "breadth": 19,
     "news": 20,
+    "reflexivity": 25,
 }
 POOL_EVOLVED = 21
 POOL_REGIME = 22
@@ -78,6 +79,8 @@ def genome_feature_frame(row: dict[str, Any], genome: Genome) -> str:
 
 def feature_family(name: str) -> str:
     """Route one causal feature to an independently firing sensory pool."""
+    if name in REFLEXIVITY_FEATURES:
+        return "reflexivity"
     if name in DERIVATIVE_FEATURES:
         return "derivatives"
     if "news_" in name or name.startswith(("asset_news", "global_news")):

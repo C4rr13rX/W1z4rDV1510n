@@ -43,8 +43,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-FEATURE_SCHEMA = 4
-EVOLUTION_SCHEMA = 8
+FEATURE_SCHEMA = 5
+EVOLUTION_SCHEMA = 9
 LEARNER_KINDS = (
     "classifier", "regressor", "extra_trees", "decomposed_regressor",
     "regime_regressor", "regime_decomposed_regressor",
@@ -58,7 +58,7 @@ EVOLVABLE_POOL_NAMES = (
     "forecast_horizon", "instrument_context", "price_geometry", "trade_flow",
     "cross_market_context", "derivatives_state", "market_breadth", "news_state",
     "evolved_causal_relationships", "regime_context", "specialist_arbitration",
-    "realized_ghost_experience",
+    "realized_ghost_experience", "competitive_reflexivity",
 )
 
 from scripts.market_brain_experiment import load_bars  # noqa: E402
@@ -89,6 +89,31 @@ DERIVED_FEATURES = {
     "breadth_alignment": lambda f: f["trend_vote"] * (f["market_breadth_r6"] - .5),
     "liquidity_acceleration": lambda f: (
         f["futures_quote_ratio24"] - f["spot_quote_ratio24"]),
+    "participant_direction": lambda f: statistics.fmean((
+        math.tanh(2 * f["futures_taker_imbalance"]),
+        math.tanh(f["basis_z24"]), math.tanh(f["funding_z168"]),
+    )),
+    "participant_consensus": lambda f: abs(statistics.fmean((
+        math.tanh(2 * f["futures_taker_imbalance"]),
+        math.tanh(f["basis_z24"]), math.tanh(f["funding_z168"]),
+    ))),
+    "participant_disagreement": lambda f: statistics.pstdev((
+        math.tanh(2 * f["spot_taker_imbalance"]),
+        math.tanh(2 * f["futures_taker_imbalance"]),
+        math.tanh(f["basis_z24"]), math.tanh(f["funding_z168"]),
+    )),
+    "crowding_intensity": lambda f: statistics.fmean((
+        abs(math.tanh(f["basis_z24"])), abs(math.tanh(f["funding_z168"])),
+        abs(math.tanh(2 * f["futures_taker_imbalance"])),
+    )),
+    "crowd_price_alignment": lambda f: f["participant_direction"] * math.tanh(
+        f["r6"] / max(abs(f["rv24"]), 1e-6)
+    ),
+    "participant_pressure_acceleration": lambda f: statistics.fmean((
+        math.tanh(f["imbalance_acceleration"]),
+        math.tanh(f["basis_delta6"] * 100),
+        math.tanh(f["funding_delta24"] * 10_000),
+    )),
 }
 ROLLING_SOURCES = (
     "r1", "r6", "r12", "r24", "r72", "r168", "rv24",
@@ -138,10 +163,15 @@ BASE_FEATURES = tuple(dict.fromkeys(
     + FEATURE_GROUPS["breadth"] + NEWS_FEATURES
     + ROLLING_FEATURES + CROSS_SECTION_FEATURES
 ))
+REFLEXIVITY_FEATURES = {
+    "participant_direction", "participant_consensus", "participant_disagreement",
+    "crowding_intensity", "crowd_price_alignment", "participant_pressure_acceleration",
+}
 DERIVATIVE_FEATURES = set(FEATURE_GROUPS["derivatives"]) | {
     "flow_consensus", "flow_basis_pressure", "funding_basis_pressure",
     "liquidity_acceleration",
 }
+DERIVATIVE_FEATURES.update(REFLEXIVITY_FEATURES)
 DERIVATIVE_FEATURES.update(
     f"causal_z{window}_{source}"
     for source in FEATURE_GROUPS["derivatives"] for window in ROLLING_WINDOWS
@@ -1419,6 +1449,7 @@ def main() -> int:
             champion = None
             append_event(events_path, "dataset_changed", previous=state.get("dataset_signature"),
                          current=signature, action="population_revalidation")
+        population = introduce_missing_learner_species(population, generation, rng)
         pending_gate_genome = recover_pending_gate(
             args.state_dir, champion, pending_gate_genome
         )
