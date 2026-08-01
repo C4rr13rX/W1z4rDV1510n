@@ -152,9 +152,17 @@ def available_memory_gb() -> float:
     return (psutil.virtual_memory().available / 1024**3 if psutil is not None else 999.0)
 
 
-def dataset_signature(manifest: Path, supplemental_root: Path) -> str:
+def dataset_signature(manifest: Path, supplemental_root: Path,
+                      news_path: Path | None = None) -> str:
     digest = hashlib.sha256()
     paths = [manifest, *sorted((supplemental_root / "features").glob("*.json"))]
+    if manifest.is_file():
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        paths.extend(Path(row["path"]) for row in payload.get("selected", [])
+                     if row.get("path"))
+    if news_path is not None:
+        paths.append(news_path)
+    paths = sorted(set(paths), key=lambda path: str(path.resolve()))
     for path in paths:
         if path.is_file():
             stat = path.stat()
@@ -566,7 +574,7 @@ def main() -> int:
             "required_memory_gb": args.min_free_memory_gb,
         })
         time.sleep(args.memory_poll_seconds)
-    signature = dataset_signature(args.manifest, args.supplemental_root)
+    signature = dataset_signature(args.manifest, args.supplemental_root, args.news)
     dataset = load_dataset(args.manifest, args.supplemental_root,
                            args.horizon, args.stride, args.seed, args.news)
     append_event(events_path, "dataset_loaded", rows=len(dataset["rows"]),

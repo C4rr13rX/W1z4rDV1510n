@@ -2,7 +2,7 @@ import random
 
 from scripts.market_evolution_service import (
     Genome, add_derived_features, attach_news_features, crossover, mutate,
-    passes_floor, recover_pending_gate, seed_genomes,
+    dataset_signature, passes_floor, recover_pending_gate, seed_genomes,
 )
 
 
@@ -70,3 +70,23 @@ def test_unfinished_champion_gate_is_recovered_after_restart(tmp_path):
     report.write_text("{}")
     assert recover_pending_gate(tmp_path, champion, None) is None
     assert recover_pending_gate(tmp_path, champion, "newer") == "newer"
+
+
+def test_dataset_signature_covers_primary_and_news_inputs(tmp_path):
+    primary = tmp_path / "primary.json"
+    primary.write_text("[]")
+    news = tmp_path / "news.json"
+    news.write_text("[]")
+    features = tmp_path / "supplemental" / "features"
+    features.mkdir(parents=True)
+    (features / "BTC.json").write_text("{}")
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text('{"selected":[{"path":"' +
+                        str(primary).replace("\\", "\\\\") + '"}]}')
+    before = dataset_signature(manifest, features.parent, news)
+    primary.write_text("[1]")
+    after_primary = dataset_signature(manifest, features.parent, news)
+    news.write_text("[2]")
+    after_news = dataset_signature(manifest, features.parent, news)
+    assert before != after_primary
+    assert after_primary != after_news
