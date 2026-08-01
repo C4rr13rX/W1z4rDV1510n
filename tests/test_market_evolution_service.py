@@ -1,9 +1,12 @@
 import random
 
+import scripts.market_evolution_service as evolution
+
 from scripts.market_evolution_service import (
     Genome, add_derived_features, attach_causal_normalization,
-    attach_news_features, crossover, dataset_signature, evaluation_scope, mutate,
-    passes_floor, program_name, program_value, recover_pending_gate, seed_genomes,
+    attach_news_features, crossover, dataset_signature, evaluation_scope,
+    load_dataset_cached, mutate, passes_floor, program_name, program_value,
+    recover_pending_gate, seed_genomes,
 )
 
 
@@ -129,3 +132,22 @@ def test_evaluation_scope_discards_only_stale_quarter_and_resplits():
     assert end == 1.0
     assert training.isdisjoint(holdout)
     assert len(training | holdout) == 7
+
+
+def test_dataset_cache_rejects_invalid_payload_and_round_trips(tmp_path, monkeypatch):
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text('{"selected":[]}')
+    supplemental = tmp_path / "supplemental"
+    (supplemental / "features").mkdir(parents=True)
+    cache = tmp_path / "dataset.joblib"
+    evolution.joblib.dump({"signature": "wrong", "dataset": None}, cache)
+    expected = {"rows": [{"timestamp": 1}], "assets": ["A"]}
+    monkeypatch.setattr(evolution, "load_dataset", lambda *args: expected)
+    first = load_dataset_cached(manifest, supplemental, 12, 12, "seed", None, cache)
+    monkeypatch.setattr(
+        evolution, "load_dataset",
+        lambda *args: (_ for _ in ()).throw(AssertionError("cache was not used")),
+    )
+    second = load_dataset_cached(manifest, supplemental, 12, 12, "seed", None, cache)
+    assert first == expected
+    assert second == expected

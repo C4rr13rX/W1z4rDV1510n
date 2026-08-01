@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 import numpy as np
+import joblib
 from sklearn.ensemble import (
     ExtraTreesClassifier, HistGradientBoostingClassifier, HistGradientBoostingRegressor,
 )
@@ -485,6 +486,31 @@ def load_dataset(manifest_path: Path, supplemental_root: Path, horizon: int,
     }
 
 
+def load_dataset_cached(manifest_path: Path, supplemental_root: Path, horizon: int,
+                        stride: int, seed: str, news_path: Path | None,
+                        cache_path: Path | None) -> dict[str, Any]:
+    data_signature = dataset_signature(manifest_path, supplemental_root, news_path)
+    cache_signature = hashlib.sha256(
+        f"{data_signature}|{horizon}|{stride}|{seed}".encode()
+    ).hexdigest()[:20]
+    if cache_path is not None and cache_path.is_file():
+        try:
+            payload = joblib.load(cache_path)
+            cached = payload.get("dataset") if isinstance(payload, dict) else None
+            if (payload.get("signature") == cache_signature
+                    and isinstance(cached, dict) and isinstance(cached.get("rows"), list)):
+                return payload["dataset"]
+        except (EOFError, OSError, ValueError, TypeError, KeyError):
+            pass
+    dataset = load_dataset(manifest_path, supplemental_root, horizon, stride, seed, news_path)
+    if cache_path is not None:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = cache_path.with_suffix(cache_path.suffix + f".{os.getpid()}.tmp")
+        joblib.dump({"signature": cache_signature, "dataset": dataset}, temporary, compress=3)
+        os.replace(temporary, cache_path)
+    return dataset
+
+
 def evaluation_scope(dataset: dict[str, Any], eligible: set[str], seed: str
                      ) -> tuple[set[str], set[str], float]:
     """Use the newest timestamp supported by at least 75% of eligible assets."""
@@ -832,6 +858,8 @@ def main() -> int:
     parser.add_argument("--news", type=Path,
                         default=Path(r"D:\Projects\CoolCryptoUtilities\data\news\historical_deduplicated.json"))
     parser.add_argument("--state-dir", type=Path, default=ROOT / "runtime/market-evolution")
+    parser.add_argument("--dataset-cache", type=Path,
+                        default=ROOT / "runtime/cache/market-evolution-dataset-v2.joblib")
     parser.add_argument("--population", type=int, default=12)
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--max-generations", type=int, default=0,
@@ -841,7 +869,7 @@ def main() -> int:
     parser.add_argument("--horizon", type=int, default=12)
     parser.add_argument("--stride", type=int, default=12)
     parser.add_argument("--folds", type=int, default=3)
-    parser.add_argument("--test-days", type=int, default=28)
+    parser.add_argument("--test-days", type=int, default=42)
     parser.add_argument("--calibration-days", type=int, default=30)
     parser.add_argument("--final-days", type=int, default=21)
     parser.add_argument("--cost-bps", type=float, default=20.0)
@@ -870,8 +898,9 @@ def main() -> int:
         })
         time.sleep(args.memory_poll_seconds)
     signature = dataset_signature(args.manifest, args.supplemental_root, args.news)
-    dataset = load_dataset(args.manifest, args.supplemental_root,
-                           args.horizon, args.stride, args.seed, args.news)
+    dataset = load_dataset_cached(args.manifest, args.supplemental_root,
+                                  args.horizon, args.stride, args.seed, args.news,
+                                  args.dataset_cache)
     append_event(events_path, "dataset_loaded", rows=len(dataset["rows"]),
                  assets=dataset["assets"], supplemental_assets=sorted(dataset["supplemental_assets"]))
     if state_path.is_file():

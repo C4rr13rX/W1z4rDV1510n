@@ -91,6 +91,13 @@ Generated state is ignored below `runtime/market-evolution/`:
 - `champion.json` is the current surrogate champion;
 - `brain-gate-reports/` and `brain-gates/` hold neural evidence/state.
 
+The causal feature matrix is fingerprinted and cached at
+`runtime/cache/market-evolution-dataset-v2.joblib`; primary OHLCV files,
+supplemental derivatives, news, horizon, stride, seed, and evolution schema all
+participate in cache invalidation. Use `scripts/market_evolution_validate.py`
+to rerun a micro-sweep winner on the complete protected three-fold contract
+before spending time on its Wizard gate.
+
 Create `runtime/market-evolution/STOP` for a cooperative stop after the active
 generation. Remove it before restarting. The service resumes from `state.json`.
 Ghost trading remains evaluation, and the evolution loop never authorizes
