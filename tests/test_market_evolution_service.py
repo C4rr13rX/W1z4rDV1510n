@@ -5,7 +5,7 @@ import scripts.market_evolution_service as evolution
 from scripts.market_evolution_service import (
     Genome, add_derived_features, attach_causal_normalization,
     attach_news_features, crossover, dataset_signature, evaluation_scope,
-    load_dataset_cached, mutate, passes_floor, program_name, program_value,
+    load_dataset_cached, mutate, passes_floor, passes_prescreen, program_name, program_value,
     recover_pending_gate, seed_genomes, select_diverse_elites,
 )
 
@@ -42,6 +42,17 @@ def test_floor_requires_every_relationship_not_accuracy_alone():
     assert passes_floor(passing)
     assert not passes_floor({**passing, "net_expectancy": 0})
     assert not passes_floor({**passing, "coverage": .69})
+
+
+def test_prescreen_is_lower_than_admission_but_still_multimetric():
+    viable = {
+        "acted_observations": 150, "coverage": .6, "directional_accuracy": .54,
+        "directional_balanced_accuracy": .52, "mcc": .04, "ece": .2,
+        "profit_factor": .85,
+    }
+    assert passes_prescreen(viable)
+    assert not passes_floor(viable)
+    assert not passes_prescreen({**viable, "mcc": .039})
 
 
 def test_derived_features_use_only_present_causal_values():

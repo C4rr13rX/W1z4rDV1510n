@@ -57,6 +57,11 @@ FLOOR = {
 }
 WORKING_TARGET = {"accuracy": 0.62, "balanced_accuracy": 0.58,
                   "mcc": 0.25, "profit_factor": 1.35}
+PRESCREEN = {
+    "observations": 150, "coverage": 0.60, "accuracy": 0.54,
+    "balanced_accuracy": 0.52, "mcc": 0.04, "ece": 0.20,
+    "profit_factor": 0.85,
+}
 DERIVED_FEATURES = {
     "flow_consensus": lambda f: (f["spot_taker_imbalance"] + f["futures_taker_imbalance"]) / 2,
     "flow_basis_pressure": lambda f: f["flow_divergence"] * f["futures_spot_basis"],
@@ -618,6 +623,19 @@ def passes_floor(section: dict[str, Any]) -> bool:
     )
 
 
+def passes_prescreen(section: dict[str, Any]) -> bool:
+    """Cheap lower bound that only decides whether later folds are worth fitting."""
+    return (
+        section.get("acted_observations", 0) >= PRESCREEN["observations"]
+        and section.get("coverage", 0) >= PRESCREEN["coverage"]
+        and section.get("directional_accuracy", 0) >= PRESCREEN["accuracy"]
+        and section.get("directional_balanced_accuracy", 0) >= PRESCREEN["balanced_accuracy"]
+        and section.get("mcc", -1) >= PRESCREEN["mcc"]
+        and section.get("ece", 1) <= PRESCREEN["ece"]
+        and (section.get("profit_factor") or 0) >= PRESCREEN["profit_factor"]
+    )
+
+
 def evaluate_genome(genome: Genome, dataset: dict[str, Any], *, folds: int,
                     test_days: int, calibration_days: int, final_days: int,
                     horizon: int, cost_bps: float) -> Genome:
@@ -700,12 +718,16 @@ def evaluate_genome(genome: Genome, dataset: dict[str, Any], *, folds: int,
             cal_probability = model.probability(x_cal)
             cal_confidence = np.maximum(cal_probability, 1 - cal_probability)
             threshold = float(np.quantile(cal_confidence, genome.confidence_quantile))
-            fold_results.append({
+            fold_result = {
                 "fold": fold, "cutoff": cutoff, "fit_rows": len(fit),
                 "calibration_rows": len(calibration), "confidence_threshold": threshold,
                 "known_asset_future": evaluate_slice(model, known, genome, threshold, cost_bps),
                 "unseen_asset_future": evaluate_slice(model, unseen, genome, threshold, cost_bps),
-            })
+            }
+            fold_results.append(fold_result)
+            if not all(passes_prescreen(fold_result[name])
+                       for name in ("known_asset_future", "unseen_asset_future")):
+                break
         sections = [fold_result[name] for fold_result in fold_results
                     for name in ("known_asset_future", "unseen_asset_future")]
         min_accuracy = min(section.get("directional_accuracy", 0) for section in sections)
@@ -718,7 +740,8 @@ def evaluate_genome(genome: Genome, dataset: dict[str, Any], *, folds: int,
         max_ece = max(section.get("ece", 1) for section in sections)
         max_drawdown = max(section.get("max_portfolio_drawdown", 1) for section in sections)
         min_observations = min(section.get("acted_observations", 0) for section in sections)
-        passed = all(passes_floor(section) for section in sections)
+        evaluated_all_folds = len(fold_results) == folds
+        passed = evaluated_all_folds and all(passes_floor(section) for section in sections)
         penalty = (
             max(0, FLOOR["coverage"] - min_coverage) * 100
             + max(0, FLOOR["baseline_margin"] - min_margin) * 100
@@ -738,11 +761,14 @@ def evaluate_genome(genome: Genome, dataset: dict[str, Any], *, folds: int,
         )
         genome.result = {
             "status": ("surrogate_working_target_pass" if working_target else
-                       "surrogate_floor_pass" if passed else "screened"),
+                       "surrogate_floor_pass" if passed else
+                       "screened" if evaluated_all_folds else "prescreen_reject"),
             "uses_derivatives": uses_derivatives,
             "evaluation_end": evaluation_end,
             "training_assets": sorted(training_assets),
             "holdout_assets": sorted(holdout_assets),
+            "evaluated_folds": len(fold_results),
+            "requested_folds": folds,
             "folds": fold_results,
             "summary": {
                 "min_accuracy": min_accuracy, "min_balanced_accuracy": min_balanced,
