@@ -1,102 +1,77 @@
 # Perpetual Market-Brain Evolution
 
-## Purpose
+`scripts/market_evolution_service.py` is the canonical restart-safe evolution
+loop. It loads the causal corpus once, runs a bounded parallel population,
+retains every result and failure, keeps elites, and creates mutations and
+crossovers until `runtime/market-evolution/STOP` appears.
 
-The market evolution loop continuously searches for a better causal feature
-configuration and Wizard-brain configuration without allowing a lucky fold,
-data leakage, or a surrogate classifier to replace the accepted brain.
-Generated corpora, candidate brains, logs, and ledgers live below `runtime/`
-or the CoolCryptoUtilities data directory and remain ignored. The scripts,
-identities, contracts, and experiments are tracked.
+The genome evolves feature and derived-relationship selection, confidence
+scope, screening parameters, Wizard binding/concept thresholds, and supervised
+presentation density. Screening parameters are only a cheap information test:
+no classifier state is copied into the Wizard brain. Numeric relationships
+enter neural validation as deterministic named character/atom magnitude frames
+through `brains/market_predictor_evolution.identity.toml`.
 
-Ghost trading remains an evaluation stage. Neither a surrogate pass nor a
-micro-brain pass authorizes real-money trading.
-
-## Live pipeline
+## Protected stages
 
 ```text
-causal datasets
-  -> feature/expression genomes
-  -> purged walk-forward + complete unseen-asset screening
-  -> isolated Wizard micro-brain smoke gate
+causal data
+  -> genetic feature/configuration screening
+  -> fresh isolated Wizard micro-brain smoke gate
   -> three-fold Wizard gate
   -> one untouched final period
-  -> promotion candidate (never automatic live trading)
+  -> promotion candidate (never automatic live-money authorization)
 ```
 
-`scripts/market_evolution_service.py` is the authoritative perpetual service.
-It loads the data once, runs a bounded population with two workers by default,
-persists every candidate and failure, retains elites, and produces new genomes
-with crossover and mutation. It reserves a final interval that fitness never
-sees. The evolved genes cover:
+Every genome fits before a purged calibration interval. Its attention threshold
+is selected on calibration data only, then it is scored on future familiar
+assets and completely withheld assets. Fitness uses the weakest section, never
+an average or best fold. The final interval is excluded from genetic fitness.
 
-- causal feature selection and explicit derived relationships;
-- price, flow, futures/spot basis, premium, funding, market breadth, and news;
-- confidence selectivity, constrained so abstention cannot evade coverage;
-- classifier screening parameters used only as a cheap information test;
-- Wizard binding/concept thresholds and supervised presentations used by the
-  isolated neural gate.
+The complete floor is defined in
+`docs/MARKET_BRAIN_GHOST_TRADING_ADMISSION.md`: observation count, actionable
+coverage, accuracy, balanced accuracy, MCC, baseline margin, calibration,
+after-cost expectancy, profit factor, and equal-weight portfolio drawdown are
+co-equal gates.
 
-`scripts/market_evolution_brain_gate.py` constructs fresh Wizard micro-brains
-from `brains/market_predictor_evolution.identity.toml`. Selected numeric
-features remain character/atom grounded as deterministic named magnitude
-buckets in pool 15. Horizon and instrument context fire in separate pools,
-and the future outcome remains a separate action pool. No classifier state is
-copied into the Wizard brain.
+## Current causal data
 
-The alternate `scripts/market_evolution_supervisor.py` is a process-isolated
-experimental harness for the immutable `MarketGenome` schema. It deliberately
-uses `runtime/market-evolution-process-isolated/`; do not point it at the live
-service state directory.
+- canonical hourly OHLCV and buy/sell flow;
+- checksum-verified Binance public spot and perpetual archives;
+- quote volume, trade count, taker flow, futures/spot basis, premium, funding;
+- same-time market breadth built before any future-label filtering;
+- 11,909 deduplicated historical news articles bounded by publication time.
 
-## Data currently admitted to evolution
+## Neural validation
 
-- canonical deduplicated hourly OHLCV representatives;
-- buy/sell volume flow from the existing corpus;
-- checksum-verified Binance public spot and perpetual hourly archives;
-- quote volume, trade count, taker-buy flow, futures/spot basis, premium, and
-  funding, aligned without using values published after the decision;
-- same-time cross-sectional breadth computed from all assets before filtering
-  future direction labels;
-- 11,909 deduplicated historical crypto-news articles, bounded by publication
-  timestamp and filtered away from unrelated generic advisories.
+`scripts/market_evolution_brain_gate.py` trains each fold in a new Wizard brain.
+Horizon, instrument, evolved causal relationships, and outcome have distinct
+pools. A smoke result cannot promote a brain; at least three neural folds are
+required before the untouched-final test.
 
-## Admission rules
+The process-isolated experimental alternative,
+`scripts/market_evolution_supervisor.py`, uses the separate
+`runtime/market-evolution-process-isolated/` directory. Do not point it at the
+canonical service state.
 
-Fitness uses the weakest known-asset or unseen-asset section across every
-walk-forward fold. A candidate cannot pass unless each section satisfies the
-full contract in `docs/MARKET_BRAIN_GHOST_TRADING_ADMISSION.md`, including 200
-acted observations, 70% actionable coverage, baseline margin, balanced
-accuracy, MCC, calibration, after-cost expectancy, profit factor, and
-equal-weight portfolio drawdown. The untouched final period is never part of
-genetic fitness.
+## Operation
 
-The service writes:
-
-- `runtime/market-evolution/state.json` — atomic restart coordinate;
-- `runtime/market-evolution/events.jsonl` — append-only decisions;
-- `runtime/market-evolution/candidates/` — every genome and result;
-- `runtime/market-evolution/champion.json` — current surrogate champion;
-- `runtime/market-evolution/brain-gate-reports/` — neural smoke/full evidence.
-
-Failed and inaccurate candidates remain evidence; they are not layered onto
-the accepted brain.
-
-## Operations
-
-The current launch is intentionally modest so other workstation activity can
-continue:
+The workstation-friendly launch currently in use is:
 
 ```powershell
-python scripts/market_evolution_service.py --population 8 --workers 2
+python scripts/market_evolution_service.py `
+  --population 8 --workers 2 --brain-gate-every 1
 ```
 
-Create `runtime/market-evolution/STOP` for a cooperative stop after the active
-generation. Removing that file and launching the same command resumes from the
-atomic state. Status is read from `state.json`, `champion.json`, and the tail of
-`events.jsonl`.
+Generated state is ignored below `runtime/market-evolution/`:
 
-The service automatically starts one isolated neural smoke gate at bounded
-intervals. A full three-fold gate can be run with the same gate script by
-omitting the smoke overrides. Only a complete three-fold pass is eligible for
-the untouched-final evaluation.
+- `state.json` is the atomic restart coordinate;
+- `events.jsonl` is the append-only decision ledger;
+- `candidates/` retains genomes and results;
+- `champion.json` is the current surrogate champion;
+- `brain-gate-reports/` and `brain-gates/` hold neural evidence/state.
+
+Create `runtime/market-evolution/STOP` for a cooperative stop after the active
+generation. Remove it before restarting. The service resumes from `state.json`.
+Ghost trading remains evaluation, and the evolution loop never authorizes
+real-money trading.
