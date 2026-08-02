@@ -77,14 +77,18 @@ common=(
   --endpoint "${endpoint}"
   --node-bin "${node_bin}"
   --corpus-root "${corpus_root}"
-  --batch-size 32
-  --lock-chunk-size 32
+  # At million-neuron scale a 32-episode request can page in enough of the
+  # fabric to cross the host's remaining headroom before the supervisor gets
+  # another durable control boundary. Eight keeps acknowledgements frequent
+  # enough for memory settlement and uncontended canary pauses.
+  --batch-size 8
+  --lock-chunk-size 8
   --poll-seconds 2
   --checkpoint-rows 131072
   --gate-rows 131072
   --canary-rows 16384
   --max-live-lock-seconds 8
-  --min-free-memory-gb 6
+  --min-free-memory-gb 8
   --min-free-disk-gb 8
   --max-restarts 10
 )

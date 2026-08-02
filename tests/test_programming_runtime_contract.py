@@ -2357,6 +2357,11 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             'echo "Adopting ${adopted_stage} supervisor PID ${adopted_pid}."',
             source,
         )
+        self.assertIn("--batch-size 8", source)
+        self.assertIn("--lock-chunk-size 8", source)
+        self.assertIn("--min-free-memory-gb 8", source)
+        self.assertNotIn("--batch-size 32", source)
+        self.assertNotIn("--lock-chunk-size 32", source)
 
     def test_persistent_service_stop_preserves_only_the_brain_node(self) -> None:
         unit = (
