@@ -178,17 +178,29 @@ def available_port() -> int:
 def settle_brain(client: BrainClient) -> dict[str, Any]:
     """Create the neuron-addressable rest boundary required before evaluation."""
     before = client.get("/brain/stats")
-    sleep = client.post("/brain/sleep", {
-        # Serialize without pruning fresh low-use neurons.  Evaluation must
-        # demand-page the learned fabric instead of inheriting train residency.
-        "min_use_count": 0,
-        "stale_ticks": 9_223_372_036_854_775_807,
-    })
-    if sleep.get("error"):
-        raise RuntimeError(f"brain settlement failed: {sleep}")
-    checkpoint = client.post("/brain/checkpoint", {})
-    if checkpoint.get("ok") is False:
-        raise RuntimeError(f"settled checkpoint failed: {checkpoint}")
+    had_timeout = hasattr(client, "timeout")
+    prior_timeout = getattr(client, "timeout", None)
+    # Million-terminal experimental brains can legitimately need minutes to
+    # serialize neuron-by-neuron. This is a bounded maintenance request, not
+    # inference, and must finish before lifecycle evidence is admissible.
+    client.timeout = max(float(prior_timeout or 0), 900.0)
+    try:
+        sleep = client.post("/brain/sleep", {
+            # Serialize without pruning fresh low-use neurons.  Evaluation must
+            # demand-page the learned fabric instead of inheriting train residency.
+            "min_use_count": 0,
+            "stale_ticks": 9_223_372_036_854_775_807,
+        })
+        if sleep.get("error"):
+            raise RuntimeError(f"brain settlement failed: {sleep}")
+        checkpoint = client.post("/brain/checkpoint", {})
+        if checkpoint.get("ok") is False:
+            raise RuntimeError(f"settled checkpoint failed: {checkpoint}")
+    finally:
+        if had_timeout:
+            client.timeout = prior_timeout
+        else:
+            del client.timeout
     after = client.get("/brain/stats")
     resident = int(after.get("resident_terminals") or 0)
     if resident != 0:

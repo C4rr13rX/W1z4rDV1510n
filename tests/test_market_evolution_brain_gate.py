@@ -99,6 +99,28 @@ def test_neural_gate_settles_without_pruning_before_evaluation():
         }),
         ("/brain/checkpoint", {}),
     ]
+    assert not hasattr(client, "timeout")
+
+
+def test_neural_gate_restores_normal_timeout_after_long_maintenance():
+    class Client:
+        timeout = 90
+
+        def __init__(self):
+            self.observed_timeouts = []
+            self.stats = iter([{"resident_terminals": 8}, {"resident_terminals": 0}])
+
+        def get(self, path):
+            return next(self.stats)
+
+        def post(self, path, payload):
+            self.observed_timeouts.append(self.timeout)
+            return {"ok": True}
+
+    client = Client()
+    settle_brain(client)
+    assert client.observed_timeouts == [900, 900]
+    assert client.timeout == 90
 
 
 def test_only_passing_or_explicitly_retained_gate_keeps_generated_brain():

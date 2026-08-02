@@ -82,6 +82,13 @@ Horizon, instrument, evolved causal relationships, and outcome have distinct
 pools. A smoke result cannot promote a brain; at least three neural folds are
 required before the untouched-final test.
 
+Before evaluation, the gate performs non-pruning neuron-wise sleep and a
+checkpoint, then requires zero resident terminals. That maintenance request
+has a bounded 15-minute client timeout because million-terminal experimental
+brains can take several minutes to serialize; ordinary inference retains its
+short timeout. A timeout never converts into a score or bypasses lifecycle
+evidence.
+
 The process-isolated experimental alternative,
 `scripts/market_evolution_supervisor.py`, uses the separate
 `runtime/market-evolution-process-isolated/` directory. Do not point it at the
