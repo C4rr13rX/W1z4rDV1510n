@@ -168,6 +168,13 @@ An evaluator missing its own corpus, executable, or required deployment
 fixture is treated the same way: it produced no observation of brain behavior,
 so the candidate is preserved for infrastructure repair instead of being
 quarantined as learned regression.
+
+If an older controller already recorded such a false interval, append an
+explicit `resolved` event to the immutable deferred ledger with the missing
+artifact and checksum restoration as evidence, restart the worker at its equal
+RAM/WAL coordinate so it rebuilds its skip set, and rerun the same canary. Do
+not erase the original event or accept its rows without a repeated behavioral
+gate.
 If retries are exhausted, the supervisor preserves the guarded candidate and
 exits for a restart. Deferred replay restores its pre-replay guard before
 pausing. A completed evaluator reporting a behavioral mismatch is the only
