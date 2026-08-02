@@ -33,6 +33,16 @@ def test_genome_identity_is_deterministic_and_mutation_stays_bounded():
     assert len(child.features) >= 8
 
 
+def test_regime_learner_always_retains_its_routing_observation():
+    candidate = seed_genomes(6, random.Random(21))[0]
+    candidate.learner_kind = "regime_regressor"
+    candidate.regime_feature = "funding_rate"
+    candidate.regime_bins = 1
+    candidate.features = [name for name in candidate.features if name != "funding_rate"]
+    candidate.finalize()
+    assert "funding_rate" in candidate.features
+
+
 def test_crossover_preserves_a_viable_feature_genome():
     parents = seed_genomes(5, random.Random(2))
     child = crossover(parents[1], parents[2], 4, random.Random(4))

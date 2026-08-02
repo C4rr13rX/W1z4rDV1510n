@@ -226,7 +226,8 @@ class Genome:
             if name in EVOLVABLE_POOL_NAMES
         }
         self.calibration_safety = max(1.0, min(12.0, float(self.calibration_safety)))
-        if self.regime_bins > 1:
+        if (self.regime_bins > 1
+                or self.learner_kind in {"regime_regressor", "regime_decomposed_regressor"}):
             self.features = sorted(set(self.features) | {self.regime_feature})
         self.feature_programs = sorted(
             (normalize_program(program) for program in self.feature_programs),
