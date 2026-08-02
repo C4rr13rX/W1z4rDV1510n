@@ -2227,33 +2227,6 @@ impl Brain {
         Ok(())
     }
 
-    fn disk_binding_postings(&self, key: &BindingPostingKey, limit: usize) -> Vec<NeuronId> {
-        let Some(file) = self.wbrain_file.as_ref() else {
-            return Vec::new();
-        };
-        let store = file.pool(self.binding_pool_id);
-        let encoded = key.encode();
-        let mut out = Vec::new();
-        for reference in self.binding_posting_indexes.iter().rev() {
-            let remaining = limit.saturating_sub(out.len());
-            if remaining == 0 {
-                break;
-            }
-            match crate::store::posting_index::lookup(&store, *reference, &encoded, remaining) {
-                Ok(ids) => {
-                    for id in ids {
-                        append_binding_posting(&mut out, id, limit);
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!("binding posting lookup failed: {}", error);
-                    break;
-                }
-            }
-        }
-        out
-    }
-
     /// Keep bounded attention representative across immutable experience
     /// generations instead of allowing the newest overlay/generation to
     /// consume the complete candidate window.
@@ -2418,18 +2391,23 @@ impl Brain {
         target: PoolId,
         sequence: &[NeuronId],
     ) -> Vec<NeuronId> {
-        let mut out = self
+        // Exact sensory identity is authoritative, but it is not permission
+        // to hydrate every episode that ever observed a common sequence.
+        // Repeated prompts can have corpus-scale posting lists. Keep exact
+        // attention bounded and generation-fair just like feature and motif
+        // attention so an old established response and a new repair both
+        // remain eligible without waking the complete history.
+        const MAX_EXACT_POSTINGS: usize = 512;
+        let overlay = self
             .binding_sequence_index
             .get(&(query, target, sequence.to_vec()))
             .cloned()
             .unwrap_or_default();
-        for id in self.disk_binding_postings(
+        self.bounded_binding_postings_across_generations(
             &BindingPostingKey::Sequence(query, target, sequence.to_vec()),
-            usize::MAX,
-        ) {
-            append_binding_posting(&mut out, id, usize::MAX);
-        }
-        out
+            &overlay,
+            MAX_EXACT_POSTINGS,
+        )
     }
 
     fn binding_feature_postings(&self, pool: PoolId, neuron: NeuronId) -> Vec<NeuronId> {

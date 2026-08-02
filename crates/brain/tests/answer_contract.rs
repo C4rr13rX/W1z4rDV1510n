@@ -375,3 +375,57 @@ fn fuzzy_raw_recall_requires_context_but_exact_episode_does_not() {
         Some(b"print((1 + 11) / 2)".to_vec())
     );
 }
+
+#[test]
+fn repeated_exact_sequence_uses_a_bounded_generation_fair_working_set() {
+    let (mut brain, input, output) = build_two_pool_brain();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "w1z4rd_exact_sequence_attention_{}_{}.wbrain",
+        std::process::id(),
+        nonce,
+    ));
+    brain.attach_wbrain(&path).expect("attach wbrain");
+
+    let prompt = b"implement the shared enterprise operation".to_vec();
+    let established = b"established correct response".to_vec();
+    for _ in 0..4 {
+        assert!(brain
+            .pretrain_binding_episode(&[(input, prompt.clone()), (output, established.clone())])
+            .is_some());
+    }
+    brain
+        .serialize_all_neurons_for_idle()
+        .expect("flush established generation");
+
+    // A later corpus generation associates the identical sensory sequence
+    // with more responses than the exact-attention budget. This must neither
+    // hide the established recurrent response nor wake the complete list.
+    for index in 0..700 {
+        let response = format!("unvalidated response {index}").into_bytes();
+        assert!(brain
+            .pretrain_binding_episode(&[(input, prompt.clone()), (output, response)])
+            .is_some());
+    }
+    brain
+        .serialize_all_neurons_for_idle()
+        .expect("flush later generation");
+    brain.activate_for_prediction(input, &prompt);
+    let evicted_before = brain.stats().evicted_neurons;
+    assert_eq!(
+        brain.decode_best_trained_binding(input, output),
+        Some(established),
+        "generation fairness must retain the older recurrent exact response",
+    );
+    let paged_neurons = evicted_before.saturating_sub(brain.stats().evicted_neurons);
+    assert!(
+        paged_neurons < 600,
+        "exact recall paged {paged_neurons} neurons; the working set must stay bounded",
+    );
+
+    drop(brain);
+    std::fs::remove_file(path).expect("remove test wbrain");
+}
