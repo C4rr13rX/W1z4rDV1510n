@@ -486,6 +486,14 @@ def atomic_json(path: Path, payload: Any) -> None:
     temporary.replace(path)
 
 
+def write_live_status(state_dir: Path, phase: str, generation: int, **payload: Any) -> None:
+    """Publish an atomic, human-readable heartbeat for the perpetual service."""
+    atomic_json(state_dir / "status.json", {
+        "at": utc_now(), "phase": phase, "generation": generation,
+        "available_memory_gb": available_memory_gb(), **payload,
+    })
+
+
 def process_alive(pid: int) -> bool:
     if pid <= 0:
         return False
@@ -1400,6 +1408,65 @@ def introduce_directional_frontier_variants(
     return population
 
 
+def introduce_regime_repair_variants(
+    population: list[Genome], evaluated: Sequence[Genome], generation: int,
+    rng: random.Random,
+) -> list[Genome]:
+    """Reserve targeted descendants of the deepest cross-regime failure.
+
+    Random mutation is deliberately retained for exploration, but once a
+    lineage reaches more protected folds than its peers its weakest fold is
+    actionable experience.  These descendants test shorter causal memory and
+    observable-state routing without ever fitting to the untouched final
+    period or changing an admission gate.
+    """
+    candidates = [
+        genome for genome in evaluated
+        if (genome.result or {}).get("status") not in {
+            "failed", "surrogate_floor_pass", "surrogate_working_target_pass",
+        }
+        and (genome.result or {}).get("evaluated_folds", 0) >= 2
+    ]
+    if not candidates or len(population) < len(LEARNER_KINDS) + 2:
+        return population
+    base = max(candidates, key=lambda genome: (
+        int((genome.result or {}).get("evaluated_folds", 0)),
+        float((genome.result or {}).get("summary", {}).get("min_accuracy", 0)),
+        float(genome.fitness if genome.fitness is not None else -math.inf),
+    ))
+    known = {genome.genome_id for genome in population}
+    regime_choices = [name for name in REGIME_FEATURES if name != base.regime_feature]
+    rng.shuffle(regime_choices)
+    variants: list[Genome] = []
+    for index, (learner, memory_factor, bins) in enumerate((
+        ("regime_decomposed_regressor", .35, 3),
+        ("regime_regressor", .60, 2),
+    )):
+        payload = asdict(base)
+        features = set(base.features)
+        programs = [dict(program) for program in base.feature_programs]
+        if len(programs) < 10:
+            programs.append(random_program(rng))
+        payload.update({
+            "features": sorted(features),
+            "feature_programs": programs,
+            "recency_half_life_days": max(45.0, base.recency_half_life_days * memory_factor),
+            "learner_kind": learner,
+            "regime_feature": regime_choices[index % len(regime_choices)],
+            "regime_bins": bins,
+            "generation": generation,
+            "parents": [base.genome_id],
+            "fitness": None, "result": None, "genome_id": "",
+        })
+        variant = Genome(**payload).finalize()
+        if variant.genome_id not in known:
+            known.add(variant.genome_id)
+            variants.append(variant)
+    if variants:
+        population[-len(variants):] = variants
+    return population
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path,
@@ -1514,10 +1581,19 @@ def main() -> int:
                     "available_memory_gb": available_memory_gb(),
                     "required_memory_gb": args.min_free_memory_gb,
                 })
+                if stop_path.exists():
+                    break
                 time.sleep(args.memory_poll_seconds)
+            if stop_path.exists():
+                break
             append_event(events_path, "generation_started", generation=generation,
                          genomes=[genome.genome_id for genome in population])
             pending = [genome for genome in population if genome.fitness is None]
+            write_live_status(
+                args.state_dir, "evaluating", generation,
+                completed=0, pending=len(pending), population=len(population),
+                champion=champion.genome_id if champion else None,
+            )
             with ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
                 futures = {
                     executor.submit(
@@ -1526,14 +1602,24 @@ def main() -> int:
                         final_days=args.final_days, horizon=args.horizon, cost_bps=args.cost_bps,
                     ): genome for genome in pending
                 }
+                completed = 0
                 for future in as_completed(futures):
                     genome = future.result()
+                    completed += 1
                     atomic_json(args.state_dir / "candidates" / f"{genome.genome_id}.json",
                                 asdict(genome))
                     append_event(events_path, "candidate_scored", generation=generation,
                                  genome_id=genome.genome_id, fitness=genome.fitness,
                                  status=(genome.result or {}).get("status"),
                                  summary=(genome.result or {}).get("summary"))
+                    write_live_status(
+                        args.state_dir, "evaluating", generation,
+                        completed=completed, pending=len(pending), population=len(population),
+                        latest_genome=genome.genome_id, latest_fitness=genome.fitness,
+                        latest_status=(genome.result or {}).get("status"),
+                        latest_summary=(genome.result or {}).get("summary"),
+                        champion=champion.genome_id if champion else None,
+                    )
                     print(f"generation {generation} {genome.genome_id} fitness={genome.fitness:.4f} "
                           f"{(genome.result or {}).get('status')}", flush=True)
             population.sort(key=lambda genome: selection_fitness(genome, neural_scores),
@@ -1594,20 +1680,24 @@ def main() -> int:
                                  genome_id=pending_gate_genome, report=str(gate_out))
                     pending_gate_genome = None
             generation += 1
+            evaluated_population = population
             elite_count = max(len(LEARNER_KINDS) + 2, round(args.population * .40))
-            elites = select_diverse_elites(population, elite_count, neural_scores)
+            elites = select_diverse_elites(evaluated_population, elite_count, neural_scores)
             next_population = elites[:]
             known_ids = {genome.genome_id for genome in next_population}
             attempts = 0
             while len(next_population) < args.population and attempts < args.population * 50:
                 attempts += 1
-                contenders = rng.sample(population[:max(elite_count * 2, 4)], 2)
+                contenders = rng.sample(evaluated_population[:max(elite_count * 2, 4)], 2)
                 child = crossover(contenders[0], contenders[1], generation, rng)
                 if child.genome_id not in known_ids:
                     known_ids.add(child.genome_id)
                     next_population.append(child)
             population = introduce_directional_frontier_variants(
-                next_population, population, generation
+                next_population, evaluated_population, generation
+            )
+            population = introduce_regime_repair_variants(
+                population, evaluated_population, generation, rng
             )
             state = {
                 "schema": EVOLUTION_SCHEMA, "updated_at": utc_now(), "generation": generation,
@@ -1625,6 +1715,12 @@ def main() -> int:
             append_event(events_path, "generation_completed", generation=generation,
                          champion=champion.genome_id if champion else None,
                          champion_fitness=champion.fitness if champion else None)
+            write_live_status(
+                args.state_dir, "generation_complete", generation,
+                population=len(population), champion=champion.genome_id if champion else None,
+                champion_fitness=champion.fitness if champion else None,
+                champion_summary=(champion.result or {}).get("summary") if champion else None,
+            )
             time.sleep(max(0, args.sleep_seconds))
     finally:
         try:

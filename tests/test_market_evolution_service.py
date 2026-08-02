@@ -13,6 +13,7 @@ from scripts.market_evolution_service import (
     evaluation_signature, decompose_returns, fit_regime_decomposed_regressor,
     introduce_calibration_variants, introduce_directional_frontier_variants,
     introduce_missing_learner_species, introduce_reflexivity_variant,
+    introduce_regime_repair_variants,
     load_dataset_cached, mutate, passes_floor,
     passes_prescreen, program_name, program_value, recover_pending_gate,
     regression_probability_scale, seed_genomes, select_diverse_elites,
@@ -310,6 +311,43 @@ def test_directional_frontier_seeds_calibration_without_changing_sign_model():
     assert all(genome.learner_kind == base.learner_kind for genome in variants)
     assert all(genome.features == base.features for genome in variants)
     assert all(genome.parents == [base.genome_id] for genome in variants)
+
+
+def test_deep_cross_regime_failure_seeds_targeted_repair_descendants():
+    population = seed_genomes(12, random.Random(15))
+    base = population[3]
+    base.recency_half_life_days = 600
+    base.fitness = 2200
+    base.result = {
+        "status": "screened", "evaluated_folds": 3,
+        "summary": {"min_accuracy": .47},
+    }
+    updated = introduce_regime_repair_variants(
+        population, population, 8, random.Random(16),
+    )
+    variants = updated[-2:]
+    assert {genome.learner_kind for genome in variants} == {
+        "regime_regressor", "regime_decomposed_regressor",
+    }
+    assert {genome.regime_bins for genome in variants} == {2, 3}
+    assert max(genome.recency_half_life_days for genome in variants) <= 360
+    assert all(genome.parents == [base.genome_id] for genome in variants)
+    assert all(genome.fitness is None and genome.result is None for genome in variants)
+
+
+def test_shallow_failures_do_not_displace_random_exploration():
+    population = seed_genomes(12, random.Random(17))
+    for genome in population:
+        genome.fitness = 300
+        genome.result = {
+            "status": "prescreen_reject", "evaluated_folds": 1,
+            "summary": {"min_accuracy": .57},
+        }
+    original = [genome.genome_id for genome in population]
+    updated = introduce_regime_repair_variants(
+        population, population, 9, random.Random(18),
+    )
+    assert [genome.genome_id for genome in updated] == original
 
 
 def test_reflexivity_variant_is_seeded_without_erasing_learner_diversity():

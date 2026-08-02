@@ -146,6 +146,21 @@ also produces monotonic 4x and 8x temperature descendants. Those descendants
 preserve its features and sign model exactly, allowing confidence honesty to be
 tested without waiting for unrelated mutations or losing the lineage.
 
+When a lineage reaches at least two protected folds but fails a later regime,
+the controller also reserves two repair descendants in the next generation.
+They preserve the causal feature lineage while testing sharply shorter memory
+and two forms of observable-state routing (regime regression and
+regime-routed market/residual decomposition). This turns the failed protected
+fold into evolutionary pressure without exposing the untouched final period or
+weakening any gate. Random mutation, crossover, learner-species preservation,
+and reflexivity variants continue alongside these targeted descendants.
+
+`status.json` is an atomic live heartbeat. It changes to `evaluating` at the
+start of a generation, updates after every completed candidate with the latest
+protected summary, and changes to `generation_complete` after the durable
+restart coordinate is written. A cooperative stop is honored even while the
+service is waiting for the configured free-memory reserve.
+
 Schema 9 adds competitive reflexivity as an independent causal feature pool.
 It observes bounded participant direction, consensus, disagreement, leverage
 intensity, price alignment, and pressure acceleration from decision-time flow,
