@@ -653,6 +653,40 @@ def endpoint_listener_pid(endpoint: str) -> int:
     return 0
 
 
+def matching_runtime_node_pids(runtime: Path) -> list[int]:
+    """Find brain processes for this runtime before their socket is ready.
+
+    A large `.wbrain` is a live process for several minutes before it binds the
+    HTTP endpoint.  The environment is the authoritative runtime identity in
+    that interval; a stale PID file and an absent listener must not authorize a
+    second loader for the same container.
+    """
+    expected = str((runtime / "brain").resolve()).casefold()
+    matches: list[int] = []
+    for process in psutil.process_iter(["pid", "name"]):
+        try:
+            name = str(process.info.get("name") or "").casefold()
+            if "w1z4rd_brain_server" not in name:
+                continue
+            configured = str(
+                process.environ().get("W1Z4RD_NODE_BRAIN_DIR") or ""
+            )
+            if configured and str(Path(configured).resolve()).casefold() == expected:
+                matches.append(int(process.pid))
+        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+            continue
+    return sorted(set(matches))
+
+
+def unique_runtime_node_pid(runtime: Path) -> int:
+    matches = matching_runtime_node_pids(runtime)
+    if len(matches) > 1:
+        raise RuntimeError(
+            f"multiple brain processes own runtime {runtime}: {matches}"
+        )
+    return matches[0] if matches else 0
+
+
 def stop_runtime_node(runtime: Path, endpoint: str,
                       timeout: float = 60.0) -> int:
     pid_path = runtime / "node.pid"
@@ -661,8 +695,13 @@ def stop_runtime_node(runtime: Path, endpoint: str,
     except (FileNotFoundError, OSError, ValueError):
         pid = 0
     listener_pid = endpoint_listener_pid(endpoint)
-    if listener_pid and listener_pid != pid:
-        pid = listener_pid
+    runtime_pid = unique_runtime_node_pid(runtime)
+    if listener_pid and runtime_pid and listener_pid != runtime_pid:
+        raise RuntimeError(
+            f"endpoint {endpoint} belongs to PID {listener_pid}, but runtime "
+            f"{runtime} belongs to loading PID {runtime_pid}"
+        )
+    pid = listener_pid or runtime_pid or pid
     if not process_alive(pid):
         if listener_pid:
             raise RuntimeError(
@@ -698,10 +737,13 @@ def start_runtime_node(runtime: Path, executable: Path, endpoint: str,
     if parsed.scheme != "http" or not parsed.hostname or not parsed.port:
         raise RuntimeError(f"automatic node recovery requires an HTTP host and port: {endpoint}")
     occupied_pid = endpoint_listener_pid(endpoint)
-    if occupied_pid:
+    loading_pid = unique_runtime_node_pid(runtime)
+    if occupied_pid or loading_pid:
+        owner_pid = occupied_pid or loading_pid
+        (runtime / "node.pid").write_text(f"{owner_pid}\n", encoding="ascii")
         raise RuntimeError(
-            f"refusing false recovery: endpoint {endpoint} is already owned by "
-            f"PID {occupied_pid}"
+            f"refusing false recovery: runtime {runtime} is already owned by "
+            f"PID {owner_pid}"
         )
     identity = runtime / "brain" / "brain.identity.toml"
     deployment = runtime / "brain.deployment.toml"

@@ -49,6 +49,7 @@ from scripts.programming_curriculum_supervisor import (
     latest_passing_canary_row,
     disk_floor_breached,
     memory_floor_breached,
+    matching_runtime_node_pids,
     recycle_settled_runtime_node,
     mark_phase_forward_harvested,
     next_suspect_start,
@@ -74,6 +75,8 @@ from scripts.programming_curriculum_supervisor import (
     require_snapshot_copy_headroom,
     runtime_responsive_batch_size,
     settle_brain_for_admission,
+    start_runtime_node,
+    stop_runtime_node,
     suspect_intervals,
     topology_delta,
     transient_gate_failure,
@@ -150,6 +153,71 @@ from tools.training_standard.drive_corpora_brain import (
 
 
 class ProgrammingRuntimeContractTests(unittest.TestCase):
+    def test_runtime_node_identity_uses_brain_directory_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            matching = Mock(pid=44, info={
+                "pid": 44, "name": "w1z4rd_brain_server",
+            })
+            matching.environ.return_value = {
+                "W1Z4RD_NODE_BRAIN_DIR": str(runtime / "brain"),
+            }
+            other = Mock(pid=45, info={
+                "pid": 45, "name": "w1z4rd_brain_server",
+            })
+            other.environ.return_value = {
+                "W1Z4RD_NODE_BRAIN_DIR": str(runtime / "other-brain"),
+            }
+            with patch(
+                "scripts.programming_curriculum_supervisor.psutil.process_iter",
+                return_value=[other, matching],
+            ):
+                self.assertEqual(matching_runtime_node_pids(runtime), [44])
+
+    def test_loading_runtime_node_blocks_duplicate_before_socket_bind(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            executable = runtime / "w1z4rd_brain_server"
+            executable.write_bytes(b"binary")
+            with (
+                patch(
+                    "scripts.programming_curriculum_supervisor.endpoint_listener_pid",
+                    return_value=0,
+                ),
+                patch(
+                    "scripts.programming_curriculum_supervisor.matching_runtime_node_pids",
+                    return_value=[321],
+                ),
+                patch("scripts.programming_curriculum_supervisor.subprocess.Popen") as launch,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "already owned by PID 321"):
+                    start_runtime_node(runtime, executable, "http://127.0.0.1:18095")
+            launch.assert_not_called()
+            self.assertEqual((runtime / "node.pid").read_text().strip(), "321")
+
+    def test_stop_adopts_loading_runtime_node_when_pid_file_is_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            (runtime / "node.pid").write_text("111\n", encoding="ascii")
+            process = Mock()
+            process.exe.return_value = "/srv/wizard/w1z4rd_brain_server"
+            with (
+                patch(
+                    "scripts.programming_curriculum_supervisor.endpoint_listener_pid",
+                    side_effect=[0, 0],
+                ),
+                patch(
+                    "scripts.programming_curriculum_supervisor.matching_runtime_node_pids",
+                    return_value=[222],
+                ),
+                patch("scripts.programming_curriculum_supervisor.process_alive", return_value=True),
+                patch("scripts.programming_curriculum_supervisor.psutil.Process", return_value=process),
+            ):
+                stopped = stop_runtime_node(runtime, "http://127.0.0.1:18095")
+            self.assertEqual(stopped, 222)
+            process.terminate.assert_called_once_with()
+            process.wait.assert_called_once_with(timeout=60.0)
+
     def test_foundation_report_preserves_exact_oov_failure_evidence(self) -> None:
         accepted = {prompt: {"accepted"} for prompt in K12}
 

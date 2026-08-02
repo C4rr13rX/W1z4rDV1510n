@@ -51,6 +51,13 @@ Cleanup is armed only after this trainer launches its initial node; discovering
 a pre-existing listener therefore reports the port conflict without attempting
 ownership cleanup.
 
+A production `.wbrain` can take several minutes to reopen before its HTTP
+listener appears. Recovery therefore also identifies a pre-bind node by the
+`W1Z4RD_NODE_BRAIN_DIR` environment that names the runtime's brain directory.
+An absent listener and stale `node.pid` do not prove that the runtime is
+unowned; launching a second process during that window can load the same large
+container twice and exhaust host memory.
+
 For a controlled deployment or experience-admission window, stop the supervisor near a block target but allow its corpus worker to reach the exact durable boundary. Then run `programming_curriculum_supervisor.py --gate-only-phase <phase>` with the normal endpoint/runtime/gate options. It executes the same authoritative midphase or completion gate, releases the matching last-good guard only on success, and exits without starting another worker. Resume the ordinary supervisor only after the protected maintenance operation is complete.
 
 When a continuous canary rejects a live candidate and a causal correction has
