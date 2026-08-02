@@ -11,6 +11,38 @@ supervisor_stage_file="${runtime}/curriculum-service-supervisor.stage"
 
 cd "${project_root}"
 
+# Own initial-node creation here instead of unconditionally pulling in a
+# second systemd unit.  A recovered node intentionally survives curriculum
+# wrapper restarts, and its runtime environment is visible before its socket
+# binds.  Adopt that process; launch only when neither identity exists.
+python3 - "${runtime}" "${node_bin}" "${endpoint}" <<'PY'
+import pathlib
+import sys
+
+from scripts.programming_curriculum_supervisor import (
+    endpoint_listener_pid,
+    start_runtime_node,
+    unique_runtime_node_pid,
+)
+
+runtime = pathlib.Path(sys.argv[1])
+node_bin = pathlib.Path(sys.argv[2])
+endpoint = sys.argv[3]
+listener_pid = endpoint_listener_pid(endpoint)
+runtime_pid = unique_runtime_node_pid(runtime)
+if listener_pid and runtime_pid and listener_pid != runtime_pid:
+    raise SystemExit(
+        f"brain endpoint/runtime conflict: endpoint_pid={listener_pid} "
+        f"runtime_pid={runtime_pid}"
+    )
+if listener_pid and not runtime_pid:
+    raise SystemExit(
+        f"brain endpoint belongs to unrecognized PID {listener_pid}"
+    )
+if not listener_pid and not runtime_pid:
+    start_runtime_node(runtime, node_bin, endpoint)
+PY
+
 ready=0
 for _ in $(seq 1 300); do
   if curl -fsS "${endpoint}/health" >/dev/null; then

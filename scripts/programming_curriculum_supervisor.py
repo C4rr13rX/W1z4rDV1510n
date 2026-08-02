@@ -915,6 +915,13 @@ def transient_gate_failure(error: BaseException) -> bool:
     return any(marker in diagnostic for marker in (
         "timeouterror",
         "timed out",
+        # An evaluator that cannot open its own corpus, executable, or other
+        # required fixture did not observe brain behavior.  Keep the guarded
+        # candidate intact and pause for infrastructure repair instead of
+        # manufacturing a semantic quarantine from a missing deployment
+        # artifact.
+        "filenotfounderror",
+        "no such file or directory",
         "connectionrefusederror",
         "connectionreseterror",
         "remotedisconnected",

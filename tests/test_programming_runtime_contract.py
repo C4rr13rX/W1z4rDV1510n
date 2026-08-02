@@ -203,6 +203,15 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         self.assertIn("runtime_pid = unique_runtime_node_pid(runtime)", wrapper)
         self.assertIn("listener_pid != runtime_pid", wrapper)
         self.assertIn("os.replace(temporary, pid_path)", wrapper)
+        self.assertIn(
+            "if not listener_pid and not runtime_pid:\n"
+            "    start_runtime_node(runtime, node_bin, endpoint)",
+            wrapper,
+        )
+        unit = (
+            ROOT / "scripts" / "aws" / "wizard-curriculum-supervisor.service"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("wizard-brain-initial.service", unit)
 
     def test_stop_adopts_loading_runtime_node_when_pid_file_is_stale(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -458,7 +467,12 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             ["python", "eval.py"], 1, "",
             "novel_paraphrase executes 4/5",
         )
+        missing_fixture = GateCommandFailure(
+            ["python", "eval.py"], 1, "",
+            "FileNotFoundError: [Errno 2] No such file or directory: corpus.jsonl",
+        )
         self.assertTrue(transient_gate_failure(timeout))
+        self.assertTrue(transient_gate_failure(missing_fixture))
         self.assertFalse(transient_gate_failure(regression))
         self.assertTrue(
             transient_gate_failure(

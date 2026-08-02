@@ -1,7 +1,7 @@
 [Unit]
 Description=Wizard Vision guarded programming curriculum
-After=network-online.target srv-wizard.mount wizard-brain-initial.service
-Wants=network-online.target wizard-brain-initial.service
+After=network-online.target srv-wizard.mount
+Wants=network-online.target
 RequiresMountsFor=/srv/wizard
 StartLimitIntervalSec=0
 
