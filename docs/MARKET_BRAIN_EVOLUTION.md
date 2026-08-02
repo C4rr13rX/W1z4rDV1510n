@@ -160,6 +160,10 @@ start of a generation, updates after every completed candidate with the latest
 protected summary, and changes to `generation_complete` after the durable
 restart coordinate is written. A cooperative stop is honored even while the
 service is waiting for the configured free-memory reserve.
+Transient Windows sharing violations are retried and heartbeat publication is
+best-effort: a dashboard, indexer, or antivirus reader cannot terminate the
+durable evolution loop. After a controller restart, an already-running neural
+gate is detected and allowed to finish before another gate is launched.
 
 Schema 9 adds competitive reflexivity as an independent causal feature pool.
 It observes bounded participant direction, consensus, disagreement, leverage

@@ -483,15 +483,44 @@ def atomic_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
     temporary.write_text(json.dumps(payload, indent=2, allow_nan=False), encoding="utf-8")
-    temporary.replace(path)
+    for attempt in range(6):
+        try:
+            temporary.replace(path)
+            return
+        except PermissionError:
+            if attempt == 5:
+                raise
+            # Antivirus, indexers, and dashboard readers can briefly hold a
+            # Windows file handle. The durable payload remains in the temp
+            # file while replacement is retried.
+            time.sleep(.05 * (2 ** attempt))
 
 
 def write_live_status(state_dir: Path, phase: str, generation: int, **payload: Any) -> None:
     """Publish an atomic, human-readable heartbeat for the perpetual service."""
-    atomic_json(state_dir / "status.json", {
-        "at": utc_now(), "phase": phase, "generation": generation,
-        "available_memory_gb": available_memory_gb(), **payload,
-    })
+    try:
+        atomic_json(state_dir / "status.json", {
+            "at": utc_now(), "phase": phase, "generation": generation,
+            "available_memory_gb": available_memory_gb(), **payload,
+        })
+    except OSError:
+        # A monitoring surface must never terminate the evolutionary owner.
+        pass
+
+
+def external_brain_gate_pids() -> list[int]:
+    """Find neural gates that survived a controller restart on this machine."""
+    if psutil is None:
+        return []
+    result = []
+    for process in psutil.process_iter(("pid", "cmdline")):
+        try:
+            command = " ".join(process.info.get("cmdline") or [])
+            if "market_evolution_brain_gate.py" in command:
+                result.append(int(process.info["pid"]))
+        except (psutil.AccessDenied, psutil.NoSuchProcess, TypeError):
+            continue
+    return result
 
 
 def process_alive(pid: int) -> bool:
@@ -1648,7 +1677,8 @@ def main() -> int:
                     # A gate can be much slower than statistical screening.
                     # Retain the newest obligation while an older gate runs.
                     pending_gate_genome = champion.genome_id
-            if gate_process is None and pending_gate_genome is not None:
+            if (gate_process is None and pending_gate_genome is not None
+                    and not external_brain_gate_pids()):
                 candidate_path = (args.state_dir / "candidates"
                                   / f"{pending_gate_genome}.json")
                 gate_out = (args.state_dir / "brain-gate-reports"

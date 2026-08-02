@@ -1,6 +1,7 @@
 import json
 import math
 import random
+from pathlib import Path
 
 import pytest
 import numpy as np
@@ -17,6 +18,7 @@ from scripts.market_evolution_service import (
     load_dataset_cached, mutate, passes_floor,
     passes_prescreen, program_name, program_value, recover_pending_gate,
     regression_probability_scale, seed_genomes, select_diverse_elites,
+    write_live_status,
 )
 
 
@@ -363,6 +365,14 @@ def test_shallow_failures_do_not_displace_random_exploration():
         population, population, 9, random.Random(18),
     )
     assert [genome.genome_id for genome in updated] == original
+
+
+def test_live_status_failure_never_stops_evolution(monkeypatch, tmp_path):
+    def denied(path: Path, payload):
+        raise PermissionError("dashboard reader briefly owns status")
+
+    monkeypatch.setattr(evolution, "atomic_json", denied)
+    write_live_status(tmp_path, "evaluating", 12, completed=3)
 
 
 def test_reflexivity_variant_is_seeded_without_erasing_learner_diversity():
