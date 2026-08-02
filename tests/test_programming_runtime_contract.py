@@ -195,6 +195,15 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             launch.assert_not_called()
             self.assertEqual((runtime / "node.pid").read_text().strip(), "321")
 
+    def test_service_wrapper_reconciles_initial_node_identity(self) -> None:
+        wrapper = (
+            ROOT / "scripts" / "aws" / "run_programming_curriculum_service.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn("listener_pid = endpoint_listener_pid(endpoint)", wrapper)
+        self.assertIn("runtime_pid = unique_runtime_node_pid(runtime)", wrapper)
+        self.assertIn("listener_pid != runtime_pid", wrapper)
+        self.assertIn("os.replace(temporary, pid_path)", wrapper)
+
     def test_stop_adopts_loading_runtime_node_when_pid_file_is_stale(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runtime = Path(directory)

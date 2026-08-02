@@ -147,6 +147,13 @@ The corpus supervisor then trains:
 
 Corpus processing is resumable and WAL-durable. The default production schedule uses a 131,072-row guarded admission block with non-halting 16,384-row canaries. Every small batch is flushed to the WAL before acknowledgement. Interior canaries detect drift while training continues and quarantine only the suspect interval; the canary coincident with the comprehensive block endpoint is deliberately skipped because the worker may still be finishing its final checkpoint. At the exact stopped-worker boundary, the supervisor drains deferred maintenance, serializes all neuron bodies, checkpoints that settled state, verifies zero resident terminals, and only then runs distributed corpus recall, foundational retention, executable transfer, strict enterprise behavior, OOV honesty, and read-only tick/topology invariants. A passing gate releases the independent last-known-good guard. Before the next guard is assigned a corpus row, the live node completes another checkpoint barrier and the guard records the post-barrier topology. Recovery resolves the process that actually owns the configured endpoint, confirms the replacement PID owns it, and requires its reopened topology to match that proof before the ledger may be rewound to the guard row. Historical over-ceiling evidence initializes a conservative server-side neural lock scope. Within a live run, eight consecutive observations below one quarter of the responsiveness ceiling double that scope gradually up to the configured maximum; any ceiling breach immediately scales it downward and records the exact slow rows and stage profile. This sheds obsolete calibration after a causal optimization without weakening the measured responsiveness invariant. During inference, complete raw atom-grounded exact episodes remain authoritative. Exact, composed, or ranked artifacts reconstructed from derived intent pools must pass the same language and behavioral compatibility contract before they can answer; “exact” within a lossy semantic projection is not equivalent to exact sensory experience.
 
+After the independently managed initial node becomes healthy, the service
+wrapper resolves both its listening-socket PID and its
+`W1Z4RD_NODE_BRAIN_DIR` runtime identity. They must identify the same process
+before the wrapper atomically replaces `node.pid`. This prevents a stale PID
+file from contradicting the pre-bind process identity used to block duplicate
+large-container loaders.
+
 All admission observations use one infrastructure policy. Transient timeout,
 connection, empty-output, or truncated-JSON failures are retried and recorded
 as `passed: null`; they are never converted into semantic corpus intervals.

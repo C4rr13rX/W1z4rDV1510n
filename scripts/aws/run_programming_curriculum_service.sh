@@ -24,6 +24,37 @@ if [[ "${ready}" != "1" ]]; then
   exit 1
 fi
 
+# The initial-node unit can spend minutes opening a production `.wbrain`
+# before it owns the HTTP socket.  Its process is deliberately independent of
+# this service, so a PID file left by an older node is not authoritative.  Once
+# health is proven, require the socket owner and runtime-environment owner to
+# agree and atomically publish that identity before the supervisor may mutate
+# corpus state.
+python3 - "${runtime}" "${endpoint}" <<'PY'
+import os
+import pathlib
+import sys
+
+from scripts.programming_curriculum_supervisor import (
+    endpoint_listener_pid,
+    unique_runtime_node_pid,
+)
+
+runtime = pathlib.Path(sys.argv[1])
+endpoint = sys.argv[2]
+listener_pid = endpoint_listener_pid(endpoint)
+runtime_pid = unique_runtime_node_pid(runtime)
+if not listener_pid or not runtime_pid or listener_pid != runtime_pid:
+    raise SystemExit(
+        "brain identity mismatch after health check: "
+        f"endpoint_pid={listener_pid} runtime_pid={runtime_pid}"
+    )
+pid_path = runtime / "node.pid"
+temporary = pid_path.with_suffix(pid_path.suffix + f".{os.getpid()}.tmp")
+temporary.write_text(f"{runtime_pid}\n", encoding="ascii")
+os.replace(temporary, pid_path)
+PY
+
 status_state() {
   python3 - "${runtime}/curriculum-supervisor.status.json" <<'PY'
 import json
