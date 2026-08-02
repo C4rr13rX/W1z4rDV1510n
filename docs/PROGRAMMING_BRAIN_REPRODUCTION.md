@@ -160,9 +160,15 @@ python scripts/programming_curriculum_supervisor.py `
   --endpoint http://127.0.0.1:18095 `
   --node-bin target/release/w1z4rd_brain_server.exe `
   --replay-deferred `
-  --batch-size 32 `
-  --lock-chunk-size 32
+  --batch-size 8 `
+  --lock-chunk-size 8 `
+  --min-free-memory-gb 8
 ```
+
+At million-neuron scale, keep the replay request and neural-lock envelopes at
+eight episodes as shown. The earlier 32-episode envelope is not a safe default
+for a fabric of this size: it can hold the response boundary long enough to
+hide memory pressure and block protected inference behind training.
 
 Replay is deliberately an end-of-corpus transaction. Each interval trains against the final accepted brain under an independent guard, recalls samples from its exact row window, and then passes the complete corpus/foundation/enterprise admission gate with that interval temporarily included. A passing interval is resolved and its unreferenced causal base pruned. A failing interval restores the final brain, remains unresolved with its diagnostic artifacts, and stops the replay loop for a test/family-fix/retry cycle. Use `--replay-interval-id PHASE:START:END` to retry one corrected interval without admitting any other pending range.
 
