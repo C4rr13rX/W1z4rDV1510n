@@ -924,7 +924,7 @@ fn normalized_char_motifs(bytes: &[u8]) -> ahash::AHashSet<[u8; 3]> {
 
 #[cfg(test)]
 mod posting_tests {
-    use super::append_binding_posting;
+    use super::{append_binding_posting, rank_bounded_binding_evidence};
 
     #[test]
     fn posting_append_is_constant_time_idempotent_and_bounded() {
@@ -935,6 +935,20 @@ mod posting_tests {
         append_binding_posting(&mut ids, 6, 2);
         assert_eq!(ids, vec![4, 5]);
     }
+
+    #[test]
+    fn global_binding_attention_prefers_cofiring_evidence_and_is_bounded() {
+        let mut evidence = ahash::AHashMap::new();
+        for id in 0..700 {
+            *evidence.entry(id).or_insert(0_u16) += 1;
+        }
+        for id in [3, 17, 699] {
+            *evidence.entry(id).or_insert(0_u16) += 3;
+        }
+        let ranked = rank_bounded_binding_evidence(evidence, 512);
+        assert_eq!(ranked.len(), 512);
+        assert!(ranked.starts_with(&[699, 17, 3]));
+    }
 }
 
 /// Binding indexes are populated once per newly allocated binding id and are
@@ -944,6 +958,37 @@ fn append_binding_posting(ids: &mut Vec<NeuronId>, binding_id: NeuronId, limit: 
     if ids.len() < limit && ids.last().copied() != Some(binding_id) {
         ids.push(binding_id);
     }
+}
+
+const MAX_ROUTED_BINDING_CANDIDATES: usize = 512;
+
+fn add_binding_evidence(
+    evidence: &mut AHashMap<NeuronId, u16>,
+    ids: impl IntoIterator<Item = NeuronId>,
+) {
+    for id in ids {
+        let score = evidence.entry(id).or_insert(0);
+        *score = score.saturating_add(1);
+    }
+}
+
+/// Rank cheap posting identities before any neuron body is deserialized.
+/// Co-firing across independent query features is stronger routing evidence
+/// than membership in one broad list. Newer ids win only equal-evidence ties;
+/// generation fairness inside each posting list keeps older established
+/// experience eligible for the comparison.
+fn rank_bounded_binding_evidence(
+    evidence: AHashMap<NeuronId, u16>,
+    limit: usize,
+) -> Vec<NeuronId> {
+    let mut ranked: Vec<_> = evidence.into_iter().collect();
+    ranked.sort_unstable_by(|(left_id, left_score), (right_id, right_score)| {
+        right_score
+            .cmp(left_score)
+            .then_with(|| right_id.cmp(left_id))
+    });
+    ranked.truncate(limit);
+    ranked.into_iter().map(|(id, _)| id).collect()
 }
 
 impl Brain {
@@ -2758,17 +2803,25 @@ impl Brain {
             )
         };
 
-        let mut candidates = ahash::AHashSet::new();
-        candidates.extend(terminal_routes);
+        let mut candidates = AHashMap::new();
+        add_binding_evidence(&mut candidates, terminal_routes);
         for neuron_id in firing {
-            candidates.extend(self.binding_feature_postings(query_pool, neuron_id));
+            add_binding_evidence(
+                &mut candidates,
+                self.binding_feature_postings(query_pool, neuron_id),
+            );
         }
         if let Some(target_pool) = target_pool.filter(|_| !sequence.is_empty()) {
-            candidates.extend(self.binding_sequence_postings(query_pool, target_pool, &sequence));
+            add_binding_evidence(
+                &mut candidates,
+                self.binding_sequence_postings(query_pool, target_pool, &sequence),
+            );
         }
 
-        let mut ids: Vec<NeuronId> = candidates.into_iter().collect();
-        ids.sort_unstable();
+        let mut ids = rank_bounded_binding_evidence(
+            candidates,
+            MAX_ROUTED_BINDING_CANDIDATES,
+        );
         if let Some(binding_handle) = self.fabric.pool(self.binding_pool_id) {
             let mut bindings = binding_handle.write();
             ids.retain(|binding_id| match bindings.ensure_loaded(*binding_id) {
@@ -3752,9 +3805,9 @@ impl Brain {
         } else {
             self.binding_sequence_postings(query_pool, target_pool, &query_seq)
         };
-        let mut candidate_set = ahash::AHashSet::new();
-        candidate_set.extend(exact_candidates);
-        if candidate_set.is_empty() {
+        let mut candidate_evidence = AHashMap::new();
+        add_binding_evidence(&mut candidate_evidence, exact_candidates);
+        if candidate_evidence.is_empty() {
             let mut routing_atoms = q_atoms.clone();
             if !q_concepts.is_empty() {
                 if let Some(query_handle) = self.fabric.pool(query_pool) {
@@ -3789,7 +3842,7 @@ impl Brain {
                 .collect();
             feature_postings.sort_unstable_by_key(|(atom, ids)| (ids.len(), *atom));
             for (_, ids) in feature_postings.into_iter().take(8) {
-                candidate_set.extend(ids);
+                add_binding_evidence(&mut candidate_evidence, ids);
             }
             if !query_seq.is_empty() {
                 if let Some(query_handle) = self.fabric.pool(query_pool) {
@@ -3810,16 +3863,18 @@ impl Brain {
                         .collect();
                     postings.sort_unstable_by_key(|ids| ids.len());
                     for ids in postings.into_iter().take(8) {
-                        candidate_set.extend(ids.iter().copied());
+                        add_binding_evidence(&mut candidate_evidence, ids);
                     }
                 }
             }
         }
-        if candidate_set.is_empty() {
+        if candidate_evidence.is_empty() {
             return None;
         }
-        let mut candidate_ids: Vec<NeuronId> = candidate_set.into_iter().collect();
-        candidate_ids.sort_unstable();
+        let candidate_ids = rank_bounded_binding_evidence(
+            candidate_evidence,
+            MAX_ROUTED_BINDING_CANDIDATES,
+        );
 
         // Wake only the routed binding bodies. Their member payload is absent
         // while idle and must be present before scoring.
@@ -4342,7 +4397,7 @@ impl Brain {
         query_pools: &[PoolId],
         target_pool: PoolId,
     ) -> Vec<NeuronId> {
-        let mut binding_ids = ahash::AHashSet::new();
+        let mut binding_evidence = AHashMap::new();
         for pool_id in query_pools {
             let Some(pool_handle) = self.fabric.pool(*pool_id) else {
                 continue;
@@ -4351,9 +4406,13 @@ impl Brain {
             for neuron_id in pool.currently_firing() {
                 if let Some(neuron) = pool.get(neuron_id) {
                     if neuron.is_atom() {
-                        binding_ids.extend(self.binding_feature_postings(*pool_id, neuron_id));
+                        add_binding_evidence(
+                            &mut binding_evidence,
+                            self.binding_feature_postings(*pool_id, neuron_id),
+                        );
                     }
-                    binding_ids.extend(
+                    add_binding_evidence(
+                        &mut binding_evidence,
                         neuron
                             .terminals
                             .iter()
@@ -4364,11 +4423,10 @@ impl Brain {
             }
             let sequence = pool.last_observed_sequence().to_vec();
             if !sequence.is_empty() {
-                binding_ids.extend(self.binding_sequence_postings(
-                    *pool_id,
-                    target_pool,
-                    &sequence,
-                ));
+                add_binding_evidence(
+                    &mut binding_evidence,
+                    self.binding_sequence_postings(*pool_id, target_pool, &sequence),
+                );
             }
             let refs: Vec<NeuronRef> = pool
                 .last_observed_sequence()
@@ -4387,14 +4445,16 @@ impl Brain {
                 .collect();
             postings.sort_unstable_by_key(|ids| ids.len());
             for ids in postings.into_iter().take(8) {
-                binding_ids.extend(ids.iter().copied());
+                add_binding_evidence(&mut binding_evidence, ids);
             }
         }
         let Some(binding_handle) = self.fabric.pool(self.binding_pool_id) else {
             return Vec::new();
         };
-        let mut routed_ids: Vec<NeuronId> = binding_ids.into_iter().collect();
-        routed_ids.sort_unstable();
+        let routed_ids = rank_bounded_binding_evidence(
+            binding_evidence,
+            MAX_ROUTED_BINDING_CANDIDATES,
+        );
         let mut members_by_pool: AHashMap<PoolId, Vec<NeuronId>> = AHashMap::new();
         {
             let mut bindings = binding_handle.write();
@@ -4629,10 +4689,17 @@ impl Brain {
         if query_atoms.len() < 2 {
             return Vec::new();
         }
-        let candidate_ids: ahash::AHashSet<NeuronId> = query_atoms
-            .iter()
-            .flat_map(|atom| self.binding_feature_postings(feature_pool, *atom))
-            .collect();
+        let mut candidate_evidence = AHashMap::new();
+        for atom in &query_atoms {
+            add_binding_evidence(
+                &mut candidate_evidence,
+                self.binding_feature_postings(feature_pool, *atom),
+            );
+        }
+        let candidate_ids = rank_bounded_binding_evidence(
+            candidate_evidence,
+            MAX_ROUTED_BINDING_CANDIDATES,
+        );
         if candidate_ids.is_empty() {
             return Vec::new();
         }
@@ -4959,10 +5026,17 @@ impl Brain {
         if query_atoms.len() < 2 {
             return None;
         }
-        let candidate_ids: ahash::AHashSet<NeuronId> = query_atoms
-            .iter()
-            .flat_map(|atom| self.binding_feature_postings(feature_pool, *atom))
-            .collect();
+        let mut candidate_evidence = AHashMap::new();
+        for atom in &query_atoms {
+            add_binding_evidence(
+                &mut candidate_evidence,
+                self.binding_feature_postings(feature_pool, *atom),
+            );
+        }
+        let candidate_ids = rank_bounded_binding_evidence(
+            candidate_evidence,
+            MAX_ROUTED_BINDING_CANDIDATES,
+        );
         if candidate_ids.is_empty() {
             return None;
         }
@@ -5179,10 +5253,14 @@ impl Brain {
             .filter(|ids| !ids.is_empty())
             .collect();
         posting_lists.sort_unstable_by_key(|ids| ids.len());
-        let mut candidate_ids = ahash::AHashSet::new();
+        let mut candidate_evidence = AHashMap::new();
         for ids in posting_lists.into_iter().take(8) {
-            candidate_ids.extend(ids.iter().copied());
+            add_binding_evidence(&mut candidate_evidence, ids);
         }
+        let candidate_ids = rank_bounded_binding_evidence(
+            candidate_evidence,
+            MAX_ROUTED_BINDING_CANDIDATES,
+        );
         drop(bindings);
         {
             let mut bindings = bindings_handle.write();
