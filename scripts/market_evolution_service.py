@@ -1276,6 +1276,28 @@ def introduce_calibration_variants(population: list[Genome], generation: int) ->
     return population
 
 
+def introduce_reflexivity_variant(population: list[Genome], generation: int) -> list[Genome]:
+    """Seed the new participant-state pool without making it globally mandatory."""
+    if not population or any(set(genome.features) & REFLEXIVITY_FEATURES
+                             for genome in population):
+        return population
+    base = population[0]
+    counts = Counter(genome.learner_kind for genome in population)
+    replacement_index = next(
+        (index for index in range(len(population) - 1, -1, -1)
+         if counts[population[index].learner_kind] > 1),
+        len(population) - 1,
+    )
+    payload = asdict(base)
+    payload.update({
+        "features": sorted(set(base.features) | REFLEXIVITY_FEATURES),
+        "generation": generation, "parents": [base.genome_id],
+        "fitness": None, "result": None, "genome_id": "",
+    })
+    population[replacement_index] = Genome(**payload).finalize()
+    return population
+
+
 def brain_feedback_score(report: dict[str, Any] | None) -> float:
     """Bound neural smoke evidence so it guides but cannot bypass fold stages."""
     sections = [
@@ -1327,6 +1349,12 @@ def select_diverse_elites(population: Sequence[Genome], count: int,
     for has_programs in (True, False):
         candidate = next((genome for genome in ranked
                           if bool(genome.feature_programs) is has_programs), None)
+        if candidate is not None:
+            retain(candidate)
+    for uses_reflexivity in (True, False):
+        candidate = next((genome for genome in ranked
+                          if bool(set(genome.features) & REFLEXIVITY_FEATURES)
+                          is uses_reflexivity), None)
         if candidate is not None:
             retain(candidate)
     for genome in ranked:
@@ -1459,6 +1487,7 @@ def main() -> int:
         population = seed_genomes(args.population, rng)
         champion = None
         append_event(events_path, "started", population=args.population)
+    population = introduce_reflexivity_variant(population, generation)
     try:
         while not stop_path.exists() and (args.max_generations == 0 or generation < args.max_generations):
             if gate_process is not None and gate_process.poll() is not None:
@@ -1565,7 +1594,7 @@ def main() -> int:
                                  genome_id=pending_gate_genome, report=str(gate_out))
                     pending_gate_genome = None
             generation += 1
-            elite_count = max(len(LEARNER_KINDS), round(args.population * .40))
+            elite_count = max(len(LEARNER_KINDS) + 2, round(args.population * .40))
             elites = select_diverse_elites(population, elite_count, neural_scores)
             next_population = elites[:]
             known_ids = {genome.genome_id for genome in next_population}

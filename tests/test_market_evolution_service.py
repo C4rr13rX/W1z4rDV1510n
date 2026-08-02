@@ -12,7 +12,7 @@ from scripts.market_evolution_service import (
     attach_news_features, crossover, dataset_signature, evaluation_scope,
     evaluation_signature, decompose_returns, fit_regime_decomposed_regressor,
     introduce_calibration_variants, introduce_directional_frontier_variants,
-    introduce_missing_learner_species,
+    introduce_missing_learner_species, introduce_reflexivity_variant,
     load_dataset_cached, mutate, passes_floor,
     passes_prescreen, program_name, program_value, recover_pending_gate,
     regression_probability_scale, seed_genomes, select_diverse_elites,
@@ -310,3 +310,17 @@ def test_directional_frontier_seeds_calibration_without_changing_sign_model():
     assert all(genome.learner_kind == base.learner_kind for genome in variants)
     assert all(genome.features == base.features for genome in variants)
     assert all(genome.parents == [base.genome_id] for genome in variants)
+
+
+def test_reflexivity_variant_is_seeded_without_erasing_learner_diversity():
+    population = seed_genomes(12, random.Random(14))
+    for genome in population:
+        genome.features = sorted(set(genome.features) - evolution.REFLEXIVITY_FEATURES)
+        genome.finalize()
+    original_species = {genome.learner_kind for genome in population}
+    updated = introduce_reflexivity_variant(population, 7)
+    reflexive = [genome for genome in updated
+                 if set(genome.features) & evolution.REFLEXIVITY_FEATURES]
+    assert len(reflexive) == 1
+    assert evolution.REFLEXIVITY_FEATURES <= set(reflexive[0].features)
+    assert original_species <= {genome.learner_kind for genome in updated}
