@@ -1380,7 +1380,15 @@ def introduce_directional_frontier_variants(
             "regressor", "decomposed_regressor", "regime_regressor",
             "regime_decomposed_regressor",
         }
-        and (genome.result or {}).get("summary", {}).get("min_accuracy", 0) >= FLOOR["accuracy"]
+        and (genome.result or {}).get("summary", {}).get(
+            "min_accuracy", 0
+        ) >= PRESCREEN["accuracy"]
+        and (genome.result or {}).get("summary", {}).get(
+            "min_balanced_accuracy", 0
+        ) >= PRESCREEN["balanced_accuracy"]
+        and (genome.result or {}).get("summary", {}).get(
+            "min_mcc", -1
+        ) >= PRESCREEN["mcc"]
         and (genome.result or {}).get("summary", {}).get("min_expectancy", 0) > 0
         and (genome.result or {}).get("summary", {}).get("max_ece", 0) > FLOOR["ece"]
     ]

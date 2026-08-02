@@ -302,7 +302,8 @@ def test_directional_frontier_seeds_calibration_without_changing_sign_model():
     base = population[1]
     base.calibration_safety = 1.0
     base.result = {"summary": {
-        "min_accuracy": .59, "min_mcc": .13, "min_expectancy": .002,
+        "min_accuracy": .59, "min_balanced_accuracy": .56,
+        "min_mcc": .13, "min_expectancy": .002,
         "max_ece": .30,
     }}
     updated = introduce_directional_frontier_variants(population, [base], 4)
@@ -310,6 +311,20 @@ def test_directional_frontier_seeds_calibration_without_changing_sign_model():
     assert [genome.calibration_safety for genome in variants] == [4.0, 8.0]
     assert all(genome.learner_kind == base.learner_kind for genome in variants)
     assert all(genome.features == base.features for genome in variants)
+    assert all(genome.parents == [base.genome_id] for genome in variants)
+
+
+def test_prescreen_directional_frontier_can_repair_calibration_before_next_fold():
+    population = seed_genomes(12, random.Random(19))
+    base = population[1]
+    base.calibration_safety = 1.0
+    base.result = {"summary": {
+        "min_accuracy": .56, "min_balanced_accuracy": .54, "min_mcc": .08,
+        "min_expectancy": .001, "max_ece": .27,
+    }}
+    updated = introduce_directional_frontier_variants(population, [base], 5)
+    variants = updated[-2:]
+    assert [genome.calibration_safety for genome in variants] == [4.0, 8.0]
     assert all(genome.parents == [base.genome_id] for genome in variants)
 
 

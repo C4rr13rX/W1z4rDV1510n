@@ -141,7 +141,7 @@ market weight recombines them. Future returns remain supervised targets only,
 and the router sees only decision-time context.
 
 Selection retains the champion plus every learner species. A positive-expectancy
-directional frontier above the accuracy floor but outside the calibration gate
+directional frontier above the multimetric prescreen floor but outside the calibration gate
 also produces monotonic 4x and 8x temperature descendants. Those descendants
 preserve its features and sign model exactly, allowing confidence honesty to be
 tested without waiting for unrelated mutations or losing the lineage.
