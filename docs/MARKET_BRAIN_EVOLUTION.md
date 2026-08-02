@@ -5,6 +5,14 @@ loop. It loads the causal corpus once, runs a bounded parallel population,
 retains every result and failure, keeps elites, and creates mutations and
 crossovers until `runtime/market-evolution/STOP` appears.
 
+While running, the controller fingerprints OHLCV, derivatives, and news at
+generation boundaries (every 30 minutes by default). When new evidence
+arrives, it reloads the corpus, retains the heritable genomes, clears every
+corpus-dependent fitness and neural score, and revalidates all survivors.
+Neural-gate results that finish against an older corpus fingerprint are logged
+as stale and cannot enter selection or the untouched-final queue. Use
+`--dataset-refresh-seconds 0` only for an intentionally frozen experiment.
+
 The genome evolves feature and derived-relationship selection, confidence
 scope, screening parameters, Wizard binding/concept thresholds, and supervised
 presentation density. Screening parameters are only a cheap information test:

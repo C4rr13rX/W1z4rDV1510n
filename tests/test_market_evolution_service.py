@@ -173,6 +173,21 @@ def test_evaluation_signature_changes_without_invalidating_feature_cache(tmp_pat
     assert data == dataset_signature(manifest, supplemental)
 
 
+def test_new_corpus_evidence_invalidates_scores_but_preserves_lineages():
+    population = seed_genomes(6, random.Random(14))
+    identities = {genome.genome_id for genome in population}
+    for genome in population:
+        genome.fitness = 123.0
+        genome.result = {"status": "screened"}
+    refreshed = evolution.invalidate_population_for_new_evidence(
+        population, 19, random.Random(15)
+    )
+    assert identities & {genome.genome_id for genome in refreshed}
+    assert all(genome.fitness is None and genome.result is None
+               for genome in refreshed)
+    assert {genome.learner_kind for genome in refreshed} == set(evolution.LEARNER_KINDS)
+
+
 def test_regression_temperature_preserves_zero_boundary():
     scores = np.asarray([-10, -8, -6, -4, -2, 2, 4, 6, 8, 10] * 4, dtype=float)
     labels = np.asarray([-1, -1, -1, 1, -1, 1, 1, -1, 1, 1] * 4, dtype=int)

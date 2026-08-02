@@ -604,6 +604,23 @@ def recover_pending_gate(state_dir: Path, champion: Genome | None,
     return None if report.is_file() else champion.genome_id
 
 
+def invalidate_population_for_new_evidence(
+    population: list[Genome], generation: int, rng: random.Random,
+) -> list[Genome]:
+    """Clear evidence-dependent scores while preserving heritable lineages.
+
+    Fitness and neural tie-break scores describe one exact causal corpus.  A
+    growing market/news corpus therefore has to re-evaluate every survivor;
+    retaining the genome is useful heredity, but retaining its old score would
+    compare unlike experiments and could promote a stale winner.
+    """
+    for genome in population:
+        genome.fitness = None
+        genome.result = None
+    population = introduce_calibration_variants(population, generation)
+    return introduce_missing_learner_species(population, generation, rng)
+
+
 def add_derived_features(rows: Sequence[dict[str, Any]]) -> None:
     for row in rows:
         features = row["features"]
@@ -1533,6 +1550,11 @@ def main() -> int:
                         help="launch one isolated Wizard smoke gate this many generations")
     parser.add_argument("--min-free-memory-gb", type=float, default=8.0)
     parser.add_argument("--memory-poll-seconds", type=float, default=15.0)
+    parser.add_argument(
+        "--dataset-refresh-seconds", type=float, default=1800.0,
+        help=("fingerprint OHLCV, derivatives, and news at generation boundaries; "
+              "zero disables live corpus refresh"),
+    )
     args = parser.parse_args()
     if args.population < 4:
         raise ValueError("population must be at least four")
@@ -1543,6 +1565,7 @@ def main() -> int:
     gate_process: subprocess.Popen | None = None
     gate_genome: str | None = None
     gate_out: Path | None = None
+    gate_signature: str | None = None
     pending_gate_genome: str | None = None
     neural_scores: dict[str, float] = {}
     owner = claim_service(args.state_dir)
@@ -1574,12 +1597,12 @@ def main() -> int:
         neural_scores = {str(key): float(value)
                          for key, value in state.get("neural_scores", {}).items()}
         if state.get("dataset_signature") != signature:
-            for genome in population:
-                genome.fitness = None
-                genome.result = None
-            population = introduce_calibration_variants(population, generation)
-            population = introduce_missing_learner_species(population, generation, rng)
+            population = invalidate_population_for_new_evidence(
+                population, generation, rng
+            )
             champion = None
+            neural_scores = {}
+            pending_gate_genome = None
             append_event(events_path, "dataset_changed", previous=state.get("dataset_signature"),
                          current=signature, action="population_revalidation")
         population = introduce_missing_learner_species(population, generation, rng)
@@ -1593,18 +1616,26 @@ def main() -> int:
         champion = None
         append_event(events_path, "started", population=args.population)
     population = introduce_reflexivity_variant(population, generation)
+    next_dataset_check = time.monotonic() + max(0.0, args.dataset_refresh_seconds)
     try:
         while not stop_path.exists() and (args.max_generations == 0 or generation < args.max_generations):
             if gate_process is not None and gate_process.poll() is not None:
                 gate_report = (json.loads(gate_out.read_text(encoding="utf-8"))
                                if gate_out is not None and gate_out.is_file() else None)
+                gate_is_current = gate_signature == signature
                 append_event(events_path, "brain_gate_finished", genome_id=gate_genome,
                              returncode=gate_process.returncode,
-                             passed=(gate_report or {}).get("all_brain_floor_gates"),
-                             feedback_score=brain_feedback_score(gate_report))
-                if gate_genome is not None:
+                             passed=((gate_report or {}).get("all_brain_floor_gates")
+                                     if gate_is_current else False),
+                             feedback_score=(brain_feedback_score(gate_report)
+                                             if gate_is_current else 0.0),
+                             evidence_current=gate_is_current,
+                             gate_signature=gate_signature,
+                             current_signature=signature)
+                if gate_genome is not None and gate_is_current:
                     neural_scores[gate_genome] = brain_feedback_score(gate_report)
-                if gate_report and gate_report.get("all_brain_floor_gates"):
+                if (gate_is_current and gate_report
+                        and gate_report.get("all_brain_floor_gates")):
                     atomic_json(args.state_dir / "untouched-final-queue.json", {
                         "queued_at": utc_now(), "genome_id": gate_genome,
                         "brain_gate_report": str(gate_out),
@@ -1613,6 +1644,44 @@ def main() -> int:
                 gate_process = None
                 gate_genome = None
                 gate_out = None
+                gate_signature = None
+            if (args.dataset_refresh_seconds > 0
+                    and time.monotonic() >= next_dataset_check):
+                next_dataset_check = time.monotonic() + args.dataset_refresh_seconds
+                refreshed_data_signature = dataset_signature(
+                    args.manifest, args.supplemental_root, args.news
+                )
+                refreshed_signature = evaluation_signature(
+                    refreshed_data_signature, folds=args.folds,
+                    test_days=args.test_days, calibration_days=args.calibration_days,
+                    final_days=args.final_days, horizon=args.horizon,
+                    cost_bps=args.cost_bps,
+                )
+                if refreshed_signature != signature:
+                    previous_signature = signature
+                    write_live_status(
+                        args.state_dir, "dataset_refresh", generation,
+                        previous_signature=previous_signature,
+                        current_signature=refreshed_signature,
+                    )
+                    dataset = load_dataset_cached(
+                        args.manifest, args.supplemental_root, args.horizon,
+                        args.stride, args.seed, args.news, args.dataset_cache,
+                    )
+                    population = invalidate_population_for_new_evidence(
+                        population, generation, rng
+                    )
+                    champion = None
+                    pending_gate_genome = None
+                    neural_scores = {}
+                    data_signature = refreshed_data_signature
+                    signature = refreshed_signature
+                    append_event(
+                        events_path, "dataset_changed",
+                        previous=previous_signature, current=signature,
+                        action="live_population_revalidation",
+                        rows=len(dataset["rows"]), assets=dataset["assets"],
+                    )
             while available_memory_gb() < args.min_free_memory_gb:
                 atomic_json(args.state_dir / "status.json", {
                     "at": utc_now(), "phase": "memory_wait", "generation": generation,
@@ -1710,6 +1779,7 @@ def main() -> int:
                     gate_stdout.close()
                     gate_stderr.close()
                     gate_genome = pending_gate_genome
+                    gate_signature = signature
                     pending_gate_genome = None
                     append_event(events_path, "brain_gate_started", genome_id=gate_genome,
                                  pid=gate_process.pid,
