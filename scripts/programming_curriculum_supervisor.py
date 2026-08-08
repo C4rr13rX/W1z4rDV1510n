@@ -2261,6 +2261,17 @@ def deferred_replay_marker_path(runtime: Path) -> Path:
     return runtime / "deferred-replay-active.json"
 
 
+def deferred_handoff_exit_code(forward_harvest: bool) -> int:
+    """Distinguish a completed forward harvest from an incomplete run.
+
+    Deferred intervals are the expected output of ``--forward-harvest``.  The
+    following replay stage owns their admission, so a fully accounted forward
+    pass must exit successfully even though the overall curriculum is not yet
+    complete.  Without that mode, unresolved intervals remain a hard failure.
+    """
+    return 0 if forward_harvest else 1
+
+
 def deferred_replay_command(args: argparse.Namespace, phase: Phase,
                             runtime: Path, event: dict) -> list[str]:
     """Build an exact, independently durable replay for one quarantined span."""
@@ -3374,7 +3385,7 @@ def main() -> int:
             "deferred_intervals": deferred,
             "updated_unix": time.time(),
         })
-        return 1
+        return deferred_handoff_exit_code(args.forward_harvest)
     publish(status_path, {"state": "all_complete", "updated_unix": time.time()})
     return 0
 

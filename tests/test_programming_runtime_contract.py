@@ -44,6 +44,7 @@ from scripts.programming_curriculum_supervisor import (
     guarded_block_target,
     guard_state_identity,
     deferred_interval_id,
+    deferred_handoff_exit_code,
     deferred_replay_command,
     deferred_replay_marker_path,
     latest_passing_canary_row,
@@ -2478,6 +2479,10 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
                 "binding_pool_id": 0,
             },
         )
+
+    def test_deferred_intervals_are_a_successful_forward_handoff_only(self) -> None:
+        self.assertEqual(deferred_handoff_exit_code(True), 0)
+        self.assertEqual(deferred_handoff_exit_code(False), 1)
 
     def test_persistent_service_hands_deferred_tail_to_replay(self) -> None:
         source = (

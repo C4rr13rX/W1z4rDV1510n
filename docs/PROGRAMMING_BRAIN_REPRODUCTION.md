@@ -99,6 +99,12 @@ forward offset and leaves the interval unresolved for the test–fix retry. A
 pass records admission, resolves only that interval, and prunes its unreferenced
 causal base.
 
+`deferred_intervals_pending` is therefore a successful terminal state for the
+forward-harvest process, but not for an ordinary supervisor invocation. The
+canonical trainer receives a zero exit status at that handoff and immediately
+starts deferred replay; a non-harvest invocation still exits unsuccessfully so
+no caller can mistake unresolved intervals for a completed curriculum.
+
 `deferred-replay-active.json` makes this final queue restart-safe. A marker in
 `training` state is rolled back before retry; a marker advanced to `admitted`
 after the comprehensive gate is committed without rerunning its examples.
