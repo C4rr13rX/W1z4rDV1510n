@@ -86,6 +86,34 @@ class Phase:
     repeats: int = 1
 
 
+def curriculum_phases(corpus_root: Path, include_seed: bool = False) -> list[Phase]:
+    """Return the single authoritative logical-row curriculum plan."""
+    phases = [
+        Phase("mathinstruct-domain-safe", "reasoning_math_001",
+              corpus_root / "mathinstruct.jsonl", 245_323),
+        Phase("metamathqa-domain-safe", "reasoning_math_001",
+              corpus_root / "metamathqa.jsonl", 385_524),
+        Phase("csn-python-full", "programming_literacy_python_001",
+              corpus_root / "csn_python_full.jsonl", 421_477),
+        Phase("csn-python-para5", "programming_literacy_python_001",
+              corpus_root / "csn_python_full_para5.jsonl", 2_028_816),
+        Phase("jupyter-scientific-full", "domain_scientific_python_001",
+              corpus_root / "jupyter_scientific_full.jsonl", 690_175),
+        Phase("jupyter-scientific-para4", "domain_scientific_python_001",
+              corpus_root / "jupyter_scientific_para4.jsonl", 2_760_496),
+        Phase("jupyter-scientific-partial", "domain_scientific_python_001",
+              corpus_root / "jupyter_scientific_partial.jsonl", 206_948),
+    ]
+    if include_seed:
+        phases[0:0] = [
+            Phase("canonical-algorithms", "dsa_classical_001",
+                  corpus_root / "the_algorithms_full.jsonl", 1_953, repeats=4),
+            Phase("gsm8k-domain-safe", "reasoning_math_001",
+                  corpus_root / "gsm8k.jsonl", 7_473),
+        ]
+    return phases
+
+
 def read_json(path: Path) -> dict:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -2740,33 +2768,7 @@ def main() -> int:
         return 0
 
     corpus_root = args.corpus_root.resolve()
-    phases = [
-        Phase("mathinstruct-domain-safe", "reasoning_math_001",
-              corpus_root / "mathinstruct.jsonl", 245_323),
-        Phase("metamathqa-domain-safe", "reasoning_math_001",
-              corpus_root / "metamathqa.jsonl", 385_524),
-        Phase("csn-python-full", "programming_literacy_python_001",
-              corpus_root / "csn_python_full.jsonl", 421_477),
-        Phase("csn-python-para5", "programming_literacy_python_001",
-              corpus_root / "csn_python_full_para5.jsonl",
-              2_028_816),
-        Phase("jupyter-scientific-full", "domain_scientific_python_001",
-              corpus_root / "jupyter_scientific_full.jsonl",
-              690_175),
-        Phase("jupyter-scientific-para4", "domain_scientific_python_001",
-              corpus_root / "jupyter_scientific_para4.jsonl",
-              2_760_496),
-        Phase("jupyter-scientific-partial", "domain_scientific_python_001",
-              corpus_root / "jupyter_scientific_partial.jsonl",
-              206_948),
-    ]
-    if args.include_seed_corpora:
-        phases[0:0] = [
-            Phase("canonical-algorithms", "dsa_classical_001",
-                  corpus_root / "the_algorithms_full.jsonl", 1_953, repeats=4),
-            Phase("gsm8k-domain-safe", "reasoning_math_001",
-                  corpus_root / "gsm8k.jsonl", 7_473),
-        ]
+    phases = curriculum_phases(corpus_root, args.include_seed_corpora)
     missing = [str(phase.corpus) for phase in phases if not phase.corpus.is_file()]
     if missing:
         parser.error("missing corpus files: " + ", ".join(missing))

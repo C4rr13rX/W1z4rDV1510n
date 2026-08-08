@@ -60,6 +60,16 @@ if (Test-Path -LiteralPath $State) {
         Write-Host ("Last state : {0} / {1}" -f $status.phase, $status.state)
         Write-Host ("Rows       : {0} -> guarded target {1}" -f `
             $status.durable_next_row, $status.block_target_row)
+        $curriculum = $probe.curriculum
+        if ($null -ne $curriculum) {
+            Write-Host ("Curriculum : {0:N0} / {1:N0} durable ({2:N0} forward remain)" -f `
+                $curriculum.durable_processed_rows, $curriculum.total_rows, `
+                $curriculum.forward_remaining_rows)
+            Write-Host ("Admission  : {0:N0} accepted; {1:N0} quarantined for replay" -f `
+                $curriculum.accepted_rows, $curriculum.deferred_rows)
+            Write-Host ("Outstanding: at least {0:N0} rows including known replay" -f `
+                $curriculum.minimum_outstanding_rows)
+        }
         Write-Host ("Processes  : supervisor={0}, wrapper={1}, worker={2}" -f `
             $probe.supervisor_count, $probe.wrapper_count, $probe.worker_count)
         Write-Host ("Decision   : {0} - {1}" -f `

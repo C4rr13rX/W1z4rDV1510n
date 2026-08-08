@@ -158,8 +158,12 @@ def remote_probe(profile: str, instance_id: str, runtime: str) -> dict:
         return {"host_state": instance, "observed_unix": time.time()}
 
     remote = f"""python3 - <<'PY'
-import json, pathlib, time
+import json, pathlib, sys, time
 runtime = pathlib.Path({runtime!r})
+sys.path.insert(0, '/srv/wizard/project')
+from scripts.programming_curriculum_supervisor import (
+    curriculum_phases, read_json, unresolved_deferred_intervals,
+)
 try:
     status = json.loads((runtime / 'curriculum-supervisor.status.json').read_text())
 except Exception as exc:
@@ -186,10 +190,49 @@ try:
     service_stage = (runtime / 'curriculum-service-supervisor.stage').read_text().strip()
 except OSError:
     service_stage = ''
+include_seed = any(
+    (runtime / f'{{name}}.progress.json').is_file()
+    for name in ('canonical-algorithms', 'gsm8k-domain-safe')
+)
+phases = curriculum_phases(pathlib.Path('/srv/wizard/corpora'), include_seed)
+processed = 0
+phase_rows = {{}}
+for phase in phases:
+    progress = read_json(runtime / f'{{phase.name}}.progress.json')
+    durable = min(phase.rows, max(0, int(progress.get('durable_next_row') or 0)))
+    phase_rows[phase.name] = durable
+    processed += durable
+total = sum(phase.rows for phase in phases)
+intervals = {{}}
+for event in unresolved_deferred_intervals(runtime):
+    phase = str(event['phase'])
+    start = max(0, int(event['start_row']))
+    end = min(phase_rows.get(phase, 0), int(event['end_row']))
+    if end > start:
+        intervals.setdefault(phase, []).append((start, end))
+deferred = 0
+for spans in intervals.values():
+    merged = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    deferred += sum(end - start for start, end in merged)
+curriculum = {{
+    'total_rows': total,
+    'durable_processed_rows': processed,
+    'accepted_rows': max(0, processed - deferred),
+    'deferred_rows': deferred,
+    'forward_remaining_rows': max(0, total - processed),
+    'minimum_outstanding_rows': max(0, total - processed) + deferred,
+    'include_seed_corpora': include_seed,
+}}
 print(json.dumps({{
     'host_state': 'running', 'runtime': str(runtime), 'status': status,
     'supervisor_count': supervisors, 'wrapper_count': wrappers,
     'worker_count': workers, 'service_stage': service_stage,
+    'curriculum': curriculum,
     'status_age_seconds': max(0.0, time.time() - updated) if updated else 1e99,
     'observed_unix': time.time(),
 }}, separators=(',', ':')))
@@ -387,7 +430,13 @@ def main() -> int:
                 f"phase={status.get('phase', '-')} "
                 f"state={status.get('state', probe.get('host_state', '-'))} "
                 f"row={status.get('durable_next_row', '-')} "
-                f"target={status.get('block_target_row', '-')}",
+                f"target={status.get('block_target_row', '-')}; "
+                f"curriculum={probe.get('curriculum', {}).get('durable_processed_rows', '-')}"
+                f"/{probe.get('curriculum', {}).get('total_rows', '-')} "
+                f"accepted={probe.get('curriculum', {}).get('accepted_rows', '-')} "
+                f"quarantined={probe.get('curriculum', {}).get('deferred_rows', '-')} "
+                f"forward_remaining={probe.get('curriculum', {}).get('forward_remaining_rows', '-')} "
+                f"minimum_outstanding={probe.get('curriculum', {}).get('minimum_outstanding_rows', '-')}",
             )
             if trigger and not args.dry_run:
                 returncode = invoke_codex(

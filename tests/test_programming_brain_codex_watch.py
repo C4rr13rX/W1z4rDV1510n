@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+from scripts.programming_curriculum_supervisor import curriculum_phases
 from scripts.aws.watch_programming_brain import (
     Decision,
     classify_probe,
@@ -8,6 +11,15 @@ from scripts.aws.watch_programming_brain import (
     format_codex_event,
     observe,
 )
+
+
+def test_curriculum_plan_has_one_authoritative_logical_row_total() -> None:
+    base = curriculum_phases(Path("corpora"))
+    seeded = curriculum_phases(Path("corpora"), include_seed=True)
+    assert sum(phase.rows for phase in base) == 6_738_759
+    assert sum(phase.rows for phase in seeded) == 6_748_185
+    assert sum(phase.rows * phase.repeats for phase in seeded) == 6_754_044
+    assert [phase.name for phase in seeded[-7:]] == [phase.name for phase in base]
 
 
 def probe(state: str, *, supervisors: int = 1, wrappers: int = 1,
@@ -132,3 +144,15 @@ def test_codex_json_events_have_a_human_readable_tail() -> None:
     })
     assert message == "CODEX MESSAGE Fixed the replay gate."
     assert command == "CODEX COMMAND [in_progress] python -m pytest"
+
+
+def test_tail_reports_full_curriculum_admission_accounting() -> None:
+    source = (
+        __import__("pathlib").Path(__file__).parents[1]
+        / "scripts/aws/watch_programming_brain.py"
+    ).read_text(encoding="utf-8")
+    for field in (
+        "total_rows", "durable_processed_rows", "accepted_rows",
+        "deferred_rows", "forward_remaining_rows", "minimum_outstanding_rows",
+    ):
+        assert field in source
