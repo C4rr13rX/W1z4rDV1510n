@@ -287,3 +287,47 @@ Treat output shape and delivery semantics as part of behavioral compatibility.
 For example, a word-frequency function must return its mapping; code that
 computes the same mapping only to write a framework-managed file is not an
 interchangeable response.
+
+## Event-driven Codex supervision
+
+Healthy corpus work does not require a reasoning agent to poll it. Run the
+small local watcher with the explicit Codex thread that owns this project:
+
+```powershell
+python scripts/aws/watch_programming_brain.py `
+  --session-id $env:CODEX_THREAD_ID
+```
+
+The watcher queries a compact AWS lifecycle probe every five minutes. A live
+supervisor or wrapper remains authoritative even while it reports a canary
+failure that automatic quarantine recovery still owns. Codex is resumed
+immediately for the durable forward-to-quarantine handoff or an automated-stage
+completion. A serious stop, stale heartbeat, or stopped AWS host requires two
+identical observations before waking Codex. The event fingerprint is persisted
+below the ignored `runtime/` directory, so an identical event cannot repeatedly
+consume agent turns within the default thirty-minute repair window. If Codex
+returns without changing an actionable condition, the condition is eligible
+again after that cooldown; a healthy observation clears it. This prevents both
+tight reasoning loops and permanent one-shot abandonment.
+
+The invocation uses `codex exec resume <session-id>` with the saved CLI login,
+the repository as its working directory, `approval_policy=never`, and the
+existing full-access sandbox setting. It records JSONL and stderr logs below
+`runtime/programming-brain-codex-watch/logs/`. Use `--once --dry-run` to inspect
+classification without waking Codex. Do not use `--last`: an unrelated newer
+Codex task could otherwise receive the programming-brain event.
+
+The resumed prompt carries the final acceptance contract, not merely the
+current corpus alarm. It requires a 1,000-task deterministic enterprise
+software obstacle course with capability-family remediation and full
+regression, followed by the CoolCryptoUtilities brain selectors and C0D3R V2 /
+Brand Dozer Multi-Scale Robot World capstone. The capstone is independently
+judged for real 3D robot construction, credible real-world physics, and
+fabrication-ready 3D-printing output; the model's own completion claim is never
+admission evidence.
+
+The complete, auditable definition of done is
+[`PROGRAMMING_BRAIN_ACCEPTANCE_CONTRACT.md`](PROGRAMMING_BRAIN_ACCEPTANCE_CONTRACT.md).
+The watcher exits only after the contract's generated completion marker contains
+all required passing fields. The marker is a routing guard, not proof by itself;
+its referenced reports remain authoritative.
