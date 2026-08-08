@@ -1,9 +1,11 @@
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from scripts.aws.bootstrap_training_host import (
     bootstrap_commands,
     cost_guard_commands,
+    resumed_deadline_epoch,
 )
 from scripts.aws.deploy_private_training import estimate_cost
 from scripts.aws.restore_training_inputs import (
@@ -81,6 +83,13 @@ def test_cost_guard_uses_a_persisted_absolute_deadline():
     assert "wizard-cost-stop.timer" in commands
     assert "OnUnitActiveSec=1min" in commands
     assert "/sbin/shutdown -h now" in commands
+
+
+def test_resumed_cost_deadline_is_bounded_from_explicit_restart_not_original_launch():
+    resumed_at = datetime(2026, 8, 8, 10, 0, tzinfo=timezone.utc)
+    assert resumed_deadline_epoch(192, now=resumed_at) == int(
+        datetime(2026, 8, 16, 10, 0, tzinfo=timezone.utc).timestamp()
+    )
 
 
 def test_cross_os_restore_rebases_verified_progress_corpus(tmp_path):

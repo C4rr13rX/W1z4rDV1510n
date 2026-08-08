@@ -43,6 +43,13 @@ explicitly delete the retained volume, and remove the inline deployment policy.
 The deployment permission is a customer-managed policy attached through the
 dedicated `WizardVisionDeployers` group; it is not an inline user policy.
 
+The persisted stop deadline is renewed only by an explicit bootstrap/resume
+invocation. It is measured from that invocation, not from EC2 `LaunchTime`:
+AWS preserves the original launch timestamp across stop/start cycles, so using
+it would make every restart of an older retained instance shut down after the
+timer's first one-minute check. The default renewed window remains bounded at
+192 hours; `--maximum-hours` may shorten it for a smaller run.
+
 ## Migration invariant
 
 Never copy the mutable container while training is running. First stop the

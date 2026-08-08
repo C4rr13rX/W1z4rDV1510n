@@ -1359,6 +1359,78 @@ def suspect_intervals(runtime: Path, phase: str, candidate_row: int,
     return [(begin, end) for begin, end in uncovered if begin < end]
 
 
+def deferred_coverage_ids(runtime: Path, phase: str, start_row: int,
+                          end_row: int) -> list[str] | None:
+    """Return obligations that completely cover one half-open logical span."""
+    if end_row <= start_row:
+        return []
+    cursor = start_row
+    identifiers: list[str] = []
+    for event in unresolved_deferred_intervals(runtime, phase):
+        start = max(start_row, int(event["start_row"]))
+        end = min(end_row, int(event["end_row"]))
+        if end <= cursor:
+            continue
+        if start > cursor:
+            return None
+        cursor = max(cursor, end)
+        identifier = str(event.get("interval_id") or "")
+        if identifier and identifier not in identifiers:
+            identifiers.append(identifier)
+        if cursor >= end_row:
+            return identifiers
+    return None
+
+
+def advance_guard_across_deferred_block(runtime: Path, phase: Phase,
+                                        candidate_row: int) -> dict | None:
+    """Advance only the logical cursor when a whole block is quarantined.
+
+    The accepted neural state and immutable guard do not change: none of the
+    block's experience was admitted. Moving the guard's logical row prevents
+    the next supervisor from repeatedly benchmarking an empty sample while
+    every excluded row remains an explicit deferred replay obligation.
+    """
+    metadata_path = runtime / "brain" / "brain.last-good.json"
+    metadata = read_json(metadata_path)
+    if metadata.get("phase") != phase.name:
+        return None
+    guard_row = metadata.get("row")
+    if (not isinstance(guard_row, int) or candidate_row <= guard_row
+            or candidate_row > phase.rows):
+        return None
+    identifiers = deferred_coverage_ids(
+        runtime, phase.name, guard_row, candidate_row
+    )
+    if identifiers is None:
+        return None
+    history = list(metadata.get("logical_deferred_advances") or [])
+    history.append({
+        "start_row": guard_row,
+        "end_row": candidate_row,
+        "deferred_interval_ids": identifiers,
+        "updated_unix": time.time(),
+    })
+    metadata.update({
+        "row": candidate_row,
+        "logical_deferred_advances": history,
+        "updated_unix": time.time(),
+    })
+    publish(metadata_path, metadata)
+    report = {
+        "kind": "fully_deferred_block_advanced",
+        "phase": phase.name,
+        "start_row": guard_row,
+        "trained_rows": candidate_row,
+        "deferred_interval_ids": identifiers,
+        "passed": None,
+        "neural_state_changed": False,
+        "updated_unix": time.time(),
+    }
+    append_health_event(runtime, report)
+    return report
+
+
 def record_deferred_failure(runtime: Path, phase: Phase, candidate_row: int,
                             durable_row: int, error: str, reason: str,
                             use_passing_canary: bool = True) -> dict:
@@ -2122,6 +2194,16 @@ def admit_midphase_candidate(args: argparse.Namespace, phase: Phase,
             "updated_unix": time.time(),
         })
         return "failed"
+    deferred_advance = advance_guard_across_deferred_block(
+        runtime, phase, candidate_row
+    )
+    if deferred_advance is not None:
+        publish(status_path, {
+            "state": "midphase_fully_deferred",
+            **{key: value for key, value in deferred_advance.items()
+               if key != "kind"},
+        })
+        return "deferred"
     publish(status_path, {
         "state": "midphase_benchmarking",
         "phase": phase.name,
@@ -3076,44 +3158,12 @@ def main() -> int:
         if (not attach_recovered and not attached_resource_settled
                 and attached_ram > attached_start
                 and attached_ram < attach_phase.rows):
-            if attached_durable != attached_ram:
-                publish(status_path, {"state": "midphase_gate_failed",
-                                      "phase": attach_phase.name,
-                                      "error": "attached worker ended before durable boundary",
-                                      "ram_next_row": attached_ram,
-                                      "durable_next_row": attached_durable,
-                                      "updated_unix": time.time()})
+            admission = admit_midphase_candidate(
+                args, attach_phase, runtime, status_path,
+                attached_ram, attached_durable,
+            )
+            if admission not in {"admitted", "deferred", "recovered"}:
                 return 1
-            publish(status_path, {"state": "midphase_benchmarking",
-                                  "phase": attach_phase.name,
-                                  "ram_next_row": attached_ram,
-                                  "durable_next_row": attached_durable,
-                                  "updated_unix": time.time()})
-            try:
-                run_midphase_gate(args, attach_phase, runtime, attached_ram)
-            except ADMISSION_GATE_ERRORS as exc:
-                if admission_infrastructure_failure(exc):
-                    pause_admission_for_infrastructure(
-                        runtime, status_path, attach_phase, attached_ram,
-                        "attached_midphase_gate", exc,
-                    )
-                    return 1
-                record_deferred_failure(
-                    runtime, attach_phase, attached_ram, attached_durable,
-                    str(exc), "attached_midphase_gate_failed",
-                    use_passing_canary=False,
-                )
-                publish(status_path, {"state": "midphase_gate_failed",
-                                      "phase": attach_phase.name,
-                                      "ram_next_row": attached_ram,
-                                      "durable_next_row": attached_durable,
-                                      "error": str(exc),
-                                      "updated_unix": time.time()})
-                if not perform_automatic_recovery(
-                        args, attach_phase, runtime, status_path):
-                    return 1
-            else:
-                accept_last_good_guard(runtime, attach_phase.name)
 
     assert_training_not_quarantined(runtime)
     for phase in phases:
@@ -3121,6 +3171,20 @@ def main() -> int:
         while True:
             ram, durable = phase_offsets(runtime / f"{phase.name}.progress.json")
             if ram >= phase.rows:
+                guard = read_json(runtime / "brain" / "brain.last-good.json")
+                guard_row = guard.get("row") if guard.get("phase") == phase.name else None
+                if (args.forward_harvest and isinstance(guard_row, int)
+                        and deferred_coverage_ids(
+                            runtime, phase.name, guard_row, phase.rows
+                        ) is not None):
+                    harvested = mark_phase_forward_harvested(
+                        runtime, phase, guard
+                    )
+                    publish(status_path, {
+                        "state": "forward_harvest_deferred",
+                        **harvested,
+                    })
+                    break
                 gate_path = runtime / f"{phase.name}.completion-gate.json"
                 if not read_json(gate_path).get("passed"):
                     publish(status_path, {"state": "benchmarking",
@@ -3183,6 +3247,8 @@ def main() -> int:
                     args, phase, runtime, status_path, ram, durable
                 )
                 if admission == "admitted":
+                    continue
+                if admission == "deferred":
                     continue
                 if admission == "recovered":
                     restarts = 0
@@ -3272,6 +3338,8 @@ def main() -> int:
                     ram_after, durable_after,
                 )
                 if admission == "admitted":
+                    continue
+                if admission == "deferred":
                     continue
                 if admission == "recovered":
                     restarts = 0

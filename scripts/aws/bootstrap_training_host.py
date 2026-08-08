@@ -6,7 +6,7 @@ import argparse
 import json
 import subprocess
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -72,22 +72,23 @@ def wait_for_ssm(profile: str, instance_id: str, timeout: int) -> None:
     raise TimeoutError(f"{instance_id} did not become SSM Online")
 
 
-def instance_deadline_epoch(
-    profile: str, instance_id: str, maximum_hours: int
+def resumed_deadline_epoch(
+    maximum_hours: int, *, now: datetime | None = None
 ) -> int:
-    launched = aws(
-        profile,
-        "ec2",
-        "describe-instances",
-        "--instance-ids",
-        instance_id,
-        "--query",
-        "Reservations[0].Instances[0].LaunchTime",
-        "--output",
-        "text",
-    ).stdout.strip()
-    launch_time = datetime.fromisoformat(launched.replace("Z", "+00:00"))
-    return int((launch_time + timedelta(hours=maximum_hours)).timestamp())
+    """Return the bounded deadline for one explicitly resumed training run.
+
+    EC2's ``LaunchTime`` remains the original instance launch timestamp across
+    stop/start cycles. Deriving the guard from it makes an expired retained
+    instance shut itself down one minute after every later restart. Starting
+    this bootstrap is the explicit authorization boundary for a new bounded
+    run, so its deadline is measured from that invocation instead.
+    """
+    if maximum_hours <= 0:
+        raise ValueError("maximum_hours must be positive")
+    reference = now or datetime.now(timezone.utc)
+    if reference.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
+    return int((reference + timedelta(hours=maximum_hours)).timestamp())
 
 
 def cost_guard_commands(deadline_epoch: int) -> list[str]:
@@ -332,9 +333,7 @@ def main() -> int:
 
     instance_id = stack_instance_id(args.profile)
     wait_for_ssm(args.profile, instance_id, min(args.timeout, 1800))
-    deadline = instance_deadline_epoch(
-        args.profile, instance_id, args.maximum_hours
-    )
+    deadline = resumed_deadline_epoch(args.maximum_hours)
     guard = send_and_wait(
         args.profile,
         instance_id,

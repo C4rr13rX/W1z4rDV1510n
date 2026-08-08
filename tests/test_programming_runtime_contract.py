@@ -62,6 +62,8 @@ from scripts.programming_curriculum_supervisor import (
     quarantine_interval_ids,
     read_json,
     record_deferred_failure,
+    advance_guard_across_deferred_block,
+    deferred_coverage_ids,
     recover_interrupted_deferred_replay,
     replay_interval_recall_command,
     recall_command,
@@ -1236,6 +1238,68 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             self.assertEqual(event["start_row"], 16640)
             self.assertEqual(event["end_row"], 16896)
             self.assertNotEqual(event["start_row"], event["end_row"])
+
+    def test_fully_deferred_block_advances_only_logical_guard_cursor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            brain = runtime / "brain"
+            brain.mkdir()
+            guard = brain / "brain.last-good.wbrain"
+            guard.write_bytes(b"accepted-neural-state")
+            metadata = brain / "brain.last-good.json"
+            proof = {"topology": {"tick": 42, "total_neurons": 7}}
+            metadata.write_text(json.dumps({
+                "phase": "corpus", "row": 0, "guard": str(guard),
+                "storage": "wbrain", "checkpoint_proof": proof,
+            }), encoding="utf-8")
+            for start, end in ((0, 40), (40, 75), (75, 100)):
+                append_deferred_event(runtime, {
+                    "interval_id": deferred_interval_id("corpus", start, end),
+                    "status": "deferred", "phase": "corpus",
+                    "start_row": start, "end_row": end,
+                })
+            phase = Phase("corpus", "script", runtime / "corpus.jsonl", 200)
+            before = guard.read_bytes()
+            report = advance_guard_across_deferred_block(
+                runtime, phase, 100
+            )
+            self.assertIsNotNone(report)
+            self.assertFalse(report["neural_state_changed"])
+            self.assertEqual(guard.read_bytes(), before)
+            advanced = json.loads(metadata.read_text(encoding="utf-8"))
+            self.assertEqual(advanced["row"], 100)
+            self.assertEqual(advanced["checkpoint_proof"], proof)
+            self.assertEqual(len(report["deferred_interval_ids"]), 3)
+            self.assertEqual(
+                deferred_coverage_ids(runtime, "corpus", 0, 100),
+                report["deferred_interval_ids"],
+            )
+
+    def test_deferred_block_refuses_to_advance_across_a_gap(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            brain = runtime / "brain"
+            brain.mkdir()
+            guard = brain / "brain.last-good.wbrain"
+            guard.write_bytes(b"accepted")
+            metadata = brain / "brain.last-good.json"
+            metadata.write_text(json.dumps({
+                "phase": "corpus", "row": 0, "guard": str(guard),
+            }), encoding="utf-8")
+            for start, end in ((0, 40), (50, 100)):
+                append_deferred_event(runtime, {
+                    "interval_id": deferred_interval_id("corpus", start, end),
+                    "status": "deferred", "phase": "corpus",
+                    "start_row": start, "end_row": end,
+                })
+            phase = Phase("corpus", "script", runtime / "corpus.jsonl", 200)
+            self.assertIsNone(deferred_coverage_ids(runtime, "corpus", 0, 100))
+            self.assertIsNone(advance_guard_across_deferred_block(
+                runtime, phase, 100
+            ))
+            self.assertEqual(
+                json.loads(metadata.read_text(encoding="utf-8"))["row"], 0
+            )
 
     def test_deferred_failure_records_disjoint_uncovered_spans(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2562,7 +2626,15 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn('parser.add_argument("--attach-phase", default="")', source)
-        self.assertIn("run_midphase_gate(args, attach_phase, runtime, attached_ram)", source)
+        self.assertIn(
+            "admission = admit_midphase_candidate(\n"
+            "                args, attach_phase, runtime, status_path,",
+            source,
+        )
+        self.assertIn(
+            'admission not in {"admitted", "deferred", "recovered"}',
+            source,
+        )
         self.assertIn('parser.add_argument(\n        "--gate-only-phase"', source)
         self.assertIn('"state": "gate_only_complete"', source)
 

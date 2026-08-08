@@ -204,6 +204,15 @@ hide memory pressure and block protected inference behind training.
 
 Replay is deliberately an end-of-corpus transaction. Each interval trains against the final accepted brain under an independent guard, recalls samples from its exact row window, and then passes the complete corpus/foundation/enterprise admission gate with that interval temporarily included. A passing interval is resolved and its unreferenced causal base pruned. A failing interval restores the final brain, remains unresolved with its diagnostic artifacts, and stops the replay loop for a test/family-fix/retry cycle. Use `--replay-interval-id PHASE:START:END` to retry one corrected interval without admitting any other pending range.
 
+During forward harvest, a guarded block may be completely covered by unresolved
+deferred intervals. Its admission sampler must then contain zero rows. Do not
+manufacture a pass and do not append an empty interval: verify gap-free
+half-open coverage from the accepted guard row to the block boundary, preserve
+the unchanged guard bytes and topology proof, advance only the guard's logical
+row, and train the next block. A single uncovered row forbids this transition.
+At the corpus boundary, the same proof permits the existing forward-harvest
+handoff into deferred replay.
+
 Only one curriculum supervisor may own a runtime. Startup scans for an existing Python supervisor with the same resolved runtime and then claims `curriculum-supervisor.pid` using exclusive creation; stale PID files are recovered, while a live owner is rejected. This claim covers guard creation as well as training so two launches cannot race on the same temporary snapshot or progress ledger.
 
 After the corpus curriculum, the trainer admits three experience gates. The
