@@ -6,6 +6,7 @@ import argparse
 import ast
 import http.client
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -65,22 +66,58 @@ def syntax_valid(code: str) -> bool:
         return False
 
 
-def executes(code: str, function: str, args: list, expected: object) -> tuple[bool, str]:
+def prompt_requires_function(prompt: str, function: str) -> bool:
+    """Whether the public request constrains the generated identifier."""
+    return re.search(
+        rf"(?<![A-Za-z0-9_]){re.escape(function)}(?![A-Za-z0-9_])",
+        prompt,
+        flags=re.IGNORECASE,
+    ) is not None
+
+
+def callable_candidates(code: str, requested: str, prompt: str) -> list[str]:
     if not syntax_valid(code):
-        return False, "invalid_syntax"
-    assertion = (
-        f"\nimport json\n_result={function}(*json.loads({json.dumps(args)!r}))"
-        f"\n_expected=json.loads({json.dumps(expected)!r})"
-        "\nassert _result == _expected, (_result, _expected)\n"
-    )
-    try:
-        run = subprocess.run(
-            [sys.executable, "-I", "-c", code + assertion],
-            capture_output=True, text=True, timeout=3,
+        return []
+    if prompt_requires_function(prompt, requested):
+        return [requested]
+    tree = ast.parse(code)
+    names = [
+        node.name for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    # Prefer the learned canonical identifier when it is present, but a prompt
+    # that did not name it cannot require the model to guess that hidden name.
+    return ([requested] if requested in names else []) + [
+        name for name in names if name != requested
+    ]
+
+
+def executes(code: str, function: str, args: list, expected: object,
+             prompt: str = "") -> tuple[bool, str, str]:
+    if not syntax_valid(code):
+        return False, "invalid_syntax", ""
+    candidates = callable_candidates(code, function, prompt)
+    if not candidates:
+        return False, "no_top_level_function", ""
+    errors = []
+    for candidate in candidates:
+        assertion = (
+            f"\nimport json\n_result={candidate}(*json.loads({json.dumps(args)!r}))"
+            f"\n_expected=json.loads({json.dumps(expected)!r})"
+            "\nassert _result == _expected, (_result, _expected)\n"
         )
-    except subprocess.TimeoutExpired:
-        return False, "timeout"
-    return run.returncode == 0, (run.stderr.strip()[-300:] if run.returncode else "")
+        try:
+            run = subprocess.run(
+                [sys.executable, "-I", "-c", code + assertion],
+                capture_output=True, text=True, timeout=3,
+            )
+        except subprocess.TimeoutExpired:
+            errors.append(f"{candidate}: timeout")
+            continue
+        if run.returncode == 0:
+            return True, "", candidate
+        errors.append(f"{candidate}: {run.stderr.strip()[-240:]}")
+    return False, " | ".join(errors)[-500:], ""
 
 
 def main() -> int:
@@ -96,7 +133,9 @@ def main() -> int:
         for kind, prompt in (("trained", exemplar["prompt"]), ("novel_paraphrase", novel_prompt)):
             payload = client.chat_payload(prompt)
             reply = str(payload.get("reply") or "")
-            ran, error = executes(reply, function, call_args, expected)
+            ran, error, invoked_function = executes(
+                reply, function, call_args, expected, str(prompt)
+            )
             results.append({
                 "kind": kind, "function": function, "prompt": prompt,
                 "nonempty": bool(reply), "syntax_valid": syntax_valid(reply),
@@ -106,6 +145,7 @@ def main() -> int:
                 "call_args": call_args,
                 "expected_result": expected,
                 "error": error,
+                "invoked_function": invoked_function,
                 "route": {
                     "decoder": payload.get("decoder"),
                     "grounding": payload.get("grounding"),
