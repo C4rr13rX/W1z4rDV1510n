@@ -106,3 +106,12 @@ def test_completion_marker_requires_every_authoritative_gate() -> None:
     assert completion_marker_valid(marker)
     marker["obstacle_course"]["passed"] = 999
     assert not completion_marker_valid(marker)
+
+
+def test_probe_process_matching_is_executable_scoped() -> None:
+    source = (
+        __import__("pathlib").Path(__file__).parents[1]
+        / "scripts/aws/watch_programming_brain.py"
+    ).read_text(encoding="utf-8")
+    assert "process_name.startswith('python')" in source
+    assert "process_name == 'bash'" in source

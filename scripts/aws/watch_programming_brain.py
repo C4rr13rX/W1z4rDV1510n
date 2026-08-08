@@ -160,13 +160,18 @@ supervisors = wrappers = workers = 0
 for path in pathlib.Path('/proc').glob('[0-9]*/cmdline'):
     try:
         command = path.read_bytes().replace(b'\\0', b' ').decode(errors='replace')
+        process_name = (path.parent / 'comm').read_text().strip().lower()
     except OSError:
         continue
-    if 'programming_curriculum_supervisor.py' in command and {runtime!r} in command:
+    if (process_name.startswith('python')
+            and 'programming_curriculum_supervisor.py' in command
+            and {runtime!r} in command):
         supervisors += 1
-    if 'run_programming_curriculum_service.sh' in command:
+    if process_name == 'bash' and 'run_programming_curriculum_service.sh' in command:
         wrappers += 1
-    if 'tools.training_standard.drive_corpora_brain' in command and {runtime!r} in command:
+    if (process_name.startswith('python')
+            and 'tools.training_standard.drive_corpora_brain' in command
+            and {runtime!r} in command):
         workers += 1
 updated = float(status.get('updated_unix') or 0.0)
 try:
