@@ -1874,6 +1874,14 @@ fn has_programming_language_intent(labels: &[String]) -> bool {
     labels.iter().any(|label| label.contains(":LANGUAGE:"))
 }
 
+fn has_exactly_one_programming_language(labels: &[String]) -> bool {
+    labels
+        .iter()
+        .filter(|label| label.contains(":LANGUAGE:"))
+        .count()
+        == 1
+}
+
 fn contains_ascii_term(text: &str, term: &str) -> bool {
     text.match_indices(term).any(|(start, matched)| {
         let before = text[..start].chars().next_back();
@@ -3446,6 +3454,7 @@ async fn h_brain_chat(
     // inhibits superficially similar but behaviorally incompatible source.
     let raw_semantically_validated = composition_features
         .as_ref()
+        .filter(|(_, labels)| has_exactly_one_programming_language(labels))
         .and_then(|(_, labels)| {
             brain.decode_best_binding_by_char_motifs_with_margin_where(
                 POOL_TEXT,
@@ -5081,6 +5090,7 @@ mod tests {
             "intent:LANGUAGE:JAVASCRIPT".to_string(),
             "intent:INTEGRATION:TRANSACTIONAL_OUTBOX".to_string(),
         ];
+        assert!(has_exactly_one_programming_language(&labels));
         assert_eq!(
             single_language_ranked_manifest(
                 &labels,
@@ -5092,6 +5102,7 @@ mod tests {
 
         let mut polyglot = labels;
         polyglot.push("intent:LANGUAGE:GO".to_string());
+        assert!(!has_exactly_one_programming_language(&polyglot));
         assert_eq!(
             single_language_ranked_manifest(
                 &polyglot,
