@@ -44,6 +44,14 @@ def atomic_json(path: Path, payload: dict) -> None:
     os.replace(temporary, path)
 
 
+def append_activity(path: Path, message: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(f"[{stamp}] {message.rstrip()}\n")
+        stream.flush()
+
+
 def read_json(path: Path) -> dict:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -230,8 +238,28 @@ passes a fresh requirement-by-requirement audit.
 """
 
 
+def format_codex_event(payload: dict) -> str:
+    event_type = str(payload.get("type") or "")
+    if event_type in {"turn.started", "turn.completed", "turn.failed", "error"}:
+        detail = payload.get("message") or payload.get("error") or ""
+        return f"CODEX {event_type}{': ' + str(detail) if detail else ''}"
+    if event_type not in {"item.started", "item.completed"}:
+        return ""
+    item = payload.get("item") or {}
+    item_type = str(item.get("type") or "item")
+    if item_type == "agent_message":
+        text = str(item.get("text") or "").strip().replace("\r", "")
+        return f"CODEX MESSAGE {text}" if text else ""
+    if item_type == "command_execution":
+        command = str(item.get("command") or "").strip().replace("\n", " ")
+        status = str(item.get("status") or "")
+        return f"CODEX COMMAND [{status}] {command}".rstrip()
+    summary = item.get("name") or item.get("path") or item.get("status") or ""
+    return f"CODEX {event_type} {item_type} {summary}".rstrip()
+
+
 def invoke_codex(session_id: str, decision: Decision, probe: dict,
-                 log_dir: Path) -> int:
+                 log_dir: Path, activity_path: Path) -> int:
     log_dir.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     stdout_path = log_dir / f"codex-{stamp}.jsonl"
@@ -242,13 +270,29 @@ def invoke_codex(session_id: str, decision: Decision, probe: dict,
         "-c", 'sandbox_mode="danger-full-access"',
         "--json", session_id, "-",
     ]
+    append_activity(activity_path, f"ALARM waking Codex: {decision.reason}")
     with stdout_path.open("w", encoding="utf-8") as stdout, \
             stderr_path.open("w", encoding="utf-8") as stderr:
-        result = subprocess.run(
-            command, cwd=ROOT, input=codex_prompt(decision, probe),
-            text=True, stdout=stdout, stderr=stderr, check=False,
+        process = subprocess.Popen(
+            command, cwd=ROOT, text=True, stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=stderr,
         )
-    return result.returncode
+        assert process.stdin is not None and process.stdout is not None
+        process.stdin.write(codex_prompt(decision, probe))
+        process.stdin.close()
+        for line in process.stdout:
+            stdout.write(line)
+            stdout.flush()
+            try:
+                activity = format_codex_event(json.loads(line))
+            except (ValueError, TypeError):
+                activity = ""
+            if activity:
+                append_activity(activity_path, activity)
+        process.stdout.close()
+        returncode = process.wait()
+    append_activity(activity_path, f"CODEX EXIT returncode={returncode}")
+    return returncode
 
 
 def observe(state: dict, decision: Decision, stability_polls: int) -> tuple[dict, bool]:
@@ -306,6 +350,11 @@ def main() -> int:
         parser.error("poll and stability values must be positive")
 
     state = read_json(args.state_path)
+    activity_path = args.state_path.parent / "activity.log"
+    append_activity(
+        activity_path,
+        f"WATCHER START pid={os.getpid()} session={args.session_id or 'dry-run'}",
+    )
     while True:
         if completion_marker_valid(read_json(args.completion_marker)):
             state.update({"state": "objective_complete", "updated_unix": time.time()})
@@ -331,9 +380,19 @@ def main() -> int:
             })
             atomic_json(args.state_path, state)
             print(json.dumps({"decision": decision.__dict__, "trigger": trigger}))
+            status = probe.get("status") or {}
+            append_activity(
+                activity_path,
+                f"{decision.kind.upper()} {decision.reason}; "
+                f"phase={status.get('phase', '-')} "
+                f"state={status.get('state', probe.get('host_state', '-'))} "
+                f"row={status.get('durable_next_row', '-')} "
+                f"target={status.get('block_target_row', '-')}",
+            )
             if trigger and not args.dry_run:
                 returncode = invoke_codex(
-                    args.session_id, decision, probe, args.state_path.parent / "logs"
+                    args.session_id, decision, probe,
+                    args.state_path.parent / "logs", activity_path,
                 )
                 state["last_codex_returncode"] = returncode
                 state["last_codex_unix"] = time.time()
@@ -344,6 +403,7 @@ def main() -> int:
         except Exception as exc:
             state.update({"probe_error": str(exc), "updated_unix": time.time()})
             atomic_json(args.state_path, state)
+            append_activity(activity_path, f"PROBE ERROR {exc}")
             print(f"watch probe failed: {exc}", file=sys.stderr)
         if args.once:
             return 0

@@ -5,6 +5,7 @@ from scripts.aws.watch_programming_brain import (
     classify_probe,
     completion_marker_valid,
     cooldown_elapsed,
+    format_codex_event,
     observe,
 )
 
@@ -115,3 +116,19 @@ def test_probe_process_matching_is_executable_scoped() -> None:
     ).read_text(encoding="utf-8")
     assert "process_name.startswith('python')" in source
     assert "process_name == 'bash'" in source
+
+
+def test_codex_json_events_have_a_human_readable_tail() -> None:
+    message = format_codex_event({
+        "type": "item.completed",
+        "item": {"type": "agent_message", "text": "Fixed the replay gate."},
+    })
+    command = format_codex_event({
+        "type": "item.started",
+        "item": {
+            "type": "command_execution", "status": "in_progress",
+            "command": "python -m pytest",
+        },
+    })
+    assert message == "CODEX MESSAGE Fixed the replay gate."
+    assert command == "CODEX COMMAND [in_progress] python -m pytest"

@@ -317,6 +317,13 @@ existing full-access sandbox setting. It records JSONL and stderr logs below
 classification without waking Codex. Do not use `--last`: an unrelated newer
 Codex task could otherwise receive the programming-brain event.
 
+On Windows, `scripts/aws/show_programming_brain_watch.ps1` is a detachable
+viewer. It starts the hidden watcher only when no watcher process exists, shows
+the latest AWS phase/row/process snapshot, and follows `activity.log` in real
+time. Closing the PowerShell window stops only `Get-Content -Wait`; it does not
+signal, kill, or restart the watcher. A desktop shortcut may safely open and
+close this viewer independently as often as needed.
+
 The resumed prompt carries the final acceptance contract, not merely the
 current corpus alarm. It requires a 1,000-task deterministic enterprise
 software obstacle course with capability-family remediation and full
