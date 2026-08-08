@@ -401,6 +401,63 @@ fn deterministic_validator_filters_before_bounded_feature_readout() {
 }
 
 #[test]
+fn deterministic_validator_filters_before_motif_winner_selection() {
+    let mut brain = Brain::new(BrainConfig::default());
+    let text_pool = brain.create_pool(
+        PoolConfig::defaults("text", 1),
+        Box::new(BytePassthroughEncoding { prefix: "text" }),
+    );
+    let action_pool = brain.create_pool(
+        PoolConfig::defaults("action", 2),
+        Box::new(BytePassthroughEncoding { prefix: "action" }),
+    );
+    let popular_but_wrong =
+        b"def smedian(values, count):\n    return values[count // 2] if count % 2 else 0";
+    let rarer_but_valid =
+        b"def filter_odd(values):\n    return [value for value in values if value % 2]";
+    for _ in 0..12 {
+        brain.pretrain_binding_episode(&[
+            (
+                text_pool,
+                b"Build a Python function which handles odd integers from an input list."
+                    .to_vec(),
+            ),
+            (action_pool, popular_but_wrong.to_vec()),
+        ]);
+    }
+    for _ in 0..3 {
+        brain.pretrain_binding_episode(&[
+            (
+                text_pool,
+                b"Implement filter_odd in Python to keep odd numbers from a list.".to_vec(),
+            ),
+            (action_pool, rarer_but_valid.to_vec()),
+        ]);
+    }
+    let query = b"Build a Python function which keeps only odd integers from an input list.";
+    let unfiltered = brain.decode_best_binding_by_char_motifs_with_margin(
+        text_pool,
+        query,
+        action_pool,
+        0.0,
+        0.0,
+    );
+    assert!(unfiltered.is_some(), "unfiltered motif route must find an episode");
+    let recalled = brain.decode_best_binding_by_char_motifs_with_margin_where(
+        text_pool,
+        query,
+        action_pool,
+        0.0,
+        0.0,
+        &|bytes| bytes.windows(b"filter_odd".len()).any(|part| part == b"filter_odd"),
+    );
+    assert_eq!(
+        recalled.as_ref().map(|(bytes, _, _)| bytes.as_slice()),
+        Some(rarer_but_valid.as_slice()),
+    );
+}
+
+#[test]
 fn deterministic_validator_can_recover_a_richer_learned_episode() {
     let mut brain = Brain::new(BrainConfig::default());
     let feature_pool = brain.create_pool(

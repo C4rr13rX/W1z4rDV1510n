@@ -5229,6 +5229,49 @@ impl Brain {
         min_score: f32,
         min_margin: f32,
     ) -> Option<(Vec<u8>, f32, f32)> {
+        self.decode_best_binding_by_char_motifs_with_margin_filtered(
+            query_pool,
+            query_frame,
+            target_pool,
+            min_score,
+            min_margin,
+            None,
+        )
+    }
+
+    /// Character-motif recall whose candidate action must also satisfy an
+    /// independent deterministic constraint. Filtering happens before the
+    /// winner and margin are chosen, allowing sparse semantic evidence to
+    /// inhibit a superficially similar but behaviorally unrelated episode
+    /// without replacing the raw atom-stream route.
+    pub fn decode_best_binding_by_char_motifs_with_margin_where(
+        &self,
+        query_pool: PoolId,
+        query_frame: &[u8],
+        target_pool: PoolId,
+        min_score: f32,
+        min_margin: f32,
+        validator: &dyn Fn(&[u8]) -> bool,
+    ) -> Option<(Vec<u8>, f32, f32)> {
+        self.decode_best_binding_by_char_motifs_with_margin_filtered(
+            query_pool,
+            query_frame,
+            target_pool,
+            min_score,
+            min_margin,
+            Some(validator),
+        )
+    }
+
+    fn decode_best_binding_by_char_motifs_with_margin_filtered(
+        &self,
+        query_pool: PoolId,
+        query_frame: &[u8],
+        target_pool: PoolId,
+        min_score: f32,
+        min_margin: f32,
+        validator: Option<&dyn Fn(&[u8]) -> bool>,
+    ) -> Option<(Vec<u8>, f32, f32)> {
         if query_pool == target_pool
             || query_pool == self.binding_pool_id
             || target_pool == self.binding_pool_id
@@ -5247,14 +5290,19 @@ impl Brain {
         let target = target_handle.read();
         let mut classes: std::collections::HashMap<Vec<u8>, (f32, u64)> =
             std::collections::HashMap::new();
-        let mut posting_lists: Vec<Vec<NeuronId>> = query_motifs
+        let mut posting_lists: Vec<([u8; 3], Vec<NeuronId>)> = query_motifs
             .iter()
-            .map(|motif| self.binding_motif_postings(query_pool, *motif))
-            .filter(|ids| !ids.is_empty())
+            .map(|motif| (*motif, self.binding_motif_postings(query_pool, *motif)))
+            .filter(|(_, ids)| !ids.is_empty())
             .collect();
-        posting_lists.sort_unstable_by_key(|ids| ids.len());
+        posting_lists.sort_unstable_by_key(|(motif, ids)| (ids.len(), *motif));
         let mut candidate_evidence = AHashMap::new();
-        for ids in posting_lists.into_iter().take(8) {
+        // A validator can reject every superficially closest route, so give
+        // it a wider but still bounded sensory scope in which to find the
+        // first semantically compatible episode. Unfiltered latency retains
+        // the original eight rarest-motif budget.
+        let posting_limit = if validator.is_some() { 32 } else { 8 };
+        for (_, ids) in posting_lists.into_iter().take(posting_limit) {
             add_binding_evidence(&mut candidate_evidence, ids);
         }
         let candidate_ids = rank_bounded_binding_evidence(
@@ -5344,6 +5392,9 @@ impl Brain {
                 target.decode_concept_members(&atoms)
             };
             if bytes.is_empty() {
+                continue;
+            }
+            if validator.is_some_and(|accept| !accept(&bytes)) {
                 continue;
             }
             let candidate = (score, binding.use_count);

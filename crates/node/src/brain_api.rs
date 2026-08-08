@@ -3437,6 +3437,28 @@ async fn h_brain_chat(
             )
         })
         .map(|(bytes, _, _)| bytes);
+    // Raw character motifs and sparse semantic features are independent
+    // neural observations of the same request. At accumulated-corpus scale,
+    // a broad feature posting can omit an older valid episode from its
+    // bounded candidate window even though the raw motif route can still
+    // reach it. Jointly require both signals before selection: the motif
+    // route supplies verbatim learned actions and the semantic validator
+    // inhibits superficially similar but behaviorally incompatible source.
+    let raw_semantically_validated = composition_features
+        .as_ref()
+        .and_then(|(_, labels)| {
+            brain.decode_best_binding_by_char_motifs_with_margin_where(
+                POOL_TEXT,
+                prompt.as_bytes(),
+                action_pool,
+                0.0,
+                0.0,
+                &|candidate| {
+                    prompt_programming_response_compatible(labels, prompt, candidate)
+                },
+            )
+        })
+        .map(|(bytes, _, _)| bytes);
     let mut feature_candidates = composition_features
         .as_ref()
         .map(|(pool_id, labels)| {
@@ -3703,6 +3725,10 @@ async fn h_brain_chat(
         // truncation. Popular but behaviorally incompatible corpus actions
         // cannot crowd a rarer correct learned episode out of bounded recall.
         ranked_validated_source
+    } else if raw_semantically_validated.is_some() {
+        // Feature and atom-motif pools independently agree on this learned
+        // action. This path remains read-only and cannot synthesize source.
+        raw_semantically_validated
     } else if raw_motif_trained.as_ref().is_some_and(|candidate| {
         programming_response_compatible(&diagnostic_intent_labels, candidate)
     }) {
