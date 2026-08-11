@@ -2779,6 +2779,40 @@ fn select_composed_artifact(
     }
 }
 
+fn explicitly_requests_source_unit(prompt: &str) -> bool {
+    let prompt = prompt.to_ascii_lowercase();
+    (prompt.contains("function") || prompt.contains("method") || prompt.contains("snippet"))
+        && !prompt.contains("project")
+        && !prompt.contains("module")
+        && !prompt.contains("multiple files")
+        && !prompt.contains("multi-file")
+}
+
+/// A request that combines independently grounded behaviors needs their
+/// complete container before any one compatible source candidate. Corpus
+/// growth can legitimately change source ranking; it must not make a ready
+/// multi-component manifest unreachable. Explicit source-unit requests retain
+/// the narrower response contract.
+fn request_prefers_composed_artifact(labels: &[String], prompt: &str) -> bool {
+    if explicitly_requests_source_unit(prompt) {
+        return false;
+    }
+    let behavior_count = manifest_component_feature_pairs(labels)
+        .into_iter()
+        .map(|pair| pair[1].clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    let prompt = prompt.to_ascii_lowercase();
+    behavior_count >= 2
+        || labels
+            .iter()
+            .any(|label| label.ends_with(":ARTIFACT:PROJECT"))
+        || prompt.contains("project")
+        || prompt.contains("modules")
+        || prompt.contains("multiple files")
+        || prompt.contains("multi-file")
+}
+
 /// Assemble independently grounded raw-source fragments into files. The
 /// protocol carries only deterministic structural constraints; source remains
 /// byte-atom learned evidence and is never invented by this function.
@@ -3694,14 +3728,7 @@ async fn h_brain_chat(
                     .as_ref()
                     .is_some_and(|artifact| composed_artifact_contains_fragment(artifact, exact))
         });
-    let prompt_lowercase = prompt.to_ascii_lowercase();
-    let explicitly_requests_source_unit = (prompt_lowercase.contains("function")
-        || prompt_lowercase.contains("method")
-        || prompt_lowercase.contains("snippet"))
-        && !prompt_lowercase.contains("project")
-        && !prompt_lowercase.contains("module")
-        && !prompt_lowercase.contains("multiple files")
-        && !prompt_lowercase.contains("multi-file");
+    let explicitly_requests_source_unit = explicitly_requests_source_unit(prompt);
     let trained_bytes = if raw_is_exact && raw_trained.is_some() {
         // Direct sensory evidence is the strongest tier. Derived diagnostic
         // pools may compose novel requests, but can never overwrite an
@@ -3710,6 +3737,15 @@ async fn h_brain_chat(
     } else if exact_complete_manifest.is_some() {
         exact_complete_manifest
     } else if exact_is_composition_prerequisite && composed.is_some() {
+        composed
+    } else if request_prefers_composed_artifact(
+        &diagnostic_intent_labels,
+        prompt,
+    ) && composed.is_some()
+    {
+        // A ready, behavior-complete container is stronger than one plain
+        // source candidate for a request that asks independent subsystems to
+        // work together. This ordering is invariant to later corpus rank.
         composed
     } else if !explicitly_requests_source_unit && ranked_single_manifest.is_some() {
         // Preserve a learned project/file response contract unless the user
@@ -5219,6 +5255,23 @@ mod tests {
             ),
             Some(fragments)
         );
+    }
+
+    #[test]
+    fn multi_behavior_module_request_prefers_composition_over_plain_source() {
+        let labels = vec![
+            "intent:LANGUAGE:PYTHON".to_string(),
+            "intent:PERSISTENCE:ATOMIC_TRANSACTION".to_string(),
+            "intent:SECURITY:AUTHORIZATION".to_string(),
+        ];
+        assert!(request_prefers_composed_artifact(
+            &labels,
+            "Build Python database transaction and access-control modules: transfers are all-or-nothing and permissions deny by default.",
+        ));
+        assert!(!request_prefers_composed_artifact(
+            &labels,
+            "Write a Python function that checks authorization before a transaction.",
+        ));
     }
 
     #[test]

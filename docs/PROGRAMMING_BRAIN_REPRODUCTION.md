@@ -227,6 +227,17 @@ hide memory pressure and block protected inference behind training.
 
 Replay is deliberately an end-of-corpus transaction. Each interval trains against the final accepted brain under an independent guard, recalls samples from its exact row window, and then passes the complete corpus/foundation/enterprise admission gate with that interval temporarily included. A passing interval is resolved and its unreferenced causal base pruned. A failing interval restores the final brain, remains unresolved with its diagnostic artifacts, and stops the replay loop for a test/family-fix/retry cycle. Use `--replay-interval-id PHASE:START:END` to retry one corrected interval without admitting any other pending range.
 
+Corpus growth may change the ranking of individually compatible source
+candidates without invalidating an independently grounded project
+composition. For a request combining two or more behavior classes, or one
+that explicitly asks for a project/modules/multiple files, a ready compatible
+manifest composition must precede any single plain-source candidate. Preserve
+the narrower source response only when the prompt explicitly asks for a
+function, method, or snippet. This precedence is an output-contract invariant,
+not a popularity tie-break: otherwise a later source episode can make a valid
+multi-component container unreachable even though component retrieval and
+composition both succeeded.
+
 During forward harvest, a guarded block may be completely covered by unresolved
 deferred intervals. Its admission sampler must then contain zero rows. Do not
 manufacture a pass and do not append an empty interval: verify gap-free
