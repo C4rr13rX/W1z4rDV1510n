@@ -2003,7 +2003,7 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             snapshot = brain / "brain.bin"
             snapshot.write_bytes(b"accepted")
             guard = brain / "brain.last-good.bin"
-            guard.hardlink_to(snapshot)
+            os.link(snapshot, guard)
             (brain / "brain.last-good.json").write_text(json.dumps({
                 "phase": "corpus", "row": 100,
             }), encoding="utf-8")
