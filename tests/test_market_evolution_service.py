@@ -1558,6 +1558,43 @@ def test_full_fold_tree_champion_can_launch_return_magnitude_specialist():
     assert sum(protected_parent in genome.parents for genome in after) >= 1
 
 
+def test_profitable_return_tree_repairs_coverage_before_more_topology():
+    population = seed_genomes(8, random.Random(192))
+    champion = population[0]
+    champion.learner_kind = "extra_trees"
+    champion.fitness = 2400
+    champion.result = {"evaluated_folds": 3, "requested_folds": 3}
+    observed = Genome(**{
+        **champion.__dict__, "learner_kind": "extra_trees_regressor",
+        "generation": 910, "parents": [champion.genome_id],
+        "genome_id": "", "fitness": 405,
+        "result": {
+            "evaluated_folds": 1, "requested_folds": 3,
+            "summary": {
+                "min_accuracy": .6115, "min_balanced_accuracy": .6127,
+                "min_mcc": .225, "min_profit_factor": 1.002,
+                "min_coverage": .483,
+            },
+        },
+    }).finalize()
+    for genome in population[1:]:
+        genome.fitness = None
+        genome.result = None
+
+    after = evolution.introduce_champion_return_tree_variant(
+        population, champion, [observed], 911
+    )
+
+    repair = next(
+        genome for genome in after
+        if genome.learner_kind == "extra_trees_regressor"
+    )
+    expected_step = max(.02, min(.08, (.60 - .483) * .5))
+    assert repair.confidence_quantile == pytest.approx(
+        observed.confidence_quantile - expected_step
+    )
+
+
 def test_extra_trees_return_regressor_ranks_signed_magnitude():
     genome = seed_genomes(1, random.Random(188))[0]
     values = np.linspace(-2.0, 2.0, 80, dtype=np.float32).reshape(-1, 1)

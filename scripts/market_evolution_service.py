@@ -3487,19 +3487,52 @@ def introduce_champion_return_tree_variant(
     result = champion.result or {}
     if int(result.get("evaluated_folds", 0)) < int(result.get("requested_folds", 3)):
         return population
-    payload = asdict(champion)
-    payload.update({
-        "learner_kind": "extra_trees_regressor",
-        "generation": generation, "parents": [champion.genome_id],
-        "fitness": None, "result": None, "genome_id": "",
-    })
-    variant = Genome(**payload).finalize()
     known_keys = {
         genome_evaluation_key(genome)
         for genome in [*population, *evidence]
         if genome.fitness is not None or genome in population
     }
-    if genome_evaluation_key(variant) in known_keys:
+    quantiles: list[float] = []
+    return_evidence = sorted(
+        (genome for genome in evidence
+         if genome.learner_kind == "extra_trees_regressor"
+         and genome.fitness is not None),
+        key=lambda genome: float(
+            ((genome.result or {}).get("summary") or {}).get("min_coverage", 0)
+        ),
+        reverse=True,
+    )
+    for observed in return_evidence:
+        summary = (observed.result or {}).get("summary", {})
+        coverage = float(summary.get("min_coverage", 0))
+        strong_signal = (
+            float(summary.get("min_accuracy", 0)) >= .56
+            and float(summary.get("min_balanced_accuracy", 0)) >= .55
+            and float(summary.get("min_mcc", -1)) >= .10
+            and float(summary.get("min_profit_factor", 0)) >= .95
+        )
+        if strong_signal and coverage < PRESCREEN["coverage"]:
+            coverage_gap = PRESCREEN["coverage"] - coverage
+            quantiles.append(max(
+                0.0,
+                observed.confidence_quantile
+                - max(.02, min(.08, coverage_gap * .5)),
+            ))
+    quantiles.append(champion.confidence_quantile)
+    variant: Genome | None = None
+    for quantile in quantiles:
+        payload = asdict(champion)
+        payload.update({
+            "learner_kind": "extra_trees_regressor",
+            "confidence_quantile": quantile,
+            "generation": generation, "parents": [champion.genome_id],
+            "fitness": None, "result": None, "genome_id": "",
+        })
+        proposal = Genome(**payload).finalize()
+        if genome_evaluation_key(proposal) not in known_keys:
+            variant = proposal
+            break
+    if variant is None:
         return population
     protected_parent_ids = protected_parent_ids or set()
     parent_counts = Counter(
@@ -4982,6 +5015,7 @@ def main() -> int:
                     and champion.genome_id in genome.parents
                     and genome.fitness is None
                     and genome.feature_programs == champion.feature_programs
+                    and genome.learner_kind == champion.learner_kind
                     for genome in population
                 ),
                 "champion_profit_program_candidates": sum(
