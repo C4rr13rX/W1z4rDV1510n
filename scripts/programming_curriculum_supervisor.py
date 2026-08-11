@@ -1746,7 +1746,7 @@ def run_completion_gate(args: argparse.Namespace, phase: Phase,
 
     foundation = evaluate("foundation", [
         sys.executable, "scripts/programming_brain_eval.py",
-        "--endpoint", args.endpoint,
+        "--endpoint", args.endpoint, "--details",
     ])
     for passed_key, total_key in (
         ("toddler_exact", "toddler_total"),

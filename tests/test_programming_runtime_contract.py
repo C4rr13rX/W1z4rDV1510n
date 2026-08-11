@@ -276,6 +276,14 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         self.assertEqual(failed[0]["reply"], "incorrect learned answer")
         self.assertEqual(failed[0]["route"]["decoder"], "trained_binding")
 
+    def test_completion_foundation_gate_requests_failure_details(self) -> None:
+        source = (
+            ROOT / "scripts" / "programming_curriculum_supervisor.py"
+        ).read_text(encoding="utf-8")
+        start = source.index('foundation = evaluate("foundation"')
+        end = source.index("for passed_key, total_key", start)
+        self.assertIn('"--details"', source[start:end])
+
     def test_memory_floor_requires_forward_durable_progress(self) -> None:
         gib = 1024 * 1024 * 1024
         self.assertFalse(memory_floor_breached(6.0, 100, 100, 100, 1 * gib))

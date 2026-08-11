@@ -3308,6 +3308,7 @@ async fn h_brain_chat(
     // grow with total curriculum size even though the exact binding index had
     // already reduced retrieval itself to O(1)-style lookup.
     let raw_is_exact = brain.has_exact_trained_binding(POOL_TEXT, action_pool);
+    let unseen_atomic_prompt = unseen_atomic_prompt_requires_abstention(prompt, raw_is_exact);
     let exact_raw_trained = raw_is_exact
         .then(|| brain.decode_best_trained_binding(POOL_TEXT, action_pool))
         .flatten();
@@ -3844,9 +3845,11 @@ async fn h_brain_chat(
         }
     });
 
-    let reply = if directly_underspecified {
+    let reply = if directly_underspecified || unseen_atomic_prompt {
         // Explicit missing-information evidence inhibits every generative
-        // route, including raw-character fuzzy recall.
+        // route, including raw-character fuzzy recall. An unobserved atomic
+        // lexical symbol has the same contract: a familiar word occurring
+        // inside it is not independent grounding for the whole symbol.
         String::new()
     } else if let Some(td) = trained_decode.as_ref().filter(|s| !s.is_empty()) {
         td.clone()
@@ -3972,6 +3975,24 @@ async fn h_brain_chat(
                 && trained_decode.is_none(),
         },
     }))
+}
+
+/// Keep an unobserved, single lexical symbol outside grounding.
+///
+/// Character motifs are intentionally useful for paraphrase recall, but a
+/// growing corpus can make a learned word appear as a substring of a novel
+/// token (`quasarithmetic` contains `arithmetic`). With no second token or
+/// exact sensory episode there is no boundary-preserving evidence that the
+/// user requested the learned behavior. Exact one-token lessons remain fully
+/// authoritative; only their fuzzy substrings are inhibited.
+fn unseen_atomic_prompt_requires_abstention(prompt: &str, raw_is_exact: bool) -> bool {
+    if raw_is_exact {
+        return false;
+    }
+    let mut lexical = prompt
+        .split(|ch: char| !ch.is_alphanumeric() && ch != '_')
+        .filter(|token| !token.is_empty());
+    lexical.next().is_some() && lexical.next().is_none()
 }
 
 /// Strip Wizard-chat context-wrapper boilerplate so the brain only
@@ -4821,6 +4842,23 @@ fn brain_phase_routes_impl(state: BrainApiState, include_core_routes: bool) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unseen_atomic_symbol_cannot_inherit_a_contained_word_binding() {
+        assert!(unseen_atomic_prompt_requires_abstention(
+            "quasarithmetic",
+            false,
+        ));
+        assert!(unseen_atomic_prompt_requires_abstention("zxqv_compiler", false));
+        assert!(!unseen_atomic_prompt_requires_abstention(
+            "quasarithmetic",
+            true,
+        ));
+        assert!(!unseen_atomic_prompt_requires_abstention(
+            "compute arithmetic mean",
+            false,
+        ));
+    }
 
     #[test]
     fn fresh_brain_uses_neuron_addressable_storage_from_first_observation() {
