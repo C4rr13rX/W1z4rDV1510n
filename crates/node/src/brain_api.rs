@@ -2642,10 +2642,7 @@ fn prompt_programming_response_compatible(
             .iter()
             .any(|cue| request.contains(cue));
         if asks_for_single_input_square {
-            let parameters = declared_parameter_names(&source)
-                .into_iter()
-                .filter(|parameter| parameter != "self" && parameter != "cls")
-                .collect::<Vec<_>>();
+            let parameters = declared_parameter_names(&source);
             let scalar_incompatible = [
                 ".shape",
                 "axis=",
@@ -2653,12 +2650,30 @@ fn prompt_programming_response_compatible(
                 "numpy.sqrt",
                 "np.sum",
                 "numpy.sum",
+                "len(",
+                "sum(",
+                "any(",
+                "all(",
             ]
             .iter()
             .any(|evidence| source.contains(evidence));
+            let scalar_parameter = parameters.first();
+            let collection_access = scalar_parameter.is_some_and(|parameter| {
+                let compact: String = source
+                    .chars()
+                    .filter(|ch| !ch.is_ascii_whitespace())
+                    .collect();
+                compact.contains(&format!("{parameter}["))
+            });
             if parameters.len() != 1
-                || !parameter_self_power_evidence(&source, &parameters[0])
+                || scalar_parameter.is_some_and(|parameter| {
+                    parameter == "self" || parameter == "cls"
+                })
+                || !scalar_parameter.is_some_and(|parameter| {
+                    parameter_self_power_evidence(&source, parameter)
+                })
                 || scalar_incompatible
+                || collection_access
             {
                 return false;
             }
@@ -5616,6 +5631,11 @@ mod tests {
             &square,
             implicit_name_square_prompt,
             b"def root_mean_square(X):\n    segment_width = X.shape[1]\n    return np.sqrt(np.sum(X * X, axis=1) / segment_width)",
+        ));
+        assert!(!prompt_derived_feature_artifact_compatible(
+            &square,
+            implicit_name_square_prompt,
+            b"def cornersphere(self, x):\n    nconstr = len(x)\n    if any(x[:nconstr] < 1):\n        return np.NaN\n    return sum(x**2) - nconstr",
         ));
         assert!(prompt_programming_response_compatible(
             &square,
