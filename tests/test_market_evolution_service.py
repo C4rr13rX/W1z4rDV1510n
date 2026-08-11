@@ -1678,8 +1678,9 @@ def test_regime_shift_frontier_launches_rotating_stability_children():
 
 
 def test_pending_queue_prioritizes_active_accuracy_repairs():
-    coverage, shift, multiscale, ordinary, slow_shift, coverage_child = seed_genomes(
-        6, random.Random(54)
+    (coverage, shift, multiscale, champion, ordinary, slow_shift,
+     coverage_child) = seed_genomes(
+        7, random.Random(54)
     )
     multiscale.learner_kind = "multiscale_regressor"
     multiscale.finalize()
@@ -1690,12 +1691,17 @@ def test_pending_queue_prioritizes_active_accuracy_repairs():
     coverage_child.parents = [coverage.genome_id]
     slow_shift.finalize()
     coverage_child.finalize()
+    champion_child = evolution.mutate(champion, 30, random.Random(56))
+    champion_child.parents = [champion.genome_id]
+    champion_child.finalize()
 
     ordered = evolution.prioritize_pending_genomes(
-        [slow_shift, ordinary, multiscale_child, coverage_child],
-        coverage, shift, multiscale,
+        [slow_shift, ordinary, multiscale_child, coverage_child, champion_child],
+        coverage, shift, multiscale, None, champion,
     )
-    assert ordered == [coverage_child, multiscale_child, ordinary, slow_shift]
+    assert ordered == [
+        champion_child, coverage_child, multiscale_child, ordinary, slow_shift,
+    ]
 
 
 def test_resume_seeders_cannot_erase_active_frontier_children():

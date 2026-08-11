@@ -3629,6 +3629,7 @@ def prioritize_pending_genomes(
     regime_shift_frontier: Genome | None,
     multiscale_frontier: Genome | None = None,
     extra_trees_frontier: Genome | None = None,
+    champion: Genome | None = None,
 ) -> list[Genome]:
     """Evaluate the highest-information repairs first on small worker pools.
 
@@ -3641,9 +3642,17 @@ def prioritize_pending_genomes(
     multiscale_id = multiscale_frontier.genome_id if multiscale_frontier else None
     tree_id = extra_trees_frontier.genome_id if extra_trees_frontier else None
     shift_id = regime_shift_frontier.genome_id if regime_shift_frontier else None
+    champion_id = champion.genome_id if champion else None
 
     def priority(genome: Genome) -> int:
         parents = set(genome.parents)
+        # A direct, single-coordinate descendant of the only full-fold winner
+        # produces the cleanest signed evidence and is usually cheaper than
+        # multiscale or decomposed repairs. Evaluate it before speculative
+        # frontier descendants so a 30-minute feedback cycle cannot expire
+        # while its most actionable experiment is still queued.
+        if champion_id is not None and champion_id in parents:
+            return 6
         if coverage_id is not None and coverage_id in parents:
             return 5
         if multiscale_id is not None and multiscale_id in parents:
@@ -4201,6 +4210,7 @@ def main() -> int:
                 coverage_frontier, regime_shift_frontier,
                 multiscale_boundary_frontier or multiscale_frontier,
                 extra_trees_frontier,
+                champion,
             )
             write_live_status(
                 args.state_dir, "evaluating", generation,
