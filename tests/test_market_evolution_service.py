@@ -1260,6 +1260,33 @@ def test_partial_fold_frontier_cannot_drive_champion_coordinate_search():
     assert [genome.genome_id for genome in after] == before
 
 
+def test_full_fold_champion_coordinate_search_survives_emergent_saturation():
+    population = seed_genomes(8, random.Random(181))
+    champion = population[0]
+    champion.fitness = 2400
+    champion.result = {"evaluated_folds": 3, "requested_folds": 3}
+    for genome in population[1:]:
+        genome.fitness = None
+        genome.result = None
+        genome.emergent_pools = [{
+            "name": f"emergent_{genome.genome_id}",
+            "features": ["r1"], "concept_threshold": 2,
+        }]
+
+    after = evolution.introduce_champion_coordinate_variant(
+        population, champion, [], 903
+    )
+
+    descendants = [
+        genome for genome in after
+        if champion.genome_id in genome.parents and genome.fitness is None
+    ]
+    assert len(descendants) == 1
+    assert descendants[0].confidence_quantile == max(
+        0.0, champion.confidence_quantile - .01
+    )
+
+
 def test_reliability_decay_search_brackets_best_protected_evidence():
     base = seed_genomes(1, random.Random(175))[0]
     evidence = []

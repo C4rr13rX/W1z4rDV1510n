@@ -3129,12 +3129,20 @@ def introduce_champion_coordinate_variant(
     if variant is None:
         return population
     protected_parent_ids = protected_parent_ids or set()
-    replacement = next((
+    replaceable = [
         index for index in range(len(population) - 1, 0, -1)
         if population[index].fitness is None
-        and not population[index].emergent_pools
         and not (set(population[index].parents) & protected_parent_ids)
-    ), None)
+    ]
+    # Prefer an ordinary child, but do not silently abandon the reserved
+    # full-fold search merely because crossover copied emergent topology into
+    # every unprotected child. One emergent experiment is a smaller cost than
+    # another generation with no controlled descendant of the only candidate
+    # that has survived every requested fold.
+    replacement = next((
+        index for index in replaceable
+        if not population[index].emergent_pools
+    ), replaceable[0] if replaceable else None)
     if replacement is None:
         return population
     population[replacement] = variant
