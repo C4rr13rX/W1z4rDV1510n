@@ -4862,8 +4862,7 @@ def cap_expensive_multiscale_candidates(
     converted = 0
     protected_seen: set[tuple[tuple[str, ...], str]] = set()
     for index, source in enumerate(population):
-        if (source.fitness is not None
-                or source.learner_kind != "multiscale_regressor"):
+        if source.learner_kind != "multiscale_regressor":
             continue
         protected = bool(set(source.parents) & protected_parent_ids)
         protected_key = (
@@ -4871,6 +4870,8 @@ def cap_expensive_multiscale_candidates(
         )
         if protected and protected_key not in protected_seen:
             protected_seen.add(protected_key)
+            continue
+        if source.fitness is not None:
             continue
         payload = asdict(source)
         payload.update({

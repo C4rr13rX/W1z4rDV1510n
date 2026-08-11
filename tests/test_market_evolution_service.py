@@ -2577,6 +2577,31 @@ def test_untargeted_multiscale_candidates_are_converted():
     assert remaining[0].parents == [protected_parent]
 
 
+def test_resumed_multiscale_duplicate_of_evaluated_probe_is_converted():
+    population = seed_genomes(6, random.Random(206))
+    protected_parent = "active-multiscale-boundary"
+    evaluated = population[-2]
+    evaluated.learner_kind = "multiscale_regressor"
+    evaluated.parents = [protected_parent]
+    evaluated.fitness = 1300
+    evaluated.result = {"status": "prescreen_reject", "summary": {}}
+    evaluated.finalize()
+    pending = Genome(**{
+        **evaluated.__dict__,
+        "confidence_quantile": evaluated.confidence_quantile + .000004,
+        "genome_id": "", "fitness": None, "result": None,
+    }).finalize()
+    population[-1] = pending
+
+    updated, converted = evolution.cap_expensive_multiscale_candidates(
+        population, 43, {protected_parent}
+    )
+
+    assert converted == 1
+    assert updated[-2].learner_kind == "multiscale_regressor"
+    assert updated[-1].learner_kind == "regressor"
+
+
 def test_genome_outcome_pool_learns_live_metric_rankings():
     evidence = []
     for index in range(120):
