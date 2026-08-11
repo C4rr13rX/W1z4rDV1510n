@@ -30,7 +30,8 @@ from typing import Any, Sequence
 import numpy as np
 import joblib
 from sklearn.ensemble import (
-    ExtraTreesClassifier, HistGradientBoostingClassifier, HistGradientBoostingRegressor,
+    ExtraTreesClassifier, ExtraTreesRegressor, HistGradientBoostingClassifier,
+    HistGradientBoostingRegressor,
 )
 from sklearn.linear_model import LogisticRegression
 
@@ -52,6 +53,7 @@ LEARNER_KINDS = (
 RETURN_LEARNER_KINDS = {
     "regressor", "decomposed_regressor", "regime_regressor",
     "regime_decomposed_regressor", "multiscale_regressor",
+    "extra_trees_regressor",
 }
 REGIME_FEATURES = (
     "rv24", "volatility_ratio", "market_breadth_r6", "market_median_r6",
@@ -699,6 +701,18 @@ def new_return_regressor(genome: Genome, random_state: int) -> HistGradientBoost
         max_leaf_nodes=genome.max_leaf_nodes,
         min_samples_leaf=genome.min_samples_leaf,
         l2_regularization=genome.l2_regularization, random_state=random_state,
+    )
+
+
+def new_extra_trees_return_regressor(
+    genome: Genome, random_state: int,
+) -> ExtraTreesRegressor:
+    """Rank signed return magnitude with the champion's nonlinear tree shape."""
+    return ExtraTreesRegressor(
+        n_estimators=min(240, max(80, genome.max_iter)),
+        max_leaf_nodes=genome.max_leaf_nodes,
+        min_samples_leaf=genome.min_samples_leaf,
+        max_features="sqrt", n_jobs=1, random_state=random_state,
     )
 
 
@@ -1968,7 +1982,16 @@ def evaluate_genome(genome: Genome, dataset: dict[str, Any], *, folds: int,
             weights = causal_weights(genome.recency_half_life_days)
             if genome.learner_kind in RETURN_LEARNER_KINDS:
                 raw_model = new_return_regressor(genome, 1700 + fold)
-                if genome.learner_kind == "multiscale_regressor":
+                if genome.learner_kind == "extra_trees_regressor":
+                    raw_model = new_extra_trees_return_regressor(
+                        genome, 1700 + fold
+                    ).fit(
+                        x_fit,
+                        np.asarray([row["return"] for row in fit], dtype=np.float64),
+                        sample_weight=weights,
+                    )
+                    model = Surrogate(raw_model, "extra_trees_regressor")
+                elif genome.learner_kind == "multiscale_regressor":
                     raw_model = fit_multiscale_regressor(
                         genome, x_fit,
                         np.asarray([row["return"] for row in fit], dtype=np.float64),
@@ -3385,6 +3408,56 @@ def introduce_champion_profit_program_from_frontiers(
     return population
 
 
+def introduce_champion_return_tree_variant(
+    population: list[Genome], champion: Genome | None,
+    evidence: Sequence[Genome], generation: int,
+    protected_parent_ids: set[str] | None = None,
+) -> list[Genome]:
+    """Test return-magnitude ranking after program hypotheses are exhausted."""
+    if (champion is None or champion.fitness is None
+            or champion.learner_kind != "extra_trees" or len(population) < 6):
+        return population
+    result = champion.result or {}
+    if int(result.get("evaluated_folds", 0)) < int(result.get("requested_folds", 3)):
+        return population
+    payload = asdict(champion)
+    payload.update({
+        "learner_kind": "extra_trees_regressor",
+        "generation": generation, "parents": [champion.genome_id],
+        "fitness": None, "result": None, "genome_id": "",
+    })
+    variant = Genome(**payload).finalize()
+    known_keys = {
+        genome_evaluation_key(genome)
+        for genome in [*population, *evidence]
+        if genome.fitness is not None or genome in population
+    }
+    if genome_evaluation_key(variant) in known_keys:
+        return population
+    protected_parent_ids = protected_parent_ids or set()
+    parent_counts = Counter(
+        parent
+        for genome in population if genome.fitness is None
+        for parent in genome.parents
+    )
+    ordinary = [
+        index for index in range(len(population) - 1, 0, -1)
+        if population[index].fitness is None
+        and champion.genome_id not in population[index].parents
+        and not (set(population[index].parents) & protected_parent_ids)
+    ]
+    duplicate = [
+        index for index in range(len(population) - 1, 0, -1)
+        if population[index].fitness is None
+        and champion.genome_id not in population[index].parents
+        and any(parent_counts[parent] > 1 for parent in population[index].parents)
+    ]
+    replacement = ordinary[0] if ordinary else (duplicate[0] if duplicate else None)
+    if replacement is not None:
+        population[replacement] = variant
+    return population
+
+
 def coverage_frontier_rank(genome: Genome) -> tuple[float, ...] | None:
     """Rank near-coverage misses without discarding profitable accuracy.
 
@@ -4757,6 +4830,7 @@ def main() -> int:
                     ) if genome is not None
                 },
             )
+            before_profit_search = [genome.genome_id for genome in population]
             population = introduce_champion_profit_program_from_frontiers(
                 population, champion,
                 (extra_trees_frontier, coverage_frontier, multiscale_frontier),
@@ -4769,6 +4843,18 @@ def main() -> int:
                     ) if genome is not None
                 },
             )
+            if [genome.genome_id for genome in population] == before_profit_search:
+                population = introduce_champion_return_tree_variant(
+                    population, champion, champion_coordinate_evidence,
+                    generation,
+                    {
+                        genome.genome_id for genome in (
+                            coverage_frontier, multiscale_frontier,
+                            multiscale_boundary_frontier, extra_trees_frontier,
+                            regime_shift_frontier,
+                        ) if genome is not None
+                    },
+                )
             population, regime_candidates_converted = cap_expensive_regime_candidates(
                 population, generation, regime_shift_frontier
             )
@@ -4820,6 +4906,13 @@ def main() -> int:
                     and champion.genome_id in genome.parents
                     and genome.fitness is None
                     and len(genome.feature_programs) > len(champion.feature_programs)
+                    for genome in population
+                ),
+                "champion_return_tree_candidates": sum(
+                    champion is not None
+                    and champion.genome_id in genome.parents
+                    and genome.fitness is None
+                    and genome.learner_kind == "extra_trees_regressor"
                     for genome in population
                 ),
                 "surplus_regime_candidates_converted": regime_candidates_converted,

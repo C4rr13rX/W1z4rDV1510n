@@ -1530,6 +1530,46 @@ def test_accurate_program_transfer_gets_selective_profit_followup():
     }
 
 
+def test_full_fold_tree_champion_can_launch_return_magnitude_specialist():
+    population = seed_genomes(8, random.Random(187))
+    champion = population[0]
+    champion.learner_kind = "extra_trees"
+    champion.fitness = 2400
+    champion.result = {"evaluated_folds": 3, "requested_folds": 3}
+    protected_parent = "active-frontier"
+    for genome in population[1:]:
+        genome.fitness = None
+        genome.result = None
+        genome.parents = [protected_parent]
+        genome.finalize()
+
+    after = evolution.introduce_champion_return_tree_variant(
+        population, champion, [], 909, {protected_parent}
+    )
+
+    specialists = [
+        genome for genome in after
+        if genome.learner_kind == "extra_trees_regressor"
+        and champion.genome_id in genome.parents
+    ]
+    assert len(specialists) == 1
+    assert specialists[0].features == champion.features
+    assert specialists[0].feature_programs == champion.feature_programs
+    assert sum(protected_parent in genome.parents for genome in after) >= 1
+
+
+def test_extra_trees_return_regressor_ranks_signed_magnitude():
+    genome = seed_genomes(1, random.Random(188))[0]
+    values = np.linspace(-2.0, 2.0, 80, dtype=np.float32).reshape(-1, 1)
+    target = .02 * values[:, 0]
+    model = evolution.new_extra_trees_return_regressor(genome, 19).fit(
+        values, target
+    )
+    prediction = model.predict(values)
+    assert prediction[0] < 0 < prediction[-1]
+    assert prediction[-1] > prediction[len(prediction) // 2]
+
+
 def test_reliability_decay_search_brackets_best_protected_evidence():
     base = seed_genomes(1, random.Random(175))[0]
     evidence = []
