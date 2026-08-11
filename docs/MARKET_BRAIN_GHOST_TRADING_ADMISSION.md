@@ -12,6 +12,19 @@ Ghost trading is an evaluation stage, not evidence that real-money trading is
 safe or profitable.  Real-money admission requires a separate operational and
 risk review.
 
+## Automated PF admission
+
+The lightweight evolution watchdog owns a durable PF-to-ghost-stack record at
+`runtime/market-evolution/ghost_stack_admission.json`. Only a `screened`
+champion with at least three evaluated protected folds and
+`summary.min_profit_factor >= 1.1` may launch the CoolCryptoUtilities Django
+and production-manager stack. A profitable single fold cannot trigger it.
+
+The launcher forces `ENABLE_LIVE_TRADING=0`, `EXECUTE_LIVE_TRADES=0`,
+`LIVE_TRADES_DRY_RUN=1`, and `AUTO_PROMOTE_LIVE=0`; admission starts paper
+measurement, not capital deployment. Both Django HTTP health and a fresh
+production-manager heartbeat are required before the stack is called healthy.
+
 ## Leakage controls
 
 - Split by event time, never randomly.

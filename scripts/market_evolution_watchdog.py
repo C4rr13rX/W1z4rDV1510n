@@ -24,6 +24,7 @@ except ImportError:  # pragma: no cover
 
 
 ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_GHOST_STACK_ROOT = ROOT.parent / "CoolCryptoUtilities"
 
 
 def utc_now() -> str:
@@ -85,6 +86,86 @@ def append_event(state_dir: Path, event: str, **payload: object) -> None:
         stream.flush()
 
 
+def validated_profit_factor(state_dir: Path, required_folds: int = 3) -> float | None:
+    """Read only the protected-fold minimum PF from the durable champion."""
+    try:
+        champion = json.loads((state_dir / "champion.json").read_text(encoding="utf-8"))
+        result = champion.get("result") or {}
+        if str(result.get("status") or "") != "screened":
+            return None
+        if int(result.get("evaluated_folds") or 0) < required_folds:
+            return None
+        value = float((result.get("summary") or {}).get("min_profit_factor"))
+        return value if value >= 0.0 else None
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
+def ghost_stack_healthy(stack_root: Path, timeout: float = 3.0,
+                        heartbeat_max_age: float = 150.0) -> bool:
+    """Require both Django HTTP and a fresh production-manager heartbeat."""
+    try:
+        with urllib.request.urlopen(
+            "http://127.0.0.1:8001/api/wizard-chat/status/", timeout=timeout,
+        ) as response:
+            if not 200 <= response.status < 300:
+                return False
+        heartbeat = json.loads(
+            (stack_root / "logs/production_manager_heartbeat.json").read_text(encoding="utf-8")
+        )
+        age = time.time() - float(heartbeat.get("timestamp") or 0.0)
+        status = str(heartbeat.get("status") or "").lower()
+        return age <= heartbeat_max_age and status in {"running", "starting"}
+    except (OSError, ValueError, TypeError, json.JSONDecodeError,
+            urllib.error.URLError):
+        return False
+
+
+def maybe_start_ghost_stack(
+    state_dir: Path,
+    stack_root: Path,
+    threshold: float,
+    last_attempt: float,
+    *,
+    now: float | None = None,
+    cooldown: float = 90.0,
+) -> tuple[float, bool]:
+    """Start the paper stack only after durable all-fold PF admission."""
+    current = time.time() if now is None else now
+    profit_factor = validated_profit_factor(state_dir)
+    healthy = ghost_stack_healthy(stack_root) if profit_factor is not None and profit_factor >= threshold else False
+    atomic_json(state_dir / "ghost_stack_admission.json", {
+        "at": utc_now(),
+        "validated_profit_factor": profit_factor,
+        "threshold": threshold,
+        "admitted": bool(profit_factor is not None and profit_factor >= threshold),
+        "healthy": healthy,
+        "mode": "ghost",
+        "live_execution_enabled": False,
+    })
+    if profit_factor is None or profit_factor < threshold or healthy:
+        return last_attempt, healthy
+    if current - last_attempt < cooldown:
+        return last_attempt, False
+    python = stack_root / ".venv/Scripts/python.exe" if os.name == "nt" else stack_root / ".venv/bin/python"
+    launcher = stack_root / "scripts/start_ghost_stack.py"
+    if not python.exists() or not launcher.exists():
+        append_event(state_dir, "ghost_stack_launch_unavailable",
+                     python=str(python), launcher=str(launcher))
+        return current, False
+    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    with (state_dir / "ghost_stack.stdout.log").open("ab") as stdout, \
+            (state_dir / "ghost_stack.stderr.log").open("ab") as stderr:
+        process = subprocess.Popen(
+            [str(python), str(launcher), "--timeout", "90"],
+            cwd=stack_root, stdout=stdout, stderr=stderr,
+            creationflags=creationflags,
+        )
+    append_event(state_dir, "ghost_stack_launch_started", pid=process.pid,
+                 validated_profit_factor=profit_factor, threshold=threshold)
+    return current, False
+
+
 def claim_supervisor(state_dir: Path) -> Path:
     path = state_dir / "supervisor.pid"
     prior = read_pid(path)
@@ -135,18 +216,24 @@ def main() -> int:
     parser.add_argument("--memory-poll-seconds", type=float, default=15.0)
     parser.add_argument("--restart-delay-seconds", type=float, default=30.0)
     parser.add_argument("--heartbeat-seconds", type=float, default=15.0)
+    parser.add_argument("--ghost-stack-root", type=Path,
+                        default=DEFAULT_GHOST_STACK_ROOT)
+    parser.add_argument("--ghost-stack-profit-factor", type=float, default=1.1)
+    parser.add_argument("--ghost-stack-check-seconds", type=float, default=60.0)
     parser.add_argument("service_args", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if args.service_args[:1] == ["--"]:
         args.service_args = args.service_args[1:]
     if min(args.memory_poll_seconds, args.restart_delay_seconds,
-           args.heartbeat_seconds) <= 0:
+           args.heartbeat_seconds, args.ghost_stack_check_seconds) <= 0:
         parser.error("poll, restart, and heartbeat intervals must be positive")
 
     args.state_dir.mkdir(parents=True, exist_ok=True)
     stop_path = args.state_dir / "STOP"
     owner = claim_supervisor(args.state_dir)
     append_event(args.state_dir, "supervisor_started", pid=os.getpid())
+    ghost_stack_last_check = 0.0
+    ghost_stack_last_attempt = 0.0
     try:
         while not stop_path.exists():
             worker_pid = read_pid(args.state_dir / "service.pid")
@@ -157,6 +244,14 @@ def main() -> int:
                     time.sleep(args.heartbeat_seconds)
                     publish_status(args.state_dir, "worker_running",
                                    worker_pid=worker_pid, adopted=True)
+                    now = time.time()
+                    if now - ghost_stack_last_check >= args.ghost_stack_check_seconds:
+                        ghost_stack_last_attempt, _ = maybe_start_ghost_stack(
+                            args.state_dir, args.ghost_stack_root,
+                            args.ghost_stack_profit_factor, ghost_stack_last_attempt,
+                            now=now,
+                        )
+                        ghost_stack_last_check = now
                 continue
 
             if not wait_until_launchable(
@@ -184,6 +279,14 @@ def main() -> int:
                     publish_status(args.state_dir, "worker_running",
                                    worker_pid=worker.pid, adopted=False)
                     time.sleep(args.heartbeat_seconds)
+                    now = time.time()
+                    if now - ghost_stack_last_check >= args.ghost_stack_check_seconds:
+                        ghost_stack_last_attempt, _ = maybe_start_ghost_stack(
+                            args.state_dir, args.ghost_stack_root,
+                            args.ghost_stack_profit_factor, ghost_stack_last_attempt,
+                            now=now,
+                        )
+                        ghost_stack_last_check = now
             append_event(args.state_dir, "worker_exited", pid=worker.pid,
                          returncode=worker.returncode,
                          restart=not stop_path.exists())

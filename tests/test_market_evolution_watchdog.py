@@ -44,6 +44,37 @@ def test_claim_replaces_stale_pid_but_rejects_live_owner(tmp_path, monkeypatch):
         raise AssertionError("live supervisor owner was not rejected")
 
 
+def test_validated_profit_factor_requires_screened_three_fold_champion(tmp_path):
+    champion = {
+        "result": {
+            "status": "screened",
+            "evaluated_folds": 3,
+            "summary": {"min_profit_factor": 1.23},
+        }
+    }
+    (tmp_path / "champion.json").write_text(json.dumps(champion), encoding="utf-8")
+    assert watchdog.validated_profit_factor(tmp_path) == 1.23
+    champion["result"]["evaluated_folds"] = 1
+    (tmp_path / "champion.json").write_text(json.dumps(champion), encoding="utf-8")
+    assert watchdog.validated_profit_factor(tmp_path) is None
+
+
+def test_ghost_stack_stays_closed_below_validated_pf_threshold(tmp_path, monkeypatch):
+    (tmp_path / "champion.json").write_text(json.dumps({
+        "result": {"status": "screened", "evaluated_folds": 3,
+                   "summary": {"min_profit_factor": 1.09}},
+    }), encoding="utf-8")
+    monkeypatch.setattr(watchdog, "ghost_stack_healthy", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(watchdog.subprocess, "Popen", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not launch")))
+    last, healthy = watchdog.maybe_start_ghost_stack(
+        tmp_path, tmp_path / "stack", 1.1, 0.0, now=100.0,
+    )
+    assert last == 0.0
+    assert healthy is False
+    admission = json.loads((tmp_path / "ghost_stack_admission.json").read_text())
+    assert admission["admitted"] is False
+
+
 def test_real_watchdog_restarts_exited_worker_until_explicit_stop(tmp_path):
     worker = tmp_path / "disposable_worker.py"
     worker.write_text(
