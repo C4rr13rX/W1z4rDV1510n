@@ -1250,6 +1250,14 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         marker = source.index("publish(deferred_replay_marker_path(runtime)", preflight)
         self.assertLess(guard, preflight)
         self.assertLess(preflight, marker)
+        preflight_definition = source.index("def guarded_protected_route_preflight")
+        completion = source.index(
+            "completion = run_completion_gate", preflight_definition
+        )
+        post_refresh = source.index("post_reasons =", completion)
+        acceptance = source.index("accept_last_good_guard", post_refresh)
+        self.assertLess(completion, post_refresh)
+        self.assertLess(post_refresh, acceptance)
 
     def test_protected_route_pressure_predicts_failure_before_replay(self) -> None:
         healthy = {

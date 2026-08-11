@@ -1776,7 +1776,14 @@ impl Brain {
             let now = self.fabric.current_tick();
             let refresh_members = if let Some(bp) = self.fabric.pool(self.binding_pool_id) {
                 let mut bp = bp.write();
-                if let Some(n) = bp.get_mut(bid) {
+                // Promoted bindings are normally sleeping at production
+                // scale. Recurrence must page this one scoped body before it
+                // can update Hebbian strength or refresh immutable routing;
+                // otherwise maintenance appears to train while doing neither.
+                if bp.ensure_loaded(bid).is_ok() {
+                    let n = bp
+                        .get_mut(bid)
+                        .expect("loaded binding must remain addressable");
                     n.use_count = n.use_count.saturating_add(1);
                     n.last_fired_tick = now;
                     recurrence_posting_refresh_due(n.use_count).then(|| n.members.clone())

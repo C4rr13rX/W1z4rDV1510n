@@ -3,6 +3,22 @@ use w1z4rd_brain::{
     PoolConfig,
 };
 
+struct LegacyInstructionIntentEncoding(InstructionIntentEncoding);
+
+impl AtomEncoding for LegacyInstructionIntentEncoding {
+    fn atomize(&self, frame: &[u8]) -> Vec<String> {
+        self.0.atomize(frame)
+    }
+
+    fn reassemble(&self, active_atoms: &[(&str, f32)]) -> Vec<u8> {
+        self.0.reassemble(active_atoms)
+    }
+
+    fn name(&self) -> &'static str {
+        "legacy-instruction-intent"
+    }
+}
+
 #[test]
 fn ranked_feature_readout_returns_independent_grounded_actions() {
     let mut brain = Brain::new(BrainConfig::default());
@@ -690,5 +706,89 @@ fn composite_semantic_route_reports_pressure_and_retains_validated_history() {
     assert_eq!(recalled.as_deref(), Some(accepted.as_slice()));
 
     drop(brain);
+    std::fs::remove_file(path).expect("remove test wbrain");
+}
+
+#[test]
+fn sleeping_legacy_binding_recurrence_backfills_composite_route() {
+    let mut config = BrainConfig::default();
+    config.binding_emergence_threshold = 1;
+    config.tentative_emergence_threshold = 1;
+    let mut brain = Brain::new(config);
+    let binding_pool = brain.binding_pool_id();
+    let feature_pool = brain.create_pool(
+        PoolConfig::defaults("intent", 1),
+        Box::new(LegacyInstructionIntentEncoding(
+            InstructionIntentEncoding {
+                prefix: "intent".into(),
+            },
+        )),
+    );
+    let action_pool = brain.create_pool(
+        PoolConfig::defaults("action", 2),
+        Box::new(BytePassthroughEncoding { prefix: "action" }),
+    );
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "w1z4rd_legacy_composite_backfill_{}_{}.wbrain",
+        std::process::id(),
+        nonce,
+    ));
+    brain.attach_wbrain(&path).expect("attach wbrain");
+
+    let intent = b"@intent:LANGUAGE:PYTHON\n@intent:POWER_SELF:2\n";
+    let accepted = b"def square(n):\n    return n * n";
+    brain.observe(feature_pool, intent);
+    brain.observe(action_pool, accepted);
+    brain.advance_tick();
+    brain
+        .serialize_all_neurons_for_idle()
+        .expect("flush legacy route without composite keys");
+    drop(brain);
+
+    let mut encodings: std::collections::HashMap<
+        u32,
+        Box<dyn AtomEncoding>,
+    > = std::collections::HashMap::new();
+    encodings.insert(
+        binding_pool,
+        Box::new(BytePassthroughEncoding { prefix: "bind" }),
+    );
+    encodings.insert(
+        feature_pool,
+        Box::new(InstructionIntentEncoding {
+            prefix: "intent".into(),
+        }),
+    );
+    encodings.insert(
+        action_pool,
+        Box::new(BytePassthroughEncoding { prefix: "action" }),
+    );
+    let (mut restored, missing) =
+        Brain::restore_wbrain(&path, encodings).expect("restore legacy route");
+    assert!(missing.is_empty());
+    let labels = InstructionIntentEncoding {
+        prefix: "intent".into(),
+    }
+    .atomize(intent);
+    assert_eq!(
+        restored.feature_route_pressure(feature_pool, &labels),
+        Default::default(),
+    );
+
+    for _ in 0..8 {
+        restored.observe(feature_pool, intent);
+        restored.observe(action_pool, accepted);
+        restored.advance_tick();
+    }
+    let pressure = restored.feature_route_pressure(feature_pool, &labels);
+    assert_eq!(pressure.composite_keys, 1);
+    assert_eq!(pressure.composite_candidates, 1);
+    assert!(!pressure.composite_saturated);
+
+    drop(restored);
     std::fs::remove_file(path).expect("remove test wbrain");
 }

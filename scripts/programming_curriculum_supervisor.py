@@ -2425,7 +2425,7 @@ def replay_interval_recall_command(args: argparse.Namespace, phase: Phase,
     return command
 
 
-PROTECTED_ROUTE_CERTIFICATE_VERSION = 2
+PROTECTED_ROUTE_CERTIFICATE_VERSION = 3
 PROTECTED_ROUTE_REFRESH_REPEATS = 8
 
 
@@ -2528,6 +2528,7 @@ def guarded_protected_route_preflight(
     reasons: list[dict] = []
     probe_path = runtime / f"{phase.name}.protected-route-preflight.json"
     training_path = runtime / f"{phase.name}.protected-route-refresh.json"
+    post_path = runtime / f"{phase.name}.protected-route-post-refresh.json"
     report_path = runtime / f"{phase.name}.protected-route-admission.json"
     try:
         probe = run_protected_route_sentinel(
@@ -2579,6 +2580,27 @@ def guarded_protected_route_preflight(
             "updated_unix": time.time(),
         })
         completion = run_completion_gate(args, phase, runtime)
+        post_before = endpoint_json(
+            args.endpoint, "/brain/stats", timeout=120.0
+        )
+        post = run_protected_route_sentinel(
+            args, runtime, post_path, repeats=None
+        )
+        post_after = endpoint_json(
+            args.endpoint, "/brain/stats", timeout=120.0
+        )
+        post_delta = topology_delta(post_before, post_after)
+        if any(post_delta.values()):
+            raise RuntimeError(
+                "post-refresh protected route sentinel mutated topology: "
+                f"{post_delta}"
+            )
+        post_reasons = protected_route_pressure_reasons(post)
+        if post.get("exit_code") != 0 or post_reasons:
+            raise RuntimeError(
+                "protected route refresh did not remove predicted pressure: "
+                f"exit={post.get('exit_code')} reasons={post_reasons}"
+            )
         after = endpoint_json(args.endpoint, "/brain/stats", timeout=120.0)
         admission = {
             "kind": "protected_route_automatic_refresh",
@@ -2587,7 +2609,8 @@ def guarded_protected_route_preflight(
             "phase": phase.name, "before": before, "after": after,
             "tick": after.get("tick"), "pressure_reasons": reasons,
             "presentations_per_route": PROTECTED_ROUTE_REFRESH_REPEATS,
-            "training": training, "completion": completion,
+            "training": training, "post_refresh": post,
+            "completion": completion,
             "updated_unix": time.time(),
         }
         publish(report_path, admission)

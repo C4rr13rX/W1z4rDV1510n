@@ -191,8 +191,10 @@ a saturated composite route, or a protected multi-feature paraphrase that has
 not yet acquired a composite key. Under pressure it presents every protected
 route eight times inside that same immutable transaction, then requires the
 complete foundation, recall, transfer, and enterprise gate before accepting
-the refreshed state. Any diagnostic mutation, evaluator failure, failed
-refresh, or retention regression restores the exact preflight guard. A
+the refreshed state. It then repeats the sentinel read-only and requires the
+predicted pressure itself to be gone; execution success alone cannot certify
+that the preventative route was installed. Any diagnostic mutation,
+evaluator failure, failed refresh, or retention regression restores the exact preflight guard. A
 versioned certificate tied to the accepted tick prevents supervisor restarts
 from repeating an already admitted maintenance pass.
 
