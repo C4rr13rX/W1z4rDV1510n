@@ -1074,6 +1074,28 @@ def test_calibration_reliability_ranks_abstention_without_flipping_sign():
     assert confidence[regime > 0].mean() > confidence[regime < 0].mean()
 
 
+def test_continuous_rank_regressor_only_breaks_confidence_ties():
+    class TwoLevelModel:
+        def predict(self, values):
+            return np.where(values[:, 0] < 0, .01, .02)
+
+    values = np.asarray([
+        [-1.0, -2.0], [-1.0, -1.0], [-1.0, 0.0], [-1.0, 1.0],
+        [1.0, -2.0], [1.0, -1.0], [1.0, 0.0], [1.0, 1.0],
+    ], dtype=np.float64)
+    ordinary = evolution.Surrogate(TwoLevelModel(), "regressor")
+    ranked = evolution.Surrogate(TwoLevelModel(), "continuous_rank_regressor")
+
+    base = ordinary.selection_confidence(values)
+    selection = ranked.selection_confidence(values)
+
+    assert len(np.unique(base[:4])) == 1
+    assert len(np.unique(selection[:4])) == 4
+    assert max(selection[:4]) < min(selection[4:])
+    assert np.array_equal(ranked.predict(values), ordinary.predict(values))
+    assert np.array_equal(selection, ranked.selection_confidence(values))
+
+
 def test_nonlinear_calibration_reliability_discovers_feature_interactions():
     class ScoreModel:
         def predict(self, values):
@@ -2255,7 +2277,9 @@ def test_primary_coverage_lane_brackets_transitive_plateau_evidence():
     child = next(
         genome for genome in repaired if genome.parents == [frontier.genome_id]
     )
-    assert child.confidence_quantile == pytest.approx((.212 + .205) / 2)
+    assert child.learner_kind == "continuous_rank_regressor"
+    assert child.confidence_quantile == pytest.approx(frontier.confidence_quantile)
+    assert child.features == frontier.features
 
 
 def test_structure_evidence_recovers_indirect_descendants(tmp_path):

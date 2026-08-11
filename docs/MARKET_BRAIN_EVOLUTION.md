@@ -226,3 +226,16 @@ ordinary population slot performs an evidence-backed coordinate search around
 the fully evaluated three-fold champion. Each descendant changes exactly one
 cutoff, tree-complexity, recency, or calibration coordinate, and signed prior
 phenotypes are never repeated. A partial-fold frontier cannot enter this path.
+
+An ordinary histogram regressor can produce a discontinuous coverage frontier:
+nearby confidence quantiles select the same tied tree leaves until one step
+admits an entire leaf. Once signed descendants prove both a plateau above the
+coverage floor and a lower-quantile profitability reversal, the controller
+reserves one `continuous_rank_regressor` descendant. It preserves the fitted
+return model, directional probability, prediction, features, and threshold,
+and adds only a deterministic `1e-10` decision-time feature projection to the
+abstention score. That perturbation cannot reorder materially different model
+confidences; it makes observations inside an exactly tied leaf individually
+selectable. The descendant must still pass every ordinary coverage,
+profitability, calibration, known/unseen-asset, protected-fold, neural, and
+ghost-only admission gate. Historical descendants suppress repeated probes.

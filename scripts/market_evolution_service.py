@@ -56,7 +56,7 @@ LEARNER_KINDS = (
 RETURN_LEARNER_KINDS = {
     "regressor", "decomposed_regressor", "regime_regressor",
     "regime_decomposed_regressor", "multiscale_regressor",
-    "extra_trees_regressor",
+    "extra_trees_regressor", "continuous_rank_regressor",
 }
 
 
@@ -554,6 +554,29 @@ class Surrogate:
     def probability(self, values: np.ndarray) -> np.ndarray:
         return self.base_probability(values)
 
+    @staticmethod
+    def causal_tie_break(values: np.ndarray) -> np.ndarray:
+        """Stable label-free rank for otherwise indistinguishable scores.
+
+        Histogram/tree leaves intentionally emit repeated predictions. A hard
+        quantile threshold then admits or rejects the whole leaf, which can
+        jump coverage by tens of percentage points. This bounded projection
+        uses only same-row causal inputs and is far too small to reorder any
+        materially different confidence values; it only makes a tied leaf
+        continuously selectable.
+        """
+        matrix = np.asarray(values, dtype=np.float64)
+        if matrix.ndim != 2 or not len(matrix):
+            return np.zeros(len(matrix), dtype=np.float64)
+        bounded = np.tanh(np.nan_to_num(
+            matrix, nan=0.0, posinf=20.0, neginf=-20.0,
+        ))
+        index = np.arange(1, bounded.shape[1] + 1, dtype=np.float64)
+        weights = np.sin(index * 1.618033988749895)
+        secondary = np.cos(index * 0.7548776662466927)
+        projection = bounded @ weights + (bounded * bounded) @ secondary
+        return 0.5 + 0.5 * np.sin(projection * 12.9898 + 0.61803398875)
+
     def selection_confidence(self, values: np.ndarray) -> np.ndarray:
         """Return an abstention score independent of directional probability."""
         probability = self.base_probability(values)
@@ -562,7 +585,10 @@ class Surrogate:
                 return np.abs(np.asarray(
                     self.model.return_model.predict(values), dtype=np.float64,
                 ))
-            return np.maximum(probability, 1.0 - probability)
+            score = np.maximum(probability, 1.0 - probability)
+            if self.kind == "continuous_rank_regressor":
+                score = score + 1e-10 * self.causal_tie_break(values)
+            return score
         design = self.reliability_design(values, probability)
         normalized = (design - self.reliability_mean) / self.reliability_scale
         # This score chooses whether to abstain. Direction and ECE continue to
@@ -573,6 +599,8 @@ class Surrogate:
             return 1.0 - score
         if self.reliability_direction == 0:
             return np.full(len(score), .5, dtype=np.float64)
+        if self.kind == "continuous_rank_regressor":
+            score = score + 1e-10 * self.causal_tie_break(values)
         return score
 
     def tune_reliability_orientation(
@@ -2102,7 +2130,12 @@ def evaluate_genome(genome: Genome, dataset: dict[str, Any], *, folds: int,
                         x_fit, np.asarray([row["return"] for row in fit], dtype=np.float64),
                         sample_weight=weights,
                     )
-                    model = Surrogate(raw_model, "regressor")
+                    model = Surrogate(
+                        raw_model,
+                        ("continuous_rank_regressor"
+                         if genome.learner_kind == "continuous_rank_regressor"
+                         else "regressor"),
+                    )
             elif genome.learner_kind == "extra_trees":
                 raw_model = ExtraTreesClassifier(
                     n_estimators=min(240, max(80, genome.max_iter)),
@@ -3745,9 +3778,38 @@ def introduce_primary_coverage_variant(
         )
     ), None)
     if reversal is not None:
-        quantiles.append(
-            (upper_quantile + reversal.confidence_quantile) / 2.0
+        ranked_variant_seen = any(
+            genome.learner_kind == "continuous_rank_regressor"
+            and frontier.genome_id in genome.parents
+            for genome in evidence
         )
+        if (frontier.learner_kind == "regressor" and plateau_evidence
+                and not ranked_variant_seen):
+            # Signed evidence proves the ordinary regressor has a discrete
+            # confidence plateau: above it coverage is short, below it an
+            # entire harmful leaf enters. Preserve direction/fit exactly and
+            # test a causal within-leaf rank before mutating more coordinates.
+            payload = asdict(frontier)
+            payload.update({
+                "learner_kind": "continuous_rank_regressor",
+                "generation": generation, "parents": [frontier.genome_id],
+                "fitness": None, "result": None, "genome_id": "",
+            })
+            variant = Genome(**payload).finalize()
+            known_keys = {
+                genome_evaluation_key(genome) for genome in [*population, *evidence]
+            }
+            if genome_evaluation_key(variant) not in known_keys:
+                protected_parent_ids = protected_parent_ids or set()
+                replacement = next((
+                    index for index in range(len(population) - 1, 0, -1)
+                    if population[index].fitness is None
+                    and not (set(population[index].parents) & protected_parent_ids)
+                ), None)
+                if replacement is not None:
+                    population[replacement] = variant
+                return population
+        quantiles.append((upper_quantile + reversal.confidence_quantile) / 2.0)
     else:
         base = (min(plateau_evidence, key=lambda genome: genome.confidence_quantile)
                 if plateau_evidence else
@@ -5651,7 +5713,8 @@ def main() -> int:
                 multiscale_boundary_frontier,
             )
             population = introduce_primary_coverage_variant(
-                population, coverage_frontier, primary_coverage_evidence,
+                population, coverage_frontier,
+                [*primary_coverage_evidence, *historical_repair_evidence],
                 generation,
                 {
                     genome.genome_id for genome in (
