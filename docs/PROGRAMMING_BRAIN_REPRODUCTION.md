@@ -174,6 +174,28 @@ least eight times, settle the overlay into immutable storage, and pass the full
 retention battery before admission. A shorter fixed pass can miss a
 logarithmic milestone and is not durable-reachability evidence.
 
+Do not wait for that staleness to become an execution failure. Sparse
+`instruction-intent` bindings additionally publish canonical feature-pair
+postings. A multi-feature query intersects those composite routes before it
+falls back to broad single-feature postings, so unrelated episodes sharing
+only the language or one behavior cannot consume the entire bounded readout.
+Pair postings are limited to semantic pools and at most sixteen active atoms;
+raw sensory/code pools never receive the quadratic expansion. Legacy
+containers remain readable through the single-feature fallback and acquire
+pair routes through ordinary recurrence or guarded maintenance.
+
+Immediately after establishing the final-brain replay guard, the supervisor
+runs the protected multi-language sentinel explicitly with `--no-train`. It
+fails closed on a missing report, any trained or paraphrase execution failure,
+a saturated composite route, or a protected multi-feature paraphrase that has
+not yet acquired a composite key. Under pressure it presents every protected
+route eight times inside that same immutable transaction, then requires the
+complete foundation, recall, transfer, and enterprise gate before accepting
+the refreshed state. Any diagnostic mutation, evaluator failure, failed
+refresh, or retention regression restores the exact preflight guard. A
+versioned certificate tied to the accepted tick prevents supervisor restarts
+from repeating an already admitted maintenance pass.
+
 `programming_multilanguage_eval.py` trains six repetitions by default. Any
 read-only control or post-admission probe must pass `--no-train`; otherwise it
 is maintenance training and must begin inside the immutable guard. If a probe

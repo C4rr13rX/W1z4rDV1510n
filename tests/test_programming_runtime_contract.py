@@ -59,8 +59,10 @@ from scripts.programming_curriculum_supervisor import (
     pause_admission_for_infrastructure,
     preserve_admission_evidence,
     preserve_deferred_base,
+    protected_route_pressure_reasons,
     prune_resolved_deferred_bases,
     publish,
+    run_protected_route_sentinel,
     quarantine_interval_ids,
     read_json,
     record_deferred_failure,
@@ -1242,6 +1244,96 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             '"final-brain deferred replay passed comprehensive admission"',
             source,
         )
+        guard = source.index("ensure_live_last_good_guard(args, runtime, phase, phase.rows)")
+        preflight = source.index("guarded_protected_route_preflight(", guard)
+        marker = source.index("publish(deferred_replay_marker_path(runtime)", preflight)
+        self.assertLess(guard, preflight)
+        self.assertLess(preflight, marker)
+
+    def test_protected_route_pressure_predicts_failure_before_replay(self) -> None:
+        healthy = {
+            "results": [{
+                "language": "python", "kind": "paraphrase", "executes": True,
+                "intent_diagnostics": {
+                    "labels": ["PYTHON", "POWER_SELF:2"],
+                    "ranked_candidates": 4, "composite_keys": 1,
+                    "composite_candidates": 4, "composite_saturated": False,
+                },
+            }]
+        }
+        self.assertEqual(protected_route_pressure_reasons(healthy), [])
+        self.assertTrue(
+            protected_route_pressure_reasons({})[0]["suite_missing"]
+        )
+
+        trained_failure = json.loads(json.dumps(healthy))
+        trained_failure["results"][0]["kind"] = "trained"
+        trained_failure["results"][0]["executes"] = False
+        self.assertTrue(
+            protected_route_pressure_reasons(trained_failure)[0]["failed"]
+        )
+
+        saturated = json.loads(json.dumps(healthy))
+        saturated["results"][0]["intent_diagnostics"].update({
+            "composite_candidates": 512,
+            "composite_saturated": True,
+        })
+        reasons = protected_route_pressure_reasons(saturated)
+        self.assertEqual(len(reasons), 1)
+        self.assertTrue(reasons[0]["composite_saturated"])
+
+        unreachable = json.loads(json.dumps(healthy))
+        unreachable["results"][0]["executes"] = False
+        unreachable["results"][0]["intent_diagnostics"].update({
+            "ranked_candidates": 64,
+            "composite_keys": 0,
+            "composite_candidates": 0,
+        })
+        reasons = protected_route_pressure_reasons(unreachable)
+        self.assertEqual(len(reasons), 1)
+        self.assertTrue(reasons[0]["failed"])
+        self.assertTrue(reasons[0]["legacy_composite_missing"])
+        self.assertTrue(reasons[0]["legacy_saturated"])
+
+        migration = json.loads(json.dumps(healthy))
+        migration["results"][0]["intent_diagnostics"].update({
+            "ranked_candidates": 3,
+            "composite_keys": 0,
+            "composite_candidates": 0,
+        })
+        reasons = protected_route_pressure_reasons(migration)
+        self.assertEqual(len(reasons), 1)
+        self.assertTrue(reasons[0]["legacy_composite_missing"])
+        self.assertFalse(reasons[0]["legacy_saturated"])
+
+    def test_protected_route_sentinel_declares_mutation_semantics(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            output = runtime / "sentinel.json"
+
+            def completed(command: list[str], **_kwargs: object) -> SimpleNamespace:
+                output.write_text('{"results": []}', encoding="utf-8")
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with patch(
+                "scripts.programming_curriculum_supervisor.subprocess.run",
+                side_effect=completed,
+            ) as run:
+                run_protected_route_sentinel(
+                    SimpleNamespace(endpoint="http://brain"), runtime,
+                    output, repeats=None,
+                )
+                readonly = run.call_args.args[0]
+                self.assertIn("--no-train", readonly)
+                self.assertNotIn("--repeats", readonly)
+
+                run_protected_route_sentinel(
+                    SimpleNamespace(endpoint="http://brain"), runtime,
+                    output, repeats=8,
+                )
+                mutating = run.call_args.args[0]
+                self.assertNotIn("--no-train", mutating)
+                self.assertEqual(mutating[-2:], ["--repeats", "8"])
 
     def test_committed_deferred_replay_recovers_without_duplicate_training(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

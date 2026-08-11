@@ -2425,6 +2425,222 @@ def replay_interval_recall_command(args: argparse.Namespace, phase: Phase,
     return command
 
 
+PROTECTED_ROUTE_CERTIFICATE_VERSION = 2
+PROTECTED_ROUTE_REFRESH_REPEATS = 8
+
+
+def protected_route_pressure_reasons(report: dict) -> list[dict]:
+    """Classify sentinel failures/pressure before a large replay mutation.
+
+    Canonical exact recall plus a failed paraphrase is the characteristic
+    learned-but-unreachable failure. Composite saturation predicts the same
+    boundary before execution fails. A missing composite route for a
+    multi-feature protected paraphrase is itself a migration signal: waiting
+    for the legacy 64-result ceiling would merely rediscover the old failure.
+    """
+    reasons: list[dict] = []
+    results = report.get("results") or []
+    if not results:
+        return [{"suite_missing": True, "failed": True}]
+    for row in results:
+        kind = row.get("kind")
+        if kind not in ("trained", "paraphrase"):
+            continue
+        diagnostics = row.get("intent_diagnostics") or {}
+        ranked = int(diagnostics.get("ranked_candidates") or 0)
+        composite_saturated = diagnostics.get("composite_saturated") is True
+        failed = row.get("executes") is not True
+        legacy_composite_missing = (
+            kind == "paraphrase"
+            and len(diagnostics.get("labels") or []) >= 2
+            and int(diagnostics.get("composite_keys") or 0) == 0
+        )
+        legacy_saturated = (
+            legacy_composite_missing
+            and ranked >= 64
+        )
+        if (failed or (kind == "paraphrase" and composite_saturated)
+                or legacy_composite_missing):
+            reasons.append({
+                "language": row.get("language"),
+                "kind": kind,
+                "failed": failed,
+                "ranked_candidates": ranked,
+                "composite_keys": int(diagnostics.get("composite_keys") or 0),
+                "composite_candidates": int(
+                    diagnostics.get("composite_candidates") or 0
+                ),
+                "composite_saturated": composite_saturated,
+                "legacy_composite_missing": legacy_composite_missing,
+                "legacy_saturated": legacy_saturated,
+            })
+    return reasons
+
+
+def run_protected_route_sentinel(args: argparse.Namespace, runtime: Path,
+                                 output: Path, *, repeats: int | None) -> dict:
+    """Run the protected route suite with explicit mutation semantics."""
+    output.unlink(missing_ok=True)
+    command = [
+        sys.executable, "scripts/programming_multilanguage_eval.py",
+        "--endpoint", args.endpoint, "--output", str(output),
+    ]
+    if repeats is None:
+        command.append("--no-train")
+    else:
+        command.extend(["--repeats", str(repeats)])
+    completed = subprocess.run(
+        command, cwd=ROOT, capture_output=True, text=True,
+        timeout=1800.0, check=False,
+    )
+    report = read_json(output)
+    if not report:
+        raise RuntimeError(
+            "protected route sentinel produced no report: "
+            f"exit={completed.returncode} stdout={completed.stdout[-2000:]} "
+            f"stderr={completed.stderr[-2000:]}"
+        )
+    report["exit_code"] = completed.returncode
+    return report
+
+
+def guarded_protected_route_preflight(
+        args: argparse.Namespace, phase: Phase, runtime: Path,
+        status_path: Path) -> dict:
+    """Prove or automatically refresh protected routes inside the live guard.
+
+    This transaction never widens attention, edits serialized use counts, or
+    allocates a replacement action. Eight ordinary recurrent presentations are
+    sufficient to re-advertise the same binding under the bounded-cadence
+    contract. Any failed repair restores the immutable accepted guard.
+    """
+    before = endpoint_json(args.endpoint, "/brain/stats", timeout=120.0)
+    certificate_path = runtime / "protected-route-reachability.json"
+    certificate = read_json(certificate_path)
+    if (
+        certificate.get("passed") is True
+        and certificate.get("version") == PROTECTED_ROUTE_CERTIFICATE_VERSION
+        and int(certificate.get("tick") or -1) == int(before.get("tick") or -2)
+    ):
+        return {"passed": True, "refreshed": False, "cached": True,
+                "certificate": str(certificate_path)}
+
+    reasons: list[dict] = []
+    probe_path = runtime / f"{phase.name}.protected-route-preflight.json"
+    training_path = runtime / f"{phase.name}.protected-route-refresh.json"
+    report_path = runtime / f"{phase.name}.protected-route-admission.json"
+    try:
+        probe = run_protected_route_sentinel(
+            args, runtime, probe_path, repeats=None
+        )
+        after_probe = endpoint_json(
+            args.endpoint, "/brain/stats", timeout=120.0
+        )
+        probe_delta = topology_delta(before, after_probe)
+        if any(probe_delta.values()):
+            raise RuntimeError(
+                "read-only protected route sentinel mutated topology: "
+                f"{probe_delta}"
+            )
+        reasons = protected_route_pressure_reasons(probe)
+        if not reasons:
+            certificate = {
+                "version": PROTECTED_ROUTE_CERTIFICATE_VERSION,
+                "passed": True, "refreshed": False,
+                "phase": phase.name, "tick": before.get("tick"),
+                "probe": str(probe_path), "pressure_reasons": [],
+                "updated_unix": time.time(),
+            }
+            publish(certificate_path, certificate)
+            append_health_event(runtime, {
+                "kind": "protected_route_preflight", **certificate,
+            })
+            return certificate
+
+        publish(status_path, {
+            "state": "protected_route_refresh_training",
+            "phase": phase.name,
+            "pressure_reasons": reasons,
+            "presentations_per_route": PROTECTED_ROUTE_REFRESH_REPEATS,
+            "updated_unix": time.time(),
+        })
+        training = run_protected_route_sentinel(
+            args, runtime, training_path,
+            repeats=PROTECTED_ROUTE_REFRESH_REPEATS,
+        )
+        if training.get("exit_code") != 0:
+            raise RuntimeError(
+                f"protected route refresh failed execution: {training}"
+            )
+        publish(status_path, {
+            "state": "protected_route_refresh_benchmarking",
+            "phase": phase.name,
+            "pressure_reasons": reasons,
+            "updated_unix": time.time(),
+        })
+        completion = run_completion_gate(args, phase, runtime)
+        after = endpoint_json(args.endpoint, "/brain/stats", timeout=120.0)
+        admission = {
+            "kind": "protected_route_automatic_refresh",
+            "version": PROTECTED_ROUTE_CERTIFICATE_VERSION,
+            "passed": True, "refreshed": True,
+            "phase": phase.name, "before": before, "after": after,
+            "tick": after.get("tick"), "pressure_reasons": reasons,
+            "presentations_per_route": PROTECTED_ROUTE_REFRESH_REPEATS,
+            "training": training, "completion": completion,
+            "updated_unix": time.time(),
+        }
+        publish(report_path, admission)
+        append_health_event(runtime, admission)
+        publish(certificate_path, {
+            "version": PROTECTED_ROUTE_CERTIFICATE_VERSION,
+            "passed": True, "refreshed": True,
+            "phase": phase.name, "tick": after.get("tick"),
+            "admission": str(report_path),
+            "pressure_reasons": reasons, "updated_unix": time.time(),
+        })
+        if not accept_last_good_guard(runtime, phase.name):
+            raise RuntimeError(
+                "protected route refresh passed but guard was not phase-owned"
+            )
+        return admission
+    except Exception as exc:
+        last_good = read_json(runtime / "brain" / "brain.last-good.json")
+        publish(canary_quarantine_path(runtime), {
+            "state": "protected_route_refresh_failed",
+            "phase": phase.name,
+            "candidate_row": phase.rows,
+            "durable_next_row": phase.rows,
+            "last_good": last_good,
+            "error": str(exc),
+            "created_unix": time.time(),
+        })
+        stop_runtime_node(runtime, args.endpoint)
+        restored = restore_canary_quarantine(runtime, finalize=False)
+        start_runtime_node(runtime, args.node_bin, args.endpoint)
+        verify_restored_topology(
+            restored,
+            endpoint_json(args.endpoint, "/brain/stats", timeout=120.0),
+        )
+        finalize_canary_restore(runtime, restored)
+        failed = {
+            "kind": "protected_route_automatic_refresh",
+            "version": PROTECTED_ROUTE_CERTIFICATE_VERSION,
+            "passed": False, "phase": phase.name,
+            "before": before, "last_good": last_good,
+            "pressure_reasons": reasons, "error": str(exc),
+            "restored": restored, "updated_unix": time.time(),
+        }
+        publish(report_path, failed)
+        append_health_event(runtime, failed)
+        publish(status_path, {
+            "state": "protected_route_refresh_failed",
+            "phase": phase.name, "error": str(exc),
+            "report": str(report_path), "updated_unix": time.time(),
+        })
+        raise
+
+
 def restore_rejected_deferred_replay(args: argparse.Namespace, runtime: Path,
                                      phase: Phase, event: dict,
                                      error: str) -> None:
@@ -2557,6 +2773,15 @@ def run_deferred_replays(args: argparse.Namespace, runtime: Path,
             )
             return 1
         ensure_live_last_good_guard(args, runtime, phase, phase.rows)
+        preflight = guarded_protected_route_preflight(
+            args, phase, runtime, status_path
+        )
+        if preflight.get("refreshed") is True:
+            # The maintenance candidate is now the accepted base. Establish a
+            # new independent guard before any deferred corpus row can mutate
+            # it; never reuse the guard that protected the maintenance pass.
+            settle_brain_for_admission(args, phase, runtime, phase.rows)
+            ensure_live_last_good_guard(args, runtime, phase, phase.rows)
         publish(deferred_replay_marker_path(runtime), {
             "state": "training",
             "phase": phase.name,

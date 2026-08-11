@@ -620,3 +620,75 @@ fn validated_feature_recall_remains_visible_across_a_full_new_overlay() {
     drop(brain);
     std::fs::remove_file(path).expect("remove test wbrain");
 }
+
+#[test]
+fn composite_semantic_route_reports_pressure_and_retains_validated_history() {
+    let mut config = BrainConfig::default();
+    config.binding_emergence_threshold = 1;
+    config.tentative_emergence_threshold = 1;
+    let mut brain = Brain::new(config);
+    let feature_pool = brain.create_pool(
+        PoolConfig::defaults("intent", 1),
+        Box::new(InstructionIntentEncoding {
+            prefix: "intent".into(),
+        }),
+    );
+    let action_pool = brain.create_pool(
+        PoolConfig::defaults("action", 2),
+        Box::new(BytePassthroughEncoding { prefix: "action" }),
+    );
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "w1z4rd_composite_route_pressure_{}_{}.wbrain",
+        std::process::id(),
+        nonce,
+    ));
+    brain.attach_wbrain(&path).expect("attach wbrain");
+
+    let intent = b"@intent:LANGUAGE:PYTHON\n@intent:POWER_SELF:2\n";
+    let accepted = b"def square(n):\n    return n * n";
+    brain.observe(feature_pool, intent);
+    brain.observe(action_pool, accepted);
+    brain.advance_tick();
+    brain
+        .serialize_all_neurons_for_idle()
+        .expect("flush protected composite generation");
+
+    let labels = InstructionIntentEncoding {
+        prefix: "intent".into(),
+    }
+    .atomize(intent);
+    let initial = brain.feature_route_pressure(feature_pool, &labels);
+    assert_eq!(initial.composite_keys, 1);
+    assert_eq!(initial.composite_candidates, 1);
+    assert!(!initial.composite_saturated);
+
+    for index in 0..520 {
+        let distractor = format!("def array_square_{index}(xs): return sum(x*x for x in xs)");
+        brain.observe(feature_pool, intent);
+        brain.observe(action_pool, distractor.as_bytes());
+        brain.advance_tick();
+    }
+    let pressure = brain.feature_route_pressure(feature_pool, &labels);
+    assert_eq!(pressure.composite_keys, 1);
+    assert_eq!(pressure.composite_candidates, 512);
+    assert!(pressure.composite_saturated);
+
+    let recalled = brain.decode_first_ranked_feature_binding_with_context_where(
+        feature_pool,
+        &labels,
+        action_pool,
+        None,
+        None,
+        &[feature_pool],
+        &[],
+        &|bytes| bytes == accepted,
+    );
+    assert_eq!(recalled.as_deref(), Some(accepted.as_slice()));
+
+    drop(brain);
+    std::fs::remove_file(path).expect("remove test wbrain");
+}

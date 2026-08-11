@@ -17,6 +17,7 @@ mod wbrain_metadata;
 use ahash::AHashMap;
 use std::collections::VecDeque;
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::{Mutex, OnceLock};
 
 use crate::action::{ActionEvent, ActionId};
 use crate::annealer::{Annealer, AnnealerConfig};
@@ -64,6 +65,10 @@ fn ensure_neuron_trees_loaded(pool: &mut Pool, roots: &[NeuronId]) {
 enum BindingPostingKey {
     Sequence(PoolId, PoolId, Vec<NeuronId>),
     Feature(PoolId, NeuronId),
+    /// Joint evidence from two independently grounded sparse semantic atoms.
+    /// IDs are stored in ascending order so learning and query lookup share
+    /// one deterministic key regardless of atom activation order.
+    FeaturePair(PoolId, NeuronId, NeuronId),
     Motif(PoolId, [u8; 3]),
 }
 
@@ -174,6 +179,19 @@ impl BindingPostingKey {
                 out.extend_from_slice(&neuron.to_le_bytes());
                 out
             }
+            Self::FeaturePair(pool, left, right) => {
+                let (left, right) = if left <= right {
+                    (*left, *right)
+                } else {
+                    (*right, *left)
+                };
+                let mut out = Vec::with_capacity(13);
+                out.push(4);
+                out.extend_from_slice(&pool.to_le_bytes());
+                out.extend_from_slice(&left.to_le_bytes());
+                out.extend_from_slice(&right.to_le_bytes());
+                out
+            }
             Self::Motif(pool, motif) => {
                 let mut out = Vec::with_capacity(8);
                 out.push(3);
@@ -231,6 +249,16 @@ pub struct RankedFeatureBinding {
     pub use_count: u64,
     pub target_size: usize,
     pub binding_id: NeuronId,
+}
+
+/// Cheap pressure evidence for a sparse composite semantic route. Callers use
+/// this to schedule guarded maintenance before a protected binding disappears
+/// behind the global attention cap; it never pages binding neuron bodies.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct FeatureRoutePressure {
+    pub composite_keys: usize,
+    pub composite_candidates: usize,
+    pub composite_saturated: bool,
 }
 
 /// Stage 13A — one neuron in a single pool's decoded extrusion.
@@ -755,6 +783,11 @@ pub struct Brain {
     /// atom either directly or beneath a collapsed feature concept. Derived
     /// from the atom substrate and rebuilt on restore.
     binding_feature_atom_index: AHashMap<(PoolId, NeuronId), Vec<NeuronId>>,
+    /// Pairwise composite routes for sparse semantic sensors. These make
+    /// LANGUAGE+BEHAVIOR addressable before broad single-feature candidates
+    /// consume the bounded global attention window.
+    binding_feature_pair_index:
+        AHashMap<(PoolId, NeuronId, NeuronId), Vec<NeuronId>>,
     /// Sparse associative access for novel character-stream similarity.
     /// Motifs remain grounded in raw atom sequences; this only avoids
     /// reconstructing and comparing every learned binding on every query.
@@ -1045,6 +1078,7 @@ impl Brain {
             consolidated_binding_count_total: 0,
             binding_sequence_index: AHashMap::new(),
             binding_feature_atom_index: AHashMap::new(),
+            binding_feature_pair_index: AHashMap::new(),
             binding_motif_index: AHashMap::new(),
             binding_posting_indexes: Vec::new(),
             fingerprint_posting_indexes: Vec::new(),
@@ -2114,8 +2148,27 @@ impl Brain {
                     );
                 }
             }
-            for atom in atoms {
+            let mut atoms: Vec<_> = atoms.into_iter().collect();
+            atoms.sort_unstable();
+            for &atom in &atoms {
                 keys.push(BindingPostingKey::Feature(pool_id, atom));
+            }
+            // Pairwise keys are restricted to sparse semantic sensors. Raw
+            // character/code pools can expose hundreds of atoms and would
+            // create a quadratic posting explosion without adding independent
+            // intent evidence.
+            if pool.encoding_name() == "instruction-intent" {
+                const MAX_COMPOSITE_FEATURE_ATOMS: usize = 16;
+                atoms.truncate(MAX_COMPOSITE_FEATURE_ATOMS);
+                for left_index in 0..atoms.len() {
+                    for &right in &atoms[left_index + 1..] {
+                        keys.push(BindingPostingKey::FeaturePair(
+                            pool_id,
+                            atoms[left_index],
+                            right,
+                        ));
+                    }
+                }
             }
         }
         // Atom/concept identity is available only after the requested member
@@ -2186,6 +2239,13 @@ impl Brain {
                         .or_default();
                     append_binding_posting(ids, binding_id, usize::MAX);
                 }
+                BindingPostingKey::FeaturePair(pool, left, right) => {
+                    let ids = self
+                        .binding_feature_pair_index
+                        .entry((pool, left.min(right), left.max(right)))
+                        .or_default();
+                    append_binding_posting(ids, binding_id, usize::MAX);
+                }
                 BindingPostingKey::Motif(pool, motif) => {
                     let ids = self.binding_motif_index.entry((pool, motif)).or_default();
                     append_binding_posting(ids, binding_id, 512);
@@ -2246,6 +2306,9 @@ impl Brain {
             let Some(pool) = self.fabric.pool(pool_id) else {
                 continue;
             };
+            let composite_semantic_pool =
+                pool.read().encoding_name() == "instruction-intent";
+            let mut composite_atoms = Vec::new();
             let mut pending = roots.clone();
             let mut visited = ahash::AHashSet::new();
             while let Some(neuron_id) = pending.pop() {
@@ -2262,6 +2325,9 @@ impl Brain {
                         &BindingPostingKey::Feature(pool_id, neuron_id).encode(),
                         binding_id,
                     )?;
+                    if composite_semantic_pool {
+                        composite_atoms.push(neuron_id);
+                    }
                     continue;
                 } else {
                     pool.write().read_neuron_shape_bounded(neuron_id)?
@@ -2274,6 +2340,9 @@ impl Brain {
                         &BindingPostingKey::Feature(pool_id, neuron_id).encode(),
                         binding_id,
                     )?;
+                    if composite_semantic_pool {
+                        composite_atoms.push(neuron_id);
+                    }
                 } else {
                     pending.extend(
                         children
@@ -2281,6 +2350,25 @@ impl Brain {
                             .filter(|member| member.pool == pool_id)
                             .map(|member| member.neuron),
                     );
+                }
+            }
+            if composite_semantic_pool {
+                const MAX_COMPOSITE_FEATURE_ATOMS: usize = 16;
+                composite_atoms.sort_unstable();
+                composite_atoms.dedup();
+                composite_atoms.truncate(MAX_COMPOSITE_FEATURE_ATOMS);
+                for left_index in 0..composite_atoms.len() {
+                    for &right in &composite_atoms[left_index + 1..] {
+                        builder.insert(
+                            &BindingPostingKey::FeaturePair(
+                                pool_id,
+                                composite_atoms[left_index],
+                                right,
+                            )
+                            .encode(),
+                            binding_id,
+                        )?;
+                    }
                 }
             }
         }
@@ -2507,6 +2595,90 @@ impl Brain {
         )
     }
 
+    fn binding_feature_pair_postings(
+        &self,
+        pool: PoolId,
+        left: NeuronId,
+        right: NeuronId,
+    ) -> Vec<NeuronId> {
+        const MAX_COMPOSITE_POSTINGS: usize = 512;
+        let key = (pool, left.min(right), left.max(right));
+        let overlay = self
+            .binding_feature_pair_index
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
+        self.bounded_binding_postings_across_generations(
+            &BindingPostingKey::FeaturePair(key.0, key.1, key.2),
+            &overlay,
+            MAX_COMPOSITE_POSTINGS,
+        )
+    }
+
+    fn feature_route_evidence(
+        &self,
+        feature_pool: PoolId,
+        query_atoms: &ahash::AHashSet<NeuronId>,
+    ) -> (AHashMap<NeuronId, u16>, FeatureRoutePressure) {
+        let mut atoms: Vec<_> = query_atoms.iter().copied().collect();
+        atoms.sort_unstable();
+        atoms.truncate(16);
+        let is_semantic = self
+            .fabric
+            .pool(feature_pool)
+            .is_some_and(|pool| pool.read().encoding_name() == "instruction-intent");
+        let mut evidence = AHashMap::new();
+        let mut pressure = FeatureRoutePressure::default();
+        if is_semantic {
+            for left_index in 0..atoms.len() {
+                for &right in &atoms[left_index + 1..] {
+                    let ids = self.binding_feature_pair_postings(
+                        feature_pool,
+                        atoms[left_index],
+                        right,
+                    );
+                    if ids.is_empty() {
+                        continue;
+                    }
+                    pressure.composite_keys += 1;
+                    pressure.composite_saturated |= ids.len() >= 512;
+                    add_binding_evidence(&mut evidence, ids);
+                }
+            }
+            pressure.composite_candidates = evidence.len();
+        }
+        if evidence.is_empty() {
+            for atom in query_atoms {
+                add_binding_evidence(
+                    &mut evidence,
+                    self.binding_feature_postings(feature_pool, *atom),
+                );
+            }
+        }
+        (evidence, pressure)
+    }
+
+    /// Report composite-route pressure without hydrating candidate bodies.
+    /// A saturated key is an early-warning signal, not permission to widen the
+    /// global attention cap or to mutate an accepted brain outside a guard.
+    pub fn feature_route_pressure(
+        &self,
+        feature_pool: PoolId,
+        query_labels: &[String],
+    ) -> FeatureRoutePressure {
+        let Some(feature_handle) = self.fabric.pool(feature_pool) else {
+            return FeatureRoutePressure::default();
+        };
+        let query_atoms = {
+            let feature = feature_handle.read();
+            query_labels
+                .iter()
+                .filter_map(|label| feature.label_to_id(label))
+                .collect()
+        };
+        self.feature_route_evidence(feature_pool, &query_atoms).1
+    }
+
     fn binding_motif_postings(&self, pool: PoolId, motif: [u8; 3]) -> Vec<NeuronId> {
         const MAX_MOTIF_POSTINGS: usize = 512;
         let overlay = self
@@ -2529,6 +2701,7 @@ impl Brain {
             .binding_sequence_index
             .values()
             .chain(self.binding_feature_atom_index.values())
+            .chain(self.binding_feature_pair_index.values())
             .chain(self.binding_motif_index.values())
             .map(Vec::len)
             .sum::<usize>();
@@ -2564,6 +2737,12 @@ impl Brain {
             }
             for ((pool, neuron), ids) in &self.binding_feature_atom_index {
                 let key = BindingPostingKey::Feature(*pool, *neuron).encode();
+                for id in ids {
+                    builder.insert(&key, *id)?;
+                }
+            }
+            for ((pool, left, right), ids) in &self.binding_feature_pair_index {
+                let key = BindingPostingKey::FeaturePair(*pool, *left, *right).encode();
                 for id in ids {
                     builder.insert(&key, *id)?;
                 }
@@ -2684,6 +2863,7 @@ impl Brain {
         }
         self.binding_sequence_index.clear();
         self.binding_feature_atom_index.clear();
+        self.binding_feature_pair_index.clear();
         self.binding_motif_index.clear();
         self.lifetime_recurrences.clear();
         self.tentative_promoted.clear();
@@ -2694,6 +2874,7 @@ impl Brain {
     fn rebuild_binding_sequence_index(&mut self) {
         self.binding_sequence_index.clear();
         self.binding_feature_atom_index.clear();
+        self.binding_feature_pair_index.clear();
         self.binding_motif_index.clear();
         let Some(binding_pool) = self.fabric.pool(self.binding_pool_id) else {
             return;
@@ -2716,6 +2897,7 @@ impl Brain {
     pub fn rebuild_binding_indexes_bounded(&mut self) -> std::io::Result<usize> {
         self.binding_sequence_index.clear();
         self.binding_feature_atom_index.clear();
+        self.binding_feature_pair_index.clear();
         self.binding_motif_index.clear();
         for pool_id in self.fabric.pool_ids() {
             if let Some(pool) = self.fabric.pool(pool_id) {
@@ -4727,13 +4909,11 @@ impl Brain {
         if query_atoms.len() < 2 {
             return Vec::new();
         }
-        let mut candidate_evidence = AHashMap::new();
-        for atom in &query_atoms {
-            add_binding_evidence(
-                &mut candidate_evidence,
-                self.binding_feature_postings(feature_pool, *atom),
-            );
-        }
+        // Joint semantic evidence preempts broad single-feature postings when
+        // available. Legacy containers transparently fall back until a
+        // recurrent/new binding has populated composite keys.
+        let (candidate_evidence, _) =
+            self.feature_route_evidence(feature_pool, &query_atoms);
         let candidate_ids = rank_bounded_binding_evidence(
             candidate_evidence,
             MAX_ROUTED_BINDING_CANDIDATES,
@@ -5064,13 +5244,8 @@ impl Brain {
         if query_atoms.len() < 2 {
             return None;
         }
-        let mut candidate_evidence = AHashMap::new();
-        for atom in &query_atoms {
-            add_binding_evidence(
-                &mut candidate_evidence,
-                self.binding_feature_postings(feature_pool, *atom),
-            );
-        }
+        let (candidate_evidence, _) =
+            self.feature_route_evidence(feature_pool, &query_atoms);
         let candidate_ids = rank_bounded_binding_evidence(
             candidate_evidence,
             MAX_ROUTED_BINDING_CANDIDATES,
@@ -8076,6 +8251,7 @@ impl Brain {
             .binding_sequence_index
             .values()
             .chain(self.binding_feature_atom_index.values())
+            .chain(self.binding_feature_pair_index.values())
             .chain(self.binding_motif_index.values())
             .map(Vec::len)
             .sum();
@@ -8414,6 +8590,7 @@ impl Brain {
             consolidated_binding_count_total,
             binding_sequence_index: AHashMap::new(),
             binding_feature_atom_index: AHashMap::new(),
+            binding_feature_pair_index: AHashMap::new(),
             binding_motif_index: AHashMap::new(),
             binding_posting_indexes: Vec::new(),
             fingerprint_posting_indexes: Vec::new(),
@@ -8574,6 +8751,7 @@ impl Brain {
             consolidated_binding_count_total,
             binding_sequence_index: metadata.binding_sequence_index.into_iter().collect(),
             binding_feature_atom_index: metadata.binding_feature_atom_index.into_iter().collect(),
+            binding_feature_pair_index: AHashMap::new(),
             binding_motif_index: metadata.binding_motif_index.into_iter().collect(),
             binding_posting_indexes,
             fingerprint_posting_indexes,
@@ -8630,6 +8808,16 @@ impl Brain {
         legacy_path: P,
         wbrain_path: Q,
     ) -> std::io::Result<usize> {
+        // Streaming conversion performs sustained seek/read/append phases and
+        // publishes resumability metadata between them. Serializing process-
+        // local migrations prevents competing conversions from creating I/O
+        // starvation windows that look like a truncated legacy checkpoint.
+        // Cross-process safety remains the caller's runtime-ownership duty.
+        static STREAMING_MIGRATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _migration = STREAMING_MIGRATION_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         streaming_migration::migrate(legacy_path.as_ref(), wbrain_path.as_ref())
     }
 

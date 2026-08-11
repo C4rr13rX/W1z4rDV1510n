@@ -3542,6 +3542,10 @@ async fn h_brain_chat(
             )
         })
         .map(|(bytes, _, _)| bytes);
+    let diagnostic_feature_route_pressure = composition_features
+        .as_ref()
+        .map(|(pool_id, labels)| brain.feature_route_pressure(*pool_id, labels))
+        .unwrap_or_default();
     let mut feature_candidates = composition_features
         .as_ref()
         .map(|(pool_id, labels)| {
@@ -4029,6 +4033,9 @@ async fn h_brain_chat(
             "labels": diagnostic_intent_labels,
             "ranked_candidates": feature_candidates.len(),
             "unweighted_candidates": diagnostic_unweighted_candidates,
+            "composite_keys": diagnostic_feature_route_pressure.composite_keys,
+            "composite_candidates": diagnostic_feature_route_pressure.composite_candidates,
+            "composite_saturated": diagnostic_feature_route_pressure.composite_saturated,
             "fragment_candidates": diagnostic_fragment_candidates,
             "component_routes": diagnostic_component_routes,
             "exact_feature": diagnostic_exact_feature,
