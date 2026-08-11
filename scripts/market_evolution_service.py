@@ -1118,6 +1118,35 @@ def brain_gate_obligation_viable(state_dir: Path, genome_id: str) -> bool:
     return not conclusive_anti_signal
 
 
+def brain_gate_attempt_count(events_path: Path, genome_id: str) -> int:
+    """Count durable launches for one isolated neural hypothesis."""
+    if not events_path.is_file():
+        return 0
+    attempts = 0
+    try:
+        with events_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    event = json.loads(line)
+                except (ValueError, TypeError):
+                    continue
+                if (event.get("event") == "brain_gate_started"
+                        and event.get("genome_id") == genome_id):
+                    attempts += 1
+    except OSError:
+        return attempts
+    return attempts
+
+
+def brain_gate_retry_exhausted(
+    state_dir: Path, events_path: Path, genome_id: str, max_attempts: int = 2,
+) -> bool:
+    """Stop deterministic report-less gates from monopolizing evolution."""
+    report = state_dir / "brain-gate-reports" / f"{genome_id}.smoke.json"
+    return (not report.is_file()
+            and brain_gate_attempt_count(events_path, genome_id) >= max_attempts)
+
+
 def recover_pending_gate(state_dir: Path, champion: Genome | None,
                          pending: str | None) -> str | None:
     """Restore a neural-validation obligation that was not yet recorded."""
@@ -5658,12 +5687,35 @@ def main() -> int:
                 # Surrogate scoring is intentionally blind to neural topology.
                 # Give the strongest emergent-pool hypothesis an isolated brain
                 # gate so new pool layouts receive causal neural evidence.
-                pool_candidate = next(
-                    (genome for genome in population if genome.emergent_pools
-                     and not (args.state_dir / "brain-gate-reports"
-                              / f"{genome.genome_id}.smoke.json").exists()),
-                    None,
-                )
+                ungated_pool_candidates = [
+                    genome for genome in population if genome.emergent_pools
+                    and not (args.state_dir / "brain-gate-reports"
+                             / f"{genome.genome_id}.smoke.json").exists()
+                ]
+                newly_exhausted = next((
+                    genome for genome in ungated_pool_candidates
+                    if genome.genome_id not in neural_scores
+                    and brain_gate_retry_exhausted(
+                        args.state_dir, events_path, genome.genome_id
+                    )
+                ), None)
+                if newly_exhausted is not None:
+                    neural_scores[newly_exhausted.genome_id] = brain_feedback_score(None)
+                    append_event(
+                        events_path, "brain_gate_retry_exhausted",
+                        genome_id=newly_exhausted.genome_id,
+                        attempts=brain_gate_attempt_count(
+                            events_path, newly_exhausted.genome_id
+                        ),
+                        feedback_score=brain_feedback_score(None),
+                        live_admission_effect="none",
+                    )
+                pool_candidate = next((
+                    genome for genome in ungated_pool_candidates
+                    if not brain_gate_retry_exhausted(
+                        args.state_dir, events_path, genome.genome_id
+                    )
+                ), None)
                 if pool_candidate is not None:
                     pending_gate_genome = pool_candidate.genome_id
                     append_event(
@@ -5671,6 +5723,21 @@ def main() -> int:
                         generation=generation, genome_id=pool_candidate.genome_id,
                         pools=pool_candidate.emergent_pools,
                     )
+            if (pending_gate_genome is not None
+                    and brain_gate_retry_exhausted(
+                        args.state_dir, events_path, pending_gate_genome
+                    )):
+                attempts = brain_gate_attempt_count(
+                    events_path, pending_gate_genome
+                )
+                neural_scores[pending_gate_genome] = brain_feedback_score(None)
+                append_event(
+                    events_path, "brain_gate_retry_exhausted",
+                    genome_id=pending_gate_genome, attempts=attempts,
+                    feedback_score=brain_feedback_score(None),
+                    live_admission_effect="none",
+                )
+                pending_gate_genome = None
             if (pending_gate_genome is not None
                     and not brain_gate_obligation_viable(
                         args.state_dir, pending_gate_genome

@@ -189,6 +189,12 @@ Transient Windows sharing violations are retried and heartbeat publication is
 best-effort: a dashboard, indexer, or antivirus reader cannot terminate the
 durable evolution loop. After a controller restart, an already-running neural
 gate is detected and allowed to finish before another gate is launched.
+An isolated neural hypothesis gets at most two durable automatic launches
+without producing a report. Repeated report-less timeouts assign only the
+ordinary negative neural advisory score and quarantine that hypothesis from
+automatic relaunch; they cannot reject its statistical phenotype, alter a
+protected metric, or affect live admission. A later explicit report clears the
+retry ceiling, so repaired neural infrastructure can supply fresh evidence.
 
 Schema 9 adds competitive reflexivity as an independent causal feature pool.
 It observes bounded participant direction, consensus, disagreement, leverage

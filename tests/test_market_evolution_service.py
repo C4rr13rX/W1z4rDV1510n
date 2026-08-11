@@ -2300,6 +2300,32 @@ def test_primary_coverage_lane_brackets_transitive_plateau_evidence():
     assert threshold_child.features == frontier.features
 
 
+def test_brain_gate_retry_ceiling_requires_two_reportless_launches(tmp_path):
+    events = tmp_path / "events.jsonl"
+    genome_id = "ranked-hypothesis"
+    events.write_text(
+        "\n".join([
+            json.dumps({"event": "brain_gate_started", "genome_id": genome_id}),
+            "not-json",
+            json.dumps({"event": "brain_gate_started", "genome_id": "other"}),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    assert evolution.brain_gate_attempt_count(events, genome_id) == 1
+    assert not evolution.brain_gate_retry_exhausted(tmp_path, events, genome_id)
+
+    with events.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({
+            "event": "brain_gate_started", "genome_id": genome_id,
+        }) + "\n")
+    assert evolution.brain_gate_retry_exhausted(tmp_path, events, genome_id)
+
+    reports = tmp_path / "brain-gate-reports"
+    reports.mkdir()
+    (reports / f"{genome_id}.smoke.json").write_text("{}", encoding="utf-8")
+    assert not evolution.brain_gate_retry_exhausted(tmp_path, events, genome_id)
+
+
 def test_structure_evidence_recovers_indirect_descendants(tmp_path):
     frontier = seed_genomes(1, random.Random(205))[0]
     frontier.result = {"evaluation_signature": "scope-a", "summary": {}}
