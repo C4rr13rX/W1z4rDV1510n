@@ -248,6 +248,16 @@ not a popularity tie-break: otherwise a later source episode can make a valid
 multi-component container unreachable even though component retrieval and
 composition both succeeded.
 
+Corpus growth can also make a familiar learned word appear inside a novel
+single token. Character-motif overlap across that boundary is not grounding:
+for example, an observed “arithmetic mean” episode must not answer the unseen
+atomic symbol `quasarithmetic`. Exact one-token sensory episodes remain
+authoritative, while a non-exact prompt containing only one lexical token must
+abstain. Multiword paraphrases continue through the normal raw and independent
+feature-pool routes. Always invoke the protected foundation evaluator with
+`--details` so a failed OOV gate durably records the exact prompt and reply,
+not only an aggregate count.
+
 During forward harvest, a guarded block may be completely covered by unresolved
 deferred intervals. Its admission sampler must then contain zero rows. Do not
 manufacture a pass and do not append an empty interval: verify gap-free
