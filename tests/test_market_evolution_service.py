@@ -1595,6 +1595,46 @@ def test_profitable_return_tree_repairs_coverage_before_more_topology():
     )
 
 
+def test_return_tree_bisects_signed_quality_coverage_boundary():
+    population = seed_genomes(8, random.Random(194))
+    champion = population[0]
+    champion.learner_kind = "extra_trees"
+    champion.fitness = 2400
+    champion.result = {"evaluated_folds": 3, "requested_folds": 3}
+    evidence = []
+    for quantile, accuracy, balanced, mcc, profit, coverage in (
+        (.18, .611, .612, .225, 1.002, .483),
+        (.12, .462, .462, -.077, .761, .619),
+    ):
+        evidence.append(Genome(**{
+            **champion.__dict__, "learner_kind": "extra_trees_regressor",
+            "confidence_quantile": quantile,
+            "generation": 914, "parents": [champion.genome_id],
+            "genome_id": "", "fitness": 400,
+            "result": {
+                "evaluated_folds": 1, "requested_folds": 3,
+                "summary": {
+                    "min_accuracy": accuracy,
+                    "min_balanced_accuracy": balanced, "min_mcc": mcc,
+                    "min_profit_factor": profit, "min_coverage": coverage,
+                },
+            },
+        }).finalize())
+    for genome in population[1:]:
+        genome.fitness = None
+        genome.result = None
+
+    after = evolution.introduce_champion_return_tree_variant(
+        population, champion, evidence, 915
+    )
+
+    repair = next(
+        genome for genome in after
+        if genome.learner_kind == "extra_trees_regressor"
+    )
+    assert repair.confidence_quantile == pytest.approx(.15)
+
+
 def test_nearby_return_tree_evidence_survives_champion_quantile_handoff(tmp_path):
     old = seed_genomes(1, random.Random(193))[0]
     old.learner_kind = "extra_trees"

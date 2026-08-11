@@ -3539,15 +3539,33 @@ def introduce_champion_return_tree_variant(
         ),
         reverse=True,
     )
+    evidence_quality: list[tuple[Genome, bool]] = []
     for observed in return_evidence:
         summary = (observed.result or {}).get("summary", {})
-        coverage = float(summary.get("min_coverage", 0))
         strong_signal = (
             float(summary.get("min_accuracy", 0)) >= .56
             and float(summary.get("min_balanced_accuracy", 0)) >= .55
             and float(summary.get("min_mcc", -1)) >= .10
             and float(summary.get("min_profit_factor", 0)) >= .95
         )
+        evidence_quality.append((observed, strong_signal))
+    # A coarse coverage jump can cross a discontinuous quality boundary. Once
+    # both sides are signed, bisect the narrowest strong/weak quantile bracket
+    # instead of extrapolating another destructive threshold.
+    brackets = [
+        (strong.confidence_quantile - weak.confidence_quantile,
+         (strong.confidence_quantile + weak.confidence_quantile) / 2.0)
+        for strong, is_strong in evidence_quality if is_strong
+        for weak, weak_is_strong in evidence_quality if not weak_is_strong
+        if weak.confidence_quantile < strong.confidence_quantile
+        and strong.confidence_quantile - weak.confidence_quantile >= .002
+    ]
+    if brackets:
+        _, midpoint = min(brackets)
+        quantiles.append(midpoint)
+    for observed, strong_signal in evidence_quality:
+        summary = (observed.result or {}).get("summary", {})
+        coverage = float(summary.get("min_coverage", 0))
         if strong_signal and coverage < PRESCREEN["coverage"]:
             coverage_gap = PRESCREEN["coverage"] - coverage
             quantiles.append(max(
