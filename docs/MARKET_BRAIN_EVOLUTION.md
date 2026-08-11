@@ -209,3 +209,12 @@ cross-pool terminals. Because statistical surrogates cannot measure neural
 topology, the strongest new-pool hypothesis is explicitly queued for an
 isolated Wizard-brain gate. Old schema states load with an empty topology gene
 and immediately receive one bounded topology experiment.
+
+Schema 14 also treats repeated identical protected outcomes as evidence. When
+six or more orientation-aware reliability trials from one feature pool collapse
+to the same accuracy, balance, MCC, coverage, expectancy, and profit-factor
+signature, that pool/threshold dimension is declared locally uninformative.
+The scheduler stops infinitesimal quantile bisection and tests compact
+flow/derivatives, news/regime, and relative-trend correctness specialists. This
+keeps the perpetual search causal and novel without relaxing any promotion,
+coverage, calibration, unseen-asset, profitability, or ghost-only gate.

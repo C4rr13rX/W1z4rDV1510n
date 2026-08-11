@@ -44,7 +44,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 FEATURE_SCHEMA = 5
-EVOLUTION_SCHEMA = 13
+EVOLUTION_SCHEMA = 14
 LEARNER_KINDS = (
     "classifier", "regressor", "extra_trees", "decomposed_regressor",
     "regime_regressor", "regime_decomposed_regressor",
@@ -75,6 +75,22 @@ RELIABILITY_FEATURE_POOLS = {
         "asset_news_sentiment_24h", "news_polarity_24h",
         "news_negative_share_24h", "news_macro_24h", "news_regulation_24h",
         "news_security_24h", "news_liquidation_24h",
+    ),
+    "flow_derivatives": (
+        "spot_taker_imbalance", "futures_taker_imbalance", "flow_imbalance",
+        "flow_divergence", "futures_spot_basis", "funding_rate",
+        "basis_z24", "funding_z168",
+    ),
+    "news_regime": (
+        "asset_news_sentiment_acceleration", "asset_news_sentiment_24h",
+        "news_polarity_24h", "news_negative_share_24h", "news_macro_24h",
+        "news_regulation_24h", "news_security_24h", "news_liquidation_24h",
+        "rv24", "volatility_ratio", "market_breadth_r6",
+    ),
+    "relative_trend": (
+        "r1", "r6", "r12", "r24", "r72", "market_median_r6",
+        "market_breadth_r6", "relative_market_r6", "cross_rank_r6",
+        "cross_rank_r24",
     ),
 }
 RELIABILITY_FEATURE_POOLS["combined"] = tuple(dict.fromkeys(
@@ -1253,9 +1269,43 @@ def next_oriented_reliability_variants(
             for fold in (candidate.result or {}).get("folds", [])
         )
     }
-    active_pools = tuple(
-        pool for pool in ("flow_news", "combined") if pool not in inert_pools
-    ) or ("combined",)
+    outcome_by_pool: dict[str, set[tuple[float, ...]]] = defaultdict(set)
+    tested_by_pool: Counter[str] = Counter()
+    for candidate in evidence:
+        if (candidate.calibration_reliability_version != 8
+                or candidate.fitness is None):
+            continue
+        summary = (candidate.result or {}).get("summary", {})
+        tested_by_pool[candidate.calibration_reliability_pool] += 1
+        outcome_by_pool[candidate.calibration_reliability_pool].add(tuple(
+            round(float(summary.get(name, fallback)), 8)
+            for name, fallback in (
+                ("min_accuracy", 0), ("min_balanced_accuracy", 0),
+                ("min_mcc", -1), ("min_coverage", 0),
+                ("min_expectancy", -1), ("min_profit_factor", 0),
+            )
+        ))
+    plateau_pools = {
+        pool for pool, count in tested_by_pool.items()
+        if count >= 6 and len(outcome_by_pool[pool]) <= max(1, count // 12)
+    }
+    primary_pools = ("flow_news", "combined")
+    compact_pools = ("flow_derivatives", "news_regime", "relative_trend")
+    pool_schedule = primary_pools + compact_pools
+    primary_active = tuple(
+        pool for pool in primary_pools
+        if pool not in inert_pools and pool not in plateau_pools
+    )
+    active_pools = primary_active or tuple(
+        pool for pool in compact_pools
+        if pool not in inert_pools and pool not in plateau_pools
+    )
+    if not active_pools:
+        # Every current representation has become uninformative. Revisit the
+        # least-sampled one rather than bisection-looping inside a plateau.
+        active_pools = (min(
+            pool_schedule, key=lambda pool: (tested_by_pool[pool], pool)
+        ),)
     quantiles = list(dict.fromkeys(
         round(min(.30, max(.05, base_quantile + offset)), 6)
         for offset in (0.0, .02, -.02, .04, -.04, .06)

@@ -1151,6 +1151,51 @@ def test_orientation_aware_scheduler_explores_both_feature_pools_without_repeats
     )
 
 
+def test_orientation_scheduler_escapes_outcome_plateau_into_compact_pools():
+    base = seed_genomes(1, random.Random(177))[0]
+    base.confidence_quantile = .237396
+    evidence = []
+    for index, quantile in enumerate((
+        .197396, .217396, .237396, .257396, .277396, .297396,
+    )):
+        evidence.append(Genome(**{
+            **base.__dict__, "calibration_reliability": True,
+            "calibration_reliability_version": 8,
+            "calibration_reliability_pool": "combined",
+            "confidence_quantile": quantile,
+            "generation": 400 + index, "genome_id": "", "fitness": 1200,
+            "result": {"summary": {
+                "min_accuracy": .5027, "min_balanced_accuracy": .5063,
+                "min_mcc": .0131, "min_coverage": .7928,
+                "min_expectancy": -.0007, "min_profit_factor": .9319,
+            }},
+        }).finalize())
+    for index, quantile in enumerate((.237396, .257396)):
+        evidence.append(Genome(**{
+            **base.__dict__, "calibration_reliability": True,
+            "calibration_reliability_version": 8,
+            "calibration_reliability_pool": "flow_news",
+            "confidence_quantile": quantile,
+            "generation": 500 + index, "genome_id": "", "fitness": 1100,
+            "result": {
+                "folds": [
+                    {"multiscale_calibration": {"reliability_direction": 0.0}},
+                    {"multiscale_calibration": {"reliability_direction": 0.0}},
+                ],
+                "summary": {"min_accuracy": .49},
+            },
+        }).finalize())
+
+    proposals = evolution.next_oriented_reliability_variants(
+        evidence, base.confidence_quantile
+    )
+
+    assert proposals == (
+        ("flow_derivatives", .237396), ("news_regime", .237396)
+    )
+    assert all(pool not in {"combined", "flow_news"} for pool, _ in proposals)
+
+
 def test_reliability_decay_search_brackets_best_protected_evidence():
     base = seed_genomes(1, random.Random(175))[0]
     evidence = []
