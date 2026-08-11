@@ -1570,6 +1570,100 @@ def test_extra_trees_return_regressor_ranks_signed_magnitude():
     assert prediction[-1] > prediction[len(prediction) // 2]
 
 
+def test_champion_replacement_rejects_material_profitability_regression():
+    incumbent, candidate = seed_genomes(2, random.Random(189))
+    incumbent.fitness = 2394.11
+    incumbent.result = {
+        "evaluated_folds": 3, "requested_folds": 3,
+        "summary": {
+            "min_accuracy": .5664, "min_balanced_accuracy": .5589,
+            "min_mcc": .1234, "min_baseline_margin": .0117,
+            "min_coverage": .6489, "min_expectancy": -.000481,
+            "min_profit_factor": .9581, "max_ece": .1536,
+            "max_drawdown": .736,
+        },
+    }
+    candidate.fitness = 2394.27
+    candidate.result = {
+        "evaluated_folds": 3, "requested_folds": 3,
+        "summary": {
+            "min_accuracy": .5673, "min_balanced_accuracy": .5593,
+            "min_mcc": .1246, "min_baseline_margin": .0117,
+            "min_coverage": .6519, "min_expectancy": -.000532,
+            "min_profit_factor": .9537, "max_ece": .1505,
+            "max_drawdown": .765,
+        },
+    }
+    assert not evolution.champion_replacement_allowed(candidate, incumbent)
+
+
+def test_champion_replacement_accepts_bounded_pareto_gain():
+    incumbent, candidate = seed_genomes(2, random.Random(190))
+    incumbent.fitness = 2394.07
+    incumbent.result = {
+        "evaluated_folds": 3, "requested_folds": 3,
+        "summary": {
+            "min_accuracy": .5664, "min_balanced_accuracy": .5589,
+            "min_mcc": .1234, "min_baseline_margin": .0117,
+            "min_coverage": .6474, "min_expectancy": -.000488,
+            "min_profit_factor": .9576, "max_ece": .1536,
+            "max_drawdown": .735,
+        },
+    }
+    candidate.fitness = 2394.11
+    candidate.result = {
+        "evaluated_folds": 3, "requested_folds": 3,
+        "summary": {
+            "min_accuracy": .5664, "min_balanced_accuracy": .5589,
+            "min_mcc": .1234, "min_baseline_margin": .0117,
+            "min_coverage": .6489, "min_expectancy": -.000481,
+            "min_profit_factor": .9581, "max_ece": .1536,
+            "max_drawdown": .736,
+        },
+    }
+    assert evolution.champion_replacement_allowed(candidate, incumbent)
+
+
+def test_unsafe_champion_rolls_back_to_signed_parent(tmp_path):
+    incumbent, candidate = seed_genomes(2, random.Random(191))
+    incumbent.fitness = 2394.11
+    incumbent.result = {
+        "evaluation_signature": "scope-a",
+        "evaluated_folds": 3, "requested_folds": 3,
+        "summary": {
+            "min_accuracy": .5664, "min_balanced_accuracy": .5589,
+            "min_mcc": .1234, "min_baseline_margin": .0117,
+            "min_coverage": .6489, "min_expectancy": -.000481,
+            "min_profit_factor": .9581, "max_ece": .1536,
+            "max_drawdown": .736,
+        },
+    }
+    candidate.fitness = 2394.27
+    candidate.parents = [incumbent.genome_id]
+    candidate.result = {
+        "evaluation_signature": "scope-a",
+        "evaluated_folds": 3, "requested_folds": 3,
+        "summary": {
+            "min_accuracy": .5673, "min_balanced_accuracy": .5593,
+            "min_mcc": .1246, "min_baseline_margin": .0117,
+            "min_coverage": .6519, "min_expectancy": -.000532,
+            "min_profit_factor": .9537, "max_ece": .1505,
+            "max_drawdown": .765,
+        },
+    }
+    (tmp_path / "candidates").mkdir()
+    (tmp_path / "candidates" / f"{incumbent.genome_id}.json").write_text(
+        json.dumps(incumbent.__dict__), encoding="utf-8"
+    )
+
+    restored, rejected = evolution.rollback_unsafe_champion(
+        tmp_path, candidate, "scope-a"
+    )
+
+    assert restored.genome_id == incumbent.genome_id
+    assert rejected == [candidate.genome_id]
+
+
 def test_reliability_decay_search_brackets_best_protected_evidence():
     base = seed_genomes(1, random.Random(175))[0]
     evidence = []

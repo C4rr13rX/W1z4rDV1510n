@@ -2553,6 +2553,73 @@ def selection_fitness(genome: Genome, neural_scores: dict[str, float] | None = N
     )
 
 
+def champion_replacement_allowed(candidate: Genome, incumbent: Genome) -> bool:
+    """Require a bounded Pareto improvement for the durable research champion."""
+    if (candidate.fitness is None or incumbent.fitness is None
+            or candidate.fitness <= incumbent.fitness):
+        return False
+    candidate_result = candidate.result or {}
+    incumbent_result = incumbent.result or {}
+    if (int(candidate_result.get("evaluated_folds", 0))
+            < int(candidate_result.get("requested_folds", 3))):
+        return False
+    candidate_summary = candidate_result.get("summary", {})
+    incumbent_summary = incumbent_result.get("summary", {})
+    # These tolerances absorb one or two acted observations moving at a
+    # quantile boundary, but reject material economics/safety regressions such
+    # as the former scalar-fitness handoff. All values are worst-fold metrics.
+    lower_bounds = {
+        "min_accuracy": 0.0,
+        "min_balanced_accuracy": .002,
+        "min_mcc": .005,
+        "min_baseline_margin": .005,
+        "min_coverage": .005,
+        "min_expectancy": .000025,
+        "min_profit_factor": .002,
+    }
+    for name, tolerance in lower_bounds.items():
+        if (float(candidate_summary.get(name, -math.inf))
+                < float(incumbent_summary.get(name, -math.inf)) - tolerance):
+            return False
+    upper_bounds = {"max_ece": .005, "max_drawdown": .01}
+    for name, tolerance in upper_bounds.items():
+        if (float(candidate_summary.get(name, math.inf))
+                > float(incumbent_summary.get(name, math.inf)) + tolerance):
+            return False
+    return True
+
+
+def rollback_unsafe_champion(
+    state_dir: Path, champion: Genome | None, evaluation_id: str,
+) -> tuple[Genome | None, list[str]]:
+    """Undo scalar-fitness handoffs that violate the new Pareto contract."""
+    if champion is None:
+        return None, []
+    rolled_back: list[str] = []
+    current = champion
+    visited = {current.genome_id}
+    while current.parents:
+        parents: list[Genome] = []
+        for parent_id in current.parents:
+            path = state_dir / "candidates" / f"{parent_id}.json"
+            try:
+                parent = genome_from_dict(json.loads(path.read_text(encoding="utf-8")))
+            except (OSError, ValueError, TypeError):
+                continue
+            if (parent.fitness is not None
+                    and (parent.result or {}).get("evaluation_signature") == evaluation_id):
+                parents.append(parent)
+        if not parents:
+            break
+        parent = max(parents, key=lambda genome: genome.fitness or -math.inf)
+        if parent.genome_id in visited or champion_replacement_allowed(current, parent):
+            break
+        rolled_back.append(current.genome_id)
+        current = parent
+        visited.add(current.genome_id)
+    return current, rolled_back
+
+
 def select_diverse_elites(population: Sequence[Genome], count: int,
                           neural_scores: dict[str, float] | None = None) -> list[Genome]:
     """Retain fitness leaders plus viable behavioral species.
@@ -4297,6 +4364,17 @@ def main() -> int:
                     generation=generation, genomes=restored_candidates,
                     evaluation_signature=signature,
                 )
+            safe_champion, rolled_back = rollback_unsafe_champion(
+                args.state_dir, champion, signature
+            )
+            if safe_champion is not None and rolled_back:
+                champion = safe_champion
+                atomic_json(args.state_dir / "champion.json", asdict(champion))
+                append_event(
+                    events_path, "unsafe_champion_rolled_back",
+                    rejected=rolled_back, restored=champion.genome_id,
+                    reason="bounded_pareto_contract",
+                )
         population, resumed_regime_conversions = cap_expensive_regime_candidates(
             population, generation, regime_shift_frontier
         )
@@ -4657,10 +4735,15 @@ def main() -> int:
                           f"{(genome.result or {}).get('status')}", flush=True)
             population.sort(key=lambda genome: selection_fitness(genome, neural_scores),
                             reverse=True)
-            champion_changed = (champion is None
-                                or (population[0].fitness or -math.inf) > (champion.fitness or -math.inf))
-            if champion_changed:
-                champion = genome_from_dict(asdict(population[0]))
+            challenger = (
+                population[0] if champion is None else next((
+                    genome for genome in population
+                    if champion_replacement_allowed(genome, champion)
+                ), None)
+            )
+            champion_changed = challenger is not None
+            if challenger is not None:
+                champion = genome_from_dict(asdict(challenger))
                 atomic_json(args.state_dir / "champion.json", asdict(champion))
                 append_event(events_path, "champion_updated", generation=generation,
                              genome_id=champion.genome_id, fitness=champion.fitness,
