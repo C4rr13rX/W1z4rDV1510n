@@ -1424,6 +1424,35 @@ def load_nearby_program_transfer_evidence(
     return list(evidence.values())
 
 
+def load_nearby_return_tree_evidence(
+    state_dir: Path, champion: Genome, evaluation_id: str,
+) -> list[Genome]:
+    """Keep return-tree response curves across classifier quantile handoffs."""
+    evidence: dict[str, Genome] = {}
+    for path in (state_dir / "candidates").glob("*.json"):
+        try:
+            candidate = genome_from_dict(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError, TypeError):
+            continue
+        if (candidate.fitness is None
+                or candidate.learner_kind != "extra_trees_regressor"
+                or (candidate.result or {}).get("evaluation_signature") != evaluation_id):
+            continue
+        payload = asdict(candidate)
+        payload.update({
+            "learner_kind": champion.learner_kind,
+            "confidence_quantile": champion.confidence_quantile,
+            "generation": champion.generation, "parents": champion.parents,
+            "fitness": champion.fitness, "result": champion.result,
+            "genome_id": champion.genome_id,
+        })
+        reconstructed = Genome(**payload).finalize()
+        if genome_evaluation_key(reconstructed) != genome_evaluation_key(champion):
+            continue
+        evidence[candidate.genome_id] = candidate
+    return list(evidence.values())
+
+
 def add_derived_features(rows: Sequence[dict[str, Any]]) -> None:
     for row in rows:
         features = row["features"]
@@ -3497,8 +3526,16 @@ def introduce_champion_return_tree_variant(
         (genome for genome in evidence
          if genome.learner_kind == "extra_trees_regressor"
          and genome.fitness is not None),
-        key=lambda genome: float(
-            ((genome.result or {}).get("summary") or {}).get("min_coverage", 0)
+        key=lambda genome: (
+            float(((genome.result or {}).get("summary") or {}).get(
+                "min_coverage", 0
+            )),
+            float(((genome.result or {}).get("summary") or {}).get(
+                "min_profit_factor", 0
+            )),
+            float(((genome.result or {}).get("summary") or {}).get(
+                "min_accuracy", 0
+            )),
         ),
         reverse=True,
     )
@@ -4935,6 +4972,11 @@ def main() -> int:
                     args.state_dir, champion, signature
                 ) if champion is not None else []
             )
+            champion_return_tree_evidence = (
+                load_nearby_return_tree_evidence(
+                    args.state_dir, champion, signature
+                ) if champion is not None else []
+            )
             population = introduce_champion_coordinate_variant(
                 population, champion, champion_coordinate_evidence,
                 generation,
@@ -4961,7 +5003,7 @@ def main() -> int:
             )
             if [genome.genome_id for genome in population] == before_profit_search:
                 population = introduce_champion_return_tree_variant(
-                    population, champion, champion_coordinate_evidence,
+                    population, champion, champion_return_tree_evidence,
                     generation,
                     {
                         genome.genome_id for genome in (

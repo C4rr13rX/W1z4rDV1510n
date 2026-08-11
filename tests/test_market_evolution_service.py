@@ -1595,6 +1595,41 @@ def test_profitable_return_tree_repairs_coverage_before_more_topology():
     )
 
 
+def test_nearby_return_tree_evidence_survives_champion_quantile_handoff(tmp_path):
+    old = seed_genomes(1, random.Random(193))[0]
+    old.learner_kind = "extra_trees"
+    old.confidence_quantile = .1796
+    old.finalize()
+    champion = Genome(**{
+        **old.__dict__, "confidence_quantile": .1821,
+        "generation": 913, "parents": [old.genome_id], "genome_id": "",
+        "fitness": 2400, "result": {
+            "evaluated_folds": 3, "requested_folds": 3, "summary": {},
+        },
+    }).finalize()
+    champion.finalize()
+    return_tree = Genome(**{
+        **old.__dict__, "learner_kind": "extra_trees_regressor",
+        "generation": 912, "parents": [old.genome_id],
+        "genome_id": "", "fitness": 405,
+        "result": {
+            "evaluation_signature": "scope-a",
+            "evaluated_folds": 1, "requested_folds": 3,
+            "summary": {"min_accuracy": .611, "min_profit_factor": 1.002},
+        },
+    }).finalize()
+    (tmp_path / "candidates").mkdir()
+    (tmp_path / "candidates" / f"{return_tree.genome_id}.json").write_text(
+        json.dumps(return_tree.__dict__), encoding="utf-8"
+    )
+
+    evidence = evolution.load_nearby_return_tree_evidence(
+        tmp_path, champion, "scope-a"
+    )
+
+    assert [genome.genome_id for genome in evidence] == [return_tree.genome_id]
+
+
 def test_extra_trees_return_regressor_ranks_signed_magnitude():
     genome = seed_genomes(1, random.Random(188))[0]
     values = np.linspace(-2.0, 2.0, 80, dtype=np.float32).reshape(-1, 1)
