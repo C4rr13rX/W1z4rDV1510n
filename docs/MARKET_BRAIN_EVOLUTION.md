@@ -210,7 +210,8 @@ topology, the strongest new-pool hypothesis is explicitly queued for an
 isolated Wizard-brain gate. Old schema states load with an empty topology gene
 and immediately receive one bounded topology experiment.
 
-Schema 14 also treats repeated identical protected outcomes as evidence. When
+The reliability scheduler also treats repeated identical protected outcomes as
+evidence. When
 six or more orientation-aware reliability trials from one feature pool collapse
 to the same accuracy, balance, MCC, coverage, expectancy, and profit-factor
 signature, that pool/threshold dimension is declared locally uninformative.

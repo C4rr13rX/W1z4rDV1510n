@@ -44,7 +44,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 FEATURE_SCHEMA = 5
-EVOLUTION_SCHEMA = 14
+EVOLUTION_SCHEMA = 13
 LEARNER_KINDS = (
     "classifier", "regressor", "extra_trees", "decomposed_regressor",
     "regime_regressor", "regime_decomposed_regressor",
