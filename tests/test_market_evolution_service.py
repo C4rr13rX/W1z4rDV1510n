@@ -1196,6 +1196,70 @@ def test_orientation_scheduler_escapes_outcome_plateau_into_compact_pools():
     assert all(pool not in {"combined", "flow_news"} for pool, _ in proposals)
 
 
+def test_full_fold_champion_coordinate_search_is_single_axis_and_remembers_evidence():
+    population = seed_genomes(8, random.Random(178))
+    champion = population[0]
+    champion.fitness = 2400
+    champion.result = {
+        "evaluated_folds": 3, "requested_folds": 3,
+        "summary": {"min_accuracy": .566, "min_profit_factor": .958},
+    }
+    for genome in population[1:]:
+        genome.fitness = None
+        genome.result = None
+        genome.emergent_pools = []
+    first = evolution.introduce_champion_coordinate_variant(
+        population, champion, [], 900
+    )
+    child = next(
+        genome for genome in first
+        if champion.genome_id in genome.parents and genome.fitness is None
+    )
+    assert child.confidence_quantile == max(
+        0.0, champion.confidence_quantile - .01
+    )
+    unchanged = (
+        set(champion.__dict__) - {
+            "confidence_quantile", "generation", "parents", "fitness",
+            "result", "genome_id",
+        }
+    )
+    assert all(getattr(child, name) == getattr(champion, name) for name in unchanged)
+
+    child.fitness = 1200
+    child.result = {
+        "evaluation_signature": "scope-a", "evaluated_folds": 3,
+        "requested_folds": 3, "summary": {"min_accuracy": .55},
+    }
+    next_population = seed_genomes(8, random.Random(179))
+    for genome in next_population:
+        genome.fitness = None
+        genome.result = None
+        genome.emergent_pools = []
+    second = evolution.introduce_champion_coordinate_variant(
+        next_population, champion, [child], 901
+    )
+    next_child = next(
+        genome for genome in second
+        if champion.genome_id in genome.parents and genome.fitness is None
+    )
+    assert next_child.confidence_quantile == min(
+        .30, champion.confidence_quantile + .01
+    )
+
+
+def test_partial_fold_frontier_cannot_drive_champion_coordinate_search():
+    population = seed_genomes(8, random.Random(180))
+    frontier = population[0]
+    frontier.fitness = 2500
+    frontier.result = {"evaluated_folds": 1, "requested_folds": 3}
+    before = [genome.genome_id for genome in population]
+    after = evolution.introduce_champion_coordinate_variant(
+        population, frontier, [], 902
+    )
+    assert [genome.genome_id for genome in after] == before
+
+
 def test_reliability_decay_search_brackets_best_protected_evidence():
     base = seed_genomes(1, random.Random(175))[0]
     evidence = []

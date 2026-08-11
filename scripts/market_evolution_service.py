@@ -3076,6 +3076,71 @@ def introduce_extra_trees_coverage_variant(
     return population
 
 
+def introduce_champion_coordinate_variant(
+    population: list[Genome], champion: Genome | None,
+    evidence: Sequence[Genome], generation: int,
+    protected_parent_ids: set[str] | None = None,
+) -> list[Genome]:
+    """Spend one slot on a controlled descendant of the full-fold champion.
+
+    Frontier repair deliberately explores high-accuracy one-fold lineages, but
+    it must not consume the whole population after their temporal reversal is
+    well established.  This search changes exactly one continuous or bounded
+    tree coordinate at a time and remembers every signed phenotype result.
+    """
+    if champion is None or champion.fitness is None or len(population) < 4:
+        return population
+    result = champion.result or {}
+    if int(result.get("evaluated_folds", 0)) < int(result.get("requested_folds", 3)):
+        return population
+    schedules: tuple[tuple[str, float | int], ...] = (
+        ("confidence_quantile", max(0.0, champion.confidence_quantile - .01)),
+        ("confidence_quantile", min(.30, champion.confidence_quantile + .01)),
+        ("confidence_quantile", max(0.0, champion.confidence_quantile - .02)),
+        ("confidence_quantile", min(.30, champion.confidence_quantile + .02)),
+        ("min_samples_leaf", max(8, champion.min_samples_leaf - 4)),
+        ("min_samples_leaf", min(100, champion.min_samples_leaf + 4)),
+        ("max_leaf_nodes", max(8, champion.max_leaf_nodes - 4)),
+        ("max_leaf_nodes", min(72, champion.max_leaf_nodes + 4)),
+        ("recency_half_life_days", max(45.0, champion.recency_half_life_days * .75)),
+        ("recency_half_life_days", min(2200.0, champion.recency_half_life_days * 1.25)),
+        ("calibration_safety", max(1.0, champion.calibration_safety * .75)),
+        ("calibration_safety", min(12.0, champion.calibration_safety * 1.25)),
+    )
+    known_keys = {
+        genome_evaluation_key(genome)
+        for genome in [*population, *evidence]
+        if genome.fitness is not None or genome in population
+    }
+    variant: Genome | None = None
+    for field_name, value in schedules:
+        if value == getattr(champion, field_name):
+            continue
+        payload = asdict(champion)
+        payload.update({
+            field_name: value, "generation": generation,
+            "parents": [champion.genome_id], "fitness": None,
+            "result": None, "genome_id": "",
+        })
+        proposal = Genome(**payload).finalize()
+        if genome_evaluation_key(proposal) not in known_keys:
+            variant = proposal
+            break
+    if variant is None:
+        return population
+    protected_parent_ids = protected_parent_ids or set()
+    replacement = next((
+        index for index in range(len(population) - 1, 0, -1)
+        if population[index].fitness is None
+        and not population[index].emergent_pools
+        and not (set(population[index].parents) & protected_parent_ids)
+    ), None)
+    if replacement is None:
+        return population
+    population[replacement] = variant
+    return population
+
+
 def coverage_frontier_rank(genome: Genome) -> tuple[float, ...] | None:
     """Rank near-coverage misses without discarding profitable accuracy.
 
@@ -4417,6 +4482,22 @@ def main() -> int:
                     ) if genome is not None
                 }),
             )
+            champion_coordinate_evidence = load_direct_descendant_evidence(
+                args.state_dir,
+                ({champion.genome_id} if champion is not None else set()),
+                signature,
+            )
+            population = introduce_champion_coordinate_variant(
+                population, champion, champion_coordinate_evidence,
+                generation,
+                {
+                    genome.genome_id for genome in (
+                        coverage_frontier, multiscale_frontier,
+                        multiscale_boundary_frontier, extra_trees_frontier,
+                        regime_shift_frontier,
+                    ) if genome is not None
+                },
+            )
             population, regime_candidates_converted = cap_expensive_regime_candidates(
                 population, generation, regime_shift_frontier
             )
@@ -4454,6 +4535,12 @@ def main() -> int:
                 "regime_shift_candidates": sum(
                     regime_shift_frontier is not None
                     and regime_shift_frontier.genome_id in genome.parents
+                    for genome in population
+                ),
+                "champion_coordinate_candidates": sum(
+                    champion is not None
+                    and champion.genome_id in genome.parents
+                    and genome.fitness is None
                     for genome in population
                 ),
                 "surplus_regime_candidates_converted": regime_candidates_converted,

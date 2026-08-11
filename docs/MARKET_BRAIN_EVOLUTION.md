@@ -219,3 +219,10 @@ The scheduler stops infinitesimal quantile bisection and tests compact
 flow/derivatives, news/regime, and relative-trend correctness specialists. This
 keeps the perpetual search causal and novel without relaxing any promotion,
 coverage, calibration, unseen-asset, profitability, or ghost-only gate.
+
+Frontier repair and champion exploitation have separate budgets. High-accuracy
+one-fold frontiers may continue bounded temporal-reversal research, while one
+ordinary population slot performs an evidence-backed coordinate search around
+the fully evaluated three-fold champion. Each descendant changes exactly one
+cutoff, tree-complexity, recency, or calibration coordinate, and signed prior
+phenotypes are never repeated. A partial-fold frontier cannot enter this path.
