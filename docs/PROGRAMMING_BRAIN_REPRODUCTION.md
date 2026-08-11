@@ -174,6 +174,13 @@ least eight times, settle the overlay into immutable storage, and pass the full
 retention battery before admission. A shorter fixed pass can miss a
 logarithmic milestone and is not durable-reachability evidence.
 
+`programming_multilanguage_eval.py` trains six repetitions by default. Any
+read-only control or post-admission probe must pass `--no-train`; otherwise it
+is maintenance training and must begin inside the immutable guard. If a probe
+is mistakenly run without that flag, do not hide the mutation: account for its
+exact presentations and tick delta in the admission evidence, and require the
+combined final state to pass the comprehensive gate before it can remain live.
+
 After the conditionally launched or adopted node becomes healthy, the service
 wrapper resolves both its listening-socket PID and its
 `W1Z4RD_NODE_BRAIN_DIR` runtime identity. They must identify the same process
