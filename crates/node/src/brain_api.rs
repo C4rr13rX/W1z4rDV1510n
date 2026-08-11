@@ -2646,8 +2646,19 @@ fn prompt_programming_response_compatible(
                 .into_iter()
                 .filter(|parameter| parameter != "self" && parameter != "cls")
                 .collect::<Vec<_>>();
+            let scalar_incompatible = [
+                ".shape",
+                "axis=",
+                "np.sqrt",
+                "numpy.sqrt",
+                "np.sum",
+                "numpy.sum",
+            ]
+            .iter()
+            .any(|evidence| source.contains(evidence));
             if parameters.len() != 1
                 || !parameter_self_power_evidence(&source, &parameters[0])
+                || scalar_incompatible
             {
                 return false;
             }
@@ -2713,6 +2724,19 @@ fn prompt_programming_response_compatible(
 fn derived_feature_artifact_compatible(labels: &[String], bytes: &[u8]) -> bool {
     !has_programming_language_intent(labels)
         || programming_response_compatible(labels, bytes)
+}
+
+/// Apply the complete user request to every derived programming artifact.
+/// Exact raw sensory episodes remain authoritative, but no feature, motif,
+/// composition, or autonomous route may weaken prompt-specific constraints
+/// to the broader language+behavior class.
+fn prompt_derived_feature_artifact_compatible(
+    labels: &[String],
+    prompt: &str,
+    bytes: &[u8],
+) -> bool {
+    !has_programming_language_intent(labels)
+        || prompt_programming_response_compatible(labels, prompt, bytes)
 }
 
 fn compatible_integrated_reply(
@@ -3663,7 +3687,11 @@ async fn h_brain_chat(
         .map(|(_, labels)| labels.clone())
         .unwrap_or_default();
     let exact_feature_compatible = exact_feature.as_ref().is_some_and(|candidate| {
-        derived_feature_artifact_compatible(&diagnostic_intent_labels, candidate)
+        prompt_derived_feature_artifact_compatible(
+            &diagnostic_intent_labels,
+            prompt,
+            candidate,
+        )
     });
     let exact_complete_manifest = exact_feature
         .as_ref()
@@ -3675,7 +3703,14 @@ async fn h_brain_chat(
     let diagnostic_exact_manifest = exact_complete_manifest.is_some();
     let programming_language_intent = has_programming_language_intent(&diagnostic_intent_labels);
     let ranked_single_source =
-        single_language_ranked_source(&diagnostic_intent_labels, &feature_candidates);
+        single_language_ranked_source(&diagnostic_intent_labels, &feature_candidates)
+            .filter(|candidate| {
+                prompt_derived_feature_artifact_compatible(
+                    &diagnostic_intent_labels,
+                    prompt,
+                    candidate,
+                )
+            });
     let ranked_validated_source = composition_features.as_ref().and_then(|(pool_id, labels)| {
         (labels
             .iter()
@@ -3702,7 +3737,11 @@ async fn h_brain_chat(
             .flatten()
     });
     let raw_programming_compatible = raw_trained.as_ref().is_some_and(|candidate| {
-        programming_response_compatible(&diagnostic_intent_labels, candidate)
+        prompt_derived_feature_artifact_compatible(
+            &diagnostic_intent_labels,
+            prompt,
+            candidate,
+        )
     });
     let fragment_composition =
         merge_grounded_code_fragments_for_prompt(&feature_candidates, prompt);
@@ -3717,8 +3756,9 @@ async fn h_brain_chat(
         manifest_composition,
     )
     .filter(|candidate| {
-        derived_feature_artifact_compatible(
+        prompt_derived_feature_artifact_compatible(
             &diagnostic_intent_labels,
+            prompt,
             candidate,
         )
     });
@@ -3776,7 +3816,11 @@ async fn h_brain_chat(
         // action. This path remains read-only and cannot synthesize source.
         raw_semantically_validated
     } else if raw_motif_trained.as_ref().is_some_and(|candidate| {
-        programming_response_compatible(&diagnostic_intent_labels, candidate)
+        prompt_derived_feature_artifact_compatible(
+            &diagnostic_intent_labels,
+            prompt,
+            candidate,
+        )
     }) {
         // Character motifs resolve sparse-feature ambiguity, but cannot
         // displace one unambiguous complete feature episode.
@@ -3838,10 +3882,17 @@ async fn h_brain_chat(
             // Autonomous propagation is also a derived response path. Its
             // confidence/composition evidence cannot admit behaviorally
             // unrelated but language-valid source.
-            compatible_integrated_reply(
-                &diagnostic_intent_labels,
-                result.answer.as_deref(),
-            )
+            result
+                .answer
+                .as_deref()
+                .filter(|answer| {
+                    prompt_derived_feature_artifact_compatible(
+                        &diagnostic_intent_labels,
+                        prompt,
+                        answer,
+                    )
+                })
+                .map(|answer| String::from_utf8_lossy(answer).into_owned())
         }
     });
 
@@ -5560,6 +5611,11 @@ mod tests {
             &square,
             implicit_name_square_prompt,
             b"def chi_squared(*choices):\n    return sum((item.expected - item.observed) ** 2 for item in choices)",
+        ));
+        assert!(!prompt_derived_feature_artifact_compatible(
+            &square,
+            implicit_name_square_prompt,
+            b"def root_mean_square(X):\n    segment_width = X.shape[1]\n    return np.sqrt(np.sum(X * X, axis=1) / segment_width)",
         ));
         assert!(prompt_programming_response_compatible(
             &square,
