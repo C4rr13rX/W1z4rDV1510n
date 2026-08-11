@@ -1371,6 +1371,45 @@ def load_direct_descendant_evidence(
     return list(evidence.values())
 
 
+def load_nearby_program_transfer_evidence(
+    state_dir: Path, champion: Genome, evaluation_id: str,
+) -> list[Genome]:
+    """Recover one-program trials across harmless nearby champion handoffs."""
+    champion_programs = {
+        program_name(program) for program in champion.feature_programs
+    }
+    evidence: dict[str, Genome] = {}
+    for path in (state_dir / "candidates").glob("*.json"):
+        try:
+            candidate = genome_from_dict(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError, TypeError):
+            continue
+        candidate_programs = {
+            program_name(program) for program in candidate.feature_programs
+        }
+        if (candidate.fitness is None
+                or (candidate.result or {}).get("evaluation_signature") != evaluation_id
+                or candidate_programs - champion_programs == set()
+                or len(candidate_programs - champion_programs) != 1
+                or champion_programs - candidate_programs
+                or abs(candidate.confidence_quantile
+                       - champion.confidence_quantile) > .011):
+            continue
+        payload = asdict(candidate)
+        payload.update({
+            "feature_programs": champion.feature_programs,
+            "confidence_quantile": champion.confidence_quantile,
+            "generation": champion.generation, "parents": champion.parents,
+            "fitness": champion.fitness, "result": champion.result,
+            "genome_id": champion.genome_id,
+        })
+        reconstructed = Genome(**payload).finalize()
+        if genome_evaluation_key(reconstructed) != genome_evaluation_key(champion):
+            continue
+        evidence[candidate.genome_id] = candidate
+    return list(evidence.values())
+
+
 def add_derived_features(rows: Sequence[dict[str, Any]]) -> None:
     for row in rows:
         features = row["features"]
@@ -3228,10 +3267,25 @@ def introduce_champion_profit_program_variant(
     champion_programs = {
         program_name(program) for program in champion.feature_programs
     }
+    champion_summary = champion_result.get("summary", {})
+    rejected_programs: set[str] = set()
+    for observed in evidence:
+        observed_programs = {
+            program_name(program) for program in observed.feature_programs
+        }
+        added = observed_programs - champion_programs
+        observed_summary = (observed.result or {}).get("summary", {})
+        if (len(added) == 1
+                and float(observed_summary.get("min_accuracy", 0))
+                    <= float(champion_summary.get("min_accuracy", 0))
+                and float(observed_summary.get("min_profit_factor", 0))
+                    <= float(champion_summary.get("min_profit_factor", 0))):
+            rejected_programs.update(added)
     hypotheses = [
         normalize_program(program)
         for program in profitable_frontier.feature_programs
         if program_name(program) not in champion_programs
+        and program_name(program) not in rejected_programs
     ]
     known_keys = {
         genome_evaluation_key(genome)
@@ -4634,6 +4688,11 @@ def main() -> int:
                 ({champion.genome_id} if champion is not None else set()),
                 signature,
             )
+            champion_profit_evidence = (
+                load_nearby_program_transfer_evidence(
+                    args.state_dir, champion, signature
+                ) if champion is not None else []
+            )
             population = introduce_champion_coordinate_variant(
                 population, champion, champion_coordinate_evidence,
                 generation,
@@ -4647,7 +4706,7 @@ def main() -> int:
             )
             population = introduce_champion_profit_program_variant(
                 population, champion, extra_trees_frontier,
-                champion_coordinate_evidence, generation,
+                champion_profit_evidence, generation,
                 {
                     genome.genome_id for genome in (
                         coverage_frontier, multiscale_frontier,

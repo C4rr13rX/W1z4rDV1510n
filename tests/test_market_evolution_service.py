@@ -1373,6 +1373,58 @@ def test_profitable_frontier_program_isolated_on_full_fold_champion():
     ) >= 1
 
 
+def test_failed_nearby_program_transfer_advances_to_next_hypothesis():
+    population = seed_genomes(8, random.Random(184))
+    champion = population[0]
+    champion.fitness = 2400
+    champion.result = {
+        "evaluated_folds": 3, "requested_folds": 3,
+        "summary": {"min_accuracy": .566, "min_profit_factor": .958},
+    }
+    first = {
+        "op": "signed_sqrt_product", "left": "cross_rank_r1",
+        "right": "causal_z14_r24", "scale": 3.2,
+    }
+    second = {
+        "op": "regime_gate", "left": "funding_z168",
+        "right": "crowd_price_alignment", "scale": 2.7,
+    }
+    frontier = population[1]
+    frontier.fitness = 2300
+    frontier.feature_programs = [first, second]
+    frontier.result = {"summary": {
+        "min_profit_factor": 1.05, "min_expectancy": .0005,
+    }}
+    failed = Genome(**{
+        **champion.__dict__,
+        "feature_programs": [*champion.feature_programs, first],
+        "confidence_quantile": champion.confidence_quantile - .005,
+        "generation": 904, "parents": ["prior-champion"],
+        "genome_id": "", "fitness": 2300,
+        "result": {
+            "evaluation_signature": "scope-a",
+            "evaluated_folds": 3, "requested_folds": 3,
+            "summary": {"min_accuracy": .563, "min_profit_factor": .907},
+        },
+    }).finalize()
+    for genome in population[2:]:
+        genome.fitness = None
+        genome.result = None
+
+    after = evolution.introduce_champion_profit_program_variant(
+        population, champion, frontier, [failed], 906
+    )
+
+    transfer = next(
+        genome for genome in after
+        if champion.genome_id in genome.parents
+        and len(genome.feature_programs) > len(champion.feature_programs)
+    )
+    names = {evolution.program_name(program) for program in transfer.feature_programs}
+    assert evolution.program_name(first) not in names
+    assert evolution.program_name(second) in names
+
+
 def test_reliability_decay_search_brackets_best_protected_evidence():
     base = seed_genomes(1, random.Random(175))[0]
     evidence = []
