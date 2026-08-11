@@ -1480,6 +1480,56 @@ def test_exhausted_profit_frontier_advances_without_spending_two_slots():
     assert evolution.program_name(next_program) in names
 
 
+def test_accurate_program_transfer_gets_selective_profit_followup():
+    population = seed_genomes(8, random.Random(186))
+    champion = population[0]
+    champion.fitness = 2400
+    champion.result = {
+        "evaluated_folds": 3, "requested_folds": 3,
+        "summary": {"min_accuracy": .5664, "min_profit_factor": .958},
+    }
+    program = {
+        "op": "regime_gate", "left": "hour_sin",
+        "right": "causal_z60_market_breadth_r6", "scale": 3.8,
+    }
+    frontier = population[1]
+    frontier.fitness = 2300
+    frontier.feature_programs = [program]
+    frontier.result = {"summary": {
+        "min_profit_factor": 1.21, "min_expectancy": .002,
+    }}
+    observed = Genome(**{
+        **champion.__dict__,
+        "feature_programs": [*champion.feature_programs, program],
+        "generation": 905, "parents": [champion.genome_id],
+        "genome_id": "", "fitness": 2380,
+        "result": {
+            "evaluation_signature": "scope-a",
+            "evaluated_folds": 3, "requested_folds": 3,
+            "summary": {"min_accuracy": .5668, "min_profit_factor": .932},
+        },
+    }).finalize()
+    for genome in population[2:]:
+        genome.fitness = None
+        genome.result = None
+
+    after = evolution.introduce_champion_profit_program_variant(
+        population, champion, frontier, [observed], 908
+    )
+
+    followup = next(
+        genome for genome in after
+        if champion.genome_id in genome.parents
+        and len(genome.feature_programs) > len(champion.feature_programs)
+    )
+    assert followup.confidence_quantile == pytest.approx(
+        champion.confidence_quantile + .01
+    )
+    assert evolution.program_name(program) in {
+        evolution.program_name(item) for item in followup.feature_programs
+    }
+
+
 def test_reliability_decay_search_brackets_best_protected_evidence():
     base = seed_genomes(1, random.Random(175))[0]
     evidence = []

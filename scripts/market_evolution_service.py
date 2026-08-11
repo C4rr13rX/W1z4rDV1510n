@@ -1393,7 +1393,7 @@ def load_nearby_program_transfer_evidence(
                 or len(candidate_programs - champion_programs) != 1
                 or champion_programs - candidate_programs
                 or abs(candidate.confidence_quantile
-                       - champion.confidence_quantile) > .011):
+                       - champion.confidence_quantile) > .031):
             continue
         payload = asdict(candidate)
         payload.update({
@@ -3269,6 +3269,7 @@ def introduce_champion_profit_program_variant(
     }
     champion_summary = champion_result.get("summary", {})
     rejected_programs: set[str] = set()
+    tradeoff_programs: dict[str, dict[str, Any]] = {}
     for observed in evidence:
         observed_programs = {
             program_name(program) for program in observed.feature_programs
@@ -3281,6 +3282,16 @@ def introduce_champion_profit_program_variant(
                 and float(observed_summary.get("min_profit_factor", 0))
                     <= float(champion_summary.get("min_profit_factor", 0))):
             rejected_programs.update(added)
+        elif (len(added) == 1
+                and float(observed_summary.get("min_accuracy", 0))
+                    > float(champion_summary.get("min_accuracy", 0))
+                and float(observed_summary.get("min_profit_factor", 0))
+                    < float(champion_summary.get("min_profit_factor", 0))):
+            added_name = next(iter(added))
+            tradeoff_programs[added_name] = next(
+                program for program in observed.feature_programs
+                if program_name(program) == added_name
+            )
     hypotheses = [
         normalize_program(program)
         for program in profitable_frontier.feature_programs
@@ -3293,7 +3304,32 @@ def introduce_champion_profit_program_variant(
         if genome.fitness is not None or genome in population
     }
     variant: Genome | None = None
+    # A transferred program that improves all-fold accuracy but hurts
+    # economics may still contain useful signal with an unprofitable low-
+    # confidence tail. Raise its threshold in bounded steps before discarding
+    # the feature, while phenotype evidence prevents repeated evaluations.
+    for added_name, program in tradeoff_programs.items():
+        if added_name in rejected_programs:
+            continue
+        for offset in (.01, .02, .03):
+            payload = asdict(champion)
+            payload.update({
+                "feature_programs": [*champion.feature_programs, program][-10:],
+                "confidence_quantile": min(
+                    .30, champion.confidence_quantile + offset
+                ),
+                "generation": generation, "parents": [champion.genome_id],
+                "fitness": None, "result": None, "genome_id": "",
+            })
+            proposal = Genome(**payload).finalize()
+            if genome_evaluation_key(proposal) not in known_keys:
+                variant = proposal
+                break
+        if variant is not None:
+            break
     for program in hypotheses:
+        if variant is not None:
+            break
         payload = asdict(champion)
         payload.update({
             "feature_programs": [*champion.feature_programs, program][-10:],
