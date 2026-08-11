@@ -55,6 +55,23 @@ RETURN_LEARNER_KINDS = {
     "regime_decomposed_regressor", "multiscale_regressor",
     "extra_trees_regressor",
 }
+
+
+@dataclass
+class ExtraTreesHybridModel:
+    """Use independent tree pools for direction and trade desirability."""
+    direction_model: Any
+    return_model: Any
+
+    @property
+    def classes_(self) -> Any:
+        return self.direction_model.classes_
+
+    def predict_proba(self, values: np.ndarray) -> np.ndarray:
+        return self.direction_model.predict_proba(values)
+
+    def predict(self, values: np.ndarray) -> np.ndarray:
+        return self.direction_model.predict(values)
 REGIME_FEATURES = (
     "rv24", "volatility_ratio", "market_breadth_r6", "market_median_r6",
     "futures_spot_basis", "funding_rate", "flow_divergence", "news_polarity_24h",
@@ -479,7 +496,7 @@ class Surrogate:
         return np.asarray(self.model.predict(values), dtype=np.float64)
 
     def base_probability(self, values: np.ndarray) -> np.ndarray:
-        if self.kind in {"classifier", "extra_trees"}:
+        if self.kind in {"classifier", "extra_trees", "extra_trees_hybrid"}:
             return self.model.predict_proba(values)[:, list(self.model.classes_).index(1)]
         score = self.raw_score(values)
         normalized = np.clip(score / max(self.score_scale, 1e-9), -30, 30)
@@ -538,6 +555,10 @@ class Surrogate:
         """Return an abstention score independent of directional probability."""
         probability = self.base_probability(values)
         if self.reliability_model is None:
+            if self.kind == "extra_trees_hybrid":
+                return np.abs(np.asarray(
+                    self.model.return_model.predict(values), dtype=np.float64,
+                ))
             return np.maximum(probability, 1.0 - probability)
         design = self.reliability_design(values, probability)
         normalized = (design - self.reliability_mean) / self.reliability_scale
@@ -1435,7 +1456,9 @@ def load_nearby_return_tree_evidence(
         except (OSError, ValueError, TypeError):
             continue
         if (candidate.fitness is None
-                or candidate.learner_kind != "extra_trees_regressor"
+                or candidate.learner_kind not in {
+                    "extra_trees_regressor", "extra_trees_hybrid",
+                }
                 or (candidate.result or {}).get("evaluation_signature") != evaluation_id):
             continue
         payload = asdict(candidate)
@@ -2066,6 +2089,23 @@ def evaluate_genome(genome: Genome, dataset: dict[str, Any], *, folds: int,
                     random_state=1700 + fold,
                 ).fit(x_fit, y_fit, sample_weight=weights)
                 model = Surrogate(raw_model, "extra_trees")
+            elif genome.learner_kind == "extra_trees_hybrid":
+                direction_model = ExtraTreesClassifier(
+                    n_estimators=min(240, max(80, genome.max_iter)),
+                    max_leaf_nodes=genome.max_leaf_nodes,
+                    min_samples_leaf=genome.min_samples_leaf,
+                    max_features="sqrt", class_weight=None, n_jobs=1,
+                    random_state=1700 + fold,
+                ).fit(x_fit, y_fit, sample_weight=weights)
+                return_model = new_extra_trees_return_regressor(
+                    genome, 2700 + fold,
+                ).fit(
+                    x_fit,
+                    np.asarray([row["return"] for row in fit], dtype=np.float64),
+                    sample_weight=weights,
+                )
+                raw_model = ExtraTreesHybridModel(direction_model, return_model)
+                model = Surrogate(raw_model, "extra_trees_hybrid")
             else:
                 raw_model = HistGradientBoostingClassifier(
                     learning_rate=genome.learning_rate, max_iter=genome.max_iter,
@@ -3527,7 +3567,9 @@ def introduce_champion_return_tree_variant(
     quantiles: list[float] = []
     return_evidence = sorted(
         (genome for genome in evidence
-         if genome.learner_kind == "extra_trees_regressor"
+         if genome.learner_kind in {
+             "extra_trees_regressor", "extra_trees_hybrid",
+         }
          and genome.fitness is not None),
         key=lambda genome: (
             float(((genome.result or {}).get("summary") or {}).get(
@@ -3553,6 +3595,52 @@ def introduce_champion_return_tree_variant(
         )
         evidence_quality.append((observed, strong_signal))
     variant: Genome | None = None
+    hybrid_evidence = [
+        observed for observed in return_evidence
+        if observed.learner_kind == "extra_trees_hybrid"
+    ]
+    profitable_selective = [
+        observed for observed in return_evidence
+        if observed.learner_kind == "extra_trees_regressor"
+        and float(((observed.result or {}).get("summary") or {}).get(
+            "min_profit_factor", 0
+        )) >= 1.0
+        and float(((observed.result or {}).get("summary") or {}).get(
+            "min_accuracy", 0
+        )) >= .60
+    ]
+    coverage_anchors = [
+        observed for observed in return_evidence
+        if observed.learner_kind == "extra_trees_regressor"
+        and float(((observed.result or {}).get("summary") or {}).get(
+            "min_coverage", 0
+        )) >= PRESCREEN["coverage"]
+    ]
+    # Preserve the champion's direction classifier while a separate return
+    # pool ranks WHEN to act. The launch requires signed evidence for both a
+    # profitable selective region and a quantile that clears coverage.
+    if profitable_selective and coverage_anchors and not hybrid_evidence:
+        base = max(
+            coverage_anchors,
+            key=lambda observed: (
+                float(((observed.result or {}).get("summary") or {}).get(
+                    "min_profit_factor", 0
+                )),
+                float(((observed.result or {}).get("summary") or {}).get(
+                    "min_accuracy", 0
+                )),
+            ),
+        )
+        payload = asdict(champion)
+        payload.update({
+            "learner_kind": "extra_trees_hybrid",
+            "confidence_quantile": base.confidence_quantile,
+            "generation": generation, "parents": [champion.genome_id],
+            "fitness": None, "result": None, "genome_id": "",
+        })
+        proposal = Genome(**payload).finalize()
+        if genome_evaluation_key(proposal) not in known_keys:
+            variant = proposal
     # Near the economics boundary, improve the ranking function before
     # admitting weaker signals. Smoother leaves can generalize return magnitude
     # across assets while the quantile remains fixed, making this a controlled
@@ -3583,6 +3671,8 @@ def introduce_champion_return_tree_variant(
         ),
         reverse=True,
     )
+    if variant is not None:
+        topology_bases = []
     for base in topology_bases:
         specifications = (
             {"min_samples_leaf": min(100, champion.min_samples_leaf + 4)},
@@ -5149,7 +5239,9 @@ def main() -> int:
                     champion is not None
                     and champion.genome_id in genome.parents
                     and genome.fitness is None
-                    and genome.learner_kind == "extra_trees_regressor"
+                    and genome.learner_kind in {
+                        "extra_trees_regressor", "extra_trees_hybrid",
+                    }
                     for genome in population
                 ),
                 "surplus_regime_candidates_converted": regime_candidates_converted,

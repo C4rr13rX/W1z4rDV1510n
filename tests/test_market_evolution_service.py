@@ -1603,7 +1603,7 @@ def test_return_tree_bisects_signed_quality_coverage_boundary():
     champion.result = {"evaluated_folds": 3, "requested_folds": 3}
     evidence = []
     for quantile, accuracy, balanced, mcc, profit, coverage in (
-        (.18, .611, .612, .225, 1.002, .483),
+        (.18, .611, .612, .225, .999, .483),
         (.12, .462, .462, -.077, .761, .619),
     ):
         evidence.append(Genome(**{
@@ -1633,6 +1633,71 @@ def test_return_tree_bisects_signed_quality_coverage_boundary():
         if genome.learner_kind == "extra_trees_regressor"
     )
     assert repair.confidence_quantile == pytest.approx(.15)
+
+
+def test_return_tree_evidence_launches_direction_magnitude_hybrid():
+    population = seed_genomes(8, random.Random(196))
+    champion = population[0]
+    champion.learner_kind = "extra_trees"
+    champion.fitness = 2400
+    champion.result = {"evaluated_folds": 3, "requested_folds": 3}
+    evidence = []
+    for quantile, accuracy, profit, coverage in (
+        (.18, .611, 1.002, .483),
+        (.12, .462, .761, .619),
+    ):
+        evidence.append(Genome(**{
+            **champion.__dict__, "learner_kind": "extra_trees_regressor",
+            "confidence_quantile": quantile,
+            "generation": 918, "parents": [champion.genome_id],
+            "genome_id": "", "fitness": 400,
+            "result": {
+                "evaluated_folds": 1, "requested_folds": 3,
+                "summary": {
+                    "min_accuracy": accuracy,
+                    "min_balanced_accuracy": accuracy,
+                    "min_mcc": .20 if accuracy > .60 else -.07,
+                    "min_profit_factor": profit, "min_coverage": coverage,
+                },
+            },
+        }).finalize())
+    for genome in population[1:]:
+        genome.fitness = None
+        genome.result = None
+
+    after = evolution.introduce_champion_return_tree_variant(
+        population, champion, evidence, 919
+    )
+
+    hybrid = next(
+        genome for genome in after
+        if genome.learner_kind == "extra_trees_hybrid"
+    )
+    assert hybrid.confidence_quantile == pytest.approx(.12)
+    assert hybrid.features == champion.features
+
+
+def test_hybrid_uses_classifier_direction_and_return_magnitude_for_selection():
+    values = np.asarray([[-2.0], [-1.0], [1.0], [2.0]], dtype=np.float32)
+    labels = np.asarray([-1, -1, 1, 1], dtype=np.int8)
+    returns = np.asarray([-.01, -.002, .003, .02], dtype=np.float64)
+    direction = evolution.ExtraTreesClassifier(
+        n_estimators=20, random_state=3,
+    ).fit(values, labels)
+    magnitude = evolution.ExtraTreesRegressor(
+        n_estimators=20, random_state=4,
+    ).fit(values, returns)
+    model = evolution.Surrogate(
+        evolution.ExtraTreesHybridModel(direction, magnitude),
+        "extra_trees_hybrid",
+    )
+
+    probability = model.base_probability(values)
+    selection = model.selection_confidence(values)
+
+    assert probability[0] < .5 < probability[-1]
+    assert selection[-1] > selection[1]
+    assert np.all(selection >= 0)
 
 
 def test_return_tree_smooths_ranking_before_admitting_weaker_signals():

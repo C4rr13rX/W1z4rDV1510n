@@ -85,6 +85,12 @@ walk-forward and retention gates before replacing the accepted brain.
 - Persist every evaluated phenotype, including failures, under the evaluation
   signature. Restarts and later generations must reuse that signed evidence
   rather than silently repeating a disproven experiment.
+- When a return-magnitude model finds a profitable selective tail but loses
+  direction at the coverage floor, preserve the validated direction model and
+  use an independently fitted magnitude pool only for abstention ranking. Such
+  a hybrid may launch only after signed evidence identifies both the selective
+  profit region and a coverage-clearing threshold, and it still must pass all
+  folds before either component is admitted.
 
 ## Stop conditions
 
