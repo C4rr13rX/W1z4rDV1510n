@@ -3219,6 +3219,21 @@ def main() -> int:
                 return 1
 
     assert_training_not_quarantined(runtime)
+    if args.replay_deferred:
+        # Replay is a distinct end-of-corpus stage. run_deferred_replays
+        # independently verifies that every forward phase reached its durable
+        # boundary before opening an exact interval transaction. Do not walk
+        # the forward completion-gate loop first: fully deferred terminal
+        # windows intentionally contain no admissible recall sample.
+        try:
+            return run_deferred_replays(args, runtime, status_path, phases)
+        except (OSError, RuntimeError, psutil.Error) as exc:
+            publish(status_path, {
+                "state": "deferred_replay_orchestration_failed",
+                "error": str(exc),
+                "updated_unix": time.time(),
+            })
+            return 1
     for phase in phases:
         restarts = 0
         while True:
@@ -3420,18 +3435,6 @@ def main() -> int:
 
     deferred = unresolved_deferred_intervals(runtime)
     if deferred:
-        if args.replay_deferred:
-            try:
-                return run_deferred_replays(
-                    args, runtime, status_path, phases
-                )
-            except (OSError, RuntimeError, psutil.Error) as exc:
-                publish(status_path, {
-                    "state": "deferred_replay_orchestration_failed",
-                    "error": str(exc),
-                    "updated_unix": time.time(),
-                })
-                return 1
         publish(status_path, {
             "state": "deferred_intervals_pending",
             "deferred_intervals": deferred,

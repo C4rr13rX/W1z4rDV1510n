@@ -2494,6 +2494,17 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         self.assertEqual(deferred_handoff_exit_code(True), 0)
         self.assertEqual(deferred_handoff_exit_code(False), 1)
 
+    def test_replay_stage_bypasses_forward_completion_gates(self) -> None:
+        source = (
+            ROOT / "scripts" / "programming_curriculum_supervisor.py"
+        ).read_text(encoding="utf-8")
+        stage_boundary = source.index(
+            "if args.replay_deferred:\n        # Replay is a distinct"
+        )
+        replay = source.index("return run_deferred_replays", stage_boundary)
+        forward_loop = source.index("    for phase in phases:", stage_boundary)
+        self.assertLess(replay, forward_loop)
+
     def test_persistent_service_hands_deferred_tail_to_replay(self) -> None:
         source = (
             ROOT / "scripts" / "aws" / "run_programming_curriculum_service.sh"

@@ -228,6 +228,11 @@ sampler over an all-deferred window. If any field or interval differs, refuse
 the shortcut and retain the normal admission path. This closes the crash
 window between guard release and publication of `deferred_intervals_pending`
 without treating quarantine as acceptance or losing a replay obligation.
+The `--replay-deferred` process is a separate stage: it first verifies that
+all forward progress files are terminal inside `run_deferred_replays`, then
+opens one exact interval transaction. It must bypass every ordinary forward
+completion gate, because an all-deferred terminal phase has no eligible
+forward recall rows by construction.
 
 Only one curriculum supervisor may own a runtime. Startup scans for an existing Python supervisor with the same resolved runtime and then claims `curriculum-supervisor.pid` using exclusive creation; stale PID files are recovered, while a live owner is rejected. This claim covers guard creation as well as training so two launches cannot race on the same temporary snapshot or progress ledger.
 
