@@ -91,6 +91,11 @@ walk-forward and retention gates before replacing the accepted brain.
   a hybrid may launch only after signed evidence identifies both the selective
   profit region and a coverage-clearing threshold, and it still must pass all
   folds before either component is admitted.
+- Each materially different profitable near-coverage learner class must retain
+  an independent repair lane. A later multiscale or tree frontier may not
+  silently replace the strongest ordinary regressor's experiment; descendants
+  bracket the smallest coverage-clearing quantile and preserve protected-fold
+  reversals as signed evidence.
 
 ## Stop conditions
 

@@ -3277,6 +3277,91 @@ def introduce_extra_trees_coverage_variant(
     return population
 
 
+def introduce_primary_coverage_variant(
+    population: list[Genome], frontier: Genome | None,
+    evidence: Sequence[Genome], generation: int,
+    protected_parent_ids: set[str] | None = None,
+) -> list[Genome]:
+    """Give the strongest non-tree coverage frontier its own repair lane.
+
+    The general repair path may deliberately switch to a multiscale boundary
+    once one exists. Without this independent lane, that switch silently
+    starved a stronger ordinary regressor that was profitable and only a few
+    observations short of prescreen coverage.
+    """
+    if (coverage_frontier_rank(frontier) is None
+            or frontier is None
+            or frontier.learner_kind in {"extra_trees", "multiscale_regressor"}):
+        return population
+    summary = (frontier.result or {}).get("summary", {})
+    lower_evidence = sorted(
+        (
+            genome for genome in evidence
+            if frontier.genome_id in genome.parents
+            and genome_structure_key(genome) == genome_structure_key(frontier)
+            and genome.confidence_quantile < frontier.confidence_quantile
+            and genome.fitness is not None
+        ),
+        key=lambda genome: genome.confidence_quantile,
+        reverse=True,
+    )
+    quantiles: list[float] = []
+    reversal = next((
+        genome for genome in lower_evidence
+        if float(((genome.result or {}).get("summary") or {}).get(
+            "min_coverage", 0
+        )) >= PRESCREEN["coverage"]
+        and (
+            float(((genome.result or {}).get("summary") or {}).get(
+                "min_accuracy", 0
+            )) < PRESCREEN["accuracy"]
+            or float(((genome.result or {}).get("summary") or {}).get(
+                "min_profit_factor", 0
+            )) < PRESCREEN["profit_factor"]
+        )
+    ), None)
+    if reversal is not None:
+        quantiles.append(
+            (frontier.confidence_quantile + reversal.confidence_quantile) / 2.0
+        )
+    else:
+        base = lower_evidence[0] if lower_evidence else frontier
+        base_summary = (base.result or {}).get("summary", {})
+        coverage_gap = max(
+            .001,
+            PRESCREEN["coverage"] - float(base_summary.get("min_coverage", 0)),
+        )
+        phase = (.75, 1.0, 1.25)[generation % 3]
+        step = max(.0025, min(.02, coverage_gap * 1.5)) * phase
+        quantiles.append(base.confidence_quantile - step)
+    known_keys = {
+        genome_evaluation_key(genome) for genome in [*population, *evidence]
+    }
+    variant: Genome | None = None
+    for quantile in quantiles:
+        payload = asdict(frontier)
+        payload.update({
+            "confidence_quantile": max(0.0, min(.30, quantile)),
+            "generation": generation, "parents": [frontier.genome_id],
+            "fitness": None, "result": None, "genome_id": "",
+        })
+        proposal = Genome(**payload).finalize()
+        if genome_evaluation_key(proposal) not in known_keys:
+            variant = proposal
+            break
+    if variant is None:
+        return population
+    protected_parent_ids = protected_parent_ids or set()
+    replacement = next((
+        index for index in range(len(population) - 1, 0, -1)
+        if population[index].fitness is None
+        and not (set(population[index].parents) & protected_parent_ids)
+    ), None)
+    if replacement is not None:
+        population[replacement] = variant
+    return population
+
+
 def introduce_champion_coordinate_variant(
     population: list[Genome], champion: Genome | None,
     evidence: Sequence[Genome], generation: int,
@@ -5111,6 +5196,15 @@ def main() -> int:
                 multiscale_reversal_frontier,
                 multiscale_boundary_frontier,
             )
+            population = introduce_primary_coverage_variant(
+                population, coverage_frontier, historical_repair_evidence,
+                generation,
+                {
+                    genome.genome_id for genome in (
+                        multiscale_frontier, multiscale_boundary_frontier,
+                    ) if genome is not None
+                },
+            )
             population = introduce_extra_trees_coverage_variant(
                 population, extra_trees_frontier, generation,
                 extra_trees_reversal_frontier,
@@ -5218,6 +5312,12 @@ def main() -> int:
                 "regime_shift_candidates": sum(
                     regime_shift_frontier is not None
                     and regime_shift_frontier.genome_id in genome.parents
+                    for genome in population
+                ),
+                "primary_coverage_candidates": sum(
+                    coverage_frontier is not None
+                    and coverage_frontier.genome_id in genome.parents
+                    and genome.fitness is None
                     for genome in population
                 ),
                 "champion_coordinate_candidates": sum(

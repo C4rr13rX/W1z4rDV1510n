@@ -2106,6 +2106,71 @@ def test_extra_trees_soft_accuracy_boundary_triggers_bisection():
     assert child.confidence_quantile == pytest.approx((.251 + .230) / 2)
 
 
+def test_profitable_primary_regressor_gets_independent_coverage_lane():
+    frontier = seed_genomes(1, random.Random(197))[0]
+    frontier.learner_kind = "regressor"
+    frontier.confidence_quantile = .21823
+    frontier.fitness = 410
+    frontier.result = {"evaluated_folds": 1, "summary": {
+        "min_accuracy": .6467, "min_balanced_accuracy": .6452,
+        "min_mcc": .2923, "min_coverage": .5976,
+        "min_acted_observations": 150, "min_expectancy": .00221,
+        "min_profit_factor": 1.2156,
+    }}
+    frontier.finalize()
+    population = seed_genomes(8, random.Random(198))
+    for genome in population[1:]:
+        genome.fitness = None
+        genome.result = None
+
+    repaired = evolution.introduce_primary_coverage_variant(
+        population, frontier, [], 920
+    )
+
+    child = next(
+        genome for genome in repaired if genome.parents == [frontier.genome_id]
+    )
+    assert child.learner_kind == "regressor"
+    assert .21 < child.confidence_quantile < frontier.confidence_quantile
+    assert child.feature_programs == frontier.feature_programs
+
+
+def test_primary_coverage_lane_bisects_a_protected_fold_reversal():
+    frontier = seed_genomes(1, random.Random(199))[0]
+    frontier.learner_kind = "regressor"
+    frontier.confidence_quantile = .218
+    frontier.fitness = 410
+    frontier.result = {"evaluated_folds": 1, "summary": {
+        "min_accuracy": .646, "min_balanced_accuracy": .645,
+        "min_mcc": .29, "min_coverage": .597,
+        "min_expectancy": .002, "min_profit_factor": 1.21,
+    }}
+    frontier.finalize()
+    reversal = Genome(**{
+        **frontier.__dict__, "confidence_quantile": .214,
+        "generation": 921, "parents": [frontier.genome_id],
+        "genome_id": "", "fitness": 1300,
+        "result": {"evaluated_folds": 2, "summary": {
+            "min_accuracy": .49, "min_balanced_accuracy": .48,
+            "min_mcc": -.03, "min_coverage": .62,
+            "min_expectancy": -.001, "min_profit_factor": .89,
+        }},
+    }).finalize()
+    population = seed_genomes(8, random.Random(200))
+    for genome in population[1:]:
+        genome.fitness = None
+        genome.result = None
+
+    repaired = evolution.introduce_primary_coverage_variant(
+        population, frontier, [reversal], 922
+    )
+
+    child = next(
+        genome for genome in repaired if genome.parents == [frontier.genome_id]
+    )
+    assert child.confidence_quantile == pytest.approx(.216)
+
+
 def test_compatible_reversal_frontier_is_structure_scoped():
     upper = seed_genomes(4, random.Random(69))[-1]
     upper.confidence_quantile = .27
