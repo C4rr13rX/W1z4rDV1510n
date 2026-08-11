@@ -97,7 +97,10 @@ walk-forward and retention gates before replacing the accepted brain.
   bracket the smallest coverage-clearing quantile and preserve protected-fold
   reversals as signed evidence. If a quantile descendant produces an identical
   acted set and coverage, the next bounded step must escape that score plateau
-  rather than treating a numerically different genome as new behavior.
+  rather than treating a numerically different genome as new behavior. An
+  identical descendant must not replace the upper frontier endpoint merely
+  because its quantile is lower; doing so destroys the ancestry that proves
+  the plateau and resets automatic correction.
 
 ## Stop conditions
 

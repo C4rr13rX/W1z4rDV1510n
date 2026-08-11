@@ -2273,7 +2273,14 @@ def test_near_coverage_frontier_survives_population_turnover(tmp_path):
     }).finalize()
     assert evolution.update_coverage_frontier(
         tmp_path, recovered, same_mask_lower_threshold
-    ).genome_id == same_mask_lower_threshold.genome_id
+    ).genome_id == candidate.genome_id
+    (candidates / f"{same_mask_lower_threshold.genome_id}.json").write_text(
+        json.dumps(same_mask_lower_threshold.__dict__), encoding="utf-8"
+    )
+    (tmp_path / "coverage_frontier.json").write_text(json.dumps({
+        "genome": same_mask_lower_threshold.__dict__,
+    }), encoding="utf-8")
+    assert evolution.load_coverage_frontier(tmp_path).genome_id == candidate.genome_id
 
 
 def test_regime_shift_frontier_recovers_verified_temporal_reversal(tmp_path):

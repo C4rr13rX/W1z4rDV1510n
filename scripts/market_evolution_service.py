@@ -3887,7 +3887,10 @@ def coverage_frontier_rank(genome: Genome) -> tuple[float, ...] | None:
         balanced,
         mcc,
         float(summary.get("min_acted_observations", 0)),
-        -float(genome.confidence_quantile),
+        # If every observed outcome is identical, retain the higher-quantile
+        # upper endpoint. Replacing it with a numerically lower descendant
+        # erases the parent/child evidence needed to detect a score plateau.
+        float(genome.confidence_quantile),
     )
 
 
