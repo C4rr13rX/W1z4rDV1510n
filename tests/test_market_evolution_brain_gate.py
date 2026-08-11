@@ -1,6 +1,9 @@
+import tomllib
+
 from scripts.market_evolution_brain_gate import (
     add_baselines,
     available_port,
+    emergent_pool_layout,
     feature_family,
     feature_frame,
     genome_feature_frame,
@@ -10,7 +13,7 @@ from scripts.market_evolution_brain_gate import (
     settle_brain,
     streams,
 )
-from scripts.market_evolution_service import Genome
+from scripts.market_evolution_service import Genome, program_name
 
 
 def genome():
@@ -55,6 +58,30 @@ def test_feature_families_fire_in_separate_atom_grounded_pools():
     assert any("specialists=" in frame for _, frame in fired)
 
 
+def test_isolated_feature_launches_specialist_pool_and_cofires_with_classes():
+    candidate = genome()
+    candidate.feature_programs = [
+        {"op": "sub", "left": "r6", "right": "funding_rate", "scale": 1}
+    ]
+    candidate.finalize()
+    evolved_name = program_name(candidate.feature_programs[0])
+    candidate.emergent_pools = [{
+        "features": [evolved_name], "concept_threshold": 4,
+    }]
+    candidate.finalize()
+    row = {"asset": "ETH", "features": {"r6": .01, "funding_rate": .001}}
+    fired = streams(row, candidate, 12)
+    layout = emergent_pool_layout(candidate)
+    dynamic_id = layout[0]["id"]
+    assert dynamic_id >= 100
+    assert any(pool_id == dynamic_id and evolved_name in frame
+               for pool_id, frame in fired)
+    assert any(pool_id == 15 for pool_id, _ in fired)
+    assert any(pool_id == 18 for pool_id, _ in fired)
+    assert not any(pool_id == 21 and evolved_name in frame
+                   for pool_id, frame in fired)
+
+
 def test_rendered_identity_applies_brain_genes_without_lowering_outcome_threshold(tmp_path):
     template = tmp_path / "template.toml"
     template.write_text('binding_emergence_threshold = 3\n[[pools]]\nkind = "SensoryInput"\nconcept_emergence_threshold = 5\n[[pools]]\nkind = "Action"\nconcept_emergence_threshold = 3\n')
@@ -64,6 +91,25 @@ def test_rendered_identity_applies_brain_genes_without_lowering_outcome_threshol
     assert "binding_emergence_threshold = 7" in text
     assert 'kind = "SensoryInput"\nconcept_emergence_threshold = 9' in text
     assert 'kind = "Action"\nconcept_emergence_threshold = 3' in text
+
+
+def test_rendered_identity_declares_dynamic_pool_with_matching_route(tmp_path):
+    candidate = genome()
+    candidate.emergent_pools = [{"features": ["r6"], "concept_threshold": 6}]
+    candidate.finalize()
+    template = tmp_path / "template.toml"
+    template.write_text('name = "test"\nbinding_emergence_threshold = 3\n')
+    output = tmp_path / "identity.toml"
+    render_identity(template, output, candidate)
+    pool = emergent_pool_layout(candidate)[0]
+    text = output.read_text()
+    assert f'name = "{pool["name"]}"' in text
+    assert f'id = {pool["id"]}' in text
+    assert "concept_emergence_threshold = 6" in text
+    parsed = tomllib.loads(text)
+    declared = next(item for item in parsed["pools"] if item["id"] == pool["id"])
+    assert declared["name"] == pool["name"]
+    assert declared["kind"] == "SensoryInput"
 
 
 def test_dynamic_gate_port_can_be_reserved():

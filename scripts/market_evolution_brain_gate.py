@@ -49,6 +49,7 @@ POOL_EVOLVED = 21
 POOL_REGIME = 22
 POOL_ARBITRATION = 23
 POOL_EXPERIENCE = 24
+DYNAMIC_POOL_BASE = 100
 
 
 def quantize(value: float) -> str:
@@ -92,10 +93,35 @@ def feature_family(name: str) -> str:
     return "price"
 
 
+def emergent_pool_layout(genome: Genome) -> list[dict[str, Any]]:
+    """Assign reproducible non-template IDs to heritable specialist pools."""
+    return [
+        {**pool, "id": DYNAMIC_POOL_BASE + index}
+        for index, pool in enumerate(
+            sorted(genome.emergent_pools, key=lambda value: value["name"])
+        )
+    ]
+
+
+def source_frame(row: dict[str, Any], genome: Genome, sources: Sequence[str]) -> str:
+    programs = {program_name(program): program for program in genome.feature_programs}
+    values = []
+    for source in sources:
+        value = (program_value(row["features"], programs[source])
+                 if source in programs else float(row["features"].get(source, 0.0)))
+        values.append(f"{source}={quantize(value)}")
+    return " ".join(values)
+
+
 def streams(row: dict[str, Any], genome: Genome, horizon: int) -> list[tuple[int, str]]:
+    dynamic_layout = emergent_pool_layout(genome)
+    isolated_sources = {
+        source for pool in dynamic_layout for source in pool["features"]
+    }
     grouped: dict[str, list[str]] = defaultdict(list)
     for name in genome.features:
-        grouped[feature_family(name)].append(name)
+        if name not in isolated_sources:
+            grouped[feature_family(name)].append(name)
     result = [
         (FEATURE_POOLS[family], feature_frame(row, names))
         for family, names in sorted(grouped.items(), key=lambda item: FEATURE_POOLS[item[0]])
@@ -104,9 +130,14 @@ def streams(row: dict[str, Any], genome: Genome, horizon: int) -> list[tuple[int
     evolved = " ".join(
         f"{program_name(program)}={quantize(program_value(row['features'], program))}"
         for program in genome.feature_programs
+        if program_name(program) not in isolated_sources
     )
     if evolved:
         result.append((POOL_EVOLVED, evolved))
+    result.extend(
+        (pool["id"], source_frame(row, genome, pool["features"]))
+        for pool in dynamic_layout
+    )
     result.extend([
         (POOL_HORIZON, f"horizon_bars={horizon}"),
         (POOL_INSTRUMENT, f"base={str(row['asset']).lower()} market=crypto"),
@@ -151,8 +182,23 @@ def render_identity(template: Path, destination: Path, genome: Genome) -> None:
             blocks[index] = re.sub(r"concept_emergence_threshold = \d+",
                                    f"concept_emergence_threshold = {threshold}",
                                    blocks[index])
+    text = "[[pools]]".join(blocks)
+    for pool in emergent_pool_layout(genome):
+        text += f'''\n\n[[pools]]
+name = "{pool['name']}"
+id = {pool['id']}
+prototype = "byte-passthrough"
+atom_encoding_prefix = "{pool['name']}"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 1024
+max_concept_member_count = 12
+concept_emergence_threshold = {pool['concept_threshold']}
+decay_rate = 0.00002
+prune_floor = 0.001
+'''
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_text("[[pools]]".join(blocks), encoding="utf-8")
+    destination.write_text(text, encoding="utf-8")
 
 
 def wait_health(endpoint: str, process: subprocess.Popen, timeout: float = 45) -> None:
@@ -453,6 +499,7 @@ def main() -> int:
         "stage": ("isolated_wizard_full_gate" if args.folds >= 3
                   else "isolated_wizard_smoke_gate"), "folds": folds,
         "attempt_runtime": str(args.attempt_root),
+        "emergent_pools": emergent_pool_layout(genome),
         "all_brain_floor_gates": passed,
         "promotion": "eligible_for_untouched_final" if passed else "quarantined",
     }

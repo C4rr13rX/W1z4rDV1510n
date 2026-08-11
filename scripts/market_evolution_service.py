@@ -44,15 +44,46 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 FEATURE_SCHEMA = 5
-EVOLUTION_SCHEMA = 9
+EVOLUTION_SCHEMA = 13
 LEARNER_KINDS = (
     "classifier", "regressor", "extra_trees", "decomposed_regressor",
     "regime_regressor", "regime_decomposed_regressor",
 )
+RETURN_LEARNER_KINDS = {
+    "regressor", "decomposed_regressor", "regime_regressor",
+    "regime_decomposed_regressor", "multiscale_regressor",
+}
 REGIME_FEATURES = (
     "rv24", "volatility_ratio", "market_breadth_r6", "market_median_r6",
     "futures_spot_basis", "funding_rate", "flow_divergence", "news_polarity_24h",
 )
+RELIABILITY_FEATURES = (
+    "rv24", "volatility_ratio", "market_breadth_r6", "relative_market_r6",
+    "flow_divergence", "futures_spot_basis", "news_negative_share_24h",
+)
+RELIABILITY_FEATURE_POOLS = {
+    "core": RELIABILITY_FEATURES,
+    "trend_regime": (
+        "r1", "r6", "r12", "r24", "r72", "rv24", "volatility_ratio",
+        "market_median_r6", "market_breadth_r6", "relative_market_r6",
+        "cross_rank_r6", "cross_rank_r24",
+    ),
+    "flow_news": (
+        "spot_taker_imbalance", "futures_taker_imbalance", "flow_imbalance",
+        "flow_divergence", "futures_spot_basis", "funding_rate",
+        "basis_z24", "funding_z168", "asset_news_sentiment_acceleration",
+        "asset_news_sentiment_24h", "news_polarity_24h",
+        "news_negative_share_24h", "news_macro_24h", "news_regulation_24h",
+        "news_security_24h", "news_liquidation_24h",
+    ),
+}
+RELIABILITY_FEATURE_POOLS["combined"] = tuple(dict.fromkeys(
+    # Preserve the empirically stronger flow/news specialist, then add only
+    # compact regime modifiers whose co-occurrence splits its reliability.
+    # The full trend pool is intentionally not concatenated after its isolated
+    # protected result underperformed flow/news on the hard temporal fold.
+    RELIABILITY_FEATURE_POOLS["flow_news"] + RELIABILITY_FEATURES
+))
 AUXILIARY_HORIZONS = (1, 6, 12, 24)
 EVOLVABLE_POOL_NAMES = (
     "forecast_horizon", "instrument_context", "price_geometry", "trade_flow",
@@ -60,6 +91,8 @@ EVOLVABLE_POOL_NAMES = (
     "evolved_causal_relationships", "regime_context", "specialist_arbitration",
     "realized_ghost_experience", "competitive_reflexivity",
 )
+MAX_EMERGENT_POOLS = 8
+MAX_EMERGENT_POOL_FEATURES = 4
 
 from scripts.market_brain_experiment import load_bars  # noqa: E402
 from scripts.market_signal_audit import (  # noqa: E402
@@ -79,6 +112,15 @@ PRESCREEN = {
     "balanced_accuracy": 0.52, "mcc": 0.04, "ece": 0.20,
     "profit_factor": 0.85,
 }
+COMPETENCE_FLOOR = {
+    "observations": 30, "accuracy": 0.55, "balanced_accuracy": 0.52,
+    "mcc": 0.04, "profit_factor": 1.05,
+}
+COMPETENCE_FEATURES = (
+    "rv24", "volatility_ratio", "market_breadth_r6", "market_median_r6",
+    "futures_spot_basis", "funding_rate", "flow_divergence",
+    "news_polarity_24h",
+)
 DERIVED_FEATURES = {
     "flow_consensus": lambda f: (f["spot_taker_imbalance"] + f["futures_taker_imbalance"]) / 2,
     "flow_basis_pressure": lambda f: f["flow_divergence"] * f["futures_spot_basis"],
@@ -157,6 +199,13 @@ NEWS_CATEGORIES = {
     "network": ("UPGRADE", "FORK", "MAINNET", "OUTAGE", "VALIDATOR", "PROTOCOL"),
     "whale": ("WHALE", "LARGE HOLDER", "ON-CHAIN", "ONCHAIN"),
 }
+NEWS_SPECIALIST_FEATURES = (
+    "news_count_24h", "news_sentiment_24h", "news_polarity_24h",
+    "asset_news_count_24h", "asset_news_sentiment_24h",
+    "asset_news_sentiment_acceleration", "news_negative_share_24h",
+    "news_macro_24h", "news_regulation_24h", "news_security_24h",
+    "news_liquidation_24h",
+)
 BASE_FEATURES = tuple(dict.fromkeys(
     FEATURE_GROUPS["price"] + FEATURE_GROUPS["flow"]
     + FEATURE_GROUPS["cross"] + FEATURE_GROUPS["derivatives"]
@@ -201,7 +250,13 @@ class Genome:
     regime_bins: int = 1
     training_horizons: list[int] = field(default_factory=lambda: [12])
     pool_thresholds: dict[str, int] = field(default_factory=dict)
+    emergent_pools: list[dict[str, Any]] = field(default_factory=list)
     calibration_safety: float = 1.0
+    calibration_orientation: bool = False
+    calibration_reliability: bool = False
+    calibration_reliability_version: int = 0
+    calibration_reliability_pool: str = "core"
+    calibration_reliability_decay: float = 0.0
     generation: int = 0
     parents: list[str] = field(default_factory=list)
     genome_id: str = ""
@@ -226,6 +281,16 @@ class Genome:
             if name in EVOLVABLE_POOL_NAMES
         }
         self.calibration_safety = max(1.0, min(12.0, float(self.calibration_safety)))
+        self.calibration_orientation = bool(self.calibration_orientation)
+        self.calibration_reliability = bool(self.calibration_reliability)
+        self.calibration_reliability_version = max(
+            0, min(8, int(self.calibration_reliability_version))
+        )
+        if self.calibration_reliability_pool not in RELIABILITY_FEATURE_POOLS:
+            self.calibration_reliability_pool = "core"
+        self.calibration_reliability_decay = max(
+            0.0, min(8.0, float(self.calibration_reliability_decay))
+        )
         if (self.regime_bins > 1
                 or self.learner_kind in {"regime_regressor", "regime_decomposed_regressor"}):
             self.features = sorted(set(self.features) | {self.regime_feature})
@@ -233,13 +298,32 @@ class Genome:
             (normalize_program(program) for program in self.feature_programs),
             key=lambda program: json.dumps(program, sort_keys=True, separators=(",", ":")),
         )
+        active_sources = set(self.features) | {
+            program_name(program) for program in self.feature_programs
+        }
+        normalized_pools: dict[tuple[str, ...], dict[str, Any]] = {}
+        for pool in self.emergent_pools:
+            normalized = normalize_emergent_pool(pool, active_sources)
+            if normalized is not None:
+                normalized_pools[tuple(normalized["features"])] = normalized
+        self.emergent_pools = [
+            normalized_pools[key] for key in sorted(normalized_pools)
+        ][:MAX_EMERGENT_POOLS]
         payload["features"] = self.features
         payload["feature_programs"] = self.feature_programs
         payload["regime_feature"] = self.regime_feature
         payload["regime_bins"] = self.regime_bins
         payload["training_horizons"] = self.training_horizons
         payload["pool_thresholds"] = self.pool_thresholds
+        payload["emergent_pools"] = self.emergent_pools
         payload["calibration_safety"] = self.calibration_safety
+        payload["calibration_orientation"] = self.calibration_orientation
+        payload["calibration_reliability"] = self.calibration_reliability
+        payload["calibration_reliability_version"] = (
+            self.calibration_reliability_version
+        )
+        payload["calibration_reliability_pool"] = self.calibration_reliability_pool
+        payload["calibration_reliability_decay"] = self.calibration_reliability_decay
         self.genome_id = hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()[:16]
@@ -266,6 +350,45 @@ def program_name(program: dict[str, Any]) -> str:
     encoded = json.dumps(normalize_program(program), sort_keys=True,
                          separators=(",", ":")).encode()
     return "evolved_" + hashlib.sha256(encoded).hexdigest()[:12]
+
+
+def normalize_emergent_pool(
+    pool: dict[str, Any], active_sources: set[str],
+) -> dict[str, Any] | None:
+    """Canonicalize one heritable specialist pool around active features."""
+    sources = sorted({
+        str(source) for source in pool.get("features", [])
+        if str(source) in active_sources
+    })[:MAX_EMERGENT_POOL_FEATURES]
+    if not sources:
+        return None
+    digest = hashlib.sha256("\0".join(sources).encode()).hexdigest()[:12]
+    return {
+        "name": f"emergent_{digest}",
+        "features": sources,
+        "concept_threshold": min(12, max(
+            2, int(pool.get("concept_threshold", 5))
+        )),
+    }
+
+
+def emergent_pool_sources(genome: "Genome") -> list[str]:
+    return sorted(set(genome.features) | {
+        program_name(program) for program in genome.feature_programs
+    })
+
+
+def random_emergent_pool(genome: "Genome", rng: random.Random) -> dict[str, Any] | None:
+    """Create a bounded specialist hypothesis, favoring true isolation."""
+    sources = emergent_pool_sources(genome)
+    if not sources:
+        return None
+    width = min(len(sources), rng.choices((1, 2, 3, 4), (5, 3, 1, 1))[0])
+    selected = rng.sample(sources, width)
+    return normalize_emergent_pool(
+        {"features": selected, "concept_threshold": rng.randint(3, 8)},
+        set(sources),
+    )
 
 
 def program_value(features: dict[str, float], program: dict[str, Any]) -> float:
@@ -324,6 +447,11 @@ class Surrogate:
     score_scale: float = 1.0
     market_model: Any = None
     market_weight: float = 1.0
+    reliability_model: Any = None
+    reliability_indices: tuple[int, ...] = ()
+    reliability_mean: Any = None
+    reliability_scale: Any = None
+    reliability_direction: float = 1.0
 
     def raw_score(self, values: np.ndarray) -> np.ndarray:
         if self.kind == "decomposed_regressor":
@@ -332,12 +460,109 @@ class Surrogate:
             return residual + self.market_weight * market
         return np.asarray(self.model.predict(values), dtype=np.float64)
 
-    def probability(self, values: np.ndarray) -> np.ndarray:
+    def base_probability(self, values: np.ndarray) -> np.ndarray:
         if self.kind in {"classifier", "extra_trees"}:
             return self.model.predict_proba(values)[:, list(self.model.classes_).index(1)]
         score = self.raw_score(values)
         normalized = np.clip(score / max(self.score_scale, 1e-9), -30, 30)
         return 1.0 / (1.0 + np.exp(-normalized))
+
+    def reliability_design(
+        self, values: np.ndarray, probability: np.ndarray,
+    ) -> np.ndarray:
+        confidence = np.maximum(probability, 1.0 - probability)
+        columns = [confidence.reshape(-1, 1)]
+        if self.reliability_indices:
+            columns.append(values[:, self.reliability_indices])
+        return np.column_stack(columns)
+
+    def fit_reliability(
+        self, values: np.ndarray, labels: np.ndarray,
+        feature_indices: Sequence[int], version: int = 1,
+        decay: float = 0.0,
+    ) -> bool:
+        """Learn correctness ranking from calibration only, never direction."""
+        probability = self.base_probability(values)
+        prediction = np.where(probability >= .5, 1, -1).astype(np.int8)
+        correctness = (prediction == np.asarray(labels, dtype=np.int8)).astype(np.int8)
+        if len(values) < 80 or len(np.unique(correctness)) < 2:
+            return False
+        self.reliability_indices = tuple(int(index) for index in feature_indices)
+        design = self.reliability_design(values, probability)
+        self.reliability_mean = design.mean(axis=0)
+        self.reliability_scale = np.maximum(design.std(axis=0), 1e-6)
+        normalized = (design - self.reliability_mean) / self.reliability_scale
+        if version >= 2:
+            # Correctness depends on interactions such as high volatility plus
+            # weak breadth or adverse news plus flow divergence.  A bounded
+            # nonlinear pool can discover those WHEN/WHY regions while the
+            # directional base model remains untouched.
+            effective_decay = (float(decay) if decay > 0 else 2.0)
+            reliability_weights = (
+                np.exp(np.linspace(-effective_decay, 0.0, len(correctness)))
+                if version >= 5 else None
+            )
+            self.reliability_model = ExtraTreesClassifier(
+                n_estimators=160, max_leaf_nodes=24, min_samples_leaf=20,
+                max_features="sqrt", class_weight="balanced", n_jobs=1,
+                random_state=2718,
+            ).fit(normalized, correctness, sample_weight=reliability_weights)
+        else:
+            self.reliability_model = LogisticRegression(
+                C=.2, solver="lbfgs", max_iter=300, class_weight="balanced",
+            ).fit(normalized, correctness)
+        return True
+
+    def probability(self, values: np.ndarray) -> np.ndarray:
+        return self.base_probability(values)
+
+    def selection_confidence(self, values: np.ndarray) -> np.ndarray:
+        """Return an abstention score independent of directional probability."""
+        probability = self.base_probability(values)
+        if self.reliability_model is None:
+            return np.maximum(probability, 1.0 - probability)
+        design = self.reliability_design(values, probability)
+        normalized = (design - self.reliability_mean) / self.reliability_scale
+        # This score chooses whether to abstain. Direction and ECE continue to
+        # use base_probability, so low predicted correctness cannot flip or
+        # masquerade as calibrated directional confidence.
+        score = self.reliability_model.predict_proba(normalized)[:, 1]
+        if self.reliability_direction < 0:
+            return 1.0 - score
+        if self.reliability_direction == 0:
+            return np.full(len(score), .5, dtype=np.float64)
+        return score
+
+    def tune_reliability_orientation(
+        self, values: np.ndarray, labels: np.ndarray,
+    ) -> float:
+        """Orient abstention using a later calibration slice only.
+
+        A correctness ranker can drift so that its high-score tail becomes the
+        least reliable region.  Detect that on protected calibration data and
+        invert selection (never prediction direction).  Weak evidence disables
+        abstention for the fold instead of manufacturing a confident ranking.
+        """
+        if self.reliability_model is None or len(values) < 40:
+            self.reliability_direction = 0.0
+            return self.reliability_direction
+        probability = self.base_probability(values)
+        predicted = np.where(probability >= .5, 1, -1).astype(np.int8)
+        correctness = (predicted == np.asarray(labels, dtype=np.int8)).astype(float)
+        design = self.reliability_design(values, probability)
+        normalized = (design - self.reliability_mean) / self.reliability_scale
+        score = self.reliability_model.predict_proba(normalized)[:, 1]
+        lower, upper = np.quantile(score, (.25, .75))
+        low = correctness[score <= lower]
+        high = correctness[score >= upper]
+        if not len(low) or not len(high):
+            self.reliability_direction = 0.0
+            return self.reliability_direction
+        tail_gap = float(high.mean() - low.mean())
+        self.reliability_direction = (
+            1.0 if tail_gap >= .03 else -1.0 if tail_gap <= -.03 else 0.0
+        )
+        return self.reliability_direction
 
     def predict(self, values: np.ndarray) -> np.ndarray:
         return np.where(self.probability(values) >= .5, 1, -1).astype(np.int8)
@@ -372,6 +597,50 @@ class DecomposedRegressor:
         residual = np.asarray(self.residual_model.predict(values), dtype=np.float64)
         market = np.asarray(self.market_model.predict(values), dtype=np.float64)
         return residual + self.market_weight * market
+
+
+@dataclass
+class MultiscaleRegressor:
+    """Blend causal return models fitted with short and long memory."""
+    short_model: Any
+    long_model: Any
+    short_weight: float = .5
+    allow_orientation: bool = False
+    direction: float = 1.0
+
+    def predict(self, values: np.ndarray) -> np.ndarray:
+        short = np.asarray(self.short_model.predict(values), dtype=np.float64)
+        long = np.asarray(self.long_model.predict(values), dtype=np.float64)
+        return self.direction * (
+            self.short_weight * short + (1.0 - self.short_weight) * long
+        )
+
+    def tune(self, values: np.ndarray, labels: np.ndarray) -> None:
+        """Select one bounded blend on calibration data, never protected data."""
+        short = np.asarray(self.short_model.predict(values), dtype=np.float64)
+        long = np.asarray(self.long_model.predict(values), dtype=np.float64)
+        labels = np.asarray(labels, dtype=np.int8)
+        def accuracy(weight: float, direction: float) -> float:
+            prediction = np.where(
+                direction * (weight * short + (1.0 - weight) * long) >= 0,
+                1, -1,
+            )
+            return float(np.mean(prediction == labels))
+
+        positive = max(
+            (accuracy(weight, 1.0), -abs(weight - .5), weight)
+            for weight in (.25, .5, .75)
+        )
+        self.short_weight = positive[2]
+        self.direction = 1.0
+        if self.allow_orientation and len(labels) >= 40:
+            inverted = max(
+                (accuracy(weight, -1.0), -abs(weight - .5), weight)
+                for weight in (.25, .5, .75)
+            )
+            if inverted[0] >= .55 and inverted[0] >= positive[0] + .04:
+                self.short_weight = inverted[2]
+                self.direction = -1.0
 
 
 def regression_probability_scale(scores: np.ndarray, labels: np.ndarray) -> float:
@@ -414,6 +683,22 @@ def new_return_regressor(genome: Genome, random_state: int) -> HistGradientBoost
         max_leaf_nodes=genome.max_leaf_nodes,
         min_samples_leaf=genome.min_samples_leaf,
         l2_regularization=genome.l2_regularization, random_state=random_state,
+    )
+
+
+def fit_multiscale_regressor(
+    genome: Genome, values: np.ndarray, target: np.ndarray,
+    short_weights: np.ndarray, long_weights: np.ndarray, random_state: int,
+) -> MultiscaleRegressor:
+    """Fit the same phenotype at two causal recency scales."""
+    return MultiscaleRegressor(
+        new_return_regressor(genome, random_state).fit(
+            values, target, sample_weight=short_weights
+        ),
+        new_return_regressor(genome, random_state + 1000).fit(
+            values, target, sample_weight=long_weights
+        ),
+        allow_orientation=genome.calibration_orientation,
     )
 
 
@@ -524,6 +809,61 @@ def external_brain_gate_pids() -> list[int]:
     return result
 
 
+def stale_external_brain_gate_pids(
+    state_dir: Path, max_age_seconds: float, *, now: float | None = None,
+) -> list[int]:
+    """Find only this service's neural gates that exceeded their time budget."""
+    if psutil is None or max_age_seconds <= 0:
+        return []
+    now = time.time() if now is None else float(now)
+    state_marker = str(state_dir.resolve()).lower()
+    stale: list[int] = []
+    for process in psutil.process_iter(("pid", "cmdline", "create_time")):
+        try:
+            command = " ".join(process.info.get("cmdline") or [])
+            if ("market_evolution_brain_gate.py" not in command
+                    or state_marker not in command.lower()):
+                continue
+            age = now - float(process.info.get("create_time") or now)
+            if age >= max_age_seconds:
+                stale.append(int(process.info["pid"]))
+        except (psutil.AccessDenied, psutil.NoSuchProcess, TypeError, ValueError):
+            continue
+    return stale
+
+
+def terminate_process_tree(pid: int) -> bool:
+    """Terminate one verified stale gate and descendants, never unrelated PIDs."""
+    if psutil is None:
+        return False
+    try:
+        process = psutil.Process(pid)
+        command = " ".join(process.cmdline())
+        if "market_evolution_brain_gate.py" not in command:
+            return False
+        descendants = process.children(recursive=True)
+        for child in descendants:
+            child.terminate()
+        process.terminate()
+        _, alive = psutil.wait_procs([*descendants, process], timeout=5)
+        for remaining in alive:
+            remaining.kill()
+        return True
+    except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.TimeoutExpired):
+        return False
+
+
+def recover_stale_external_brain_gates(
+    state_dir: Path, max_age_seconds: float,
+) -> list[int]:
+    """Release neural-validation capacity after a controller restart or hang."""
+    recovered = []
+    for pid in stale_external_brain_gate_pids(state_dir, max_age_seconds):
+        if terminate_process_tree(pid):
+            recovered.append(pid)
+    return recovered
+
+
 def process_alive(pid: int) -> bool:
     if pid <= 0:
         return False
@@ -595,6 +935,107 @@ def append_event(path: Path, event: str, **payload: Any) -> None:
                                 separators=(",", ":"), allow_nan=False) + "\n")
 
 
+def record_accuracy_improvement(
+    state_dir: Path,
+    data_signature: str,
+    source: str,
+    accuracy: float,
+    *,
+    generation: int,
+    genome_id: str | None,
+    metrics: dict[str, Any] | None = None,
+) -> bool:
+    """Persist and log only a new comparable prediction-accuracy high.
+
+    Accuracy is keyed by the exact evaluation/corpus signature and evidence
+    source.  This prevents a changed corpus or a surrogate score from being
+    compared with isolated Wizard-brain evidence.  The first observation is a
+    silent baseline; every subsequent strict increase gets one JSONL record.
+    """
+    try:
+        accuracy = float(accuracy)
+    except (TypeError, ValueError):
+        return False
+    if not math.isfinite(accuracy) or not 0.0 <= accuracy <= 1.0:
+        return False
+    key = f"{data_signature}:{source}"
+    state_path = state_dir / "accuracy_best.json"
+    try:
+        state = (json.loads(state_path.read_text(encoding="utf-8"))
+                 if state_path.is_file() else {})
+    except (OSError, ValueError, TypeError):
+        state = {}
+    best = state.setdefault("best", {})
+    prior_entry = best.get(key)
+    prior = (float(prior_entry.get("accuracy"))
+             if isinstance(prior_entry, dict) and prior_entry.get("accuracy") is not None
+             else None)
+    if prior is not None and accuracy <= prior + 1e-12:
+        return False
+    entry = {
+        "accuracy": accuracy, "at": utc_now(), "generation": int(generation),
+        "genome_id": genome_id, "source": source,
+        "dataset_signature": data_signature,
+    }
+    best[key] = entry
+    state.update({"schema": 1, "updated_at": entry["at"]})
+    atomic_json(state_path, state)
+    if prior is None:
+        return False
+    append_event(
+        state_dir / "accuracy_improvements.jsonl", "accuracy_increased",
+        source=source, dataset_signature=data_signature,
+        generation=int(generation), genome_id=genome_id,
+        previous_accuracy=prior, accuracy=accuracy, delta=accuracy - prior,
+        metrics=metrics or {},
+    )
+    return True
+
+
+def brain_accuracy_summary(report: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return weakest-section metrics from an isolated Wizard gate report."""
+    sections = [
+        section.get("metrics", {})
+        for fold in (report or {}).get("folds", [])
+        for section in fold.get("sections", {}).values()
+        if isinstance(section.get("metrics"), dict)
+    ]
+    if not sections:
+        return None
+    return {
+        "min_accuracy": min(float(row.get("directional_accuracy", 0)) for row in sections),
+        "min_balanced_accuracy": min(
+            float(row.get("directional_balanced_accuracy", 0)) for row in sections
+        ),
+        "min_mcc": min(float(row.get("mcc", -1)) for row in sections),
+        "min_profit_factor": min(float(row.get("profit_factor") or 0) for row in sections),
+        "max_ece": max(float(row.get("ece", 1)) for row in sections),
+        "sections": len(sections),
+    }
+
+
+def brain_gate_obligation_viable(state_dir: Path, genome_id: str) -> bool:
+    """Reject only conclusive multi-fold anti-signals before neural gating."""
+    path = state_dir / "candidates" / f"{genome_id}.json"
+    if not path.is_file():
+        return True
+    try:
+        candidate = genome_from_dict(json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, ValueError, TypeError):
+        return True
+    result = candidate.result or {}
+    if int(result.get("evaluated_folds", 0)) < 2:
+        return True
+    summary = result.get("summary", {})
+    conclusive_anti_signal = (
+        float(summary.get("min_accuracy", 1)) < .50
+        and float(summary.get("min_mcc", 1)) < 0
+        and float(summary.get("min_expectancy", 1)) <= 0
+        and float(summary.get("min_profit_factor", 1)) < .90
+    )
+    return not conclusive_anti_signal
+
+
 def recover_pending_gate(state_dir: Path, champion: Genome | None,
                          pending: str | None) -> str | None:
     """Restore a neural-validation obligation that was not yet recorded."""
@@ -619,6 +1060,265 @@ def invalidate_population_for_new_evidence(
         genome.result = None
     population = introduce_calibration_variants(population, generation)
     return introduce_missing_learner_species(population, generation, rng)
+
+
+def restore_completed_candidates(
+    population: list[Genome], state_dir: Path, evaluation_id: str,
+    *, legacy_after: float | None = None,
+) -> tuple[list[Genome], list[str]]:
+    """Hydrate exact genomes or identical phenotypes in one evaluation scope."""
+    restored: list[str] = []
+    phenotype_evidence: dict[str, Genome] = {}
+    for evidence_path in (state_dir / "candidates").glob("*.json"):
+        try:
+            evidence = genome_from_dict(json.loads(
+                evidence_path.read_text(encoding="utf-8")
+            ))
+        except (OSError, ValueError, TypeError):
+            continue
+        retired_reliability = (
+            evidence.calibration_reliability
+            and evidence.calibration_reliability_version <= 0
+        )
+        if (evidence.fitness is not None and not retired_reliability
+                and (evidence.result or {}).get("evaluation_signature") == evaluation_id):
+            phenotype_evidence[genome_evaluation_key(evidence)] = evidence
+    for index, genome in enumerate(population):
+        if genome.fitness is not None:
+            continue
+        path = state_dir / "candidates" / f"{genome.genome_id}.json"
+        candidate: Genome | None = None
+        legacy_match = False
+        if path.is_file():
+            try:
+                direct = genome_from_dict(json.loads(path.read_text(encoding="utf-8")))
+            except (OSError, ValueError, TypeError):
+                direct = None
+            if direct is not None:
+                result = direct.result or {}
+                signed_match = result.get("evaluation_signature") == evaluation_id
+                legacy_match = (
+                    result.get("evaluation_signature") is None
+                    and legacy_after is not None
+                    and path.stat().st_mtime > legacy_after
+                )
+                retired_reliability = (
+                    direct.calibration_reliability
+                    and direct.calibration_reliability_version <= 0
+                )
+                if (direct.genome_id == genome.genome_id
+                        and direct.fitness is not None
+                        and not retired_reliability
+                        and (signed_match or legacy_match)):
+                    candidate = direct
+        if candidate is None:
+            evidence = phenotype_evidence.get(genome_evaluation_key(genome))
+            if evidence is not None:
+                candidate = genome_from_dict(asdict(genome))
+                candidate.fitness = evidence.fitness
+                candidate.result = json.loads(json.dumps(evidence.result))
+        if candidate is None:
+            continue
+        if legacy_match:
+            candidate.result["evaluation_signature"] = evaluation_id
+        atomic_json(path, asdict(candidate))
+        population[index] = candidate
+        restored.append(genome.genome_id)
+    return population, restored
+
+
+def genome_evaluation_key(genome: Genome) -> str:
+    """Hash every predictive/evaluation gene while ignoring lineage metadata."""
+    payload = asdict(genome)
+    for key in ("genome_id", "fitness", "result", "generation", "parents"):
+        payload.pop(key, None)
+    if int(payload.get("calibration_reliability_version", 0)) <= 0:
+        # Version zero is deliberately inactive. Canonicalize it to the
+        # ordinary phenotype, while restore_completed_candidates excludes old
+        # v0 result files produced by the retired clamped implementation.
+        payload["calibration_reliability"] = False
+        payload["calibration_reliability_version"] = 0
+        payload["calibration_reliability_pool"] = "core"
+        payload["calibration_reliability_decay"] = 0.0
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def reliability_evidence_rank(candidate: Genome) -> tuple[float, ...]:
+    """Compare reliability experiments on accuracy, balance, and economics."""
+    summary = (candidate.result or {}).get("summary", {})
+    accuracy = float(summary.get("min_accuracy", 0))
+    balanced = float(summary.get("min_balanced_accuracy", 0))
+    mcc = float(summary.get("min_mcc", -1))
+    expectancy = float(summary.get("min_expectancy", -1))
+    profit = float(summary.get("min_profit_factor", 0))
+    composite = (
+        accuracy + balanced + .25 * mcc
+        + min(.02, expectancy) + .02 * min(2.0, profit)
+    )
+    return composite, balanced, mcc, accuracy, expectancy, profit
+
+
+def next_reliability_decays(evidence: Sequence[Genome]) -> tuple[float, float]:
+    """Bracket the best protected decay without reusing tested values."""
+    tested: dict[float, Genome] = {}
+    for candidate in evidence:
+        if (candidate.calibration_reliability_version != 6
+                or candidate.fitness is None):
+            continue
+        tested[round(candidate.calibration_reliability_decay, 6)] = candidate
+    initial = (.75, 3.5, .25, 5.0, 1.5, 7.0)
+    if len(tested) < 3:
+        remaining = [value for value in initial if round(value, 6) not in tested]
+        return tuple(remaining[:2])  # type: ignore[return-value]
+
+    best_decay = max(tested, key=lambda value: reliability_evidence_rank(tested[value]))
+    lower = max((value for value in tested if value < best_decay), default=.1)
+    upper = min((value for value in tested if value > best_decay), default=8.0)
+    proposals = [round((lower + best_decay) / 2.0, 6),
+                 round((best_decay + upper) / 2.0, 6)]
+    proposals = [value for value in proposals if value not in tested]
+    for value in initial:
+        if value not in tested and value not in proposals:
+            proposals.append(value)
+    while len(proposals) < 2:
+        anchors = sorted({.1, 8.0, *tested, *proposals})
+        _, left, right = max(
+            (right - left, left, right)
+            for left, right in zip(anchors, anchors[1:])
+        )
+        midpoint = round((left + right) / 2.0, 6)
+        if midpoint in tested or midpoint in proposals:
+            break
+        proposals.append(midpoint)
+    return tuple(proposals[:2])  # type: ignore[return-value]
+
+
+def next_reliability_quantiles(
+    evidence: Sequence[Genome], base_quantile: float,
+) -> tuple[float, float]:
+    """Evolve abstention only after decay has enough protected evidence."""
+    tested = {
+        round(candidate.confidence_quantile, 6): candidate
+        for candidate in evidence
+        if candidate.calibration_reliability_version == 7
+        and candidate.fitness is not None
+    }
+    schedule = list(dict.fromkeys(
+        round(min(.30, base_quantile + offset), 6)
+        for offset in (.02, .04, .06)
+    ))
+    remaining = [value for value in schedule if value not in tested]
+    if len(tested) < 3:
+        while len(remaining) < 2:
+            midpoint = round((base_quantile + .30) / 2.0, 6)
+            if midpoint in tested or midpoint in remaining:
+                break
+            remaining.append(midpoint)
+        return tuple(remaining[:2])  # type: ignore[return-value]
+    best = max(tested, key=lambda value: reliability_evidence_rank(tested[value]))
+    lower = max((value for value in tested if value < best), default=base_quantile)
+    upper = min((value for value in tested if value > best), default=.30)
+    proposals = [round((lower + best) / 2.0, 6),
+                 round((best + upper) / 2.0, 6)]
+    proposals = [value for value in proposals if value not in tested]
+    for value in schedule:
+        if value not in tested and value not in proposals:
+            proposals.append(value)
+    return tuple(proposals[:2])  # type: ignore[return-value]
+
+
+def next_oriented_reliability_variants(
+    evidence: Sequence[Genome], base_quantile: float,
+) -> tuple[tuple[str, float], tuple[str, float]]:
+    """Search orientation-aware pool/coverage pairs without repeating failures."""
+    tested = {
+        (candidate.calibration_reliability_pool,
+         round(candidate.confidence_quantile, 6)): candidate
+        for candidate in evidence
+        if candidate.calibration_reliability_version == 8
+        and candidate.fitness is not None
+    }
+    inert_pools = {
+        candidate.calibration_reliability_pool
+        for candidate in evidence
+        if candidate.calibration_reliability_version == 8
+        and candidate.fitness is not None
+        and (candidate.result or {}).get("folds")
+        and all(
+            float(fold.get("multiscale_calibration", {}).get(
+                "reliability_direction", 1.0
+            )) == 0.0
+            for fold in (candidate.result or {}).get("folds", [])
+        )
+    }
+    active_pools = tuple(
+        pool for pool in ("flow_news", "combined") if pool not in inert_pools
+    ) or ("combined",)
+    quantiles = list(dict.fromkeys(
+        round(min(.30, max(.05, base_quantile + offset)), 6)
+        for offset in (0.0, .02, -.02, .04, -.04, .06)
+    ))
+    schedule = [
+        (pool, quantile)
+        for quantile in quantiles
+        for pool in active_pools
+    ]
+    remaining = [variant for variant in schedule if variant not in tested]
+    if len(remaining) >= 2:
+        return remaining[0], remaining[1]
+
+    # Once coarse pairs are exhausted, refine the strongest pool locally.
+    if tested:
+        best_pool, best_quantile = max(
+            tested, key=lambda key: reliability_evidence_rank(tested[key])
+        )
+        pool_values = sorted(
+            quantile for pool, quantile in tested if pool == best_pool
+        )
+        anchors = sorted({.05, .30, *pool_values})
+        gaps = sorted(
+            ((right - left, left, right)
+             for left, right in zip(anchors, anchors[1:])), reverse=True,
+        )
+        local_gaps = sorted(
+            gaps,
+            key=lambda gap: (min(abs(gap[1] - best_quantile),
+                                abs(gap[2] - best_quantile)), -gap[0]),
+        )
+        for _, left, right in local_gaps:
+            proposal = (best_pool, round((left + right) / 2.0, 6))
+            if proposal not in tested and proposal not in remaining:
+                remaining.append(proposal)
+            if len(remaining) >= 2:
+                break
+    while len(remaining) < 2:
+        # Resolution exhaustion is practically unreachable, but preserve a
+        # two-child scheduler contract without changing predictive semantics.
+        fallback = (active_pools[len(remaining) % len(active_pools)], .05)
+        remaining.append(fallback)
+    return remaining[0], remaining[1]
+
+
+def load_direct_descendant_evidence(
+    state_dir: Path, parent_ids: set[str], evaluation_id: str,
+) -> list[Genome]:
+    """Recover signed direct-descendant failures for adaptive search memory."""
+    if not parent_ids:
+        return []
+    evidence: dict[str, Genome] = {}
+    for path in (state_dir / "candidates").glob("*.json"):
+        try:
+            candidate = genome_from_dict(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError, TypeError):
+            continue
+        if (candidate.fitness is None
+                or (candidate.result or {}).get("evaluation_signature") != evaluation_id
+                or not (set(candidate.parents) & parent_ids)):
+            continue
+        evidence[candidate.genome_id] = candidate
+    return list(evidence.values())
 
 
 def add_derived_features(rows: Sequence[dict[str, Any]]) -> None:
@@ -918,14 +1618,55 @@ def _portfolio_drawdown(selected: Sequence[dict[str, Any]], predicted: np.ndarra
     return drawdown
 
 
+def condition_mask(rows: Sequence[dict[str, Any]], conditions: Sequence[dict[str, Any]],
+                   confidence: np.ndarray | None = None) -> np.ndarray:
+    """Return the union of causal, calibration-frozen competence conditions."""
+    result = np.zeros(len(rows), dtype=bool)
+    for condition in conditions:
+        if condition["kind"] == "all":
+            conjunction = np.ones(len(rows), dtype=bool)
+            for clause in condition.get("clauses", []):
+                conjunction &= condition_mask(rows, [clause], confidence)
+            result |= conjunction
+            continue
+        if condition["kind"] == "confidence":
+            if confidence is not None:
+                result |= confidence >= float(condition["threshold"])
+            continue
+        values = np.asarray([
+            float(row["features"].get(condition["feature"], 0.0)) for row in rows
+        ])
+        if condition["side"] == "high":
+            result |= values >= float(condition["threshold"])
+        else:
+            result |= values <= float(condition["threshold"])
+    return result
+
+
+def competence_passes(section: dict[str, Any]) -> bool:
+    """A deliberately ghost-only floor for a narrower competence envelope."""
+    return (
+        section.get("acted_observations", 0) >= COMPETENCE_FLOOR["observations"]
+        and section.get("directional_accuracy", 0) >= COMPETENCE_FLOOR["accuracy"]
+        and section.get("directional_balanced_accuracy", 0)
+        >= COMPETENCE_FLOOR["balanced_accuracy"]
+        and section.get("mcc", -1) >= COMPETENCE_FLOOR["mcc"]
+        and section.get("net_expectancy", -1) > 0
+        and (section.get("profit_factor") or 0) >= COMPETENCE_FLOOR["profit_factor"]
+    )
+
+
 def evaluate_slice(model: Surrogate, selected: list[dict[str, Any]],
-                   genome: Genome, threshold: float, cost_bps: float) -> dict[str, Any]:
+                   genome: Genome, threshold: float, cost_bps: float,
+                   conditions: Sequence[dict[str, Any]] = ()) -> dict[str, Any]:
     x = np.asarray([feature_vector(row, genome) for row in selected], dtype=np.float32)
     actual = np.asarray([row["target"] for row in selected], dtype=np.int8)
     realized = np.asarray([row["return"] for row in selected], dtype=np.float64)
     probability = model.probability(x)
-    confidence = np.maximum(probability, 1 - probability)
+    confidence = model.selection_confidence(x)
     mask = confidence >= threshold
+    if conditions:
+        mask &= condition_mask(selected, conditions, confidence)
     if not mask.any():
         return {"observations": len(selected), "acted_observations": 0, "coverage": 0.0}
     predicted = model.predict(x)[mask]
@@ -942,6 +1683,87 @@ def evaluate_slice(model: Surrogate, selected: list[dict[str, Any]],
         "max_portfolio_drawdown": _portfolio_drawdown(acted_rows, predicted, cost_bps),
     })
     return result
+
+
+def discover_competence_envelope(model: Surrogate, calibration: list[dict[str, Any]],
+                                 genome: Genome, threshold: float,
+                                 cost_bps: float) -> dict[str, Any]:
+    """Learn where a candidate is reliable using calibration evidence only.
+
+    Conditions are simple observable predicates so the resulting explanation
+    can be applied unchanged to later historical rows or a future ghost feed.
+    Protected test labels never participate in discovery.
+    """
+    if not calibration:
+        return {"conditions": [], "calibration": {}}
+    x = np.asarray([feature_vector(row, genome) for row in calibration], dtype=np.float32)
+    probability = model.probability(x)
+    confidence = model.selection_confidence(x)
+    candidates: list[dict[str, Any]] = [{
+        "kind": "confidence", "label": "highest model confidence",
+        "threshold": float(np.quantile(confidence, .75)),
+    }]
+    thresholds: dict[str, tuple[float, float]] = {}
+    for feature in COMPETENCE_FEATURES:
+        values = np.asarray([
+            float(row["features"].get(feature, 0.0)) for row in calibration
+        ], dtype=np.float64)
+        if np.allclose(values, values[0]):
+            continue
+        low, high = np.quantile(values, (.25, .75))
+        thresholds[feature] = (float(low), float(high))
+        candidates.extend((
+            {"kind": "feature", "feature": feature, "side": "low",
+             "threshold": float(low), "label": f"low {feature}"},
+            {"kind": "feature", "feature": feature, "side": "high",
+             "threshold": float(high), "label": f"high {feature}"},
+        ))
+    # Human-readable conjunctions approximate the multi-panel setups a chart
+    # reader uses. The list is deliberately pre-registered and small; mining
+    # arbitrary combinations on calibration labels would invite overfitting.
+    paired_setups = (
+        ("volatility_ratio", "market_breadth_r6"),
+        ("flow_divergence", "futures_spot_basis"),
+        ("funding_rate", "futures_spot_basis"),
+        ("news_polarity_24h", "market_breadth_r6"),
+        ("news_polarity_24h", "volatility_ratio"),
+    )
+    for left, right in paired_setups:
+        if left not in thresholds or right not in thresholds:
+            continue
+        for left_side in ("low", "high"):
+            for right_side in ("low", "high"):
+                left_threshold = thresholds[left][left_side == "high"]
+                right_threshold = thresholds[right][right_side == "high"]
+                candidates.append({
+                    "kind": "all",
+                    "label": f"{left_side} {left} + {right_side} {right}",
+                    "clauses": [
+                        {"kind": "feature", "feature": left, "side": left_side,
+                         "threshold": left_threshold},
+                        {"kind": "feature", "feature": right, "side": right_side,
+                         "threshold": right_threshold},
+                    ],
+                })
+    qualified = []
+    for condition in candidates:
+        evidence = evaluate_slice(
+            model, calibration, genome, threshold, cost_bps, [condition]
+        )
+        if competence_passes(evidence):
+            qualified.append((
+                float(evidence["directional_accuracy"])
+                + .25 * float(evidence["mcc"])
+                + min(.02, float(evidence["net_expectancy"])),
+                condition, evidence,
+            ))
+    qualified.sort(key=lambda item: item[0], reverse=True)
+    # One rule is intentionally easier to audit and less vulnerable to a
+    # multiple-comparisons union than a large hand-picked regime expression.
+    if not qualified:
+        return {"conditions": [], "calibration": {}}
+    _, condition, evidence = qualified[0]
+    return {"conditions": [condition], "calibration": evidence}
 
 
 def passes_floor(section: dict[str, Any]) -> bool:
@@ -969,6 +1791,38 @@ def passes_prescreen(section: dict[str, Any]) -> bool:
         and section.get("mcc", -1) >= PRESCREEN["mcc"]
         and section.get("ece", 1) <= PRESCREEN["ece"]
         and (section.get("profit_factor") or 0) >= PRESCREEN["profit_factor"]
+    )
+
+
+def curriculum_fitness(
+    *, fold_count: int, min_accuracy: float, min_balanced: float,
+    min_mcc: float, min_margin: float, min_coverage: float,
+    min_observations: int, min_expectancy: float, min_profit: float,
+    max_ece: float, max_drawdown: float, conditional_ghost_pass: bool,
+    conditional_ghost_accuracy: float,
+) -> float:
+    """Reward accuracy only when it remains useful and statistically supported.
+
+    The previous objective made a five-point accuracy gain worth far more than
+    losing a quarter of actionable observations. This gate-shaped curriculum
+    retains accuracy pressure while making coverage collapse and negative
+    economics expensive enough to breed targeted repairs instead of winners.
+    """
+    return (
+        1000 * (fold_count - 1)
+        + 500 * min_accuracy
+        + 150 * min_balanced
+        + 100 * min_mcc
+        + 80 * min_margin
+        + 25 * min(min_profit, 2.0)
+        + 2000 * min(0.01, max(-0.01, min_expectancy))
+        - 25 * max_ece
+        - 5 * max_drawdown
+        - 250 * max(0, PRESCREEN["coverage"] - min_coverage)
+        - .75 * max(0, PRESCREEN["observations"] - min_observations)
+        - 100 * max(0, -min_margin)
+        - 40 * max(0, 1.0 - min_profit)
+        + (25 * conditional_ghost_accuracy if conditional_ghost_pass else 0)
     )
 
 
@@ -1009,25 +1863,32 @@ def evaluate_genome(genome: Genome, dataset: dict[str, Any], *, folds: int,
             y_fit = np.asarray([row["target"] for row in fit], dtype=np.int8)
             asset_counts = Counter(str(row["asset"]) for row in fit)
             class_counts = Counter(int(row["target"]) for row in fit)
-            half_life_seconds = max(1.0, genome.recency_half_life_days * 86400)
-            weights = np.asarray([
-                (1.0 / asset_counts[str(row["asset"])])
-                * ((1.0 / class_counts[int(row["target"])])
-                   if genome.learner_kind not in {
-                       "regressor", "decomposed_regressor", "regime_regressor",
-                       "regime_decomposed_regressor",
-                   } else 1.0)
-                * math.exp(-math.log(2) * (fit_stop - float(row["timestamp"]))
-                           / half_life_seconds)
-                for row in fit
-            ], dtype=np.float64)
-            weights *= len(weights) / max(weights.sum(), 1e-12)
-            if genome.learner_kind in {
-                "regressor", "decomposed_regressor", "regime_regressor",
-                "regime_decomposed_regressor",
-            }:
+            def causal_weights(half_life_days: float) -> np.ndarray:
+                half_life_seconds = max(1.0, half_life_days * 86400)
+                result = np.asarray([
+                    (1.0 / asset_counts[str(row["asset"])])
+                    * ((1.0 / class_counts[int(row["target"])])
+                       if genome.learner_kind not in RETURN_LEARNER_KINDS else 1.0)
+                    * math.exp(-math.log(2) * (fit_stop - float(row["timestamp"]))
+                               / half_life_seconds)
+                    for row in fit
+                ], dtype=np.float64)
+                result *= len(result) / max(result.sum(), 1e-12)
+                return result
+
+            weights = causal_weights(genome.recency_half_life_days)
+            if genome.learner_kind in RETURN_LEARNER_KINDS:
                 raw_model = new_return_regressor(genome, 1700 + fold)
-                if genome.learner_kind == "decomposed_regressor":
+                if genome.learner_kind == "multiscale_regressor":
+                    raw_model = fit_multiscale_regressor(
+                        genome, x_fit,
+                        np.asarray([row["return"] for row in fit], dtype=np.float64),
+                        causal_weights(genome.recency_half_life_days / 3.0),
+                        causal_weights(genome.recency_half_life_days * 3.0),
+                        1700 + fold,
+                    )
+                    model = Surrogate(raw_model, "multiscale_regressor")
+                elif genome.learner_kind == "decomposed_regressor":
                     market_target, residual_target = decompose_returns(fit)
                     decomposed = fit_decomposed_regressor(
                         genome, x_fit, market_target, residual_target, weights, 1700 + fold,
@@ -1069,30 +1930,114 @@ def evaluate_genome(genome: Genome, dataset: dict[str, Any], *, folds: int,
                     l2_regularization=genome.l2_regularization, random_state=1700 + fold,
                 ).fit(x_fit, y_fit, sample_weight=weights)
                 model = Surrogate(raw_model, "classifier")
-            x_cal = np.asarray([feature_vector(row, genome) for row in calibration], dtype=np.float32)
-            if genome.learner_kind in {
-                "regressor", "decomposed_regressor", "regime_regressor",
-                "regime_decomposed_regressor",
-            }:
-                calibration_scores = model.raw_score(x_cal)
-                calibration_labels = np.asarray(
-                    [row["target"] for row in calibration], dtype=np.int8
-                )
+            reliability_active = (
+                genome.calibration_reliability
+                and genome.calibration_reliability_version >= 1
+                and len(calibration) >= 120
+            )
+            if reliability_active:
+                calibration_split = max(80, int(len(calibration) * 2 / 3))
+                calibration_fit = calibration[:calibration_split]
+                calibration_threshold = calibration[calibration_split:]
+            else:
+                calibration_fit = calibration
+                calibration_threshold = calibration
+            x_cal_fit = np.asarray(
+                [feature_vector(row, genome) for row in calibration_fit],
+                dtype=np.float32,
+            )
+            calibration_fit_labels = np.asarray(
+                [row["target"] for row in calibration_fit], dtype=np.int8
+            )
+            if genome.learner_kind in RETURN_LEARNER_KINDS:
+                if genome.learner_kind == "multiscale_regressor":
+                    raw_model.tune(x_cal_fit, calibration_fit_labels)
+                calibration_scores = model.raw_score(x_cal_fit)
                 model.score_scale = regression_probability_scale(
-                    calibration_scores, calibration_labels
+                    calibration_scores, calibration_fit_labels
                 ) * genome.calibration_safety
-            cal_probability = model.probability(x_cal)
-            cal_confidence = np.maximum(cal_probability, 1 - cal_probability)
+            reliability_fitted = False
+            if reliability_active:
+                reliability_feature_names = RELIABILITY_FEATURE_POOLS.get(
+                    genome.calibration_reliability_pool, RELIABILITY_FEATURES
+                )
+                reliability_indices = [
+                    genome.features.index(name)
+                    for name in reliability_feature_names if name in genome.features
+                ]
+                reliability_fitted = model.fit_reliability(
+                    x_cal_fit, calibration_fit_labels, reliability_indices,
+                    genome.calibration_reliability_version,
+                    genome.calibration_reliability_decay,
+                )
+            x_cal_threshold = np.asarray(
+                [feature_vector(row, genome) for row in calibration_threshold],
+                dtype=np.float32,
+            )
+            if reliability_fitted and genome.calibration_reliability_version >= 8:
+                model.tune_reliability_orientation(
+                    x_cal_threshold,
+                    np.asarray(
+                        [row["target"] for row in calibration_threshold],
+                        dtype=np.int8,
+                    ),
+                )
+            cal_probability = model.probability(x_cal_threshold)
+            cal_confidence = model.selection_confidence(x_cal_threshold)
             threshold = float(np.quantile(cal_confidence, genome.confidence_quantile))
+            competence = discover_competence_envelope(
+                model, calibration_threshold, genome, threshold, cost_bps
+            )
+            conditions = competence["conditions"]
             fold_result = {
                 "fold": fold, "cutoff": cutoff, "fit_rows": len(fit),
-                "calibration_rows": len(calibration), "confidence_threshold": threshold,
+                "calibration_rows": len(calibration_threshold),
+                "calibration_fit_rows": len(calibration_fit),
+                "confidence_threshold": threshold,
+                "multiscale_calibration": ({
+                    "orientation_enabled": genome.calibration_orientation,
+                    "direction": float(raw_model.direction),
+                    "short_weight": float(raw_model.short_weight),
+                    "reliability_enabled": genome.calibration_reliability,
+                    "reliability_version": genome.calibration_reliability_version,
+                    "reliability_pool": genome.calibration_reliability_pool,
+                    "reliability_decay": genome.calibration_reliability_decay,
+                    "reliability_direction": model.reliability_direction,
+                    "reliability_model": (
+                        "recency_weighted_extra_trees"
+                        if genome.calibration_reliability_version >= 5
+                        else "nonlinear_extra_trees"
+                        if genome.calibration_reliability_version >= 2
+                        else "linear_logistic"
+                    ) if reliability_fitted else None,
+                    "reliability_fitted": reliability_fitted,
+                } if genome.learner_kind == "multiscale_regressor" else {}),
+                "calibration_model": evaluate_slice(
+                    model, calibration_threshold, genome, threshold, cost_bps
+                ),
                 "known_asset_future": evaluate_slice(model, known, genome, threshold, cost_bps),
                 "unseen_asset_future": evaluate_slice(model, unseen, genome, threshold, cost_bps),
+                "competence_envelope": competence,
+                "conditional_ghost_known": evaluate_slice(
+                    model, known, genome, threshold, cost_bps, conditions
+                ) if conditions else {},
+                "conditional_ghost_unseen": evaluate_slice(
+                    model, unseen, genome, threshold, cost_bps, conditions
+                ) if conditions else {},
             }
             fold_results.append(fold_result)
-            if not all(passes_prescreen(fold_result[name])
-                       for name in ("known_asset_future", "unseen_asset_future")):
+            broad_prescreen_pass = all(
+                passes_prescreen(fold_result[name])
+                for name in ("known_asset_future", "unseen_asset_future")
+            )
+            conditional_prescreen_pass = bool(conditions) and all(
+                competence_passes(fold_result[name])
+                for name in ("conditional_ghost_known", "conditional_ghost_unseen")
+            )
+            # A globally weak model may still contain a repeatable local edge.
+            # Let that evidence earn later protected folds, but never let it
+            # satisfy the broad floor or live admission contract.
+            if not broad_prescreen_pass and not conditional_prescreen_pass:
                 break
         sections = [fold_result[name] for fold_result in fold_results
                     for name in ("known_asset_future", "unseen_asset_future")]
@@ -1106,6 +2051,17 @@ def evaluate_genome(genome: Genome, dataset: dict[str, Any], *, folds: int,
         max_ece = max(section.get("ece", 1) for section in sections)
         max_drawdown = max(section.get("max_portfolio_drawdown", 1) for section in sections)
         min_observations = min(section.get("acted_observations", 0) for section in sections)
+        ghost_sections = [fold_result[name] for fold_result in fold_results
+                          for name in ("conditional_ghost_known", "conditional_ghost_unseen")
+                          if fold_result.get(name)]
+        conditional_ghost_pass = (
+            len(fold_results) == folds and len(ghost_sections) == folds * 2
+            and all(competence_passes(section) for section in ghost_sections)
+        )
+        conditional_ghost_accuracy = (
+            min(section.get("directional_accuracy", 0) for section in ghost_sections)
+            if ghost_sections else 0.0
+        )
         evaluated_all_folds = len(fold_results) == folds
         passed = evaluated_all_folds and all(passes_floor(section) for section in sections)
         # Fitness is a curriculum coordinate, never an admission shortcut.
@@ -1113,18 +2069,15 @@ def evaluate_genome(genome: Genome, dataset: dict[str, Any], *, folds: int,
         # earlier regime's prescreen and must outrank a one-fold specialist.
         # Within the same stage, emphasize the directional evidence currently
         # blocking progress while retaining smaller economic/risk pressure.
-        genome.fitness = (
-            1000 * (len(fold_results) - 1)
-            + 500 * min_accuracy
-            + 150 * min_balanced
-            + 100 * min_mcc
-            + 30 * min_margin
-            + 10 * min(min_profit, 2.0)
-            + 100 * min(0.01, max(-0.01, min_expectancy))
-            - 5 * max_ece
-            - 2 * max_drawdown
-            - max(0, FLOOR["coverage"] - min_coverage) * 20
-            - max(0, FLOOR["observations"] - min_observations) / 50
+        genome.fitness = curriculum_fitness(
+            fold_count=len(fold_results), min_accuracy=min_accuracy,
+            min_balanced=min_balanced, min_mcc=min_mcc,
+            min_margin=min_margin, min_coverage=min_coverage,
+            min_observations=min_observations, min_expectancy=min_expectancy,
+            min_profit=min_profit, max_ece=max_ece,
+            max_drawdown=max_drawdown,
+            conditional_ghost_pass=conditional_ghost_pass,
+            conditional_ghost_accuracy=conditional_ghost_accuracy,
         )
         working_target = (
             passed and min_accuracy >= WORKING_TARGET["accuracy"]
@@ -1151,6 +2104,9 @@ def evaluate_genome(genome: Genome, dataset: dict[str, Any], *, folds: int,
                 "max_ece": max_ece, "max_drawdown": max_drawdown,
                 "all_surrogate_floor_gates": passed,
                 "surrogate_working_target": working_target,
+                "conditional_ghost_pass": conditional_ghost_pass,
+                "conditional_ghost_min_accuracy": conditional_ghost_accuracy,
+                "conditional_ghost_sections": len(ghost_sections),
             },
             "elapsed_seconds": time.perf_counter() - started,
         }
@@ -1166,6 +2122,7 @@ def mutate(parent: Genome, generation: int, rng: random.Random) -> Genome:
     programs = [dict(program) for program in parent.feature_programs]
     universe = list(BASE_FEATURES) + list(DERIVED_FEATURES)
     pool_thresholds = dict(parent.pool_thresholds)
+    emergent_pools = [dict(pool) for pool in parent.emergent_pools]
     if rng.random() < .55:
         pool_name = rng.choice(EVOLVABLE_POOL_NAMES)
         current = pool_thresholds.get(pool_name, parent.concept_threshold)
@@ -1192,6 +2149,27 @@ def mutate(parent: Genome, generation: int, rng: random.Random) -> Genome:
             else:
                 changed[field_name] = float(changed[field_name]) * math.exp(rng.gauss(0, .35))
             programs[index] = normalize_program(changed)
+    active_sources = sorted(set(features) | {
+        program_name(program) for program in programs
+    })
+    topology_action = rng.random()
+    if topology_action < .50 and active_sources and len(emergent_pools) < MAX_EMERGENT_POOLS:
+        width = min(len(active_sources), rng.choices((1, 2, 3, 4), (5, 3, 1, 1))[0])
+        emergent_pools.append({
+            "features": rng.sample(active_sources, width),
+            "concept_threshold": rng.randint(3, 8),
+        })
+    elif topology_action < .68 and emergent_pools:
+        emergent_pools.pop(rng.randrange(len(emergent_pools)))
+    elif topology_action < .88 and emergent_pools:
+        index = rng.randrange(len(emergent_pools))
+        changed_pool = dict(emergent_pools[index])
+        changed_pool["concept_threshold"] = (
+            int(changed_pool.get("concept_threshold", 5)) + rng.choice((-1, 1))
+        )
+        if active_sources and rng.random() < .5:
+            changed_pool["features"] = [rng.choice(active_sources)]
+        emergent_pools[index] = changed_pool
     child = Genome(
         features=sorted(features),
         learning_rate=min(.20, max(.01, parent.learning_rate * math.exp(rng.gauss(0, .22)))),
@@ -1216,6 +2194,7 @@ def mutate(parent: Genome, generation: int, rng: random.Random) -> Genome:
                                         if ((horizon in parent.training_horizons)
                                             != (rng.random() < .12)))}),
         pool_thresholds=pool_thresholds,
+        emergent_pools=emergent_pools,
         calibration_safety=min(12.0, max(
             1.0, parent.calibration_safety * math.exp(rng.gauss(0, .25))
         )),
@@ -1237,6 +2216,14 @@ def crossover(left: Genome, right: Genome, generation: int, rng: random.Random) 
     }
     inherited_programs = [program for _, program in sorted(program_by_name.items())
                           if rng.random() < .6][:10]
+    pool_by_sources = {
+        tuple(pool.get("features", [])): pool
+        for pool in left.emergent_pools + right.emergent_pools
+    }
+    inherited_pools = [
+        dict(pool) for _, pool in sorted(pool_by_sources.items())
+        if rng.random() < .6
+    ][:MAX_EMERGENT_POOLS]
     child = Genome(
         features=sorted(features), learning_rate=choose(left.learning_rate, right.learning_rate),
         max_iter=choose(left.max_iter, right.max_iter),
@@ -1262,6 +2249,7 @@ def crossover(left: Genome, right: Genome, generation: int, rng: random.Random) 
                          right.pool_thresholds.get(name, right.concept_threshold))
             for name in EVOLVABLE_POOL_NAMES
         },
+        emergent_pools=inherited_pools,
         calibration_safety=choose(left.calibration_safety, right.calibration_safety),
         generation=generation, parents=[left.genome_id, right.genome_id],
     ).finalize()
@@ -1278,19 +2266,36 @@ def genome_from_dict(payload: dict[str, Any]) -> Genome:
     compatible.setdefault("regime_bins", 1)
     compatible.setdefault("training_horizons", [12])
     compatible.setdefault("pool_thresholds", {})
+    compatible.setdefault("emergent_pools", [])
     compatible.setdefault("calibration_safety", 1.0)
     return Genome(**compatible)
 
 
-def introduce_missing_learner_species(population: list[Genome], generation: int,
-                                      rng: random.Random) -> list[Genome]:
+def introduce_missing_learner_species(
+    population: list[Genome], generation: int, rng: random.Random,
+    protected_parent_ids: set[str] | None = None,
+) -> list[Genome]:
     """Guarantee architecture upgrades enter a resumed population immediately."""
     learners = LEARNER_KINDS
     present = {genome.learner_kind for genome in population}
     if not population:
         return population
     base = population[0]
-    for offset, learner in enumerate(kind for kind in learners if kind not in present):
+    protected_parent_ids = protected_parent_ids or set()
+    protected = {
+        index for index, genome in enumerate(population)
+        if bool(set(genome.parents) & protected_parent_ids)
+    }
+    replaceable = [
+        index for index in range(len(population) - 1, 0, -1)
+        if index not in protected and population[index].fitness is None
+    ]
+    replaceable.extend(
+        index for index in range(len(population) - 1, 0, -1)
+        if index not in protected and index not in replaceable
+    )
+    missing = [kind for kind in learners if kind not in present]
+    for learner, replacement_index in zip(missing, replaceable):
         payload = asdict(base)
         payload.update({
             "learner_kind": learner,
@@ -1311,7 +2316,7 @@ def introduce_missing_learner_species(population: list[Genome], generation: int,
             "genome_id": "",
         })
         replacement = Genome(**payload).finalize()
-        population[-(offset + 1)] = replacement
+        population[replacement_index] = replacement
     return population
 
 
@@ -1331,18 +2336,26 @@ def introduce_calibration_variants(population: list[Genome], generation: int) ->
     return population
 
 
-def introduce_reflexivity_variant(population: list[Genome], generation: int) -> list[Genome]:
+def introduce_reflexivity_variant(
+    population: list[Genome], generation: int,
+    protected_parent_ids: set[str] | None = None,
+) -> list[Genome]:
     """Seed the new participant-state pool without making it globally mandatory."""
     if not population or any(set(genome.features) & REFLEXIVITY_FEATURES
                              for genome in population):
         return population
     base = population[0]
+    protected_parent_ids = protected_parent_ids or set()
     counts = Counter(genome.learner_kind for genome in population)
     replacement_index = next(
         (index for index in range(len(population) - 1, -1, -1)
-         if counts[population[index].learner_kind] > 1),
-        len(population) - 1,
+         if counts[population[index].learner_kind] > 1
+         and not (set(population[index].parents) & protected_parent_ids)),
+        next((index for index in range(len(population) - 1, 0, -1)
+              if not (set(population[index].parents) & protected_parent_ids)), None),
     )
+    if replacement_index is None:
+        return population
     payload = asdict(base)
     payload.update({
         "features": sorted(set(base.features) | REFLEXIVITY_FEATURES),
@@ -1350,6 +2363,57 @@ def introduce_reflexivity_variant(population: list[Genome], generation: int) -> 
         "fitness": None, "result": None, "genome_id": "",
     })
     population[replacement_index] = Genome(**payload).finalize()
+    return population
+
+
+def introduce_emergent_pool_variant(
+    population: list[Genome], generation: int, rng: random.Random,
+    protected_parent_ids: set[str] | None = None,
+) -> list[Genome]:
+    """Ensure a resumed population immediately tests mutable pool topology."""
+    if not population or any(genome.emergent_pools for genome in population):
+        return population
+    base = next((genome for genome in population if genome.feature_programs), population[0])
+    pool = random_emergent_pool(base, rng)
+    if pool is None:
+        return population
+    protected_parent_ids = protected_parent_ids or set()
+    counts = Counter(genome.learner_kind for genome in population)
+    replacement_index = next(
+        (index for index in range(len(population) - 1, -1, -1)
+         if counts[population[index].learner_kind] > 1
+         and not (set(population[index].parents) & protected_parent_ids)),
+        next((index for index in range(len(population) - 1, 0, -1)
+              if not (set(population[index].parents) & protected_parent_ids)), None),
+    )
+    if replacement_index is None:
+        return population
+    payload = asdict(base)
+    payload.update({
+        "emergent_pools": [pool], "generation": generation,
+        "parents": [base.genome_id], "fitness": None, "result": None,
+        "genome_id": "",
+    })
+    population[replacement_index] = Genome(**payload).finalize()
+    return population
+
+
+def preserve_emergent_pool_elite(
+    population: list[Genome], evaluated: Sequence[Genome],
+) -> list[Genome]:
+    """Retain one topology species until neural evidence can judge its pools."""
+    if not population or any(genome.emergent_pools for genome in population):
+        return population
+    specialist = next((genome for genome in evaluated if genome.emergent_pools), None)
+    if specialist is None:
+        return population
+    counts = Counter(genome.learner_kind for genome in population)
+    replacement_index = next(
+        (index for index in range(len(population) - 1, 0, -1)
+         if counts[population[index].learner_kind] > 1),
+        len(population) - 1,
+    )
+    population[replacement_index] = genome_from_dict(asdict(specialist)).finalize()
     return population
 
 
@@ -1417,16 +2481,101 @@ def select_diverse_elites(population: Sequence[Genome], count: int,
     return selected
 
 
+def elite_budget(population_size: int) -> int:
+    """Bound survivors so evolution can never retain the entire population."""
+    if population_size < 4:
+        raise ValueError("population must be at least four")
+    return min(population_size - 2, max(2, round(population_size * .40)))
+
+
+def minimum_novel_candidates(population_size: int) -> int:
+    """Minimum unevaluated hypotheses required at every generation boundary."""
+    return min(population_size - 1, max(2, math.ceil(population_size * .25)))
+
+
+def breed_population(
+    evaluated: Sequence[Genome], generation: int, rng: random.Random,
+    neural_scores: dict[str, float] | None = None,
+) -> tuple[list[Genome], dict[str, int]]:
+    """Create a full population with a hard guarantee of genuine offspring."""
+    size = len(evaluated)
+    budget = elite_budget(size)
+    elites = select_diverse_elites(evaluated, budget, neural_scores)
+    following = elites[:]
+    known_ids = {genome.genome_id for genome in following}
+    attempts = 0
+    created = 0
+    ranked = sorted(
+        evaluated, key=lambda genome: selection_fitness(genome, neural_scores),
+        reverse=True,
+    )
+    parent_pool = ranked[:max(budget * 2, 4)]
+    while len(following) < size and attempts < size * 100:
+        attempts += 1
+        left, right = rng.sample(parent_pool, 2)
+        child = crossover(left, right, generation, rng)
+        if child.genome_id in known_ids:
+            continue
+        known_ids.add(child.genome_id)
+        following.append(child)
+        created += 1
+    # Crossover can theoretically collide in a converged population. Mutated
+    # immigrants keep the service moving instead of silently becoming inert.
+    while len(following) < size and attempts < size * 300:
+        attempts += 1
+        child = mutate(rng.choice(ranked), generation, rng)
+        if child.genome_id in known_ids:
+            continue
+        known_ids.add(child.genome_id)
+        following.append(child)
+        created += 1
+    if len(following) != size or created < minimum_novel_candidates(size):
+        raise RuntimeError(
+            f"evolution invariant failed: population={size} elites={len(elites)} "
+            f"offspring={created}"
+        )
+    return following, {
+        "population": size, "elite_budget": budget,
+        "offspring_created": created, "breeding_attempts": attempts,
+    }
+
+
+def ensure_novelty(
+    population: list[Genome], generation: int, rng: random.Random,
+) -> tuple[list[Genome], int]:
+    """Repair any later transformation that accidentally consumes exploration."""
+    required = minimum_novel_candidates(len(population))
+    injected = 0
+    known_ids = {genome.genome_id for genome in population}
+    attempts = 0
+    while sum(genome.fitness is None for genome in population) < required:
+        attempts += 1
+        if attempts > len(population) * 100:
+            raise RuntimeError("unable to restore minimum evolutionary novelty")
+        replaceable = [
+            index for index, genome in enumerate(population)
+            if index > 0 and genome.fitness is not None
+        ]
+        if not replaceable:
+            raise RuntimeError("no replaceable evaluated genome for novelty repair")
+        child = mutate(rng.choice(population), generation, rng)
+        if child.genome_id in known_ids:
+            continue
+        index = replaceable[-1]
+        known_ids.discard(population[index].genome_id)
+        population[index] = child
+        known_ids.add(child.genome_id)
+        injected += 1
+    return population, injected
+
+
 def introduce_directional_frontier_variants(
     population: list[Genome], evaluated: Sequence[Genome], generation: int,
 ) -> list[Genome]:
     """Preserve useful signs while testing materially safer confidence scales."""
     frontier = [
         genome for genome in evaluated
-        if genome.learner_kind in {
-            "regressor", "decomposed_regressor", "regime_regressor",
-            "regime_decomposed_regressor",
-        }
+        if genome.learner_kind in RETURN_LEARNER_KINDS
         and (genome.result or {}).get("summary", {}).get(
             "min_accuracy", 0
         ) >= PRESCREEN["accuracy"]
@@ -1461,6 +2610,1003 @@ def introduce_directional_frontier_variants(
     if variants:
         population[-len(variants):] = variants
     return population
+
+
+def introduce_coverage_repair_variants(
+    population: list[Genome], evaluated: Sequence[Genome], generation: int,
+    reversal_frontier: Genome | None = None,
+    multiscale_frontier: Genome | None = None,
+    multiscale_reversal_frontier: Genome | None = None,
+    multiscale_boundary_frontier: Genome | None = None,
+) -> list[Genome]:
+    """Expand the action envelope of accurate but over-selective lineages."""
+    frontier = [
+        genome for genome in evaluated
+        if (genome.result or {}).get("summary", {}).get("min_accuracy", 0) >= .56
+        and (genome.result or {}).get("summary", {}).get("min_balanced_accuracy", 0) >= .52
+        and (genome.result or {}).get("summary", {}).get("min_coverage", 1)
+        < PRESCREEN["coverage"]
+    ]
+    if not frontier or len(population) < 4:
+        return population
+    base = max(frontier, key=lambda genome: (
+        coverage_frontier_rank(genome) or (-math.inf,)
+    ))
+    if multiscale_frontier_rank(multiscale_frontier) is not None:
+        # Preserve the high-accuracy architecture as a separate research
+        # lineage even when the primary frontier is closer to the coverage
+        # gate. Its own descendants must earn coverage independently.
+        base = multiscale_frontier
+        reversal_frontier = multiscale_reversal_frontier
+    if multiscale_boundary_rank(multiscale_boundary_frontier) is not None:
+        # A boundary may be directionally strong yet not economically
+        # promotable. Use it only to localize the threshold discontinuity;
+        # the independent multiscale frontier remains the quality record.
+        base = multiscale_boundary_frontier
+        reversal_frontier = multiscale_reversal_frontier
+    known = {genome.genome_id for genome in population}
+    variants: list[Genome] = []
+    summary = (base.result or {}).get("summary", {})
+    failed_margin_children = [
+        genome for genome in evaluated
+        if base.genome_id in genome.parents
+        and genome_structure_key(genome) != genome_structure_key(base)
+        and int((genome.result or {}).get("evaluated_folds", 0)) >= 2
+        and (
+            float((genome.result or {}).get("summary", {}).get(
+                "min_accuracy", 1
+            )) < .50
+            # Mature reliability descendants carry protected search memory
+            # even when they remove the anti-signal and land exactly at the
+            # neutral boundary. Excluding == .50 caused cached repeats rather
+            # than the intended pool/threshold bracket progression.
+            or genome.calibration_reliability_version >= 6
+        )
+    ]
+    narrow_reversal_bracket = False
+    if (reversal_frontier is not None
+            and reversal_frontier.confidence_quantile < base.confidence_quantile
+            and genome_structure_key(reversal_frontier) == genome_structure_key(base)):
+        # We have a causal bracket: the upper endpoint preserves the edge but
+        # misses coverage, while the lower endpoint crosses coverage and
+        # reveals a protected-fold reversal. Bisect rather than repeat either.
+        low = reversal_frontier.confidence_quantile
+        high = base.confidence_quantile
+        narrow_reversal_bracket = high - low <= .002
+        if narrow_reversal_bracket:
+            # Threshold search has localized a discontinuity closely enough
+            # that another scalar bisection is not informative.  Cross the
+            # boundary deliberately and alter only causal feature ordering so
+            # protected fold 2 can tell us which interaction generalizes.
+            quantiles = (low, low)
+        else:
+            midpoint = (low + high) / 2
+            quantiles = (midpoint, (midpoint + high) / 2)
+    else:
+        coverage_gap = max(.001, PRESCREEN["coverage"] - float(
+            summary.get("min_coverage", 0)
+        ))
+        # Before a bracket exists, scale movement to the measured deficit.
+        phase_scale = (.5, .75, 1.0)[generation % 3]
+        offsets = (
+            max(.0025, coverage_gap * 1.5) * phase_scale,
+            max(.005, coverage_gap * 3.0) * phase_scale,
+        )
+        quantiles = (
+            base.confidence_quantile - offsets[0],
+            base.confidence_quantile - offsets[1],
+        )
+    margin_templates = (
+        {"op": "tanh_mix", "left": "asset_news_sentiment_acceleration",
+         "right": "flow_divergence", "scale": 1.0},
+        {"op": "signed_sqrt_product", "left": "market_breadth_r6",
+         "right": "relative_market_r6", "scale": 1.0},
+        {"op": "regime_gate", "left": "news_negative_share_24h",
+         "right": "volatility_ratio", "scale": 1.0},
+        {"op": "abs_gap", "left": "futures_spot_basis",
+         "right": "flow_imbalance", "scale": 1.0},
+    )
+    for variant_index, quantile in enumerate(quantiles):
+        payload = asdict(base)
+        if narrow_reversal_bracket and len(failed_margin_children) >= 2:
+            # Independent interaction probes failed to change the temporal
+            # reversal. Escalate architecture while retaining the successful
+            # feature core: blend short and long causal memory, with the blend
+            # selected only on each fold's calibration period.
+            payload["learner_kind"] = "multiscale_regressor"
+            if base.learner_kind == "multiscale_regressor":
+                attempted_scales = {
+                    round(
+                        child.recency_half_life_days
+                        / max(1.0, base.recency_half_life_days),
+                        6,
+                    )
+                    for child in failed_margin_children
+                    if child.learner_kind == "multiscale_regressor"
+                    and child.feature_programs == base.feature_programs
+                    and not child.calibration_orientation
+                    and not child.calibration_reliability
+                }
+                no_flip_oriented = [
+                    child for child in failed_margin_children
+                    if child.learner_kind == "multiscale_regressor"
+                    and child.feature_programs == base.feature_programs
+                    and child.calibration_orientation
+                    and (child.result or {}).get("folds")
+                    and all(
+                        float(fold.get("multiscale_calibration", {}).get(
+                            "direction", 1.0
+                        )) > 0
+                        for fold in (child.result or {}).get("folds", [])
+                    )
+                ]
+                if len(no_flip_oriented) >= 2:
+                    reliability_failures = {
+                        version: [
+                            child for child in failed_margin_children
+                            if child.learner_kind == "multiscale_regressor"
+                            and child.feature_programs == base.feature_programs
+                            and child.calibration_reliability
+                            and child.calibration_reliability_version == version
+                            and child.fitness is not None
+                        ]
+                        for version in (1, 2, 3, 4, 5)
+                    }
+                    # A paired linear failure is evidence that WHEN/WHY
+                    # correctness is interaction-shaped, not that reliability
+                    # ranking itself should be abandoned.
+                    reliability_version = 1
+                    for completed_version in (1, 2, 3, 4, 5):
+                        if len(reliability_failures[completed_version]) >= 2:
+                            reliability_version = completed_version + 1
+                        else:
+                            break
+                    version_six_evidence = [
+                        child for child in failed_margin_children
+                        if child.learner_kind == "multiscale_regressor"
+                        and child.feature_programs == base.feature_programs
+                        and child.calibration_reliability_version == 6
+                        and child.fitness is not None
+                    ]
+                    if reliability_version == 6 and len(version_six_evidence) >= 8:
+                        reliability_version = 7
+                    version_seven_evidence = [
+                        child for child in failed_margin_children
+                        if child.learner_kind == "multiscale_regressor"
+                        and child.feature_programs == base.feature_programs
+                        and child.calibration_reliability_version == 7
+                        and child.fitness is not None
+                    ]
+                    if reliability_version == 7 and len(version_seven_evidence) >= 2:
+                        reliability_version = 8
+                    reliability_scales = {
+                        round(
+                            child.recency_half_life_days
+                            / max(1.0, base.recency_half_life_days),
+                            6,
+                        )
+                        for child in failed_margin_children
+                        if child.learner_kind == "multiscale_regressor"
+                        and child.feature_programs == base.feature_programs
+                        and child.calibration_reliability
+                        and child.calibration_reliability_version == reliability_version
+                    }
+                    reliability_schedule = (1.0, .5, 2.0, .25, 4.0, .125, 8.0)
+                    minimum_scale = 14.0 / max(14.0, base.recency_half_life_days)
+                    maximum_scale = 2200.0 / max(14.0, base.recency_half_life_days)
+                    scheduled = list(dict.fromkeys(
+                        round(min(maximum_scale, max(minimum_scale, scale)), 6)
+                        for scale in reliability_schedule
+                    ))
+                    remaining = [scale for scale in scheduled
+                                 if scale not in reliability_scales]
+                    # Once the coarse schedule is exhausted, bisect its
+                    # largest untested memory gaps. This keeps the perpetual
+                    # loop novel and prevents an empty two-candidate batch.
+                    while len(remaining) < 2:
+                        anchors = sorted({
+                            round(minimum_scale, 6), round(maximum_scale, 6),
+                            *reliability_scales, *remaining,
+                        })
+                        gaps = sorted(
+                            ((right - left, left, right)
+                             for left, right in zip(anchors, anchors[1:])),
+                            reverse=True,
+                        )
+                        added = False
+                        for _, left, right in gaps:
+                            midpoint = round((left + right) / 2.0, 6)
+                            if midpoint not in reliability_scales and midpoint not in remaining:
+                                remaining.append(midpoint)
+                                added = True
+                                break
+                        if not added:
+                            break
+                    if len(remaining) < 2:
+                        remaining.extend([remaining[0] if remaining else 1.0] * 2)
+                    memory_scales = tuple(remaining[:2])
+                    payload["calibration_orientation"] = False
+                    payload["calibration_reliability"] = True
+                    payload["calibration_reliability_version"] = reliability_version
+                    if reliability_version == 6:
+                        remaining_decays = next_reliability_decays(
+                            version_six_evidence
+                        )
+                        # Hold memory at the empirically strongest short-memory
+                        # boundary (78 days for the current 313-day parent) so
+                        # the two candidates isolate decay rather than confound
+                        # decay with memory again.
+                        memory_scales = (.25, .25)
+                        payload["calibration_reliability_decay"] = (
+                            remaining_decays[variant_index]
+                        )
+                    elif reliability_version >= 7:
+                        best_decay = max(
+                            version_six_evidence, key=reliability_evidence_rank
+                        )
+                        best_scale = (
+                            best_decay.recency_half_life_days
+                            / max(1.0, base.recency_half_life_days)
+                        )
+                        memory_scales = (best_scale, best_scale)
+                        payload["calibration_reliability_decay"] = (
+                            best_decay.calibration_reliability_decay
+                        )
+                        if reliability_version == 7:
+                            quantile = next_reliability_quantiles(
+                                version_seven_evidence,
+                                best_decay.confidence_quantile,
+                            )[variant_index]
+                        else:
+                            version_eight_evidence = [
+                                child for child in failed_margin_children
+                                if child.learner_kind == "multiscale_regressor"
+                                and child.feature_programs == base.feature_programs
+                                and child.calibration_reliability_version == 8
+                                and child.fitness is not None
+                            ]
+                            reliability_pool, quantile = (
+                                next_oriented_reliability_variants(
+                                    version_eight_evidence,
+                                    best_decay.confidence_quantile,
+                                )[variant_index]
+                            )
+                            payload["calibration_reliability_pool"] = reliability_pool
+                    elif reliability_version >= 5:
+                        payload["calibration_reliability_decay"] = 2.0
+                    else:
+                        payload["calibration_reliability_decay"] = 0.0
+                    if reliability_version == 3:
+                        payload["calibration_reliability_pool"] = (
+                            "trend_regime" if variant_index == 0 else "flow_news"
+                        )
+                    elif reliability_version == 4:
+                        payload["calibration_reliability_pool"] = "combined"
+                    elif reliability_version >= 8:
+                        # Assigned by the orientation-aware pool/quantile
+                        # scheduler above.
+                        pass
+                    elif reliability_version >= 5:
+                        payload["calibration_reliability_pool"] = "flow_news"
+                    else:
+                        payload["calibration_reliability_pool"] = "core"
+                elif len(attempted_scales) >= 4:
+                    oriented_scales = {
+                        round(
+                            child.recency_half_life_days
+                            / max(1.0, base.recency_half_life_days),
+                            6,
+                        )
+                        for child in failed_margin_children
+                        if child.learner_kind == "multiscale_regressor"
+                        and child.feature_programs == base.feature_programs
+                        and child.calibration_orientation
+                        and not child.calibration_reliability
+                    }
+                    orientation_schedule = (1.0, .5, 2.0, .25, 4.0, .125, 8.0)
+                    remaining = [
+                        scale for scale in orientation_schedule
+                        if round(scale, 6) not in oriented_scales
+                    ]
+                    if len(remaining) >= 2:
+                        memory_scales = tuple(remaining[:2])
+                        payload["calibration_orientation"] = True
+                    else:
+                        shortest = min({1.0, *attempted_scales})
+                        longest = max({1.0, *attempted_scales})
+                        memory_scales = (shortest / 2.0, longest * 2.0)
+                else:
+                    shortest = min({1.0, *attempted_scales})
+                    longest = max({1.0, *attempted_scales})
+                    # Each failed pair widens the causal-memory search instead
+                    # of regenerating an already disproven phenotype.
+                    memory_scales = (shortest / 2.0, longest * 2.0)
+                memory_scales = tuple(
+                    min(2200.0 / max(14.0, base.recency_half_life_days),
+                        max(14.0 / max(14.0, base.recency_half_life_days), scale))
+                    for scale in memory_scales
+                )
+            else:
+                memory_scales = (1.0, 2.0)
+            payload["recency_half_life_days"] = min(
+                2200.0,
+                max(14.0, base.recency_half_life_days * memory_scales[variant_index]),
+            )
+        elif narrow_reversal_bracket:
+            template = normalize_program(margin_templates[
+                # Test disjoint pairs on adjacent generations.  The +2 keeps
+                # an already-running even generation's (2, 3) evidence from
+                # being repeated immediately after this upgrade.
+                (generation * 2 + 2 + variant_index) % len(margin_templates)
+            ])
+            programs = [dict(program) for program in base.feature_programs]
+            template_key = program_name(template)
+            programs = [
+                program for program in programs
+                if program_name(program) != template_key
+            ]
+            programs.append(template)
+            payload["feature_programs"] = programs[-10:]
+            payload["features"] = sorted(
+                set(base.features) | {template["left"], template["right"]}
+            )
+        payload.update({
+            "confidence_quantile": max(0.0, min(.30, quantile)),
+            "calibration_safety": base.calibration_safety,
+            "generation": generation, "parents": [base.genome_id],
+            "fitness": None, "result": None, "genome_id": "",
+        })
+        variant = Genome(**payload).finalize()
+        if variant.genome_id not in known:
+            known.add(variant.genome_id)
+            variants.append(variant)
+    if variants:
+        # Pool genes are heritable and can become ubiquitous. Reserve one
+        # fresh pool topology without allowing that ubiquity to block every
+        # targeted coverage repair slot.
+        emergent_novel = next((
+            index for index, genome in enumerate(population)
+            if index > 0 and genome.fitness is None and genome.emergent_pools
+        ), None)
+        protected = ({emergent_novel} if emergent_novel is not None else set())
+        replaceable = [
+            index for index in range(len(population) - 1, 0, -1)
+            if index not in protected and population[index].fitness is None
+        ]
+        if len(replaceable) < len(variants):
+            replaceable.extend(
+                index for index in range(len(population) - 1, 0, -1)
+                if index not in protected and index not in replaceable
+            )
+        for index, variant in zip(replaceable, variants):
+            population[index] = variant
+    return population
+
+
+def introduce_extra_trees_coverage_variant(
+    population: list[Genome], frontier: Genome | None, generation: int,
+    reversal_frontier: Genome | None = None,
+    protected_parent_ids: set[str] | None = None,
+) -> list[Genome]:
+    """Spend one slot expanding a strong nonlinear tree specialist."""
+    if extra_trees_frontier_rank(frontier) is None:
+        return population
+    if (reversal_frontier is not None
+            and reversal_frontier.confidence_quantile < frontier.confidence_quantile
+            and genome_structure_key(reversal_frontier) == genome_structure_key(frontier)):
+        quantile = (
+            reversal_frontier.confidence_quantile + frontier.confidence_quantile
+        ) / 2.0
+    else:
+        coverage = float((frontier.result or {}).get("summary", {}).get(
+            "min_coverage", 0
+        ))
+        coverage_gap = max(.001, PRESCREEN["coverage"] - coverage)
+        phase = (.75, 1.0, 1.25)[generation % 3]
+        offset = min(.06, max(.01, coverage_gap * .25)) * phase
+        quantile = frontier.confidence_quantile - offset
+    payload = asdict(frontier)
+    payload.update({
+        "confidence_quantile": max(0.0, min(.30, quantile)),
+        "generation": generation, "parents": [frontier.genome_id],
+        "fitness": None, "result": None, "genome_id": "",
+    })
+    variant = Genome(**payload).finalize()
+    if variant.genome_id in {genome.genome_id for genome in population}:
+        return population
+    protected_parent_ids = protected_parent_ids or set()
+    replacement = next((
+        index for index in range(len(population) - 1, 0, -1)
+        if population[index].fitness is None
+        and not (set(population[index].parents) & protected_parent_ids)
+    ), None)
+    if replacement is None:
+        return population
+    population[replacement] = variant
+    return population
+
+
+def coverage_frontier_rank(genome: Genome) -> tuple[float, ...] | None:
+    """Rank near-coverage misses without discarding profitable accuracy.
+
+    The earlier coverage-first ordering forgot a 63.6%-accurate, positive-
+    expectancy lineage in favor of a 62.3%-accurate negative-expectancy one.
+    Economics and directional strength now lead; adaptive repair handles the
+    remaining coverage distance.
+    """
+    summary = (genome.result or {}).get("summary", {})
+    accuracy = float(summary.get("min_accuracy", 0))
+    balanced = float(summary.get("min_balanced_accuracy", 0))
+    mcc = float(summary.get("min_mcc", -1))
+    coverage = float(summary.get("min_coverage", 0))
+    if not (accuracy >= .56 and balanced >= .52 and mcc >= .04
+            and .40 <= coverage < PRESCREEN["coverage"]):
+        return None
+    expectancy = float(summary.get("min_expectancy", -1))
+    profit = float(summary.get("min_profit_factor", 0))
+    return (
+        float(expectancy > 0 and profit >= 1.0),
+        coverage,
+        accuracy,
+        expectancy,
+        profit,
+        balanced,
+        mcc,
+        float(summary.get("min_acted_observations", 0)),
+        -float(genome.confidence_quantile),
+    )
+
+
+def multiscale_frontier_rank(genome: Genome | None) -> tuple[float, ...] | None:
+    """Rank accurate, profitable multiscale models awaiting coverage repair."""
+    if genome is None or genome.learner_kind != "multiscale_regressor":
+        return None
+    summary = (genome.result or {}).get("summary", {})
+    accuracy = float(summary.get("min_accuracy", 0))
+    balanced = float(summary.get("min_balanced_accuracy", 0))
+    mcc = float(summary.get("min_mcc", -1))
+    coverage = float(summary.get("min_coverage", 0))
+    expectancy = float(summary.get("min_expectancy", -1))
+    profit = float(summary.get("min_profit_factor", 0))
+    if not (accuracy >= .56 and balanced >= .52 and mcc >= .04
+            and .40 <= coverage < PRESCREEN["coverage"]
+            and expectancy > 0 and profit >= 1.0):
+        return None
+    return (accuracy, balanced, mcc, coverage, expectancy, profit)
+
+
+def multiscale_boundary_rank(genome: Genome | None) -> tuple[float, ...] | None:
+    """Rank the nearest accurate upper endpoint, independent of promotion."""
+    if genome is None or genome.learner_kind != "multiscale_regressor":
+        return None
+    summary = (genome.result or {}).get("summary", {})
+    accuracy = float(summary.get("min_accuracy", 0))
+    balanced = float(summary.get("min_balanced_accuracy", 0))
+    mcc = float(summary.get("min_mcc", -1))
+    coverage = float(summary.get("min_coverage", 0))
+    if not (accuracy >= .60 and balanced >= .58 and mcc >= .15
+            and .40 <= coverage < PRESCREEN["coverage"]):
+        return None
+    return (
+        coverage, accuracy, balanced, mcc,
+        float(summary.get("min_expectancy", -1)),
+        float(summary.get("min_profit_factor", 0)),
+        -float(genome.confidence_quantile),
+    )
+
+
+def extra_trees_frontier_rank(genome: Genome | None) -> tuple[float, ...] | None:
+    """Rank accurate, profitable extra-tree specialists needing coverage."""
+    if genome is None or genome.learner_kind != "extra_trees":
+        return None
+    summary = (genome.result or {}).get("summary", {})
+    accuracy = float(summary.get("min_accuracy", 0))
+    balanced = float(summary.get("min_balanced_accuracy", 0))
+    mcc = float(summary.get("min_mcc", -1))
+    coverage = float(summary.get("min_coverage", 0))
+    expectancy = float(summary.get("min_expectancy", -1))
+    profit = float(summary.get("min_profit_factor", 0))
+    if not (accuracy >= .62 and balanced >= .58 and mcc >= .15
+            and .25 <= coverage < PRESCREEN["coverage"]
+            and expectancy > 0 and profit >= 1.0):
+        return None
+    return (coverage, accuracy, balanced, mcc, expectancy, profit)
+
+
+def load_extra_trees_frontier(state_dir: Path) -> Genome | None:
+    saved = state_dir / "extra_trees_frontier.json"
+    best: Genome | None = None
+    best_rank: tuple[float, ...] | None = None
+    if saved.is_file():
+        try:
+            candidate = genome_from_dict(
+                json.loads(saved.read_text(encoding="utf-8"))["genome"]
+            )
+            best, best_rank = candidate, extra_trees_frontier_rank(candidate)
+        except (OSError, ValueError, TypeError, KeyError):
+            pass
+    for path in (state_dir / "candidates").glob("*.json"):
+        try:
+            candidate = genome_from_dict(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError, TypeError):
+            continue
+        rank = extra_trees_frontier_rank(candidate)
+        if rank is not None and (best_rank is None or rank > best_rank):
+            best, best_rank = candidate, rank
+    if best is not None:
+        atomic_json(saved, {"at": utc_now(), "rank": best_rank, "genome": asdict(best)})
+    return best
+
+
+def update_extra_trees_frontier(
+    state_dir: Path, current: Genome | None, candidate: Genome,
+) -> Genome | None:
+    candidate_rank = extra_trees_frontier_rank(candidate)
+    current_rank = extra_trees_frontier_rank(current)
+    if candidate_rank is None or (
+        current_rank is not None and candidate_rank <= current_rank
+    ):
+        return current
+    saved = genome_from_dict(asdict(candidate))
+    atomic_json(state_dir / "extra_trees_frontier.json", {
+        "at": utc_now(), "rank": candidate_rank, "genome": asdict(saved),
+    })
+    return saved
+
+
+def load_multiscale_boundary_frontier(state_dir: Path) -> Genome | None:
+    saved = state_dir / "multiscale_boundary_frontier.json"
+    best: Genome | None = None
+    best_rank: tuple[float, ...] | None = None
+    if saved.is_file():
+        try:
+            candidate = genome_from_dict(
+                json.loads(saved.read_text(encoding="utf-8"))["genome"]
+            )
+            best, best_rank = candidate, multiscale_boundary_rank(candidate)
+        except (OSError, ValueError, TypeError, KeyError):
+            pass
+    for path in (state_dir / "candidates").glob("*.json"):
+        try:
+            candidate = genome_from_dict(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError, TypeError):
+            continue
+        rank = multiscale_boundary_rank(candidate)
+        if rank is not None and (best_rank is None or rank > best_rank):
+            best, best_rank = candidate, rank
+    if best is not None:
+        atomic_json(saved, {"at": utc_now(), "rank": best_rank, "genome": asdict(best)})
+    return best
+
+
+def update_multiscale_boundary_frontier(
+    state_dir: Path, current: Genome | None, candidate: Genome,
+) -> Genome | None:
+    candidate_rank = multiscale_boundary_rank(candidate)
+    current_rank = multiscale_boundary_rank(current)
+    if candidate_rank is None or (
+        current_rank is not None and candidate_rank <= current_rank
+    ):
+        return current
+    saved = genome_from_dict(asdict(candidate))
+    atomic_json(state_dir / "multiscale_boundary_frontier.json", {
+        "at": utc_now(), "rank": candidate_rank, "genome": asdict(saved),
+    })
+    return saved
+
+
+def load_multiscale_frontier(state_dir: Path) -> Genome | None:
+    """Recover the best multiscale near-pass across population turnover."""
+    saved = state_dir / "multiscale_frontier.json"
+    best: Genome | None = None
+    best_rank: tuple[float, ...] | None = None
+    if saved.is_file():
+        try:
+            candidate = genome_from_dict(
+                json.loads(saved.read_text(encoding="utf-8"))["genome"]
+            )
+            best, best_rank = candidate, multiscale_frontier_rank(candidate)
+        except (OSError, ValueError, TypeError, KeyError):
+            pass
+    for path in (state_dir / "candidates").glob("*.json"):
+        try:
+            candidate = genome_from_dict(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError, TypeError):
+            continue
+        rank = multiscale_frontier_rank(candidate)
+        if rank is not None and (best_rank is None or rank > best_rank):
+            best, best_rank = candidate, rank
+    if best is not None:
+        atomic_json(saved, {"at": utc_now(), "rank": best_rank, "genome": asdict(best)})
+    return best
+
+
+def update_multiscale_frontier(
+    state_dir: Path, current: Genome | None, candidate: Genome,
+) -> Genome | None:
+    candidate_rank = multiscale_frontier_rank(candidate)
+    current_rank = multiscale_frontier_rank(current)
+    if candidate_rank is None or (
+        current_rank is not None and candidate_rank <= current_rank
+    ):
+        return current
+    saved = genome_from_dict(asdict(candidate))
+    atomic_json(state_dir / "multiscale_frontier.json", {
+        "at": utc_now(), "rank": candidate_rank, "genome": asdict(saved),
+    })
+    return saved
+
+
+def genome_structure_key(genome: Genome) -> str:
+    """Identify one model phenotype while ignoring lineage and action cutoff."""
+    payload = asdict(genome)
+    for key in (
+        "genome_id", "fitness", "result", "generation", "parents",
+        "confidence_quantile",
+    ):
+        payload.pop(key, None)
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def load_coverage_frontier(state_dir: Path) -> Genome | None:
+    """Recover the best near-pass so generational turnover cannot forget it."""
+    saved = state_dir / "coverage_frontier.json"
+    best: Genome | None = None
+    best_rank: tuple[float, ...] | None = None
+    if saved.is_file():
+        try:
+            candidate = genome_from_dict(
+                json.loads(saved.read_text(encoding="utf-8"))["genome"]
+            )
+            best, best_rank = candidate, coverage_frontier_rank(candidate)
+        except (OSError, ValueError, TypeError, KeyError):
+            pass
+    # Always rescan: ranking can improve between service versions, and a saved
+    # single frontier must not hide stronger historical evidence.
+    for path in (state_dir / "candidates").glob("*.json"):
+        try:
+            candidate = genome_from_dict(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError, TypeError):
+            continue
+        rank = coverage_frontier_rank(candidate)
+        if rank is not None and (best_rank is None or rank > best_rank):
+            best, best_rank = candidate, rank
+    if best is not None:
+        atomic_json(saved, {"at": utc_now(), "rank": best_rank, "genome": asdict(best)})
+    return best
+
+
+def update_coverage_frontier(
+    state_dir: Path, current: Genome | None, candidate: Genome,
+) -> Genome | None:
+    candidate_rank = coverage_frontier_rank(candidate)
+    current_rank = coverage_frontier_rank(current) if current is not None else None
+    if candidate_rank is None or (
+        current_rank is not None and candidate_rank <= current_rank
+    ):
+        return current
+    saved = genome_from_dict(asdict(candidate))
+    atomic_json(state_dir / "coverage_frontier.json", {
+        "at": utc_now(), "rank": candidate_rank, "genome": asdict(saved),
+    })
+    return saved
+
+
+def regime_shift_rank(genome: Genome) -> tuple[float, ...] | None:
+    """Identify a strong early edge that reverses in a later protected fold."""
+    folds = (genome.result or {}).get("folds", [])
+    if len(folds) < 2:
+        return None
+    fold_accuracy = [
+        min(float(fold.get(name, {}).get("directional_accuracy", 0))
+            for name in ("known_asset_future", "unseen_asset_future"))
+        for fold in folds
+    ]
+    first, later = fold_accuracy[0], min(fold_accuracy[1:])
+    if first < .58 or later >= .50:
+        return None
+    return (
+        first, -later,
+        float((genome.result or {}).get("summary", {}).get("min_mcc", -1)),
+    )
+
+
+def load_regime_shift_frontier(state_dir: Path) -> Genome | None:
+    """Recover a cross-regime reversal after restart or population turnover."""
+    saved = state_dir / "regime_shift_frontier.json"
+    if saved.is_file():
+        try:
+            return genome_from_dict(json.loads(saved.read_text(encoding="utf-8"))["genome"])
+        except (OSError, ValueError, TypeError, KeyError):
+            pass
+    best: Genome | None = None
+    best_rank: tuple[float, ...] | None = None
+    for path in (state_dir / "candidates").glob("*.json"):
+        try:
+            candidate = genome_from_dict(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError, TypeError):
+            continue
+        rank = regime_shift_rank(candidate)
+        if rank is not None and (best_rank is None or rank > best_rank):
+            best, best_rank = candidate, rank
+    if best is not None:
+        atomic_json(saved, {"at": utc_now(), "rank": best_rank, "genome": asdict(best)})
+    return best
+
+
+def update_regime_shift_frontier(
+    state_dir: Path, current: Genome | None, candidate: Genome,
+) -> Genome | None:
+    candidate_rank = regime_shift_rank(candidate)
+    current_rank = regime_shift_rank(current) if current is not None else None
+    if candidate_rank is None or (
+        current_rank is not None and candidate_rank <= current_rank
+    ):
+        return current
+    saved = genome_from_dict(asdict(candidate))
+    atomic_json(state_dir / "regime_shift_frontier.json", {
+        "at": utc_now(), "rank": candidate_rank, "genome": asdict(saved),
+    })
+    return saved
+
+
+def compatible_reversal_rank(
+    genome: Genome, coverage_frontier: Genome | None,
+) -> tuple[float, ...] | None:
+    """Rank the nearest lower-q boundary for one exact model structure.
+
+    Most lineages need a protected-fold reversal before a lower confidence
+    threshold becomes the unsafe endpoint. Extra trees often degrade smoothly
+    first, so retain a profitable sub-floor endpoint as soon as it crosses the
+    lineage's 62% accuracy floor. This prevents repeating the same threshold
+    and turns the next generation into an informative bisection.
+    """
+    if (coverage_frontier is None
+            or genome_structure_key(genome) != genome_structure_key(coverage_frontier)
+            or genome.confidence_quantile >= coverage_frontier.confidence_quantile):
+        return None
+    reversal = regime_shift_rank(genome)
+    if reversal is None and coverage_frontier.learner_kind == "extra_trees":
+        summary = (genome.result or {}).get("summary", {})
+        accuracy = float(summary.get("min_accuracy", 0))
+        balanced = float(summary.get("min_balanced_accuracy", 0))
+        mcc = float(summary.get("min_mcc", -1))
+        coverage = float(summary.get("min_coverage", 0))
+        expectancy = float(summary.get("min_expectancy", -1))
+        profit = float(summary.get("min_profit_factor", 0))
+        frontier_coverage = float(
+            (coverage_frontier.result or {}).get("summary", {}).get(
+                "min_coverage", 0
+            )
+        )
+        if not (.55 <= accuracy < .62 and balanced >= .55 and mcc >= .10
+                and coverage > frontier_coverage
+                and expectancy > 0 and profit >= 1.0):
+            return None
+        reversal = (accuracy, balanced, mcc, coverage, expectancy, profit)
+    if reversal is None:
+        return None
+    return (float(genome.confidence_quantile), *reversal)
+
+
+def load_compatible_reversal_frontier(
+    state_dir: Path, coverage_frontier: Genome | None,
+) -> Genome | None:
+    """Recover the tightest causal q bracket for the active coverage lineage."""
+    if coverage_frontier is None:
+        return None
+    best: Genome | None = None
+    best_rank: tuple[float, ...] | None = None
+    for path in (state_dir / "candidates").glob("*.json"):
+        try:
+            candidate = genome_from_dict(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError, TypeError):
+            continue
+        rank = compatible_reversal_rank(candidate, coverage_frontier)
+        if rank is not None and (best_rank is None or rank > best_rank):
+            best, best_rank = candidate, rank
+    return best
+
+
+def update_compatible_reversal_frontier(
+    current: Genome | None, candidate: Genome,
+    coverage_frontier: Genome | None,
+) -> Genome | None:
+    candidate_rank = compatible_reversal_rank(candidate, coverage_frontier)
+    current_rank = (
+        compatible_reversal_rank(current, coverage_frontier)
+        if current is not None else None
+    )
+    if candidate_rank is None or (
+        current_rank is not None and candidate_rank <= current_rank
+    ):
+        return current if current_rank is not None else None
+    return genome_from_dict(asdict(candidate))
+
+
+def introduce_regime_shift_variants(
+    population: list[Genome], frontier: Genome | None, generation: int,
+    protected_parent_ids: set[str] | None = None,
+) -> list[Genome]:
+    """Breed stability experiments from a verified temporal reversal.
+
+    A short-memory/volatility pair made the protected reversal worse in the
+    first live observation cycle. Rotate through progressively longer memory
+    scales and observable regime routers so the service learns from that
+    negative result instead of recreating the same phenotype every generation.
+    """
+    if frontier is None or regime_shift_rank(frontier) is None:
+        return population
+    phase = generation % 4
+    memory_factors = ((1.5, 2.5), (2.0, 4.0), (3.0, 6.0), (4.0, 8.0))[phase]
+    regime_features = (
+        "market_breadth_r6", "market_median_r6", "funding_rate", "rv24",
+    )
+    specifications = (
+        {
+            "learner_kind": "regressor",
+            "recency_half_life_days": min(
+                2200.0, frontier.recency_half_life_days * memory_factors[0]
+            ),
+            "l2_regularization": min(30.0, frontier.l2_regularization * 4.0),
+        },
+        {
+            "learner_kind": "regime_decomposed_regressor",
+            "recency_half_life_days": min(
+                2200.0, frontier.recency_half_life_days * memory_factors[1]
+            ),
+            "regime_feature": regime_features[phase], "regime_bins": 2,
+            "l2_regularization": min(30.0, frontier.l2_regularization * 4.0),
+        },
+    )
+    # One stability probe per generation is enough to preserve this search
+    # axis. Alternating species avoids letting the expensive decomposed model
+    # monopolize a six-core host and doubles observe-and-adjust throughput.
+    specifications = (specifications[generation % len(specifications)],)
+    variants = []
+    known = {genome.genome_id for genome in population}
+    for specification in specifications:
+        payload = asdict(frontier)
+        payload.update({
+            **specification, "generation": generation,
+            "parents": [frontier.genome_id], "fitness": None,
+            "result": None, "genome_id": "",
+        })
+        variant = Genome(**payload).finalize()
+        if variant.genome_id not in known:
+            known.add(variant.genome_id)
+            variants.append(variant)
+    protected_parent_ids = protected_parent_ids or set()
+    # Emergent-pool genes rapidly spread through crossover. Protecting every
+    # carrier can therefore occupy every replaceable slot and silently prevent
+    # a verified regime-shift experiment from launching. Preserve one fresh
+    # topology carrier plus all explicitly protected repair lineages.
+    emergent_novel = next((
+        index for index, genome in enumerate(population)
+        if index > 0 and genome.fitness is None and genome.emergent_pools
+    ), None)
+    protected = {
+        index for index, genome in enumerate(population)
+        if bool(set(genome.parents) & protected_parent_ids)
+        or index == emergent_novel
+    }
+    replaceable = [
+        index for index in range(len(population) - 1, 0, -1)
+        if index not in protected and population[index].fitness is None
+    ]
+    for index, variant in zip(replaceable, variants):
+        population[index] = variant
+    return population
+
+
+def prioritize_pending_genomes(
+    pending: Sequence[Genome], coverage_frontier: Genome | None,
+    regime_shift_frontier: Genome | None,
+    multiscale_frontier: Genome | None = None,
+    extra_trees_frontier: Genome | None = None,
+) -> list[Genome]:
+    """Evaluate the highest-information repairs first on small worker pools.
+
+    Ordering cannot affect a candidate's isolated score, but it materially
+    shortens observe-and-adjust latency when a slow regime model otherwise
+    sits ahead of the active accuracy/economics frontier's descendants.
+    Python's stable sort preserves breeding order within each class.
+    """
+    coverage_id = coverage_frontier.genome_id if coverage_frontier else None
+    multiscale_id = multiscale_frontier.genome_id if multiscale_frontier else None
+    tree_id = extra_trees_frontier.genome_id if extra_trees_frontier else None
+    shift_id = regime_shift_frontier.genome_id if regime_shift_frontier else None
+
+    def priority(genome: Genome) -> int:
+        parents = set(genome.parents)
+        if coverage_id is not None and coverage_id in parents:
+            return 5
+        if multiscale_id is not None and multiscale_id in parents:
+            return 4
+        if tree_id is not None and tree_id in parents:
+            return 4
+        if genome.learner_kind == "regime_decomposed_regressor":
+            return 1
+        if shift_id is not None and shift_id in parents:
+            return 2
+        return 3
+
+    return sorted(pending, key=priority, reverse=True)
+
+
+def cap_expensive_regime_candidates(
+    population: list[Genome], generation: int,
+    regime_shift_frontier: Genome | None,
+) -> tuple[list[Genome], int]:
+    """Keep one targeted decomposed regime probe and convert other copies.
+
+    On the six-core runtime each decomposed candidate can consume several
+    minutes. Multiple fresh copies delayed feedback without producing better
+    evidence. The targeted reversal descendant is retained when present;
+    converted candidates keep their features and pool topology.
+    """
+    candidates = [
+        index for index, genome in enumerate(population)
+        if genome.fitness is None
+        and genome.learner_kind == "regime_decomposed_regressor"
+    ]
+    if not candidates:
+        return population, 0
+    shift_id = regime_shift_frontier.genome_id if regime_shift_frontier else None
+    keep = next((
+        index for index in candidates
+        if shift_id is not None and shift_id in population[index].parents
+    ), None)
+    known = {genome.genome_id for genome in population}
+    converted = 0
+    for index in candidates:
+        if keep is not None and index == keep:
+            continue
+        source = population[index]
+        payload = asdict(source)
+        payload.update({
+            "learner_kind": "regressor", "regime_bins": 1,
+            "generation": generation, "parents": [source.genome_id],
+            "fitness": None, "result": None, "genome_id": "",
+        })
+        replacement = Genome(**payload).finalize()
+        if replacement.genome_id in known:
+            continue
+        known.discard(source.genome_id)
+        known.add(replacement.genome_id)
+        population[index] = replacement
+        converted += 1
+    return population, converted
+
+
+def cap_expensive_multiscale_candidates(
+    population: list[Genome], generation: int,
+    protected_parent_ids: set[str],
+) -> tuple[list[Genome], int]:
+    """Reserve double-model compute for active multiscale frontier research."""
+    known = {genome.genome_id for genome in population}
+    converted = 0
+    for index, source in enumerate(population):
+        if (source.fitness is not None
+                or source.learner_kind != "multiscale_regressor"
+                or bool(set(source.parents) & protected_parent_ids)):
+            continue
+        payload = asdict(source)
+        payload.update({
+            "learner_kind": "regressor", "regime_bins": 1,
+            "generation": generation, "parents": [source.genome_id],
+            "fitness": None, "result": None, "genome_id": "",
+        })
+        replacement = Genome(**payload).finalize()
+        if replacement.genome_id in known:
+            continue
+        known.discard(source.genome_id)
+        known.add(replacement.genome_id)
+        population[index] = replacement
+        converted += 1
+    return population, converted
 
 
 def introduce_regime_repair_variants(
@@ -1522,6 +3668,68 @@ def introduce_regime_repair_variants(
     return population
 
 
+def introduce_news_context_variant(
+    population: list[Genome], evaluated: Sequence[Genome], generation: int,
+    rng: random.Random,
+) -> list[Genome]:
+    """Reserve one fresh causal news/market interaction experiment.
+
+    News had vanished from every live genome while the zero-offspring bug was
+    active. This invariant guarantees representation, not favorable scoring.
+    The candidate must still pass the same unseen-asset and economic gates.
+    """
+    if not population or not evaluated:
+        return population
+    news_lineages = [
+        genome for genome in evaluated
+        if set(genome.features) & set(NEWS_SPECIALIST_FEATURES)
+    ]
+    base = max(news_lineages or list(evaluated), key=lambda genome: float(
+        genome.fitness if genome.fitness is not None else -math.inf
+    ))
+    payload = asdict(base)
+    features = set(base.features) | set(NEWS_SPECIALIST_FEATURES)
+    programs = [dict(program) for program in base.feature_programs]
+    templates = (
+        {"op": "tanh_mix", "left": "asset_news_sentiment_24h",
+         "right": "market_breadth_r6"},
+        {"op": "mul", "left": "news_negative_share_24h",
+         "right": "volatility_ratio"},
+        {"op": "signed_sqrt_product", "left": "news_liquidation_24h",
+         "right": "funding_rate"},
+        {"op": "regime_gate", "left": "asset_news_sentiment_acceleration",
+         "right": "flow_divergence"},
+    )
+    template = dict(rng.choice(templates))
+    template["scale"] = 10 ** rng.uniform(-.5, .5)
+    programs.append(normalize_program(template))
+    payload.update({
+        "features": sorted(features), "feature_programs": programs[-10:],
+        "recency_half_life_days": max(
+            45.0, min(2200.0, base.recency_half_life_days * rng.choice((.7, 1.0, 1.3)))
+        ),
+        "generation": generation, "parents": [base.genome_id],
+        "fitness": None, "result": None, "genome_id": "",
+    })
+    variant = Genome(**payload).finalize()
+    known = {genome.genome_id for genome in population}
+    if variant.genome_id in known:
+        variant = mutate(variant, generation, rng)
+        variant.features = sorted(set(variant.features) | set(NEWS_SPECIALIST_FEATURES))
+        variant.fitness = None
+        variant.result = None
+        variant.finalize()
+    if variant.genome_id in known:
+        return population
+    replacement = next(
+        (index for index in range(len(population) - 1, 0, -1)
+         if population[index].fitness is None),
+        len(population) - 1,
+    )
+    population[replacement] = variant
+    return population
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path,
@@ -1548,6 +3756,10 @@ def main() -> int:
     parser.add_argument("--cost-bps", type=float, default=20.0)
     parser.add_argument("--brain-gate-every", type=int, default=5,
                         help="launch one isolated Wizard smoke gate this many generations")
+    parser.add_argument(
+        "--brain-gate-timeout-seconds", type=float, default=900.0,
+        help="terminate this state directory's neural gate tree after this budget",
+    )
     parser.add_argument("--min-free-memory-gb", type=float, default=8.0)
     parser.add_argument("--memory-poll-seconds", type=float, default=15.0)
     parser.add_argument(
@@ -1560,6 +3772,10 @@ def main() -> int:
         raise ValueError("population must be at least four")
     args.state_dir.mkdir(parents=True, exist_ok=True)
     events_path = args.state_dir / "events.jsonl"
+    # Materialize the dedicated stream immediately. It intentionally stays
+    # empty until a strict, comparable accuracy increase occurs.
+    (args.state_dir / "accuracy_improvements.jsonl").touch(exist_ok=True)
+    (args.state_dir / "conditional_ghost_trades.jsonl").touch(exist_ok=True)
     state_path = args.state_dir / "state.json"
     stop_path = args.state_dir / "STOP"
     gate_process: subprocess.Popen | None = None
@@ -1588,7 +3804,31 @@ def main() -> int:
                                   args.dataset_cache)
     append_event(events_path, "dataset_loaded", rows=len(dataset["rows"]),
                  assets=dataset["assets"], supplemental_assets=sorted(dataset["supplemental_assets"]))
-    if state_path.is_file():
+    coverage_frontier = load_coverage_frontier(args.state_dir)
+    multiscale_frontier = load_multiscale_frontier(args.state_dir)
+    multiscale_boundary_frontier = load_multiscale_boundary_frontier(args.state_dir)
+    extra_trees_frontier = load_extra_trees_frontier(args.state_dir)
+    regime_shift_frontier = load_regime_shift_frontier(args.state_dir)
+    coverage_reversal_frontier = load_compatible_reversal_frontier(
+        args.state_dir, coverage_frontier
+    )
+    multiscale_reversal_frontier = load_compatible_reversal_frontier(
+        args.state_dir, multiscale_boundary_frontier or multiscale_frontier
+    )
+    extra_trees_reversal_frontier = load_compatible_reversal_frontier(
+        args.state_dir, extra_trees_frontier
+    )
+    protected_frontier_ids = {
+        genome.genome_id for genome in (
+            coverage_frontier, multiscale_frontier, regime_shift_frontier,
+            coverage_reversal_frontier, multiscale_reversal_frontier,
+            multiscale_boundary_frontier, extra_trees_frontier,
+            extra_trees_reversal_frontier,
+        )
+        if genome is not None
+    }
+    resumed_from_state = state_path.is_file()
+    if resumed_from_state:
         state = json.loads(state_path.read_text(encoding="utf-8"))
         generation = int(state["generation"])
         population = [genome_from_dict(row) for row in state["population"]]
@@ -1605,7 +3845,42 @@ def main() -> int:
             pending_gate_genome = None
             append_event(events_path, "dataset_changed", previous=state.get("dataset_signature"),
                          current=signature, action="population_revalidation")
-        population = introduce_missing_learner_species(population, generation, rng)
+        else:
+            population, restored_candidates = restore_completed_candidates(
+                population, args.state_dir, signature,
+                legacy_after=state_path.stat().st_mtime,
+            )
+            if restored_candidates:
+                append_event(
+                    events_path, "candidate_evidence_restored",
+                    generation=generation, genomes=restored_candidates,
+                    evaluation_signature=signature,
+                )
+        population, resumed_regime_conversions = cap_expensive_regime_candidates(
+            population, generation, regime_shift_frontier
+        )
+        if resumed_regime_conversions:
+            append_event(
+                events_path, "resume_regime_candidates_converted",
+                generation=generation, count=resumed_regime_conversions,
+                reason="one-expensive-regime-candidate-budget",
+            )
+        population, resumed_multiscale_conversions = cap_expensive_multiscale_candidates(
+            population, generation, {
+                genome.genome_id for genome in (
+                    multiscale_frontier, multiscale_boundary_frontier,
+                ) if genome is not None
+            },
+        )
+        if resumed_multiscale_conversions:
+            append_event(
+                events_path, "resume_multiscale_candidates_converted",
+                generation=generation, count=resumed_multiscale_conversions,
+                reason="active-multiscale-frontier-only-budget",
+            )
+        # A restart is not a breeding boundary. Apart from the explicit
+        # one-expensive-regime resource migration above, diversity invariants
+        # are applied only after evaluation at the next real breeding boundary.
         pending_gate_genome = recover_pending_gate(
             args.state_dir, champion, pending_gate_genome
         )
@@ -1615,10 +3890,94 @@ def main() -> int:
         population = seed_genomes(args.population, rng)
         champion = None
         append_event(events_path, "started", population=args.population)
-    population = introduce_reflexivity_variant(population, generation)
+    if not resumed_from_state:
+        population = introduce_reflexivity_variant(
+            population, generation, protected_frontier_ids
+        )
+    if coverage_frontier is not None:
+        append_event(
+            events_path, "coverage_frontier_loaded",
+            genome_id=coverage_frontier.genome_id,
+            summary=(coverage_frontier.result or {}).get("summary", {}),
+        )
+    if multiscale_frontier is not None:
+        append_event(
+            events_path, "multiscale_frontier_loaded",
+            genome_id=multiscale_frontier.genome_id,
+            rank=multiscale_frontier_rank(multiscale_frontier),
+            summary=(multiscale_frontier.result or {}).get("summary", {}),
+        )
+    if multiscale_boundary_frontier is not None:
+        append_event(
+            events_path, "multiscale_boundary_frontier_loaded",
+            genome_id=multiscale_boundary_frontier.genome_id,
+            rank=multiscale_boundary_rank(multiscale_boundary_frontier),
+            summary=(multiscale_boundary_frontier.result or {}).get("summary", {}),
+        )
+    if extra_trees_frontier is not None:
+        append_event(
+            events_path, "extra_trees_frontier_loaded",
+            genome_id=extra_trees_frontier.genome_id,
+            rank=extra_trees_frontier_rank(extra_trees_frontier),
+            summary=(extra_trees_frontier.result or {}).get("summary", {}),
+        )
+    if regime_shift_frontier is not None:
+        append_event(
+            events_path, "regime_shift_frontier_loaded",
+            genome_id=regime_shift_frontier.genome_id,
+            rank=regime_shift_rank(regime_shift_frontier),
+        )
+    if coverage_reversal_frontier is not None:
+        append_event(
+            events_path, "coverage_reversal_frontier_loaded",
+            genome_id=coverage_reversal_frontier.genome_id,
+            confidence_quantile=coverage_reversal_frontier.confidence_quantile,
+            rank=compatible_reversal_rank(
+                coverage_reversal_frontier, coverage_frontier
+            ),
+        )
+    if multiscale_reversal_frontier is not None:
+        append_event(
+            events_path, "multiscale_reversal_frontier_loaded",
+            genome_id=multiscale_reversal_frontier.genome_id,
+            confidence_quantile=multiscale_reversal_frontier.confidence_quantile,
+            rank=compatible_reversal_rank(
+                multiscale_reversal_frontier,
+                multiscale_boundary_frontier or multiscale_frontier,
+            ),
+        )
+    if extra_trees_reversal_frontier is not None:
+        append_event(
+            events_path, "extra_trees_reversal_frontier_loaded",
+            genome_id=extra_trees_reversal_frontier.genome_id,
+            confidence_quantile=extra_trees_reversal_frontier.confidence_quantile,
+            rank=compatible_reversal_rank(
+                extra_trees_reversal_frontier, extra_trees_frontier
+            ),
+        )
+    had_emergent_pool = any(genome.emergent_pools for genome in population)
+    if not resumed_from_state:
+        population = introduce_emergent_pool_variant(
+            population, generation, rng, protected_frontier_ids
+        )
+    if not had_emergent_pool and any(genome.emergent_pools for genome in population):
+        seeded = next(genome for genome in population if genome.emergent_pools)
+        append_event(
+            events_path, "emergent_pool_variant_seeded", generation=generation,
+            genome_id=seeded.genome_id, pools=seeded.emergent_pools,
+        )
     next_dataset_check = time.monotonic() + max(0.0, args.dataset_refresh_seconds)
     try:
         while not stop_path.exists() and (args.max_generations == 0 or generation < args.max_generations):
+            recovered_gate_pids = recover_stale_external_brain_gates(
+                args.state_dir, args.brain_gate_timeout_seconds
+            )
+            for stale_pid in recovered_gate_pids:
+                append_event(
+                    events_path, "stale_brain_gate_recovered", pid=stale_pid,
+                    timeout_seconds=args.brain_gate_timeout_seconds,
+                    live_admission_effect="none",
+                )
             if gate_process is not None and gate_process.poll() is not None:
                 gate_report = (json.loads(gate_out.read_text(encoding="utf-8"))
                                if gate_out is not None and gate_out.is_file() else None)
@@ -1634,6 +3993,16 @@ def main() -> int:
                              current_signature=signature)
                 if gate_genome is not None and gate_is_current:
                     neural_scores[gate_genome] = brain_feedback_score(gate_report)
+                    neural_summary = brain_accuracy_summary(gate_report)
+                    if neural_summary is not None:
+                        neural_source = (
+                            f"isolated_wizard_brain_{len((gate_report or {}).get('folds', []))}fold"
+                        )
+                        record_accuracy_improvement(
+                            args.state_dir, signature, neural_source,
+                            neural_summary["min_accuracy"], generation=generation,
+                            genome_id=gate_genome, metrics=neural_summary,
+                        )
                 if (gate_is_current and gate_report
                         and gate_report.get("all_brain_floor_gates")):
                     atomic_json(args.state_dir / "untouched-final-queue.json", {
@@ -1693,9 +4062,23 @@ def main() -> int:
                 time.sleep(args.memory_poll_seconds)
             if stop_path.exists():
                 break
+            population, reused_evidence = restore_completed_candidates(
+                population, args.state_dir, signature
+            )
+            if reused_evidence:
+                append_event(
+                    events_path, "phenotype_evidence_reused",
+                    generation=generation, genomes=reused_evidence,
+                    evaluation_signature=signature,
+                )
             append_event(events_path, "generation_started", generation=generation,
                          genomes=[genome.genome_id for genome in population])
-            pending = [genome for genome in population if genome.fitness is None]
+            pending = prioritize_pending_genomes(
+                [genome for genome in population if genome.fitness is None],
+                coverage_frontier, regime_shift_frontier,
+                multiscale_boundary_frontier or multiscale_frontier,
+                extra_trees_frontier,
+            )
             write_live_status(
                 args.state_dir, "evaluating", generation,
                 completed=0, pending=len(pending), population=len(population),
@@ -1713,12 +4096,113 @@ def main() -> int:
                 for future in as_completed(futures):
                     genome = future.result()
                     completed += 1
+                    if genome.result is not None:
+                        genome.result["evaluation_signature"] = signature
                     atomic_json(args.state_dir / "candidates" / f"{genome.genome_id}.json",
                                 asdict(genome))
                     append_event(events_path, "candidate_scored", generation=generation,
                                  genome_id=genome.genome_id, fitness=genome.fitness,
                                  status=(genome.result or {}).get("status"),
                                  summary=(genome.result or {}).get("summary"))
+                    result = genome.result or {}
+                    summary = result.get("summary") or {}
+                    previous_structure = (
+                        genome_structure_key(coverage_frontier)
+                        if coverage_frontier is not None else None
+                    )
+                    previous_multiscale_structure = (
+                        genome_structure_key(
+                            multiscale_boundary_frontier or multiscale_frontier
+                        )
+                        if (multiscale_boundary_frontier is not None
+                            or multiscale_frontier is not None) else None
+                    )
+                    previous_tree_structure = (
+                        genome_structure_key(extra_trees_frontier)
+                        if extra_trees_frontier is not None else None
+                    )
+                    coverage_frontier = update_coverage_frontier(
+                        args.state_dir, coverage_frontier, genome
+                    )
+                    multiscale_frontier = update_multiscale_frontier(
+                        args.state_dir, multiscale_frontier, genome
+                    )
+                    multiscale_boundary_frontier = update_multiscale_boundary_frontier(
+                        args.state_dir, multiscale_boundary_frontier, genome
+                    )
+                    extra_trees_frontier = update_extra_trees_frontier(
+                        args.state_dir, extra_trees_frontier, genome
+                    )
+                    current_multiscale_structure = (
+                        genome_structure_key(
+                            multiscale_boundary_frontier or multiscale_frontier
+                        )
+                        if (multiscale_boundary_frontier is not None
+                            or multiscale_frontier is not None) else None
+                    )
+                    if current_multiscale_structure != previous_multiscale_structure:
+                        multiscale_reversal_frontier = load_compatible_reversal_frontier(
+                            args.state_dir,
+                            multiscale_boundary_frontier or multiscale_frontier,
+                        )
+                    else:
+                        multiscale_reversal_frontier = update_compatible_reversal_frontier(
+                            multiscale_reversal_frontier, genome,
+                            multiscale_boundary_frontier or multiscale_frontier,
+                        )
+                    current_tree_structure = (
+                        genome_structure_key(extra_trees_frontier)
+                        if extra_trees_frontier is not None else None
+                    )
+                    if current_tree_structure != previous_tree_structure:
+                        extra_trees_reversal_frontier = load_compatible_reversal_frontier(
+                            args.state_dir, extra_trees_frontier
+                        )
+                    else:
+                        extra_trees_reversal_frontier = update_compatible_reversal_frontier(
+                            extra_trees_reversal_frontier, genome, extra_trees_frontier
+                        )
+                    current_structure = (
+                        genome_structure_key(coverage_frontier)
+                        if coverage_frontier is not None else None
+                    )
+                    if current_structure != previous_structure:
+                        coverage_reversal_frontier = load_compatible_reversal_frontier(
+                            args.state_dir, coverage_frontier
+                        )
+                    else:
+                        coverage_reversal_frontier = update_compatible_reversal_frontier(
+                            coverage_reversal_frontier, genome, coverage_frontier
+                        )
+                    regime_shift_frontier = update_regime_shift_frontier(
+                        args.state_dir, regime_shift_frontier, genome
+                    )
+                    if summary.get("conditional_ghost_sections", 0):
+                        append_event(
+                            args.state_dir / "conditional_ghost_trades.jsonl",
+                            "historical_conditional_ghost_evaluation",
+                            generation=generation, genome_id=genome.genome_id,
+                            evaluation_signature=signature,
+                            passed=bool(summary.get("conditional_ghost_pass")),
+                            min_accuracy=summary.get("conditional_ghost_min_accuracy"),
+                            sections=summary.get("conditional_ghost_sections"),
+                            folds=[{
+                                "fold": fold.get("fold"),
+                                "conditions": (fold.get("competence_envelope") or {}).get(
+                                    "conditions", []),
+                                "known": fold.get("conditional_ghost_known", {}),
+                                "unseen": fold.get("conditional_ghost_unseen", {}),
+                            } for fold in result.get("folds", [])],
+                            scope="historical_only",
+                            live_admission_effect="none",
+                        )
+                    if (result.get("evaluated_folds") == result.get("requested_folds")
+                            and summary.get("min_accuracy") is not None):
+                        record_accuracy_improvement(
+                            args.state_dir, signature, "protected_surrogate",
+                            summary["min_accuracy"], generation=generation,
+                            genome_id=genome.genome_id, metrics=summary,
+                        )
                     write_live_status(
                         args.state_dir, "evaluating", generation,
                         completed=completed, pending=len(pending), population=len(population),
@@ -1747,6 +4231,34 @@ def main() -> int:
                     # A gate can be much slower than statistical screening.
                     # Retain the newest obligation while an older gate runs.
                     pending_gate_genome = champion.genome_id
+            if (pending_gate_genome is None
+                    and generation % max(1, args.brain_gate_every) == 0):
+                # Surrogate scoring is intentionally blind to neural topology.
+                # Give the strongest emergent-pool hypothesis an isolated brain
+                # gate so new pool layouts receive causal neural evidence.
+                pool_candidate = next(
+                    (genome for genome in population if genome.emergent_pools
+                     and not (args.state_dir / "brain-gate-reports"
+                              / f"{genome.genome_id}.smoke.json").exists()),
+                    None,
+                )
+                if pool_candidate is not None:
+                    pending_gate_genome = pool_candidate.genome_id
+                    append_event(
+                        events_path, "emergent_pool_gate_queued",
+                        generation=generation, genome_id=pool_candidate.genome_id,
+                        pools=pool_candidate.emergent_pools,
+                    )
+            if (pending_gate_genome is not None
+                    and not brain_gate_obligation_viable(
+                        args.state_dir, pending_gate_genome
+                    )):
+                append_event(
+                    events_path, "brain_gate_skipped_conclusive_anti_signal",
+                    genome_id=pending_gate_genome,
+                    live_admission_effect="none",
+                )
+                pending_gate_genome = None
             if (gate_process is None and pending_gate_genome is not None
                     and not external_brain_gate_pids()):
                 candidate_path = (args.state_dir / "candidates"
@@ -1790,24 +4302,119 @@ def main() -> int:
                     pending_gate_genome = None
             generation += 1
             evaluated_population = population
-            elite_count = max(len(LEARNER_KINDS) + 2, round(args.population * .40))
-            elites = select_diverse_elites(evaluated_population, elite_count, neural_scores)
-            next_population = elites[:]
-            known_ids = {genome.genome_id for genome in next_population}
-            attempts = 0
-            while len(next_population) < args.population and attempts < args.population * 50:
-                attempts += 1
-                contenders = rng.sample(evaluated_population[:max(elite_count * 2, 4)], 2)
-                child = crossover(contenders[0], contenders[1], generation, rng)
-                if child.genome_id not in known_ids:
-                    known_ids.add(child.genome_id)
-                    next_population.append(child)
+            next_population, exploration = breed_population(
+                evaluated_population, generation, rng, neural_scores
+            )
             population = introduce_directional_frontier_variants(
                 next_population, evaluated_population, generation
             )
             population = introduce_regime_repair_variants(
                 population, evaluated_population, generation, rng
             )
+            population = introduce_reflexivity_variant(population, generation)
+            population = introduce_news_context_variant(
+                population, evaluated_population, generation, rng
+            )
+            population = preserve_emergent_pool_elite(
+                population, evaluated_population
+            )
+            population = introduce_emergent_pool_variant(population, generation, rng)
+            # Apply coverage repair last. Its slot chooser protects emergent
+            # topology, while news-bearing repair parents retain news context.
+            historical_repair_evidence = load_direct_descendant_evidence(
+                args.state_dir,
+                {
+                    genome.genome_id for genome in (
+                        coverage_frontier, multiscale_frontier,
+                        multiscale_boundary_frontier,
+                    ) if genome is not None
+                },
+                signature,
+            )
+            population = introduce_coverage_repair_variants(
+                population,
+                [*([coverage_frontier] if coverage_frontier is not None else []),
+                 *historical_repair_evidence,
+                 *(genome for genome in evaluated_population
+                   if genome.genome_id not in {
+                       candidate.genome_id
+                       for candidate in historical_repair_evidence
+                   }
+                   and (coverage_frontier is None
+                        or genome.genome_id != coverage_frontier.genome_id))],
+                generation,
+                coverage_reversal_frontier,
+                multiscale_frontier,
+                multiscale_reversal_frontier,
+                multiscale_boundary_frontier,
+            )
+            population = introduce_extra_trees_coverage_variant(
+                population, extra_trees_frontier, generation,
+                extra_trees_reversal_frontier,
+                {
+                    genome.genome_id for genome in (
+                        coverage_frontier, multiscale_frontier,
+                        multiscale_boundary_frontier,
+                    ) if genome is not None
+                },
+            )
+            population = introduce_regime_shift_variants(
+                population, regime_shift_frontier, generation,
+                ({
+                    genome.genome_id for genome in (
+                        coverage_frontier, multiscale_frontier,
+                        multiscale_boundary_frontier, extra_trees_frontier,
+                    ) if genome is not None
+                }),
+            )
+            population, regime_candidates_converted = cap_expensive_regime_candidates(
+                population, generation, regime_shift_frontier
+            )
+            population, multiscale_candidates_converted = (
+                cap_expensive_multiscale_candidates(
+                    population, generation, {
+                        genome.genome_id for genome in (
+                            multiscale_frontier, multiscale_boundary_frontier,
+                        ) if genome is not None
+                    },
+                )
+            )
+            population, novelty_injections = ensure_novelty(
+                population, generation, rng
+            )
+            exploration.update({
+                "generation": generation,
+                "novel_candidates": sum(
+                    genome.fitness is None for genome in population
+                ),
+                "minimum_novel_candidates": minimum_novel_candidates(len(population)),
+                "novelty_injections": novelty_injections,
+                "unique_genomes": len({genome.genome_id for genome in population}),
+                "news_candidates": sum(
+                    bool(set(genome.features) & set(NEWS_SPECIALIST_FEATURES))
+                    for genome in population
+                ),
+                "champion_age_generations": (
+                    generation - champion.generation if champion else 0
+                ),
+                "low_threshold_candidates": sum(
+                    genome.fitness is None and genome.confidence_quantile <= .15
+                    for genome in population
+                ),
+                "regime_shift_candidates": sum(
+                    regime_shift_frontier is not None
+                    and regime_shift_frontier.genome_id in genome.parents
+                    for genome in population
+                ),
+                "surplus_regime_candidates_converted": regime_candidates_converted,
+                "untargeted_multiscale_candidates_converted": (
+                    multiscale_candidates_converted
+                ),
+            })
+            atomic_json(args.state_dir / "evolution_health.json", {
+                "at": utc_now(), **exploration,
+            })
+            append_event(events_path, "exploration_health", **exploration)
             state = {
                 "schema": EVOLUTION_SCHEMA, "updated_at": utc_now(), "generation": generation,
                 "configuration": {key: str(value) if isinstance(value, Path) else value

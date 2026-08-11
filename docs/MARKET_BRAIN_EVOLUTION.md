@@ -115,9 +115,19 @@ Generated state is ignored below `runtime/market-evolution/`:
 
 - `state.json` is the atomic restart coordinate;
 - `events.jsonl` is the append-only decision ledger;
+- `accuracy_improvements.jsonl` contains only strict new accuracy highs for
+  complete protected folds or isolated Wizard-brain gates (separated by exact
+  corpus signature and evidence source); `accuracy_best.json` stores the
+  restart-safe baselines used to decide whether a high is new;
 - `candidates/` retains genomes and results;
 - `champion.json` is the current surrogate champion;
 - `brain-gate-reports/` and `brain-gates/` hold neural evidence/state.
+
+`scripts/market_evolution_watchdog.py` is the lightweight operational owner.
+It waits without loading the dataset until the configured free-RAM floor is
+met, starts the evolution worker, publishes `supervisor_status.json`, and
+restarts unexpected worker exits. `launch_revenir.ps1` starts this watchdog
+instead of starting the memory-intensive worker directly.
 
 The causal feature matrix is fingerprinted and cached at
 `runtime/cache/market-evolution-dataset-v4.joblib`; primary OHLCV files,
@@ -187,3 +197,15 @@ basis, funding, and price state. These are neutral relationships, not a rule to
 follow or fade the crowd. The brain learns continuation, squeeze, reversal, and
 abstention motifs from subsequent after-cost outcomes; the GA decides when this
 pool and its cross-pool bindings participate.
+
+Schema 10 makes specialist-pool topology heritable. A genome may isolate up to
+eight selected raw or evolved causal features into reproducibly named sensory
+pools, mutate their membership and concept-emergence thresholds, remove them,
+or inherit them through crossover. Generated identities assign collision-free
+pool IDs and fire those specialists in the same observation as price, flow,
+news, regime, arbitration, and outcome classes. The fabric's existing
+co-firing rule then grows and repeatedly strengthens atom- and concept-level
+cross-pool terminals. Because statistical surrogates cannot measure neural
+topology, the strongest new-pool hypothesis is explicitly queued for an
+isolated Wizard-brain gate. Old schema states load with an empty topology gene
+and immediately receive one bounded topology experiment.
