@@ -140,6 +140,7 @@ from scripts.programming_exec_env import (
     benchmark_tool_env,
     isolated_tool_env,
     prepare_tool_command,
+    tool_output_detail,
 )
 from scripts.programming_slow_batch_microbrains import read_events
 from scripts.programming_corpus_recall import accepted_responses, sample_window
@@ -488,6 +489,21 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
                 RuntimeError("gate command produced no JSON: evaluator")
             )
         )
+        exact_fixture_failure = GateCommandFailure(
+            ["python", "enterprise.py"], 75,
+            '{"infrastructure_only_failure": true}', "",
+        )
+        self.assertTrue(transient_gate_failure(exact_fixture_failure))
+
+    def test_tool_failure_detail_preserves_stdout_and_stderr(self) -> None:
+        result = subprocess.CompletedProcess(
+            ["dotnet", "run"], 1,
+            "error CS1002: ; expected\n",
+            "The build failed. Fix the build errors and run again.\n",
+        )
+        detail = tool_output_detail(result)
+        self.assertIn("error CS1002", detail)
+        self.assertIn("The build failed", detail)
 
     def test_canary_transport_retry_passes_without_deferred_interval(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -760,6 +776,45 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(RuntimeError, "retained terminals"):
                     settle_brain_for_admission(args, phase, Path(raw), 500)
+
+    def test_block_admission_recycles_settled_node_before_low_memory_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            runtime = Path(raw)
+            args = argparse.Namespace(
+                endpoint="http://brain",
+                min_free_memory_gb=6.0,
+                node_bin=Path("brain-server"),
+            )
+            phase = Phase("corpus", "script", Path("corpus.jsonl"), 1000)
+            with (
+                patch(
+                    "scripts.programming_curriculum_supervisor.endpoint_json",
+                    side_effect=[
+                        {"tick": 10, "resident_terminals": 100},
+                        {"tick": 10, "resident_terminals": 0},
+                    ],
+                ),
+                patch(
+                    "scripts.programming_curriculum_supervisor.endpoint_post_json",
+                    side_effect=[{"neurons_serialized": 4}, {"ok": True}],
+                ),
+                patch(
+                    "scripts.programming_curriculum_supervisor.psutil.virtual_memory",
+                    side_effect=[
+                        SimpleNamespace(available=5 * 1024**3),
+                        SimpleNamespace(available=9 * 1024**3),
+                    ],
+                ),
+                patch(
+                    "scripts.programming_curriculum_supervisor.recycle_settled_runtime_node",
+                    return_value={"passed": True},
+                ) as recycle,
+            ):
+                report = settle_brain_for_admission(
+                    args, phase, runtime, 500
+                )
+            recycle.assert_called_once()
+            self.assertEqual(report["available_bytes_after_gate"], 9 * 1024**3)
 
     def test_checkpoint_reports_authoritative_wbrain_path(self) -> None:
         source = (ROOT / "crates/node/src/brain_api.rs").read_text(

@@ -62,24 +62,33 @@ def main() -> int:
         for kind, prompt in (("canonical", case.prompt), ("paraphrase", case.paraphrase)):
             response = request(args.endpoint, "/brain/chat", {"text": prompt})
             reply = str(response.get("reply") or "")
+            try:
+                reply_files = json.loads(reply).get("files", {})
+            except (json.JSONDecodeError, AttributeError):
+                reply_files = {}
             component_results = []
             for component_name in case.components:
-                passed, detail = execute(NATIVE[component_name], reply)
+                component = NATIVE[component_name]
+                passed, detail = execute(component, reply)
+                expected_files = json.loads(component.response)["files"]
                 component_results.append({
                     "component": component_name,
                     "executes": passed,
+                    "exact": (
+                        isinstance(reply_files, dict)
+                        and all(
+                            reply_files.get(name) == content
+                            for name, content in expected_files.items()
+                        )
+                    ),
                     "detail": "" if passed else detail,
                 })
-            try:
-                files = json.loads(reply).get("files", {})
-            except (json.JSONDecodeError, AttributeError):
-                files = {}
             rows.append({
                 "name": case.name,
                 "kind": kind,
                 "executes": all(item["executes"] for item in component_results),
                 "components": component_results,
-                "files": sorted(files) if isinstance(files, dict) else [],
+                "files": sorted(reply_files) if isinstance(reply_files, dict) else [],
                 "intent_diagnostics": response.get("intent_diagnostics"),
             })
     oov = []
@@ -101,7 +110,23 @@ def main() -> int:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps(summary))
-    return 0 if all(row["executes"] for row in rows) and all(row["honest"] for row in oov) else 1
+    behavior_passed = all(row["executes"] for row in rows) and all(
+        row["honest"] for row in oov
+    )
+    if behavior_passed:
+        return 0
+    failed_components = [
+        component
+        for row in rows
+        for component in row["components"]
+        if not component["executes"]
+    ]
+    fixture_infrastructure_failure = (
+        bool(failed_components)
+        and all(component["exact"] for component in failed_components)
+        and all(row["honest"] for row in oov)
+    )
+    return 75 if fixture_infrastructure_failure else 1
 
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-from programming_exec_env import benchmark_tool_env, run_tool
+from programming_exec_env import benchmark_tool_env, run_tool, tool_output_detail
 
 
 @dataclass(frozen=True)
@@ -100,14 +100,17 @@ def execute(case: Case, code: str) -> tuple[bool, str]:
         try:
             first = run_tool(case.command, cwd=work, env=environment, timeout=90)
             if first.returncode != 0:
-                return False, (first.stderr or first.stdout)[-400:]
+                return False, tool_output_detail(first, 1200)
             if case.language == "rust":
                 first = run_tool([str(work / "eval.exe")], cwd=work,
                                  env=environment, timeout=5)
             elif case.language == "java":
                 first = run_tool(["java", "Main"], cwd=work,
                                  env=environment, timeout=5)
-            return first.returncode == 0 and "PASS" in first.stdout, (first.stderr or first.stdout)[-400:]
+            return (
+                first.returncode == 0 and "PASS" in first.stdout,
+                tool_output_detail(first, 1200),
+            )
         except (subprocess.TimeoutExpired, FileNotFoundError) as error:
             return False, str(error)
 
@@ -138,7 +141,12 @@ def main() -> int:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps(summary))
-    return 0 if all(row["executes"] for row in results) else 1
+    if all(row["executes"] for row in results):
+        return 0
+    # A trusted, byte-exact fixture that does not compile is an evaluator or
+    # host failure, not evidence that the candidate forgot the answer.
+    failures = [row for row in results if not row["executes"]]
+    return 75 if all(row["exact"] for row in failures) else 1
 
 
 if __name__ == "__main__":

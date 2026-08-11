@@ -9,7 +9,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from programming_exec_env import benchmark_tool_env, run_tool
+from programming_exec_env import benchmark_tool_env, run_tool, tool_output_detail
 
 from programming_project_eval import b64, manifest, request
 
@@ -138,7 +138,10 @@ def execute(case: Case, response: str) -> tuple[bool, str]:
                 run = run_tool(command, cwd=root, env=environment, timeout=15)
         except (subprocess.TimeoutExpired, FileNotFoundError) as error:
             return False, str(error)
-        return run.returncode == 0 and "PASS" in run.stdout, (run.stderr or run.stdout)[-900:]
+        return (
+            run.returncode == 0 and "PASS" in run.stdout,
+            tool_output_detail(run, 2000),
+        )
 
 
 def train(endpoint: str, repeats: int) -> None:
@@ -166,7 +169,18 @@ def main() -> int:
         result=request(args.endpoint,"/brain/chat",{"text":prompt}); honest=not result.get("reply") and bool((result.get("grounding") or {}).get("outside_grounding")); oov.append({"prompt":prompt,"honest":honest})
     summary={kind:{"executes":sum(r["executes"] for r in results if r["kind"]==kind),"total":len(CASES)} for kind in ("trained","paraphrase")}; summary["oov_honesty"]={"passed":sum(r["honest"] for r in oov),"total":len(oov)}
     report={"summary":summary,"results":results,"oov":oov}; args.output.parent.mkdir(parents=True,exist_ok=True); args.output.write_text(json.dumps(report,indent=2),encoding="utf-8"); print(json.dumps(summary))
-    return 0 if all(r["executes"] for r in results) and all(r["honest"] for r in oov) else 1
+    behavior_passed = all(r["executes"] for r in results) and all(
+        r["honest"] for r in oov
+    )
+    if behavior_passed:
+        return 0
+    failures = [row for row in results if not row["executes"]]
+    fixture_infrastructure_failure = (
+        bool(failures)
+        and all(row["exact"] for row in failures)
+        and all(row["honest"] for row in oov)
+    )
+    return 75 if fixture_infrastructure_failure else 1
 
 
 if __name__ == "__main__": raise SystemExit(main())

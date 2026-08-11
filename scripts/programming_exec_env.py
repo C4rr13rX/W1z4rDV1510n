@@ -40,6 +40,24 @@ def benchmark_tool_env() -> dict[str, str]:
     return isolated_tool_env(BENCHMARK_CACHE_ROOT)
 
 
+def tool_output_detail(
+    result: subprocess.CompletedProcess[str], limit: int = 2000
+) -> str:
+    """Preserve both compiler streams in failure evidence.
+
+    Several toolchains put the useful diagnostic on stdout and a generic
+    summary on stderr. Choosing one stream can therefore hide the causal
+    error that admission needs in order to distinguish infrastructure from a
+    behavioral regression.
+    """
+    sections = []
+    if result.stdout:
+        sections.append(f"stdout:\n{result.stdout.rstrip()}")
+    if result.stderr:
+        sections.append(f"stderr:\n{result.stderr.rstrip()}")
+    return "\n".join(sections)[-max(1, limit):]
+
+
 def prepare_tool_command(command: Sequence[str], cwd: Path) -> list[str]:
     """Make compiler invocation hermetic before starting its process tree."""
     prepared = list(command)

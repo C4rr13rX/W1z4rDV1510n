@@ -996,6 +996,11 @@ def transient_gate_failure(error: BaseException) -> bool:
         "connection aborted",
         "connection refused",
         "urlerror",
+        # Exit 75 is emitted only when every failed execution used a trusted,
+        # byte-exact fixture. The enterprise wrapper exposes that fact in its
+        # final JSON so a compiler/host fault is retried instead of being
+        # misclassified as neural forgetting.
+        '"infrastructure_only_failure": true',
     ))
 
 
@@ -1642,6 +1647,23 @@ def settle_brain_for_admission(args: argparse.Namespace, phase: Phase,
             "settled brain retained terminals before admission: "
             f"{after.get('resident_terminals')}"
         )
+    available_before_gate = int(psutil.virtual_memory().available)
+    floor_bytes = int(
+        max(0.0, float(getattr(args, "min_free_memory_gb", 0.0)))
+        * 1024 * 1024 * 1024
+    )
+    memory_recycle = None
+    if floor_bytes and available_before_gate < floor_bytes:
+        memory_recycle = recycle_settled_runtime_node(
+            args, runtime, phase, trained_rows, runtime / "status.json"
+        )
+    available_after_gate = int(psutil.virtual_memory().available)
+    if floor_bytes and available_after_gate < floor_bytes:
+        raise AdmissionInfrastructureError(
+            "admission host memory remained below the configured floor after "
+            f"settled-node recycle: available={available_after_gate} "
+            f"required={floor_bytes}"
+        )
     report = {
         "kind": "admission_idle_settlement",
         "phase": phase.name,
@@ -1650,6 +1672,10 @@ def settle_brain_for_admission(args: argparse.Namespace, phase: Phase,
         "sleep": sleep,
         "checkpoint": checkpoint,
         "after": after,
+        "minimum_available_bytes": floor_bytes,
+        "available_bytes_before_gate": available_before_gate,
+        "available_bytes_after_gate": available_after_gate,
+        "memory_recycle": memory_recycle,
         "updated_unix": time.time(),
     }
     publish(

@@ -64,6 +64,7 @@ def run_suite(name: str, command: list[str], timeout: float) -> dict:
     return {
         "name": name,
         "passed": result.returncode == 0,
+        "infrastructure_failure": result.returncode == 75,
         "exit_code": result.returncode,
         "elapsed_seconds": round(time.monotonic() - started, 3),
         "summary": parsed,
@@ -115,6 +116,9 @@ def main() -> int:
         results.append(result)
         print(json.dumps({
             "suite": name, "passed": result["passed"],
+            "infrastructure_failure": result.get(
+                "infrastructure_failure", False
+            ),
             "timed_out": result.get("timed_out", False),
             "elapsed_seconds": result["elapsed_seconds"],
         }), flush=True)
@@ -124,6 +128,10 @@ def main() -> int:
     structure_before = stable_structure(stats_before)
     structure_after = stable_structure(stats_after)
     structure_unchanged = structure_after == structure_before
+    failed = [row for row in results if not row["passed"]]
+    infrastructure_only_failure = bool(failed) and all(
+        row.get("infrastructure_failure") for row in failed
+    )
     report = {
         "passed": (all(row["passed"] for row in results)
                    and tick_after == tick_before and structure_unchanged),
@@ -143,6 +151,7 @@ def main() -> int:
         },
         "passed_suites": sum(row["passed"] for row in results),
         "total_suites": len(results),
+        "infrastructure_only_failure": infrastructure_only_failure,
         "results": results,
         "updated_unix": time.time(),
     }
@@ -152,8 +161,11 @@ def main() -> int:
         "passed", "tick_before", "tick_after", "tick_delta",
         "structure_unchanged",
         "passed_suites", "total_suites",
+        "infrastructure_only_failure",
     )}))
-    return 0 if report["passed"] else 1
+    if report["passed"]:
+        return 0
+    return 75 if infrastructure_only_failure else 1
 
 
 if __name__ == "__main__":
