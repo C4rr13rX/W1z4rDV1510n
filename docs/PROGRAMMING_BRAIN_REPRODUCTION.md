@@ -187,6 +187,10 @@ host-available-memory floor. If neuron residency is zero but allocator pages
 still leave the host below that floor, checkpoint and topology-prove a node
 recycle before launching compilers; if capacity is still insufficient, pause
 as infrastructure rather than manufacturing a neural regression.
+Do not share `DOTNET_CLI_HOME` across operator and service accounts: the CLI
+creates a mode-`0600` user `NuGet.Config`. Each C# execution therefore uses its
+disposable, account-owned workspace for both .NET home and NuGet packages;
+manual root diagnostics cannot alter the service's later admission outcome.
 
 If an older controller already recorded such a false interval, append an
 explicit `resolved` event to the immutable deferred ledger with the missing

@@ -9,7 +9,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from programming_exec_env import benchmark_tool_env, run_tool, tool_output_detail
+from programming_exec_env import evaluation_tool_env, run_tool, tool_output_detail
 
 from programming_project_eval import b64, manifest, request
 
@@ -123,7 +123,9 @@ def execute(case: Case, response: str) -> tuple[bool, str]:
         return False, f"invalid manifest: {error}"
     with tempfile.TemporaryDirectory(prefix=f"wv-native-{case.name}-") as raw:
         root = Path(raw)
-        environment = benchmark_tool_env()
+        environment = evaluation_tool_env(
+            "csharp" if case.command[0] == "dotnet" else "", root
+        )
         for name, content in {**files, **case.test_files}.items():
             relative = PurePosixPath(name)
             if relative.is_absolute() or ".." in relative.parts or not isinstance(content, str):

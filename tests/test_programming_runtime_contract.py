@@ -138,6 +138,7 @@ from scripts.train_programming_brain import (
 )
 from scripts.programming_exec_env import (
     benchmark_tool_env,
+    evaluation_tool_env,
     isolated_tool_env,
     prepare_tool_command,
     tool_output_detail,
@@ -1541,6 +1542,17 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         runtime = ROOT / "runtime" / "benchmark-tool-cache"
         for key in ("GOCACHE", "GOMODCACHE", "DOTNET_CLI_HOME", "NUGET_PACKAGES"):
                 self.assertTrue(Path(environment[key]).is_relative_to(runtime))
+
+    def test_dotnet_evaluation_home_is_owned_by_disposable_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            environment = evaluation_tool_env("csharp", workspace)
+            self.assertTrue(
+                Path(environment["DOTNET_CLI_HOME"]).is_relative_to(workspace)
+            )
+            self.assertTrue(
+                Path(environment["NUGET_PACKAGES"]).is_relative_to(workspace)
+            )
 
     def test_csharp_evaluator_forces_offline_package_sources(self) -> None:
         source = (

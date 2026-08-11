@@ -40,6 +40,19 @@ def benchmark_tool_env() -> dict[str, str]:
     return isolated_tool_env(BENCHMARK_CACHE_ROOT)
 
 
+def evaluation_tool_env(language: str, workspace: Path) -> dict[str, str]:
+    """Keep user-configuring toolchains local to their disposable workspace.
+
+    The .NET CLI writes user-specific configuration beneath DOTNET_CLI_HOME.
+    A cache initialized by an operator account can therefore be unreadable to
+    the production service account even though build inputs are identical.
+    Other toolchains retain the bounded shared content cache.
+    """
+    if language.casefold() == "csharp":
+        return isolated_tool_env(workspace)
+    return benchmark_tool_env()
+
+
 def tool_output_detail(
     result: subprocess.CompletedProcess[str], limit: int = 2000
 ) -> str:

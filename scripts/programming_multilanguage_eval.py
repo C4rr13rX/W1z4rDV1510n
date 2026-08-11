@@ -11,7 +11,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-from programming_exec_env import benchmark_tool_env, run_tool, tool_output_detail
+from programming_exec_env import evaluation_tool_env, run_tool, tool_output_detail
 
 
 @dataclass(frozen=True)
@@ -73,7 +73,7 @@ def train(endpoint: str, repeats: int) -> None:
 def execute(case: Case, code: str) -> tuple[bool, str]:
     with tempfile.TemporaryDirectory(prefix=f"wv-{case.language}-") as raw:
         work = Path(raw)
-        environment = benchmark_tool_env()
+        environment = evaluation_tool_env(case.language, work)
         if case.language == "csharp":
             (work / "Eval.csproj").write_text(
                 '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType>'
