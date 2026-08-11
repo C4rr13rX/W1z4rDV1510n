@@ -21,6 +21,7 @@ import statistics
 import subprocess
 import sys
 import time
+import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -34,6 +35,8 @@ from sklearn.ensemble import (
     HistGradientBoostingRegressor,
 )
 from sklearn.linear_model import LogisticRegression
+from sklearn.exceptions import ConvergenceWarning
+from sklearn.neural_network import MLPRegressor
 
 try:
     import psutil
@@ -2473,6 +2476,392 @@ def genome_from_dict(payload: dict[str, Any]) -> Genome:
     compatible.setdefault("emergent_pools", [])
     compatible.setdefault("calibration_safety", 1.0)
     return Genome(**compatible)
+
+
+OUTCOME_POOL_LEARNERS = tuple(dict.fromkeys((
+    *LEARNER_KINDS, *sorted(RETURN_LEARNER_KINDS), "extra_trees_hybrid",
+)))
+OUTCOME_POOL_TARGETS = (
+    "fold_survival", "accuracy", "balanced_accuracy", "mcc", "coverage",
+    "profit_factor", "expectancy", "calibration", "drawdown",
+)
+
+
+@dataclass
+class GenomeOutcomePool:
+    """Live neural surrogate for reproduction only, never admission."""
+    feature_mean: np.ndarray
+    feature_scale: np.ndarray
+    target_mean: np.ndarray
+    target_scale: np.ndarray
+    models: list[Any]
+    examples: int
+    validation_mae: list[float]
+    baseline_mae: list[float]
+    validation_rank_correlation: list[float]
+    active: bool
+
+    def predict(self, genomes: Sequence[Genome]) -> tuple[np.ndarray, np.ndarray]:
+        values = np.asarray(
+            [genome_outcome_vector(genome) for genome in genomes], dtype=np.float64
+        )
+        normalized = (values - self.feature_mean) / self.feature_scale
+        predictions = np.asarray(
+            [np.clip(
+                model.predict(normalized) * self.target_scale + self.target_mean,
+                0.0, 1.0,
+            ) for model in self.models],
+            dtype=np.float64,
+        )
+        return predictions.mean(axis=0), predictions.std(axis=0)
+
+
+def _bounded(value: float, low: float, high: float) -> float:
+    return max(0.0, min(1.0, (float(value) - low) / max(1e-12, high - low)))
+
+
+def _outcome_bucket(value: str, width: int) -> int:
+    return int(hashlib.sha256(value.encode()).hexdigest()[:8], 16) % width
+
+
+def genome_outcome_vector(genome: Genome) -> np.ndarray:
+    """Encode genes, feature combinations, programs, and neural topology."""
+    scalars = [
+        _bounded(math.log10(max(genome.learning_rate, 1e-6)), -2.0, -.5),
+        _bounded(genome.max_iter, 60, 500),
+        _bounded(genome.max_leaf_nodes, 8, 72),
+        _bounded(genome.min_samples_leaf, 8, 100),
+        _bounded(math.log10(max(genome.l2_regularization, 1e-6)), -3, 1.5),
+        _bounded(genome.confidence_quantile, 0, .30),
+        _bounded(genome.binding_threshold, 2, 9),
+        _bounded(genome.concept_threshold, 2, 12),
+        _bounded(genome.presentations, 2, 9),
+        _bounded(math.log(max(genome.recency_half_life_days, 1)), math.log(45),
+                 math.log(2200)),
+        _bounded(genome.market_weight, 0, 2.5),
+        _bounded(genome.regime_bins, 1, 3),
+        _bounded(genome.calibration_safety, 1, 12),
+        _bounded(genome.calibration_reliability_version, 0, 8),
+        _bounded(genome.calibration_reliability_decay, 0, 8),
+        _bounded(len(genome.features), 8, 48),
+        _bounded(len(genome.feature_programs), 0, 10),
+        _bounded(len(genome.emergent_pools), 0, MAX_EMERGENT_POOLS),
+        float(genome.calibration_orientation),
+        float(genome.calibration_reliability),
+    ]
+    learners = [float(genome.learner_kind == name) for name in OUTCOME_POOL_LEARNERS]
+    feature_hash = np.zeros(64, dtype=np.float64)
+    for name in genome.features:
+        feature_hash[_outcome_bucket(f"feature:{name}", len(feature_hash))] = 1.0
+    program_hash = np.zeros(32, dtype=np.float64)
+    for program in genome.feature_programs:
+        token = ":".join((
+            str(program.get("op", "")), str(program.get("left", "")),
+            str(program.get("right", "")),
+        ))
+        program_hash[_outcome_bucket(f"program:{token}", len(program_hash))] += .25
+    program_hash = np.clip(program_hash, 0.0, 1.0)
+    pool_hash = np.zeros(16, dtype=np.float64)
+    for pool in genome.emergent_pools:
+        for name in pool.get("features", []):
+            pool_hash[_outcome_bucket(f"pool:{name}", len(pool_hash))] = 1.0
+    return np.concatenate((
+        np.asarray(scalars + learners, dtype=np.float64),
+        feature_hash, program_hash, pool_hash,
+    ))
+
+
+def genome_outcome_target(genome: Genome) -> np.ndarray | None:
+    result = genome.result or {}
+    summary = result.get("summary") or {}
+    if not summary or result.get("status") == "failed":
+        return None
+    requested = max(1, int(result.get("requested_folds", 3)))
+    survived = int(result.get("evaluated_folds", 0)) / requested
+    return np.asarray([
+        _bounded(survived, 0, 1),
+        _bounded(summary.get("min_accuracy", 0), 0, 1),
+        _bounded(summary.get("min_balanced_accuracy", 0), 0, 1),
+        _bounded(summary.get("min_mcc", -1), -1, 1),
+        _bounded(summary.get("min_coverage", 0), 0, 1),
+        _bounded(summary.get("min_profit_factor", 0), 0, 3),
+        _bounded(summary.get("min_expectancy", -.01), -.01, .01),
+        1.0 - _bounded(summary.get("max_ece", .3), 0, .3),
+        1.0 - _bounded(summary.get("max_drawdown", 2), 0, 2),
+    ], dtype=np.float64)
+
+
+def outcome_pool_evidence(
+    state_dir: Path, evaluation_id: str, limit: int = 768,
+) -> list[Genome]:
+    """Retain recent distribution plus rare high-quality historical outcomes."""
+    candidates: dict[str, Genome] = {}
+    for path in (state_dir / "candidates").glob("*.json"):
+        try:
+            genome = genome_from_dict(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError, TypeError):
+            continue
+        if ((genome.result or {}).get("evaluation_signature") != evaluation_id
+                or genome_outcome_target(genome) is None):
+            continue
+        key = genome_evaluation_key(genome)
+        prior = candidates.get(key)
+        if prior is None or int((genome.result or {}).get("evaluated_folds", 0)) > int(
+            (prior.result or {}).get("evaluated_folds", 0)
+        ):
+            candidates[key] = genome
+    values = list(candidates.values())
+    recent = sorted(values, key=lambda genome: (genome.generation, genome.genome_id),
+                    reverse=True)[:max(1, limit * 2 // 3)]
+    quality = sorted(values, key=lambda genome: (
+        int((genome.result or {}).get("evaluated_folds", 0)),
+        float(((genome.result or {}).get("summary") or {}).get("min_profit_factor", 0)),
+        float(((genome.result or {}).get("summary") or {}).get("min_accuracy", 0)),
+        float(((genome.result or {}).get("summary") or {}).get("min_coverage", 0)),
+    ), reverse=True)[:max(1, limit // 3)]
+    selected: dict[str, Genome] = {}
+    for genome in [*recent, *quality]:
+        selected[genome.genome_id] = genome
+        if len(selected) >= limit:
+            break
+    return sorted(selected.values(), key=lambda genome: (genome.generation, genome.genome_id))
+
+
+def train_genome_outcome_pool(
+    evidence: Sequence[Genome], *, minimum_examples: int = 96,
+) -> GenomeOutcomePool | None:
+    usable = [genome for genome in evidence if genome_outcome_target(genome) is not None]
+    if len(usable) < minimum_examples:
+        return None
+    values = np.asarray([genome_outcome_vector(genome) for genome in usable])
+    targets = np.asarray([genome_outcome_target(genome) for genome in usable])
+    split = max(minimum_examples // 2, min(len(usable) - 16, int(len(usable) * .8)))
+    if split <= 0 or split >= len(usable):
+        return None
+    x_train, x_test = values[:split], values[split:]
+    y_train, y_test = targets[:split], targets[split:]
+    mean = x_train.mean(axis=0)
+    # Rare hashed features must not explode merely because they are absent in
+    # most of one chronological split.
+    scale = np.maximum(x_train.std(axis=0), .1)
+    x_train = (x_train - mean) / scale
+    x_test = (x_test - mean) / scale
+    target_mean = y_train.mean(axis=0)
+    target_scale = np.maximum(y_train.std(axis=0), .03)
+    normalized_target = (y_train - target_mean) / target_scale
+    models = []
+    predictions = []
+    for seed in (2718, 3141, 5772):
+        model = MLPRegressor(
+            hidden_layer_sizes=(24, 12), activation="tanh", solver="adam",
+            alpha=.03, learning_rate_init=.0007, max_iter=180,
+            early_stopping=True, validation_fraction=.15,
+            n_iter_no_change=15, random_state=seed,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", ConvergenceWarning)
+            model.fit(x_train, normalized_target)
+        models.append(model)
+        predictions.append(np.clip(
+            model.predict(x_test) * target_scale + target_mean, 0.0, 1.0
+        ))
+    prediction = np.mean(predictions, axis=0)
+    validation_mae = np.mean(np.abs(prediction - y_test), axis=0)
+    baseline = np.tile(y_train.mean(axis=0), (len(y_test), 1))
+    baseline_mae = np.mean(np.abs(baseline - y_test), axis=0)
+    rank_correlations = []
+    for index in range(y_test.shape[1]):
+        actual_rank = np.argsort(np.argsort(y_test[:, index])).astype(np.float64)
+        predicted_rank = np.argsort(np.argsort(prediction[:, index])).astype(np.float64)
+        correlation = (
+            float(np.corrcoef(actual_rank, predicted_rank)[0, 1])
+            if np.std(actual_rank) > 0 and np.std(predicted_rank) > 0 else 0.0
+        )
+        rank_correlations.append(correlation if math.isfinite(correlation) else 0.0)
+    key_indices = (0, 1, 4, 5)
+    active = (
+        float(validation_mae.mean()) < float(baseline_mae.mean())
+        and float(validation_mae[list(key_indices)].mean())
+        < float(baseline_mae[list(key_indices)].mean())
+    )
+    return GenomeOutcomePool(
+        mean, scale, target_mean, target_scale, models, len(usable),
+        validation_mae.tolist(),
+        baseline_mae.tolist(), rank_correlations, active,
+    )
+
+
+def nudge_genome(parent: Genome, generation: int, rng: random.Random) -> Genome:
+    """Make one bounded departure so the outcome pool can map local gradients."""
+    payload = asdict(parent)
+    coordinate = rng.choice((
+        "confidence_quantile", "recency_half_life_days", "min_samples_leaf",
+        "max_leaf_nodes", "learning_rate", "market_weight",
+        "calibration_safety", "feature",
+    ))
+    if coordinate == "confidence_quantile":
+        payload[coordinate] = min(.30, max(
+            0.0, parent.confidence_quantile + rng.choice((-.01, -.005, .005, .01))
+        ))
+    elif coordinate == "recency_half_life_days":
+        payload[coordinate] = min(2200.0, max(
+            45.0, parent.recency_half_life_days * rng.choice((.8, 1.25))
+        ))
+    elif coordinate == "min_samples_leaf":
+        payload[coordinate] = min(100, max(
+            8, parent.min_samples_leaf + rng.choice((-4, 4))
+        ))
+    elif coordinate == "max_leaf_nodes":
+        payload[coordinate] = min(72, max(
+            8, parent.max_leaf_nodes + rng.choice((-4, 4))
+        ))
+    elif coordinate == "learning_rate":
+        payload[coordinate] = min(.30, max(
+            .005, parent.learning_rate * rng.choice((.8, 1.25))
+        ))
+    elif coordinate == "market_weight":
+        payload[coordinate] = min(2.5, max(
+            0.0, parent.market_weight + rng.choice((-.1, .1))
+        ))
+    elif coordinate == "calibration_safety":
+        payload[coordinate] = min(12.0, max(
+            1.0, parent.calibration_safety * rng.choice((.85, 1.15))
+        ))
+    else:
+        features = set(parent.features)
+        universe = sorted((set(BASE_FEATURES) | set(DERIVED_FEATURES)) - features)
+        if universe and rng.random() < .5:
+            features.add(rng.choice(universe))
+        elif len(features) > 8:
+            features.remove(rng.choice(sorted(features)))
+        payload["features"] = sorted(features)
+    payload.update({
+        "generation": generation, "parents": [parent.genome_id],
+        "genome_id": "", "fitness": None, "result": None,
+    })
+    return Genome(**payload).finalize()
+
+
+def outcome_acquisition(
+    mean: np.ndarray, uncertainty: np.ndarray, *, profit_discovery: bool = False,
+) -> float:
+    fold, accuracy, balanced, mcc, coverage, profit, expectancy, calibration, drawdown = mean
+    if profit_discovery:
+        return float(
+            1.0 * fold + 2.5 * accuracy + 1.0 * balanced + .75 * mcc
+            + 2.0 * coverage + 20.0 * profit + 1.5 * expectancy
+            + .25 * calibration + .25 * drawdown
+            - 4.0 * max(0.0, .60 - coverage)
+            - 3.0 * max(0.0, 2.0 / 3.0 - profit)
+            + 1.25 * float(np.mean(uncertainty))
+        )
+    return float(
+        4.0 * fold + 3.0 * accuracy + 1.5 * balanced + 1.0 * mcc
+        + 2.0 * coverage + 4.0 * profit + 1.5 * expectancy
+        + .5 * calibration + .5 * drawdown
+        - 5.0 * max(0.0, .60 - coverage)
+        - 5.0 * max(0.0, 2.0 / 3.0 - profit)
+        + .75 * float(np.mean(uncertainty))
+    )
+
+
+def introduce_outcome_pool_variant(
+    population: list[Genome], evaluated: Sequence[Genome],
+    pool: GenomeOutcomePool | None, generation: int, rng: random.Random,
+    protected_parent_ids: set[str] | None = None,
+) -> tuple[list[Genome], dict[str, Any]]:
+    report: dict[str, Any] = {
+        "active": bool(pool and pool.active),
+        "examples": int(pool.examples if pool else 0),
+        "validation_mae": (dict(zip(OUTCOME_POOL_TARGETS, pool.validation_mae))
+                           if pool else {}),
+        "baseline_mae": (dict(zip(OUTCOME_POOL_TARGETS, pool.baseline_mae))
+                         if pool else {}),
+        "validation_rank_correlation": (dict(zip(
+            OUTCOME_POOL_TARGETS, pool.validation_rank_correlation
+        )) if pool else {}),
+        "proposed": False,
+    }
+    if pool is None or not pool.active or not population or not evaluated:
+        return population, report
+    signed = [genome for genome in evaluated if genome.fitness is not None]
+    full_fold_bases = sorted(signed, key=lambda genome: (
+            int((genome.result or {}).get("evaluated_folds", 0)),
+            float(((genome.result or {}).get("summary") or {}).get(
+                "min_accuracy", 0
+            )),
+            float(((genome.result or {}).get("summary") or {}).get(
+                "min_profit_factor", 0
+            )),
+        ), reverse=True)[:8]
+    profit_bases = sorted(signed, key=lambda genome: (
+            float(((genome.result or {}).get("summary") or {}).get(
+                "min_profit_factor", 0
+            )),
+            float(((genome.result or {}).get("summary") or {}).get(
+                "min_accuracy", 0
+            )),
+            float(((genome.result or {}).get("summary") or {}).get(
+                "min_coverage", 0
+            )),
+        ), reverse=True)[:8]
+    accuracy_bases = sorted(signed, key=lambda genome: (
+            float(((genome.result or {}).get("summary") or {}).get(
+                "min_accuracy", 0
+            )),
+            float(((genome.result or {}).get("summary") or {}).get(
+                "min_profit_factor", 0
+            )),
+        ), reverse=True)[:8]
+    bases_by_id: dict[str, Genome] = {}
+    for genome in [*full_fold_bases, *profit_bases, *accuracy_bases]:
+        bases_by_id[genome.genome_id] = genome
+    bases = list(bases_by_id.values())
+    if not bases:
+        return population, report
+    known = {genome.genome_id for genome in [*population, *evaluated]}
+    proposals: dict[str, Genome] = {}
+    for index in range(144):
+        base = bases[index % len(bases)] if index < len(bases) else rng.choice(bases)
+        proposal = (nudge_genome(base, generation, rng) if index % 2 == 0
+                    else mutate(base, generation, rng))
+        if proposal.genome_id not in known:
+            proposals[proposal.genome_id] = proposal
+    if not proposals:
+        return population, report
+    candidates = list(proposals.values())
+    means, uncertainties = pool.predict(candidates)
+    profit_discovery = generation % 3 == 0
+    ranked = sorted(
+        zip(candidates, means, uncertainties),
+        key=lambda item: outcome_acquisition(
+            item[1], item[2], profit_discovery=profit_discovery
+        ), reverse=True,
+    )
+    protected_parent_ids = protected_parent_ids or set()
+    replacement = next((
+        index for index in range(len(population) - 1, 0, -1)
+        if population[index].fitness is None
+        and not (set(population[index].parents) & protected_parent_ids)
+    ), None)
+    if replacement is None:
+        return population, report
+    proposal, mean, uncertainty = ranked[0]
+    population[replacement] = proposal
+    report.update({
+        "proposed": True, "genome_id": proposal.genome_id,
+        "parent_ids": proposal.parents,
+        "predicted": dict(zip(OUTCOME_POOL_TARGETS, mean.tolist())),
+        "uncertainty": dict(zip(OUTCOME_POOL_TARGETS, uncertainty.tolist())),
+        "acquisition": outcome_acquisition(
+            mean, uncertainty, profit_discovery=profit_discovery
+        ),
+        "acquisition_mode": (
+            "profit_discovery" if profit_discovery else "balanced_safe_improvement"
+        ),
+        "candidate_search_size": len(candidates),
+    })
+    return population, report
 
 
 def introduce_missing_learner_species(
@@ -5351,6 +5740,32 @@ def main() -> int:
                     },
                 )
             )
+            try:
+                outcome_evidence = outcome_pool_evidence(
+                    args.state_dir, signature
+                )
+                outcome_pool = train_genome_outcome_pool(outcome_evidence)
+                population, outcome_pool_report = introduce_outcome_pool_variant(
+                    population, outcome_evidence, outcome_pool, generation, rng,
+                    {
+                        genome.genome_id for genome in (
+                            champion, coverage_frontier, multiscale_frontier,
+                            multiscale_boundary_frontier, extra_trees_frontier,
+                            regime_shift_frontier,
+                        ) if genome is not None
+                    },
+                )
+            except Exception as exc:
+                outcome_pool_report = {
+                    "active": False, "proposed": False,
+                    "error": repr(exc),
+                }
+            atomic_json(args.state_dir / "genome_outcome_pool.json", {
+                "at": utc_now(), "generation": generation,
+                **outcome_pool_report,
+                "scope": "reproduction_advisory_only",
+                "live_admission_effect": "none",
+            })
             population, novelty_injections = ensure_novelty(
                 population, generation, rng
             )
@@ -5412,6 +5827,11 @@ def main() -> int:
                 "untargeted_multiscale_candidates_converted": (
                     multiscale_candidates_converted
                 ),
+                "outcome_pool_active": bool(outcome_pool_report.get("active")),
+                "outcome_pool_examples": int(outcome_pool_report.get("examples", 0)),
+                "outcome_pool_candidates": int(bool(
+                    outcome_pool_report.get("proposed")
+                )),
             })
             atomic_json(args.state_dir / "evolution_health.json", {
                 "at": utc_now(), **exploration,

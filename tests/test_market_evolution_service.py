@@ -2577,6 +2577,92 @@ def test_untargeted_multiscale_candidates_are_converted():
     assert remaining[0].parents == [protected_parent]
 
 
+def test_genome_outcome_pool_learns_live_metric_rankings():
+    evidence = []
+    for index in range(120):
+        genome = seed_genomes(1, random.Random(300 + index))[0]
+        coordinate = (index % 20) / 20.0
+        genome.confidence_quantile = .03 + .24 * coordinate
+        genome.generation = index
+        genome.fitness = 300 + index
+        genome.result = {
+            "status": "prescreen_reject",
+            "evaluated_folds": 1 + index % 3,
+            "requested_folds": 3,
+            "summary": {
+                "min_accuracy": .48 + .16 * coordinate,
+                "min_balanced_accuracy": .47 + .15 * coordinate,
+                "min_mcc": -.04 + .30 * coordinate,
+                "min_coverage": .82 - .30 * coordinate,
+                "min_profit_factor": .72 + 1.1 * coordinate,
+                "min_expectancy": -.002 + .004 * coordinate,
+                "max_ece": .18 - .08 * coordinate,
+                "max_drawdown": 1.2 - .5 * coordinate,
+            },
+        }
+        genome.finalize()
+        evidence.append(genome)
+
+    pool = evolution.train_genome_outcome_pool(evidence)
+
+    assert pool is not None
+    assert pool.examples == 120
+    assert len(pool.models) == 3
+    prediction, uncertainty = pool.predict(evidence[-2:])
+    assert prediction.shape == (2, len(evolution.OUTCOME_POOL_TARGETS))
+    assert uncertainty.shape == prediction.shape
+    accuracy_index = evolution.OUTCOME_POOL_TARGETS.index("accuracy")
+    assert pool.validation_rank_correlation[accuracy_index] > .25
+
+
+def test_outcome_pool_profit_target_changes_acquisition_priority():
+    conservative = np.asarray([.7, .62, .60, .62, .65, .35, .55, .7, .7])
+    profitable = conservative.copy()
+    profitable[5] = .75
+    uncertainty = np.zeros_like(conservative)
+
+    assert evolution.outcome_acquisition(
+        profitable, uncertainty
+    ) > evolution.outcome_acquisition(conservative, uncertainty)
+
+
+def test_active_outcome_pool_reserves_only_one_reproduction_slot():
+    class FixedOutcomeModel:
+        def predict(self, values):
+            target = np.asarray([.8, .64, .62, .62, .66, .72, .58, .7, .7])
+            return np.tile(target, (len(values), 1))
+
+    population = seed_genomes(8, random.Random(421))
+    evaluated = seed_genomes(8, random.Random(422))
+    for index, genome in enumerate(evaluated):
+        genome.fitness = 2000 - index
+        genome.result = {
+            "evaluated_folds": 3, "requested_folds": 3,
+            "summary": {"min_accuracy": .56, "min_profit_factor": 1.0},
+        }
+    for genome in population[3:]:
+        genome.fitness = None
+        genome.result = None
+    width = len(evolution.genome_outcome_vector(population[0]))
+    targets = len(evolution.OUTCOME_POOL_TARGETS)
+    pool = evolution.GenomeOutcomePool(
+        np.zeros(width), np.ones(width), np.zeros(targets), np.ones(targets),
+        [FixedOutcomeModel(), FixedOutcomeModel()], 120,
+        [.05] * targets, [.10] * targets, [.4] * targets, True,
+    )
+
+    before = {genome.genome_id for genome in population}
+    updated, report = evolution.introduce_outcome_pool_variant(
+        population, evaluated, pool, 430, random.Random(423)
+    )
+
+    introduced = [genome for genome in updated if genome.genome_id not in before]
+    assert report["active"] is True and report["proposed"] is True
+    assert len(introduced) == 1
+    assert introduced[0].fitness is None
+    assert report["genome_id"] == introduced[0].genome_id
+
+
 def test_reflexivity_variant_is_seeded_without_erasing_learner_diversity():
     population = seed_genomes(12, random.Random(14))
     for genome in population:

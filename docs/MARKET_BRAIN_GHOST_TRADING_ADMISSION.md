@@ -107,6 +107,16 @@ walk-forward and retention gates before replacing the accepted brain.
   protected parent and phenotype. Near-identical quantiles do not earn duplicate
   exemptions; redundant candidates are converted to the cheaper single-scale
   learner so controlled feedback cycles remain timely.
+- A live genome-outcome neural pool may advise exactly one reproduction slot.
+  It trains only on signed historical candidate results and encodes genes,
+  learner class, causal feature/program combinations, calibration, memory, and
+  emergent-pool topology. Chronological holdout error and rank correlation are
+  published against a naive historical-mean baseline before activation.
+- The neural pool alternates balanced-safe improvement with bounded profit
+  discovery targeting PF 2.0. Its uncertainty can encourage a small departure
+  from known lineages, but its predictions are never fitness, fold evidence,
+  champion evidence, or trading admission; every proposed genome starts with
+  no fitness and must pass the unchanged protected tests.
 
 ## Stop conditions
 
