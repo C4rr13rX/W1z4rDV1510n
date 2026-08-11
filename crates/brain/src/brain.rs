@@ -954,11 +954,14 @@ mod posting_tests {
     }
 
     #[test]
-    fn recurrent_bindings_refresh_postings_at_logarithmic_milestones() {
+    fn recurrent_bindings_refresh_postings_at_logarithmic_milestones_and_bounded_cadence() {
         let due: Vec<u64> = (0..=33)
             .filter(|count| recurrence_posting_refresh_due(*count))
             .collect();
-        assert_eq!(due, vec![2, 4, 8, 16, 32]);
+        assert_eq!(due, vec![2, 4, 8, 16, 24, 32]);
+        for start in 1..=64 {
+            assert!((start..start + 8).any(recurrence_posting_refresh_due));
+        }
     }
 }
 
@@ -972,7 +975,13 @@ fn append_binding_posting(ids: &mut Vec<NeuronId>, binding_id: NeuronId, limit: 
 }
 
 fn recurrence_posting_refresh_due(use_count: u64) -> bool {
-    use_count >= 2 && use_count.is_power_of_two()
+    // Powers of two cheaply preserve early Hebbian strength milestones, but
+    // become arbitrarily far apart for established bindings. A bounded
+    // maintenance pass must be able to make a protected route visible in the
+    // newest immutable posting generation without inspecting its private
+    // use_count. Cap staleness at eight recurrences while retaining the
+    // logarithmic milestones. This only re-advertises the existing binding.
+    use_count >= 2 && (use_count.is_power_of_two() || use_count % 8 == 0)
 }
 
 const MAX_ROUTED_BINDING_CANDIDATES: usize = 512;
@@ -1746,9 +1755,10 @@ impl Brain {
             if let Some(members) = refresh_members {
                 // Recurrent evidence must remain addressable as posting
                 // generations accumulate. Re-advertise the existing neuron;
-                // never allocate or duplicate a learned action. Powers of two
-                // bound index growth logarithmically while letting stronger
-                // Hebbian evidence periodically re-enter the live overlay.
+                // never allocate or duplicate a learned action. Early powers
+                // of two plus a bounded recurrence cadence let stronger
+                // Hebbian evidence periodically re-enter the live overlay and
+                // guarantee that a finite maintenance pass can refresh it.
                 self.index_binding_members(bid, &members);
             }
         }

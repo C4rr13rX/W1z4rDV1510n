@@ -166,10 +166,13 @@ Hebbian reinforcement must refresh routing addressability as well as the
 binding neuron's `use_count`. Immutable posting generations otherwise leave a
 repeatedly successful old binding trapped behind newer equal-feature bindings:
 the knowledge still exists, but a bounded readout cannot reach it. Re-advertise
-the existing binding identity at power-of-two recurrence milestones. This adds
-no neuron and no synthetic action, bounds posting growth logarithmically, and
-keeps both old reinforced knowledge and new repairs eligible as generations
-accumulate.
+the existing binding identity at early power-of-two recurrence milestones and
+at least once every eight recurrences thereafter. This adds no neuron and no
+synthetic action while placing a finite upper bound on routing staleness.
+Protected route maintenance must therefore present every canonical route at
+least eight times, settle the overlay into immutable storage, and pass the full
+retention battery before admission. A shorter fixed pass can miss a
+logarithmic milestone and is not durable-reachability evidence.
 
 After the conditionally launched or adopted node becomes healthy, the service
 wrapper resolves both its listening-socket PID and its
