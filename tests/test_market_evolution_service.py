@@ -2281,6 +2281,23 @@ def test_primary_coverage_lane_brackets_transitive_plateau_evidence():
     assert child.confidence_quantile == pytest.approx(frontier.confidence_quantile)
     assert child.features == frontier.features
 
+    child.fitness = frontier.fitness
+    child.result = {"evaluated_folds": 1, "summary": good}
+    second_population = seed_genomes(8, random.Random(206))
+    for genome in second_population[1:]:
+        genome.fitness = None
+        genome.result = None
+    continued = evolution.introduce_primary_coverage_variant(
+        second_population, frontier,
+        [plateau_one, plateau_two, reversal, child], 929,
+    )
+    threshold_child = next(
+        genome for genome in continued if genome.parents == [child.genome_id]
+    )
+    assert threshold_child.learner_kind == "continuous_rank_regressor"
+    assert threshold_child.confidence_quantile == pytest.approx((.218 + .205) / 2)
+    assert threshold_child.features == frontier.features
+
 
 def test_structure_evidence_recovers_indirect_descendants(tmp_path):
     frontier = seed_genomes(1, random.Random(205))[0]

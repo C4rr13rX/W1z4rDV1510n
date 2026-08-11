@@ -236,6 +236,9 @@ return model, directional probability, prediction, features, and threshold,
 and adds only a deterministic `1e-10` decision-time feature projection to the
 abstention score. That perturbation cannot reorder materially different model
 confidences; it makes observations inside an exactly tied leaf individually
-selectable. The descendant must still pass every ordinary coverage,
+selectable. If the same-threshold ablation preserves the frontier, subsequent
+coverage bisection remains inside this ranked species; reverting those children
+to the ordinary regressor would recreate the proven leaf plateau. The
+descendant must still pass every ordinary coverage,
 profitability, calibration, known/unseen-asset, protected-fold, neural, and
 ghost-only admission gate. Historical descendants suppress repeated probes.

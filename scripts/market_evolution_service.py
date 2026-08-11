@@ -3735,6 +3735,17 @@ def introduce_primary_coverage_variant(
             or frontier is None
             or frontier.learner_kind in {"extra_trees", "multiscale_regressor"}):
         return population
+    def coverage_family_key(genome: Genome) -> str:
+        payload = asdict(genome)
+        for key in (
+            "genome_id", "fitness", "result", "generation", "parents",
+            "confidence_quantile", "learner_kind",
+        ):
+            payload.pop(key, None)
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
     summary = (frontier.result or {}).get("summary", {})
     lower_evidence = sorted(
         (
@@ -3777,7 +3788,14 @@ def introduce_primary_coverage_variant(
             )) < PRESCREEN["profit_factor"]
         )
     ), None)
+    proposal_base = frontier
     if reversal is not None:
+        ranked_variants = sorted((
+            genome for genome in evidence
+            if genome.fitness is not None
+            and genome.learner_kind == "continuous_rank_regressor"
+            and coverage_family_key(genome) == coverage_family_key(frontier)
+        ), key=lambda genome: (genome.confidence_quantile, genome.generation))
         ranked_variant_seen = any(
             genome.learner_kind == "continuous_rank_regressor"
             and frontier.genome_id in genome.parents
@@ -3809,7 +3827,46 @@ def introduce_primary_coverage_variant(
                 if replacement is not None:
                     population[replacement] = variant
                 return population
-        quantiles.append((upper_quantile + reversal.confidence_quantile) / 2.0)
+        ranked_underfloor = [
+            genome for genome in ranked_variants
+            if float(((genome.result or {}).get("summary") or {}).get(
+                "min_coverage", 0
+            )) < PRESCREEN["coverage"]
+        ]
+        ranked_overfloor_failure = [
+            genome for genome in ranked_variants
+            if float(((genome.result or {}).get("summary") or {}).get(
+                "min_coverage", 0
+            )) >= PRESCREEN["coverage"]
+            and (
+                float(((genome.result or {}).get("summary") or {}).get(
+                    "min_accuracy", 0
+                )) < PRESCREEN["accuracy"]
+                or float(((genome.result or {}).get("summary") or {}).get(
+                    "min_profit_factor", 0
+                )) < PRESCREEN["profit_factor"]
+            )
+        ]
+        if ranked_underfloor:
+            # Continue threshold bisection inside the ranked species. Reverting
+            # to the ordinary regressor here would recreate the leaf plateau
+            # that justified this repair and make the first ablation a dead end.
+            proposal_base = min(
+                ranked_underfloor, key=lambda genome: genome.confidence_quantile
+            )
+            lower_bound = max(
+                [
+                    genome.confidence_quantile
+                    for genome in ranked_overfloor_failure
+                    if genome.confidence_quantile < proposal_base.confidence_quantile
+                ],
+                default=reversal.confidence_quantile,
+            )
+            quantiles.append(
+                (proposal_base.confidence_quantile + lower_bound) / 2.0
+            )
+        else:
+            quantiles.append((upper_quantile + reversal.confidence_quantile) / 2.0)
     else:
         base = (min(plateau_evidence, key=lambda genome: genome.confidence_quantile)
                 if plateau_evidence else
@@ -3839,10 +3896,10 @@ def introduce_primary_coverage_variant(
     }
     variant: Genome | None = None
     for quantile in quantiles:
-        payload = asdict(frontier)
+        payload = asdict(proposal_base)
         payload.update({
             "confidence_quantile": max(0.0, min(.30, quantile)),
-            "generation": generation, "parents": [frontier.genome_id],
+            "generation": generation, "parents": [proposal_base.genome_id],
             "fitness": None, "result": None, "genome_id": "",
         })
         proposal = Genome(**payload).finalize()
