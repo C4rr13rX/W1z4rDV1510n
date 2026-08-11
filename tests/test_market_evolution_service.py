@@ -1425,6 +1425,61 @@ def test_failed_nearby_program_transfer_advances_to_next_hypothesis():
     assert evolution.program_name(second) in names
 
 
+def test_exhausted_profit_frontier_advances_without_spending_two_slots():
+    population = seed_genomes(8, random.Random(185))
+    champion = population[0]
+    champion.fitness = 2400
+    champion.result = {
+        "evaluated_folds": 3, "requested_folds": 3,
+        "summary": {"min_accuracy": .566, "min_profit_factor": .958},
+    }
+    exhausted_program = {
+        "op": "signed_sqrt_product", "left": "cross_rank_r1",
+        "right": "causal_z14_r24", "scale": 3.2,
+    }
+    next_program = {
+        "op": "regime_gate", "left": "hour_sin",
+        "right": "causal_z60_market_breadth_r6", "scale": 3.8,
+    }
+    exhausted, following = population[1:3]
+    for frontier, program, profit in (
+        (exhausted, exhausted_program, 1.05),
+        (following, next_program, 1.21),
+    ):
+        frontier.fitness = 2300
+        frontier.feature_programs = [program]
+        frontier.result = {"summary": {
+            "min_profit_factor": profit, "min_expectancy": .0005,
+        }}
+    failed = Genome(**{
+        **champion.__dict__,
+        "feature_programs": [*champion.feature_programs, exhausted_program],
+        "generation": 904, "parents": ["prior-champion"],
+        "genome_id": "", "fitness": 2300,
+        "result": {
+            "evaluation_signature": "scope-a",
+            "evaluated_folds": 3, "requested_folds": 3,
+            "summary": {"min_accuracy": .55, "min_profit_factor": .90},
+        },
+    }).finalize()
+    for genome in population[3:]:
+        genome.fitness = None
+        genome.result = None
+
+    after = evolution.introduce_champion_profit_program_from_frontiers(
+        population, champion, [exhausted, following], [failed], 907
+    )
+
+    transfers = [
+        genome for genome in after
+        if champion.genome_id in genome.parents
+        and len(genome.feature_programs) > len(champion.feature_programs)
+    ]
+    assert len(transfers) == 1
+    names = {evolution.program_name(program) for program in transfers[0].feature_programs}
+    assert evolution.program_name(next_program) in names
+
+
 def test_reliability_decay_search_brackets_best_protected_evidence():
     base = seed_genomes(1, random.Random(175))[0]
     evidence = []

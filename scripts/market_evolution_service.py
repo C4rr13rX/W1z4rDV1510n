@@ -3332,6 +3332,23 @@ def introduce_champion_profit_program_variant(
     return population
 
 
+def introduce_champion_profit_program_from_frontiers(
+    population: list[Genome], champion: Genome | None,
+    profitable_frontiers: Sequence[Genome | None], evidence: Sequence[Genome],
+    generation: int, protected_parent_ids: set[str] | None = None,
+) -> list[Genome]:
+    """Try profitable frontiers in rank order, reserving exactly one slot."""
+    for frontier in profitable_frontiers:
+        before = [genome.genome_id for genome in population]
+        population = introduce_champion_profit_program_variant(
+            population, champion, frontier, evidence, generation,
+            protected_parent_ids,
+        )
+        if [genome.genome_id for genome in population] != before:
+            break
+    return population
+
+
 def coverage_frontier_rank(genome: Genome) -> tuple[float, ...] | None:
     """Rank near-coverage misses without discarding profitable accuracy.
 
@@ -4704,8 +4721,9 @@ def main() -> int:
                     ) if genome is not None
                 },
             )
-            population = introduce_champion_profit_program_variant(
-                population, champion, extra_trees_frontier,
+            population = introduce_champion_profit_program_from_frontiers(
+                population, champion,
+                (extra_trees_frontier, coverage_frontier, multiscale_frontier),
                 champion_profit_evidence, generation,
                 {
                     genome.genome_id for genome in (
