@@ -2207,6 +2207,86 @@ def test_primary_coverage_lane_escapes_an_identical_score_plateau():
     assert child.confidence_quantile == pytest.approx(.2055)
 
 
+def test_primary_coverage_lane_brackets_transitive_plateau_evidence():
+    frontier = seed_genomes(1, random.Random(203))[0]
+    frontier.learner_kind = "regressor"
+    frontier.confidence_quantile = .218
+    frontier.fitness = 410
+    good = {
+        "min_accuracy": .646, "min_balanced_accuracy": .645,
+        "min_mcc": .29, "min_coverage": .5976,
+        "min_acted_observations": 150, "min_expectancy": .002,
+        "min_profit_factor": 1.21,
+    }
+    frontier.result = {"evaluated_folds": 1, "summary": good}
+    frontier.finalize()
+    plateau_one = Genome(**{
+        **frontier.__dict__, "confidence_quantile": .215,
+        "generation": 925, "parents": [frontier.genome_id],
+        "genome_id": "", "fitness": 410,
+        "result": {"evaluated_folds": 1, "summary": good},
+    }).finalize()
+    plateau_two = Genome(**{
+        **frontier.__dict__, "confidence_quantile": .212,
+        "generation": 926, "parents": [plateau_one.genome_id],
+        "genome_id": "", "fitness": 410,
+        "result": {"evaluated_folds": 1, "summary": good},
+    }).finalize()
+    reversal = Genome(**{
+        **frontier.__dict__, "confidence_quantile": .205,
+        "generation": 927, "parents": [frontier.genome_id],
+        "genome_id": "", "fitness": 1260,
+        "result": {"evaluated_folds": 2, "summary": {
+            "min_accuracy": .449, "min_balanced_accuracy": .446,
+            "min_mcc": -.11, "min_coverage": .78,
+            "min_acted_observations": 184, "min_expectancy": -.0025,
+            "min_profit_factor": .79,
+        }},
+    }).finalize()
+    population = seed_genomes(8, random.Random(204))
+    for genome in population[1:]:
+        genome.fitness = None
+        genome.result = None
+
+    repaired = evolution.introduce_primary_coverage_variant(
+        population, frontier, [plateau_one, plateau_two, reversal], 928
+    )
+
+    child = next(
+        genome for genome in repaired if genome.parents == [frontier.genome_id]
+    )
+    assert child.confidence_quantile == pytest.approx((.212 + .205) / 2)
+
+
+def test_structure_evidence_recovers_indirect_descendants(tmp_path):
+    frontier = seed_genomes(1, random.Random(205))[0]
+    frontier.result = {"evaluation_signature": "scope-a", "summary": {}}
+    frontier.fitness = 400
+    frontier.finalize()
+    direct = Genome(**{
+        **frontier.__dict__, "confidence_quantile": .19,
+        "parents": [frontier.genome_id], "genome_id": "",
+    }).finalize()
+    indirect = Genome(**{
+        **frontier.__dict__, "confidence_quantile": .18,
+        "parents": [direct.genome_id], "genome_id": "",
+    }).finalize()
+    candidates = tmp_path / "candidates"
+    candidates.mkdir()
+    for candidate in (direct, indirect):
+        (candidates / f"{candidate.genome_id}.json").write_text(
+            json.dumps(candidate.__dict__), encoding="utf-8"
+        )
+
+    recovered = evolution.load_structure_evidence(
+        tmp_path, frontier, "scope-a"
+    )
+
+    assert {candidate.genome_id for candidate in recovered} == {
+        direct.genome_id, indirect.genome_id,
+    }
+
+
 def test_compatible_reversal_frontier_is_structure_scoped():
     upper = seed_genomes(4, random.Random(69))[-1]
     upper.confidence_quantile = .27

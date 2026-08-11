@@ -1479,6 +1479,26 @@ def load_nearby_return_tree_evidence(
     return list(evidence.values())
 
 
+def load_structure_evidence(
+    state_dir: Path, frontier: Genome, evaluation_id: str,
+) -> list[Genome]:
+    """Recover all signed thresholds for one phenotype across ancestry hops."""
+    structure = genome_structure_key(frontier)
+    evidence: dict[str, Genome] = {}
+    for path in (state_dir / "candidates").glob("*.json"):
+        try:
+            candidate = genome_from_dict(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError, TypeError):
+            continue
+        if (candidate.fitness is None
+                or candidate.genome_id == frontier.genome_id
+                or (candidate.result or {}).get("evaluation_signature") != evaluation_id
+                or genome_structure_key(candidate) != structure):
+            continue
+        evidence[candidate.genome_id] = candidate
+    return list(evidence.values())
+
+
 def add_derived_features(rows: Sequence[dict[str, Any]]) -> None:
     for row in rows:
         features = row["features"]
@@ -3297,8 +3317,7 @@ def introduce_primary_coverage_variant(
     lower_evidence = sorted(
         (
             genome for genome in evidence
-            if frontier.genome_id in genome.parents
-            and genome_structure_key(genome) == genome_structure_key(frontier)
+            if genome_structure_key(genome) == genome_structure_key(frontier)
             and genome.confidence_quantile < frontier.confidence_quantile
             and genome.fitness is not None
         ),
@@ -3306,9 +3325,25 @@ def introduce_primary_coverage_variant(
         reverse=True,
     )
     quantiles: list[float] = []
+    plateau_fields = (
+        "min_accuracy", "min_balanced_accuracy", "min_mcc", "min_coverage",
+        "min_acted_observations", "min_expectancy", "min_profit_factor",
+    )
+    plateau_evidence = [
+        genome for genome in lower_evidence
+        if all(abs(
+            float(((genome.result or {}).get("summary") or {}).get(field, 0))
+            - float(summary.get(field, 0))
+        ) < 1e-9 for field in plateau_fields)
+    ]
+    upper_quantile = min([
+        frontier.confidence_quantile,
+        *(genome.confidence_quantile for genome in plateau_evidence),
+    ])
     reversal = next((
         genome for genome in lower_evidence
-        if float(((genome.result or {}).get("summary") or {}).get(
+        if genome.confidence_quantile < upper_quantile
+        and float(((genome.result or {}).get("summary") or {}).get(
             "min_coverage", 0
         )) >= PRESCREEN["coverage"]
         and (
@@ -3322,10 +3357,12 @@ def introduce_primary_coverage_variant(
     ), None)
     if reversal is not None:
         quantiles.append(
-            (frontier.confidence_quantile + reversal.confidence_quantile) / 2.0
+            (upper_quantile + reversal.confidence_quantile) / 2.0
         )
     else:
-        base = lower_evidence[0] if lower_evidence else frontier
+        base = (min(plateau_evidence, key=lambda genome: genome.confidence_quantile)
+                if plateau_evidence else
+                lower_evidence[0] if lower_evidence else frontier)
         base_summary = (base.result or {}).get("summary", {})
         coverage_gap = max(
             .001,
@@ -5194,6 +5231,11 @@ def main() -> int:
                 },
                 signature,
             )
+            primary_coverage_evidence = (
+                load_structure_evidence(
+                    args.state_dir, coverage_frontier, signature
+                ) if coverage_frontier is not None else []
+            )
             population = introduce_coverage_repair_variants(
                 population,
                 [*([coverage_frontier] if coverage_frontier is not None else []),
@@ -5212,7 +5254,7 @@ def main() -> int:
                 multiscale_boundary_frontier,
             )
             population = introduce_primary_coverage_variant(
-                population, coverage_frontier, historical_repair_evidence,
+                population, coverage_frontier, primary_coverage_evidence,
                 generation,
                 {
                     genome.genome_id for genome in (

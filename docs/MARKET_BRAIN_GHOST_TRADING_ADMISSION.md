@@ -100,7 +100,9 @@ walk-forward and retention gates before replacing the accepted brain.
   rather than treating a numerically different genome as new behavior. An
   identical descendant must not replace the upper frontier endpoint merely
   because its quantile is lower; doing so destroys the ancestry that proves
-  the plateau and resets automatic correction.
+  the plateau and resets automatic correction. Threshold evidence is scoped by
+  model phenotype, not only direct parentage, so an indirect descendant still
+  tightens the behavioral bracket instead of being forgotten after a handoff.
 
 ## Stop conditions
 
