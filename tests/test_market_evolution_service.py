@@ -1287,6 +1287,92 @@ def test_full_fold_champion_coordinate_search_survives_emergent_saturation():
     )
 
 
+def test_champion_coordinate_search_mirrors_accuracy_economics_tradeoff():
+    population = seed_genomes(8, random.Random(182))
+    champion = population[0]
+    champion.fitness = 2400
+    champion.result = {
+        "evaluated_folds": 3, "requested_folds": 3,
+        "summary": {
+            "min_accuracy": .5664, "min_profit_factor": .9576,
+            "min_expectancy": -.00048,
+        },
+    }
+    observed = Genome(**{
+        **champion.__dict__,
+        "confidence_quantile": champion.confidence_quantile - .01,
+        "generation": 903, "parents": [champion.genome_id],
+        "genome_id": "", "fitness": 2390,
+        "result": {
+            "evaluated_folds": 3, "requested_folds": 3,
+            "summary": {
+                "min_accuracy": .5678, "min_profit_factor": .9409,
+                "min_expectancy": -.00069,
+            },
+        },
+    }).finalize()
+    for genome in population[1:]:
+        genome.fitness = None
+        genome.result = None
+        genome.emergent_pools = []
+
+    after = evolution.introduce_champion_coordinate_variant(
+        population, champion, [observed], 904
+    )
+
+    child = next(
+        genome for genome in after
+        if champion.genome_id in genome.parents and genome.fitness is None
+    )
+    assert child.confidence_quantile == pytest.approx(
+        champion.confidence_quantile + .01
+    )
+
+
+def test_profitable_frontier_program_isolated_on_full_fold_champion():
+    population = seed_genomes(8, random.Random(183))
+    champion = population[0]
+    champion.fitness = 2400
+    champion.result = {"evaluated_folds": 3, "requested_folds": 3}
+    frontier = population[1]
+    frontier.fitness = 2300
+    frontier.feature_programs = [{
+        "op": "regime_gate", "left": "funding_z168",
+        "right": "crowd_price_alignment", "scale": 2.7,
+    }]
+    frontier.result = {"summary": {
+        "min_profit_factor": 1.05, "min_expectancy": .0005,
+    }}
+    protected_parent = "multiscale-frontier"
+    for genome in population[2:]:
+        genome.fitness = None
+        genome.result = None
+        genome.parents = [protected_parent]
+        genome.finalize()
+    coordinate = population[2]
+    coordinate.parents = [champion.genome_id]
+    coordinate.finalize()
+
+    after = evolution.introduce_champion_profit_program_variant(
+        population, champion, frontier, [], 905, {protected_parent}
+    )
+
+    transfers = [
+        genome for genome in after
+        if champion.genome_id in genome.parents
+        and len(genome.feature_programs) > len(champion.feature_programs)
+    ]
+    assert len(transfers) == 1
+    assert transfers[0].confidence_quantile == champion.confidence_quantile
+    program_name = evolution.program_name(frontier.feature_programs[0])
+    assert program_name in {
+        evolution.program_name(program) for program in transfers[0].feature_programs
+    }
+    assert sum(
+        protected_parent in genome.parents for genome in after
+    ) >= 1
+
+
 def test_reliability_decay_search_brackets_best_protected_evidence():
     base = seed_genomes(1, random.Random(175))[0]
     evidence = []

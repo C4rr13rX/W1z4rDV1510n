@@ -3093,7 +3093,7 @@ def introduce_champion_coordinate_variant(
     result = champion.result or {}
     if int(result.get("evaluated_folds", 0)) < int(result.get("requested_folds", 3)):
         return population
-    schedules: tuple[tuple[str, float | int], ...] = (
+    schedules: list[tuple[str, float | int]] = [
         ("confidence_quantile", max(0.0, champion.confidence_quantile - .01)),
         ("confidence_quantile", min(.30, champion.confidence_quantile + .01)),
         ("confidence_quantile", max(0.0, champion.confidence_quantile - .02)),
@@ -3106,7 +3106,59 @@ def introduce_champion_coordinate_variant(
         ("recency_half_life_days", min(2200.0, champion.recency_half_life_days * 1.25)),
         ("calibration_safety", max(1.0, champion.calibration_safety * .75)),
         ("calibration_safety", min(12.0, champion.calibration_safety * 1.25)),
-    )
+    ]
+    champion_summary = result.get("summary", {})
+    tradeoff_refinements: list[tuple[float, float, float]] = []
+    for observed in evidence:
+        observed_result = observed.result or {}
+        if (int(observed_result.get("evaluated_folds", 0))
+                < int(observed_result.get("requested_folds", 3))):
+            continue
+        # Accept only a true one-coordinate observation. Direct lineage alone
+        # is insufficient because migration/capping can rewrite other genes.
+        comparison = asdict(champion)
+        comparison.update({
+            "confidence_quantile": observed.confidence_quantile,
+            "generation": observed.generation, "parents": observed.parents,
+            "fitness": observed.fitness, "result": observed.result,
+            "genome_id": observed.genome_id,
+        })
+        if genome_evaluation_key(Genome(**comparison)) != genome_evaluation_key(observed):
+            continue
+        observed_summary = observed_result.get("summary", {})
+        accuracy_gain = float(observed_summary.get("min_accuracy", 0)) - float(
+            champion_summary.get("min_accuracy", 0)
+        )
+        economics_worse = (
+            float(observed_summary.get("min_profit_factor", -math.inf))
+            < float(champion_summary.get("min_profit_factor", -math.inf))
+            or float(observed_summary.get("min_expectancy", -math.inf))
+            < float(champion_summary.get("min_expectancy", -math.inf))
+        )
+        gap = abs(observed.confidence_quantile - champion.confidence_quantile)
+        if accuracy_gain > 0 and economics_worse and gap >= .0025:
+            midpoint = (
+                observed.confidence_quantile + champion.confidence_quantile
+            ) / 2.0
+            mirrored = max(0.0, min(
+                .30,
+                champion.confidence_quantile
+                + (champion.confidence_quantile
+                   - observed.confidence_quantile),
+            ))
+            tradeoff_refinements.append((gap, mirrored, midpoint))
+    # First mirror across the champion to establish the local economics slope;
+    # then bisect the accuracy/economics boundary. Known-phenotype filtering
+    # advances automatically from the mirror to the midpoint on the next turn.
+    # This seeks PF recovery before spending another evaluation farther into a
+    # direction already proven to worsen trade economics.
+    adaptive: list[tuple[str, float | int]] = []
+    for _, mirrored, midpoint in sorted(tradeoff_refinements):
+        adaptive.extend((
+            ("confidence_quantile", mirrored),
+            ("confidence_quantile", midpoint),
+        ))
+    schedules = adaptive + schedules
     known_keys = {
         genome_evaluation_key(genome)
         for genome in [*population, *evidence]
@@ -3146,6 +3198,83 @@ def introduce_champion_coordinate_variant(
     if replacement is None:
         return population
     population[replacement] = variant
+    return population
+
+
+def introduce_champion_profit_program_variant(
+    population: list[Genome], champion: Genome | None,
+    profitable_frontier: Genome | None, evidence: Sequence[Genome],
+    generation: int, protected_parent_ids: set[str] | None = None,
+) -> list[Genome]:
+    """Transfer one profitable causal program into the full-fold champion.
+
+    A one-fold frontier is never eligible for promotion, but its exclusive
+    feature programs are useful hypotheses. Testing one program at a time on
+    the fully validated champion separates causal transfer from wholesale
+    crossover and keeps every fold, coverage, and economics gate authoritative.
+    """
+    if (champion is None or profitable_frontier is None
+            or champion.fitness is None or len(population) < 6):
+        return population
+    champion_result = champion.result or {}
+    if int(champion_result.get("evaluated_folds", 0)) < int(
+        champion_result.get("requested_folds", 3)
+    ):
+        return population
+    frontier_summary = (profitable_frontier.result or {}).get("summary", {})
+    if (float(frontier_summary.get("min_profit_factor", 0)) <= 1.0
+            or float(frontier_summary.get("min_expectancy", -math.inf)) <= 0):
+        return population
+    champion_programs = {
+        program_name(program) for program in champion.feature_programs
+    }
+    hypotheses = [
+        normalize_program(program)
+        for program in profitable_frontier.feature_programs
+        if program_name(program) not in champion_programs
+    ]
+    known_keys = {
+        genome_evaluation_key(genome)
+        for genome in [*population, *evidence]
+        if genome.fitness is not None or genome in population
+    }
+    variant: Genome | None = None
+    for program in hypotheses:
+        payload = asdict(champion)
+        payload.update({
+            "feature_programs": [*champion.feature_programs, program][-10:],
+            "generation": generation, "parents": [champion.genome_id],
+            "fitness": None, "result": None, "genome_id": "",
+        })
+        proposal = Genome(**payload).finalize()
+        if genome_evaluation_key(proposal) not in known_keys:
+            variant = proposal
+            break
+    if variant is None:
+        return population
+    protected_parent_ids = protected_parent_ids or set()
+    parent_counts = Counter(
+        parent
+        for genome in population if genome.fitness is None
+        for parent in genome.parents
+    )
+    ordinary = [
+        index for index in range(len(population) - 1, 0, -1)
+        if population[index].fitness is None
+        and champion.genome_id not in population[index].parents
+        and not (set(population[index].parents) & protected_parent_ids)
+    ]
+    # If every slot is protected, replace only a duplicate repair lineage and
+    # leave at least one descendant of that frontier in the generation.
+    duplicate = [
+        index for index in range(len(population) - 1, 0, -1)
+        if population[index].fitness is None
+        and champion.genome_id not in population[index].parents
+        and any(parent_counts[parent] > 1 for parent in population[index].parents)
+    ]
+    replacement = ordinary[0] if ordinary else (duplicate[0] if duplicate else None)
+    if replacement is not None:
+        population[replacement] = variant
     return population
 
 
@@ -4516,6 +4645,17 @@ def main() -> int:
                     ) if genome is not None
                 },
             )
+            population = introduce_champion_profit_program_variant(
+                population, champion, extra_trees_frontier,
+                champion_coordinate_evidence, generation,
+                {
+                    genome.genome_id for genome in (
+                        coverage_frontier, multiscale_frontier,
+                        multiscale_boundary_frontier, extra_trees_frontier,
+                        regime_shift_frontier,
+                    ) if genome is not None
+                },
+            )
             population, regime_candidates_converted = cap_expensive_regime_candidates(
                 population, generation, regime_shift_frontier
             )
@@ -4559,6 +4699,14 @@ def main() -> int:
                     champion is not None
                     and champion.genome_id in genome.parents
                     and genome.fitness is None
+                    and genome.feature_programs == champion.feature_programs
+                    for genome in population
+                ),
+                "champion_profit_program_candidates": sum(
+                    champion is not None
+                    and champion.genome_id in genome.parents
+                    and genome.fitness is None
+                    and len(genome.feature_programs) > len(champion.feature_programs)
                     for genome in population
                 ),
                 "surplus_regime_candidates_converted": regime_candidates_converted,
