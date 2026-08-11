@@ -219,6 +219,16 @@ row, and train the next block. A single uncovered row forbids this transition.
 At the corpus boundary, the same proof permits the existing forward-harvest
 handoff into deferred replay.
 
+The forward-harvest report is the durable commit record for that handoff.
+Publish end-of-phase progress and the report before releasing the immutable
+guard. On restart, validate the report against the exact phase, end offsets,
+accepted guard row, and the still-unresolved interval IDs covering the entire
+tail. If they agree, resume the handoff idempotently; never rerun a completion
+sampler over an all-deferred window. If any field or interval differs, refuse
+the shortcut and retain the normal admission path. This closes the crash
+window between guard release and publication of `deferred_intervals_pending`
+without treating quarantine as acceptance or losing a replay obligation.
+
 Only one curriculum supervisor may own a runtime. Startup scans for an existing Python supervisor with the same resolved runtime and then claims `curriculum-supervisor.pid` using exclusive creation; stale PID files are recovered, while a live owner is rejected. This claim covers guard creation as well as training so two launches cannot race on the same temporary snapshot or progress ledger.
 
 After the corpus curriculum, the trainer admits three experience gates. The

@@ -640,6 +640,46 @@ def mark_phase_forward_harvested(runtime: Path, phase: Phase,
     return report
 
 
+def completed_forward_harvest(runtime: Path, phase: Phase) -> dict | None:
+    """Validate an already committed forward-harvest handoff.
+
+    ``mark_phase_forward_harvested`` publishes progress and its proof before
+    releasing the immutable last-good guard. A service interruption after
+    that release must not make a fresh supervisor run an empty completion
+    gate over rows that are all explicit replay obligations. Treat the proof
+    as a transactional, idempotent phase boundary only when progress and
+    unresolved half-open interval coverage still agree exactly.
+    """
+    report = read_json(runtime / f"{phase.name}.forward-harvest.json")
+    progress = read_json(runtime / f"{phase.name}.progress.json")
+    if not (
+        report.get("passed") is True
+        and report.get("forward_harvest_only") is True
+        and report.get("phase") == phase.name
+        and int(report.get("accounted_rows") or -1) == phase.rows
+        and phase_offsets(runtime / f"{phase.name}.progress.json")
+        == (phase.rows, phase.rows)
+    ):
+        return None
+    guard_row = report.get("accepted_guard_row")
+    if not isinstance(guard_row, int) or not 0 <= guard_row <= phase.rows:
+        return None
+    interval_ids = deferred_coverage_ids(
+        runtime, phase.name, guard_row, phase.rows
+    )
+    recorded_ids = [str(value) for value in (
+        report.get("deferred_interval_ids") or []
+    )]
+    progress_ids = [str(value) for value in (
+        progress.get("forward_harvest_deferred_interval_ids") or []
+    )]
+    if (interval_ids is None
+            or interval_ids != recorded_ids
+            or interval_ids != progress_ids):
+        return None
+    return report
+
+
 def verify_restored_topology(restored: dict, observed: dict) -> None:
     """Reject a rollback whose reopened topology is not its recorded barrier."""
     expected = ((restored.get("checkpoint_proof") or {}).get("topology") or {})
@@ -3184,6 +3224,16 @@ def main() -> int:
         while True:
             ram, durable = phase_offsets(runtime / f"{phase.name}.progress.json")
             if ram >= phase.rows:
+                if args.forward_harvest:
+                    prior_harvest = completed_forward_harvest(runtime, phase)
+                    if prior_harvest is not None:
+                        publish(status_path, {
+                            "state": "forward_harvest_deferred",
+                            **prior_harvest,
+                            "resumed_from_committed_handoff": True,
+                            "updated_unix": time.time(),
+                        })
+                        break
                 guard = read_json(runtime / "brain" / "brain.last-good.json")
                 guard_row = guard.get("row") if guard.get("phase") == phase.name else None
                 if (args.forward_harvest and isinstance(guard_row, int)

@@ -53,6 +53,7 @@ from scripts.programming_curriculum_supervisor import (
     matching_runtime_node_pids,
     recycle_settled_runtime_node,
     mark_phase_forward_harvested,
+    completed_forward_harvest,
     next_suspect_start,
     phase_offsets,
     pause_admission_for_infrastructure,
@@ -1080,6 +1081,15 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
                 ],
                 20,
             )
+            self.assertFalse((brain / "brain.last-good.json").exists())
+            resumed = completed_forward_harvest(runtime, phase)
+            self.assertIsNotNone(resumed)
+            self.assertEqual(resumed["accepted_guard_row"], 20)
+
+            progress = read_json(runtime / "corpus.progress.json")
+            progress["forward_harvest_deferred_interval_ids"] = ["wrong"]
+            publish(runtime / "corpus.progress.json", progress)
+            self.assertIsNone(completed_forward_harvest(runtime, phase))
 
     def test_same_phase_restore_can_reuse_verified_guard(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
