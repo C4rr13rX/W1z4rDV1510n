@@ -167,6 +167,16 @@ add an unconditional `Wants=wizard-brain-initial.service` dependency: a
 recovered node deliberately outlives the wrapper, so starting that unit again
 would create a competing cold loader before address binding rejects it.
 
+Run a maintenance recycle as the same account configured by the curriculum
+unit. Stable neural topology alone is not sufficient for adoption: a node
+started as `root` can reopen the exact accepted checkpoint and own the correct
+socket while remaining unreadable to an `ec2-user` `/proc` identity scan. The
+wrapper must continue to reject that ambiguous owner. To recover, stop only a
+PID whose executable and endpoint ownership have both been verified, restore
+the bounded PID/status/log control files to the service account, and let the
+canonical unit launch the node. Reprove tick, pool, neuron, concept, binding,
+terminal, and zero-residency invariants before training resumes.
+
 All admission observations use one infrastructure policy. Transient timeout,
 connection, empty-output, or truncated-JSON failures are retried and recorded
 as `passed: null`; they are never converted into semantic corpus intervals.
