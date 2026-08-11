@@ -3333,6 +3333,18 @@ def introduce_primary_coverage_variant(
         )
         phase = (.75, 1.0, 1.25)[generation % 3]
         step = max(.0025, min(.02, coverage_gap * 1.5)) * phase
+        if lower_evidence:
+            frontier_coverage = float(summary.get("min_coverage", 0))
+            base_coverage = float(base_summary.get("min_coverage", 0))
+            if abs(base_coverage - frontier_coverage) < 1e-6:
+                # Quantile movement can remain inside one tree-leaf score
+                # plateau, producing an identical acted set. Escape that
+                # plateau deliberately instead of spending generations on
+                # numerically different but behaviorally identical genomes.
+                prior_step = max(
+                    .0, frontier.confidence_quantile - base.confidence_quantile
+                )
+                step = max(.01, min(.03, prior_step * 2.0))
         quantiles.append(base.confidence_quantile - step)
     known_keys = {
         genome_evaluation_key(genome) for genome in [*population, *evidence]

@@ -95,7 +95,9 @@ walk-forward and retention gates before replacing the accepted brain.
   an independent repair lane. A later multiscale or tree frontier may not
   silently replace the strongest ordinary regressor's experiment; descendants
   bracket the smallest coverage-clearing quantile and preserve protected-fold
-  reversals as signed evidence.
+  reversals as signed evidence. If a quantile descendant produces an identical
+  acted set and coverage, the next bounded step must escape that score plateau
+  rather than treating a numerically different genome as new behavior.
 
 ## Stop conditions
 
