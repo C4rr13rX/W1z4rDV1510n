@@ -103,6 +103,10 @@ walk-forward and retention gates before replacing the accepted brain.
   the plateau and resets automatic correction. Threshold evidence is scoped by
   model phenotype, not only direct parentage, so an indirect descendant still
   tightens the behavioral bracket instead of being forgotten after a handoff.
+- Expensive two-model candidates are limited to one pending experiment per
+  protected parent and phenotype. Near-identical quantiles do not earn duplicate
+  exemptions; redundant candidates are converted to the cheaper single-scale
+  learner so controlled feedback cycles remain timely.
 
 ## Stop conditions
 

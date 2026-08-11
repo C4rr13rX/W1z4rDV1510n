@@ -4471,10 +4471,17 @@ def cap_expensive_multiscale_candidates(
     """Reserve double-model compute for active multiscale frontier research."""
     known = {genome.genome_id for genome in population}
     converted = 0
+    protected_seen: set[tuple[tuple[str, ...], str]] = set()
     for index, source in enumerate(population):
         if (source.fitness is not None
-                or source.learner_kind != "multiscale_regressor"
-                or bool(set(source.parents) & protected_parent_ids)):
+                or source.learner_kind != "multiscale_regressor"):
+            continue
+        protected = bool(set(source.parents) & protected_parent_ids)
+        protected_key = (
+            tuple(sorted(source.parents)), genome_structure_key(source),
+        )
+        if protected and protected_key not in protected_seen:
+            protected_seen.add(protected_key)
             continue
         payload = asdict(source)
         payload.update({

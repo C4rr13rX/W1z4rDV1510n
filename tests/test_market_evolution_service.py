@@ -2548,16 +2548,22 @@ def test_surplus_expensive_regime_candidates_are_converted():
 
 
 def test_untargeted_multiscale_candidates_are_converted():
-    population = seed_genomes(6, random.Random(80))
+    population = seed_genomes(7, random.Random(80))
     for genome in population:
         genome.fitness = None
     protected_parent = "active-multiscale-boundary"
     population[-2].learner_kind = "multiscale_regressor"
     population[-2].parents = [protected_parent]
     population[-2].finalize()
-    population[-1].learner_kind = "multiscale_regressor"
-    population[-1].parents = ["unrelated-mutation"]
-    population[-1].finalize()
+    duplicate = Genome(**{
+        **population[-2].__dict__,
+        "confidence_quantile": population[-2].confidence_quantile + .000004,
+        "genome_id": "", "fitness": None, "result": None,
+    }).finalize()
+    population[-1] = duplicate
+    population[-3].learner_kind = "multiscale_regressor"
+    population[-3].parents = ["unrelated-mutation"]
+    population[-3].finalize()
 
     updated, converted = evolution.cap_expensive_multiscale_candidates(
         population, 42, {protected_parent}
@@ -2566,7 +2572,7 @@ def test_untargeted_multiscale_candidates_are_converted():
         genome for genome in updated
         if genome.fitness is None and genome.learner_kind == "multiscale_regressor"
     ]
-    assert converted == 1
+    assert converted == 2
     assert len(remaining) == 1
     assert remaining[0].parents == [protected_parent]
 
