@@ -36,6 +36,7 @@ from scripts.programming_curriculum_supervisor import (
     accept_last_good_guard,
     append_deferred_event,
     assert_training_not_quarantined,
+    canary_quarantine_path,
     claim_curriculum_supervisor,
     ensure_last_good_guard,
     ensure_live_last_good_guard,
@@ -1370,6 +1371,63 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             self.assertEqual(unresolved_deferred_intervals(runtime), [])
             self.assertFalse(guard.exists())
             self.assertFalse(deferred_replay_marker_path(runtime).exists())
+
+    def test_interrupted_replay_restore_retains_guard_until_next_transaction(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            brain = runtime / "brain"
+            brain.mkdir()
+            snapshot = brain / "brain.wbrain"
+            guard = brain / "brain.last-good.wbrain"
+            snapshot.write_bytes(b"unadmitted-candidate")
+            guard.write_bytes(b"accepted-brain")
+            topology = {
+                "tick": 10, "pool_count": 2, "total_neurons": 3,
+                "total_concepts": 1, "total_binding": 1,
+                "total_terminals": 4,
+            }
+            (brain / "brain.last-good.json").write_text(json.dumps({
+                "phase": "corpus", "row": 100,
+                "snapshot": str(snapshot), "guard": str(guard),
+                "checkpoint_proof": {"topology": topology},
+            }), encoding="utf-8")
+            (runtime / "corpus.progress.json").write_text("{}", encoding="utf-8")
+            event = {
+                "interval_id": "corpus:20:40", "phase": "corpus",
+                "start_row": 20, "end_row": 40, "status": "deferred",
+            }
+            publish(deferred_replay_marker_path(runtime), {
+                "state": "training", "phase": "corpus",
+                "interval_id": event["interval_id"], "interval": event,
+            })
+            with (
+                patch(
+                    "scripts.programming_curriculum_supervisor.stop_runtime_node"
+                ),
+                patch(
+                    "scripts.programming_curriculum_supervisor.start_runtime_node"
+                ),
+                patch(
+                    "scripts.programming_curriculum_supervisor.endpoint_json",
+                    return_value=topology,
+                ),
+            ):
+                recover_interrupted_deferred_replay(
+                    SimpleNamespace(endpoint="http://brain", node_bin="node"),
+                    runtime,
+                    {"corpus": Phase(
+                        "corpus", "script", runtime / "corpus.jsonl", 1000
+                    )},
+                )
+            self.assertEqual(snapshot.read_bytes(), b"accepted-brain")
+            self.assertTrue(guard.exists())
+            self.assertTrue((brain / "brain.last-good.json").exists())
+            self.assertFalse(deferred_replay_marker_path(runtime).exists())
+            self.assertFalse(canary_quarantine_path(runtime).exists())
+            self.assertEqual(
+                read_json(runtime / "corpus.progress.json")["durable_next_row"],
+                100,
+            )
 
     def test_deferred_failure_attributes_only_new_epoch_gap(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

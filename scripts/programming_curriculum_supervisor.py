@@ -2663,7 +2663,10 @@ def restore_rejected_deferred_replay(args: argparse.Namespace, runtime: Path,
         restored,
         endpoint_json(args.endpoint, "/brain/stats", timeout=120.0),
     )
-    finalize_canary_restore(runtime, restored)
+    # Keep the already proven accepted guard until the replay marker is
+    # removed and the next transaction owns it. Deleting the guard first
+    # creates an unrecoverable crash window between these two durable commits.
+    finalize_canary_restore(runtime, restored, retain_guard=True)
     deferred_replay_marker_path(runtime).unlink(missing_ok=True)
 
 

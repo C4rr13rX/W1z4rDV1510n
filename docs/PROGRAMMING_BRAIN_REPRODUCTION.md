@@ -196,6 +196,13 @@ refresh, or retention regression restores the exact preflight guard. A
 versioned certificate tied to the accepted tick prevents supervisor restarts
 from repeating an already admitted maintenance pass.
 
+Interrupted replay recovery has two durable commits: restore and topology-
+prove the accepted snapshot, then remove the active replay marker. Retain the
+same verified immutable guard across that boundary. Deleting the guard during
+restore creates a crash window in which a surviving marker can no longer be
+rolled back on the next restart. The following replay may reuse the retained
+same-phase guard; only successful admission releases it.
+
 `programming_multilanguage_eval.py` trains six repetitions by default. Any
 read-only control or post-admission probe must pass `--no-train`; otherwise it
 is maintenance training and must begin inside the immutable guard. If a probe
