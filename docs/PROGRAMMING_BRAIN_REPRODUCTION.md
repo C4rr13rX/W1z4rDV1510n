@@ -162,6 +162,15 @@ route validation. A validator attached to an early candidate-discovery branch
 is insufficient when a later fallback can select the same bytes through a
 different evidence pool.
 
+Hebbian reinforcement must refresh routing addressability as well as the
+binding neuron's `use_count`. Immutable posting generations otherwise leave a
+repeatedly successful old binding trapped behind newer equal-feature bindings:
+the knowledge still exists, but a bounded readout cannot reach it. Re-advertise
+the existing binding identity at power-of-two recurrence milestones. This adds
+no neuron and no synthetic action, bounds posting growth logarithmically, and
+keeps both old reinforced knowledge and new repairs eligible as generations
+accumulate.
+
 After the conditionally launched or adopted node becomes healthy, the service
 wrapper resolves both its listening-socket PID and its
 `W1Z4RD_NODE_BRAIN_DIR` runtime identity. They must identify the same process

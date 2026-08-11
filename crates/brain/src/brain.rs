@@ -924,7 +924,10 @@ fn normalized_char_motifs(bytes: &[u8]) -> ahash::AHashSet<[u8; 3]> {
 
 #[cfg(test)]
 mod posting_tests {
-    use super::{append_binding_posting, rank_bounded_binding_evidence};
+    use super::{
+        append_binding_posting, rank_bounded_binding_evidence,
+        recurrence_posting_refresh_due,
+    };
 
     #[test]
     fn posting_append_is_constant_time_idempotent_and_bounded() {
@@ -949,15 +952,27 @@ mod posting_tests {
         assert_eq!(ranked.len(), 512);
         assert!(ranked.starts_with(&[699, 17, 3]));
     }
+
+    #[test]
+    fn recurrent_bindings_refresh_postings_at_logarithmic_milestones() {
+        let due: Vec<u64> = (0..=33)
+            .filter(|count| recurrence_posting_refresh_due(*count))
+            .collect();
+        assert_eq!(due, vec![2, 4, 8, 16, 32]);
+    }
 }
 
-/// Binding indexes are populated once per newly allocated binding id and are
-/// rebuilt in ascending neuron order. Preserve consecutive idempotence without
-/// an O(posting-list-length) scan for every insertion.
+/// Binding indexes are populated for newly allocated bindings and refreshed at
+/// logarithmic Hebbian recurrence milestones. Preserve consecutive idempotence
+/// without an O(posting-list-length) scan for every insertion.
 fn append_binding_posting(ids: &mut Vec<NeuronId>, binding_id: NeuronId, limit: usize) {
     if ids.len() < limit && ids.last().copied() != Some(binding_id) {
         ids.push(binding_id);
     }
+}
+
+fn recurrence_posting_refresh_due(use_count: u64) -> bool {
+    use_count >= 2 && use_count.is_power_of_two()
 }
 
 const MAX_ROUTED_BINDING_CANDIDATES: usize = 512;
@@ -1716,12 +1731,25 @@ impl Brain {
         };
         if let Some(bid) = existing_bid {
             let now = self.fabric.current_tick();
-            if let Some(bp) = self.fabric.pool(self.binding_pool_id) {
+            let refresh_members = if let Some(bp) = self.fabric.pool(self.binding_pool_id) {
                 let mut bp = bp.write();
                 if let Some(n) = bp.get_mut(bid) {
                     n.use_count = n.use_count.saturating_add(1);
                     n.last_fired_tick = now;
+                    recurrence_posting_refresh_due(n.use_count).then(|| n.members.clone())
+                } else {
+                    None
                 }
+            } else {
+                None
+            };
+            if let Some(members) = refresh_members {
+                // Recurrent evidence must remain addressable as posting
+                // generations accumulate. Re-advertise the existing neuron;
+                // never allocate or duplicate a learned action. Powers of two
+                // bound index growth logarithmically while letting stronger
+                // Hebbian evidence periodically re-enter the live overlay.
+                self.index_binding_members(bid, &members);
             }
         }
 
