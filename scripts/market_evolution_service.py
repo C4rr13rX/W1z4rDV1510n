@@ -1442,6 +1442,9 @@ def load_nearby_return_tree_evidence(
         payload.update({
             "learner_kind": champion.learner_kind,
             "confidence_quantile": champion.confidence_quantile,
+            "min_samples_leaf": champion.min_samples_leaf,
+            "max_leaf_nodes": champion.max_leaf_nodes,
+            "recency_half_life_days": champion.recency_half_life_days,
             "generation": champion.generation, "parents": champion.parents,
             "fitness": champion.fitness, "result": champion.result,
             "genome_id": champion.genome_id,
@@ -3549,6 +3552,62 @@ def introduce_champion_return_tree_variant(
             and float(summary.get("min_profit_factor", 0)) >= .95
         )
         evidence_quality.append((observed, strong_signal))
+    variant: Genome | None = None
+    # Near the economics boundary, improve the ranking function before
+    # admitting weaker signals. Smoother leaves can generalize return magnitude
+    # across assets while the quantile remains fixed, making this a controlled
+    # one-coordinate follow-up to the signed return-tree phenotype.
+    topology_bases = sorted(
+        (
+            observed for observed, _ in evidence_quality
+            if .50 <= float(((observed.result or {}).get("summary") or {}).get(
+                "min_coverage", 0
+            )) < PRESCREEN["coverage"]
+            and float(((observed.result or {}).get("summary") or {}).get(
+                "min_accuracy", 0
+            )) >= .58
+            and float(((observed.result or {}).get("summary") or {}).get(
+                "min_balanced_accuracy", 0
+            )) >= .58
+            and .95 <= float(((observed.result or {}).get("summary") or {}).get(
+                "min_profit_factor", 0
+            )) < 1.0
+        ),
+        key=lambda observed: (
+            float(((observed.result or {}).get("summary") or {}).get(
+                "min_profit_factor", 0
+            )),
+            float(((observed.result or {}).get("summary") or {}).get(
+                "min_coverage", 0
+            )),
+        ),
+        reverse=True,
+    )
+    for base in topology_bases:
+        specifications = (
+            {"min_samples_leaf": min(100, champion.min_samples_leaf + 4)},
+            {"min_samples_leaf": min(100, champion.min_samples_leaf + 12)},
+            {"max_leaf_nodes": max(8, champion.max_leaf_nodes - 4)},
+            {"max_leaf_nodes": max(8, champion.max_leaf_nodes - 8)},
+            {"recency_half_life_days": max(
+                45.0, champion.recency_half_life_days * .75
+            )},
+        )
+        for specification in specifications:
+            payload = asdict(champion)
+            payload.update({
+                "learner_kind": "extra_trees_regressor",
+                "confidence_quantile": base.confidence_quantile,
+                **specification,
+                "generation": generation, "parents": [champion.genome_id],
+                "fitness": None, "result": None, "genome_id": "",
+            })
+            proposal = Genome(**payload).finalize()
+            if genome_evaluation_key(proposal) not in known_keys:
+                variant = proposal
+                break
+        if variant is not None:
+            break
     # A coarse coverage jump can cross a discontinuous quality boundary. Once
     # both sides are signed, bisect the narrowest strong/weak quantile bracket
     # instead of extrapolating another destructive threshold.
@@ -3574,8 +3633,9 @@ def introduce_champion_return_tree_variant(
                 - max(.02, min(.08, coverage_gap * .5)),
             ))
     quantiles.append(champion.confidence_quantile)
-    variant: Genome | None = None
     for quantile in quantiles:
+        if variant is not None:
+            break
         payload = asdict(champion)
         payload.update({
             "learner_kind": "extra_trees_regressor",
