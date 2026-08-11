@@ -2292,8 +2292,9 @@ def test_primary_coverage_lane_brackets_transitive_plateau_evidence():
         [plateau_one, plateau_two, reversal, child], 929,
     )
     threshold_child = next(
-        genome for genome in continued if genome.parents == [child.genome_id]
+        genome for genome in continued if child.genome_id in genome.parents
     )
+    assert threshold_child.parents == [child.genome_id, frontier.genome_id]
     assert threshold_child.learner_kind == "continuous_rank_regressor"
     assert threshold_child.confidence_quantile == pytest.approx((.218 + .205) / 2)
     assert threshold_child.features == frontier.features

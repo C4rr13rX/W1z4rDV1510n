@@ -3897,9 +3897,15 @@ def introduce_primary_coverage_variant(
     variant: Genome | None = None
     for quantile in quantiles:
         payload = asdict(proposal_base)
+        parents = list(dict.fromkeys([
+            proposal_base.genome_id, frontier.genome_id,
+        ]))
         payload.update({
             "confidence_quantile": max(0.0, min(.30, quantile)),
-            "generation": generation, "parents": [proposal_base.genome_id],
+            # Keep the immediate causal parent and the durable frontier. Later
+            # reserved lanes protect frontier parent IDs; omitting the second
+            # identity lets an otherwise valid continuation be overwritten.
+            "generation": generation, "parents": parents,
             "fitness": None, "result": None, "genome_id": "",
         })
         proposal = Genome(**payload).finalize()

@@ -238,7 +238,9 @@ abstention score. That perturbation cannot reorder materially different model
 confidences; it makes observations inside an exactly tied leaf individually
 selectable. If the same-threshold ablation preserves the frontier, subsequent
 coverage bisection remains inside this ranked species; reverting those children
-to the ordinary regressor would recreate the proven leaf plateau. The
+to the ordinary regressor would recreate the proven leaf plateau. Each child
+records both its immediate ranked parent and the durable coverage frontier so
+later reserved search lanes cannot overwrite its protected population slot. The
 descendant must still pass every ordinary coverage,
 profitability, calibration, known/unseen-asset, protected-fold, neural, and
 ghost-only admission gate. Historical descendants suppress repeated probes.
