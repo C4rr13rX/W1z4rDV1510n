@@ -2241,6 +2241,39 @@ def test_extra_trees_soft_accuracy_boundary_triggers_bisection():
     assert child.confidence_quantile == pytest.approx((.251 + .230) / 2)
 
 
+def test_extra_trees_loss_making_coverage_crossing_triggers_bisection():
+    frontier = seed_genomes(4, random.Random(191))[-1]
+    frontier.learner_kind = "extra_trees"
+    frontier.confidence_quantile = .270909887
+    frontier.result = {"summary": {
+        "min_accuracy": .6749, "min_balanced_accuracy": .6639,
+        "min_mcc": .3304, "min_coverage": .4193,
+        "min_expectancy": .00365, "min_profit_factor": 1.3768,
+    }}
+    frontier.finalize()
+    crossing = Genome(**{
+        **frontier.__dict__, "confidence_quantile": .260909887,
+        "generation": 1133, "parents": [frontier.genome_id], "genome_id": "",
+        "result": {"evaluated_folds": 1, "summary": {
+            "min_accuracy": .55625, "min_balanced_accuracy": .5704,
+            "min_mcc": .1395, "min_coverage": .6380,
+            "min_expectancy": -.00314, "min_profit_factor": .7579,
+        }},
+    }).finalize()
+
+    assert evolution.compatible_reversal_rank(crossing, frontier) is not None
+    population = seed_genomes(8, random.Random(192))
+    repaired = evolution.introduce_extra_trees_coverage_variant(
+        population, frontier, 1134, crossing
+    )
+    child = next(
+        genome for genome in repaired if genome.parents == [frontier.genome_id]
+    )
+    assert child.confidence_quantile == pytest.approx(
+        (.270909887 + .260909887) / 2
+    )
+
+
 def test_near_coverage_extra_trees_learns_reliability_instead_of_dropping_leaf():
     frontier = seed_genomes(4, random.Random(183))[-1]
     frontier.learner_kind = "extra_trees"

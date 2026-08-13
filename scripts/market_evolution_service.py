@@ -5381,10 +5381,11 @@ def compatible_reversal_rank(
     """Rank the nearest lower-q boundary for one exact model structure.
 
     Most lineages need a protected-fold reversal before a lower confidence
-    threshold becomes the unsafe endpoint. Extra trees often degrade smoothly
-    first, so retain a profitable sub-floor endpoint as soon as it crosses the
-    lineage's 62% accuracy floor. This prevents repeating the same threshold
-    and turns the next generation into an informative bisection.
+    threshold becomes the unsafe endpoint. Extra trees can instead cross the
+    coverage floor in one step while losing their directional or economic
+    edge. Retain either a profitable soft boundary or that first unsafe
+    coverage crossing. This prevents widening a known-bad threshold move and
+    turns the next generation into an informative bisection.
     """
     if (coverage_frontier is None
             or genome_structure_key(genome) != genome_structure_key(coverage_frontier)
@@ -5393,22 +5394,36 @@ def compatible_reversal_rank(
     reversal = regime_shift_rank(genome)
     if reversal is None and coverage_frontier.learner_kind == "extra_trees":
         summary = (genome.result or {}).get("summary", {})
+        frontier_summary = (coverage_frontier.result or {}).get("summary", {})
         accuracy = float(summary.get("min_accuracy", 0))
         balanced = float(summary.get("min_balanced_accuracy", 0))
         mcc = float(summary.get("min_mcc", -1))
         coverage = float(summary.get("min_coverage", 0))
         expectancy = float(summary.get("min_expectancy", -1))
         profit = float(summary.get("min_profit_factor", 0))
-        frontier_coverage = float(
-            (coverage_frontier.result or {}).get("summary", {}).get(
-                "min_coverage", 0
-            )
+        frontier_accuracy = float(frontier_summary.get("min_accuracy", 0))
+        frontier_coverage = float(frontier_summary.get("min_coverage", 0))
+        profitable_soft_boundary = (
+            .55 <= accuracy < .62 and balanced >= .55 and mcc >= .10
+            and coverage > frontier_coverage
+            and expectancy > 0 and profit >= 1.0
         )
-        if not (.55 <= accuracy < .62 and balanced >= .55 and mcc >= .10
-                and coverage > frontier_coverage
-                and expectancy > 0 and profit >= 1.0):
+        unsafe_coverage_crossing = (
+            coverage >= PRESCREEN["coverage"]
+            and coverage > frontier_coverage
+            and accuracy <= frontier_accuracy - .03
+            and (accuracy < PRESCREEN["accuracy"]
+                 or balanced < PRESCREEN["balanced_accuracy"]
+                 or mcc < PRESCREEN["mcc"]
+                 or expectancy <= 0
+                 or profit < 1.0)
+        )
+        if not (profitable_soft_boundary or unsafe_coverage_crossing):
             return None
-        reversal = (accuracy, balanced, mcc, coverage, expectancy, profit)
+        reversal = (
+            float(profitable_soft_boundary), accuracy, balanced, mcc,
+            coverage, expectancy, profit,
+        )
     if reversal is None:
         return None
     return (float(genome.confidence_quantile), *reversal)
