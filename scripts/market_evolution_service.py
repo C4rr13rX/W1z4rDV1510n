@@ -3988,6 +3988,7 @@ def introduce_extra_trees_coverage_variant(
     )
     reliability_trial: tuple[int, str, float] | None = None
     use_ranked_tie_break = False
+    ranked_quantile: float | None = None
     if use_reliability_rank:
         signed_keys = {
             genome_evaluation_key(genome) for genome in evidence
@@ -4015,19 +4016,32 @@ def introduce_extra_trees_coverage_variant(
                 reliability_trial = trial
                 break
         if reliability_trial is None:
-            probe = asdict(frontier)
-            probe.update({
-                "learner_kind": "extra_trees_ranked",
-                # Once tied confidence is continuously ranked, rejecting 40%
-                # targets the 60% protected coverage floor directly.
-                "confidence_quantile": 1.0 - PRESCREEN["coverage"],
-                "calibration_reliability": False,
-                "calibration_reliability_version": 0,
-                "calibration_reliability_pool": "core",
-                "calibration_reliability_decay": 0.0,
-                "fitness": None, "result": None, "genome_id": "",
-            })
-            if genome_evaluation_key(Genome(**probe).finalize()) in signed_keys:
+            # The calibration and protected score distributions can shift, so
+            # a nominal 40% rejection rate need not yield 60% protected
+            # coverage. Build a short signed response curve while changing no
+            # direction-model coordinate. The exact parent quantile is the
+            # critical ablation; two bounded lower points remain if it still
+            # misses the floor.
+            for trial_quantile in dict.fromkeys((
+                1.0 - PRESCREEN["coverage"],
+                frontier.confidence_quantile,
+                max(0.0, frontier.confidence_quantile - .01),
+                max(0.0, frontier.confidence_quantile - .02),
+            )):
+                probe = asdict(frontier)
+                probe.update({
+                    "learner_kind": "extra_trees_ranked",
+                    "confidence_quantile": trial_quantile,
+                    "calibration_reliability": False,
+                    "calibration_reliability_version": 0,
+                    "calibration_reliability_pool": "core",
+                    "calibration_reliability_decay": 0.0,
+                    "fitness": None, "result": None, "genome_id": "",
+                })
+                if genome_evaluation_key(Genome(**probe).finalize()) not in signed_keys:
+                    ranked_quantile = trial_quantile
+                    break
+            if ranked_quantile is None:
                 return population
             use_ranked_tie_break = True
     if (reversal_frontier is not None
@@ -4048,7 +4062,7 @@ def introduce_extra_trees_coverage_variant(
             else frontier.learner_kind
         ),
         "confidence_quantile": (
-            1.0 - PRESCREEN["coverage"] if use_ranked_tie_break else
+            ranked_quantile if use_ranked_tie_break else
             reliability_trial[2] if reliability_trial
             else max(0.0, min(.30, quantile))
         ),

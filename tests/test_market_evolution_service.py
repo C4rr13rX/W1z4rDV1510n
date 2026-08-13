@@ -2309,6 +2309,26 @@ def test_near_coverage_extra_trees_learns_reliability_instead_of_dropping_leaf()
     assert not ranked.calibration_reliability
     assert ranked.confidence_quantile == pytest.approx(.40)
 
+    ranked.fitness = 403
+    ranked.result = {"evaluation_signature": "current", "summary": {
+        "min_accuracy": .647, "min_coverage": .394,
+        "min_expectancy": .0033, "min_profit_factor": 1.327,
+    }}
+    population = seed_genomes(8, random.Random(187))
+    for genome in population[1:]:
+        genome.fitness = None
+        genome.result = None
+    repaired = evolution.introduce_extra_trees_coverage_variant(
+        population, frontier, 1123, evidence=[*signed, ranked],
+    )
+    same_threshold = next(
+        genome for genome in repaired if genome.parents == [frontier.genome_id]
+    )
+    assert same_threshold.learner_kind == "extra_trees_ranked"
+    assert same_threshold.confidence_quantile == pytest.approx(
+        frontier.confidence_quantile
+    )
+
 
 def test_profitable_primary_regressor_gets_independent_coverage_lane():
     frontier = seed_genomes(1, random.Random(197))[0]
