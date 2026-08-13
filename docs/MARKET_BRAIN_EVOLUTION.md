@@ -326,7 +326,10 @@ its leaf capacity, calibration, features, programs, and topology and names that
 signed candidate as its parent. Only after this same-phenotype curve is
 exhausted may the scheduler fall through to a hybrid or a new topology. This
 lets useful coordinates compose without granting partial-fold evidence any
-fitness or admission authority.
+fitness or admission authority. While such a profitable positive-expectancy
+curve remains actionable, it owns the one shared specialist slot ahead of new
+feature-program transfer; once its finite proposals are signed, program search
+automatically resumes.
 
 Coverage repair treats repeated identical outcomes on either side of the
 coverage floor as evidence of a discrete tree-score plateau. In particular,

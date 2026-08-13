@@ -1614,21 +1614,27 @@ def load_nearby_return_tree_evidence(
             "genome_id": champion.genome_id,
         })
         reconstructed = Genome(**payload).finalize()
-        summary = (candidate.result or {}).get("summary") or {}
-        independent_frontier = (
-            candidate.learner_kind == "extra_trees_regressor"
-            and float(summary.get("min_accuracy", 0)) >= .60
-            and float(summary.get("min_balanced_accuracy", 0)) >= .60
-            and float(summary.get("min_mcc", -1)) >= .20
-            and float(summary.get("min_profit_factor", 0)) >= 1.05
-            and float(summary.get("min_expectancy", 0)) > 0
-            and .45 <= float(summary.get("min_coverage", 0)) < PRESCREEN["coverage"]
-        )
+        independent_frontier = profitable_return_tree_coverage_frontier(candidate)
         if (genome_evaluation_key(reconstructed) != genome_evaluation_key(champion)
                 and not independent_frontier):
             continue
         evidence[candidate.genome_id] = candidate
     return list(evidence.values())
+
+
+def profitable_return_tree_coverage_frontier(genome: Genome) -> bool:
+    """Return whether a signed return ranker warrants finite cutoff repair."""
+    summary = (genome.result or {}).get("summary") or {}
+    return (
+        genome.learner_kind == "extra_trees_regressor"
+        and genome.fitness is not None
+        and float(summary.get("min_accuracy", 0)) >= .60
+        and float(summary.get("min_balanced_accuracy", 0)) >= .60
+        and float(summary.get("min_mcc", -1)) >= .20
+        and float(summary.get("min_profit_factor", 0)) >= 1.05
+        and float(summary.get("min_expectancy", 0)) > 0
+        and .45 <= float(summary.get("min_coverage", 0)) < PRESCREEN["coverage"]
+    )
 
 
 def load_structure_evidence(
@@ -6887,30 +6893,38 @@ def main() -> int:
                     ) if genome is not None
                 },
             )
-            before_profit_search = [genome.genome_id for genome in population]
-            population = introduce_champion_profit_program_from_frontiers(
-                population, champion,
-                (extra_trees_frontier, coverage_frontier, multiscale_frontier),
-                champion_profit_evidence, generation,
-                {
-                    genome.genome_id for genome in (
-                        coverage_frontier, multiscale_frontier,
-                        multiscale_boundary_frontier, extra_trees_frontier,
-                        regime_shift_frontier,
-                    ) if genome is not None
-                },
+            protected_specialist_parents = {
+                genome.genome_id for genome in (
+                    coverage_frontier, multiscale_frontier,
+                    multiscale_boundary_frontier, extra_trees_frontier,
+                    regime_shift_frontier,
+                ) if genome is not None
+            }
+            before_specialist_search = [
+                genome.genome_id for genome in population
+            ]
+            return_tree_priority = any(
+                profitable_return_tree_coverage_frontier(genome)
+                for genome in champion_return_tree_evidence
             )
-            if [genome.genome_id for genome in population] == before_profit_search:
+            if return_tree_priority:
                 population = introduce_champion_return_tree_variant(
                     population, champion, champion_return_tree_evidence,
-                    generation,
-                    {
-                        genome.genome_id for genome in (
-                            coverage_frontier, multiscale_frontier,
-                            multiscale_boundary_frontier, extra_trees_frontier,
-                            regime_shift_frontier,
-                        ) if genome is not None
-                    },
+                    generation, protected_specialist_parents,
+                )
+            if [genome.genome_id for genome in population] == before_specialist_search:
+                population = introduce_champion_profit_program_from_frontiers(
+                    population, champion,
+                    (extra_trees_frontier, coverage_frontier, multiscale_frontier),
+                    champion_profit_evidence, generation,
+                    protected_specialist_parents,
+                )
+            if (not return_tree_priority
+                    and [genome.genome_id for genome in population]
+                    == before_specialist_search):
+                population = introduce_champion_return_tree_variant(
+                    population, champion, champion_return_tree_evidence,
+                    generation, protected_specialist_parents,
                 )
             population, regime_candidates_converted = cap_expensive_regime_candidates(
                 population, generation, regime_shift_frontier

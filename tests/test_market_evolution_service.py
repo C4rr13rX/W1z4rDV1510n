@@ -1993,6 +1993,8 @@ def test_return_tree_evidence_retains_strong_independent_lineage(tmp_path):
 
     assert strong.genome_id in {genome.genome_id for genome in evidence}
     assert weak.genome_id not in {genome.genome_id for genome in evidence}
+    assert evolution.profitable_return_tree_coverage_frontier(strong)
+    assert not evolution.profitable_return_tree_coverage_frontier(weak)
 
 
 def test_extra_trees_return_regressor_ranks_signed_magnitude():
