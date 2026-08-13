@@ -388,6 +388,19 @@ same cutoff (`42%` accuracy and PF `0.66`), so smaller capacity is now stopped
 as well. The next bounded proposal restores leaves 11 and support 8, holds q
 `0.1611117`, and changes only recency half-life to 75 percent of the parent.
 
+That recency ablation produced candidate `5ad1805e85eb837c`: 59.87 percent
+accuracy, 60.51 percent balanced accuracy, MCC 0.210, PF 1.048, positive
+expectancy, and 57.92 percent coverage. It remained rejected because coverage
+was 2.08 percentage points below prescreen and ECE was 19.71 percent. A useful
+topology interaction must not be lost merely because the family-wide Pareto
+guard blocks broad cutoff descent. When a new topology retains at least 59.5
+percent accuracy, 59 percent balanced accuracy, positive expectancy, PF 1.0,
+55 percent coverage, and prescreen-valid ECE, the controller may test one
+bounded 0.5--1.5 percentage-point cutoff recovery derived from that exact
+topology. A result below those quality bounds stops the interaction; it does
+not relax any fold, unseen-asset, calibration, profitability, ghost, or live
+gate.
+
 Coverage repair treats repeated identical outcomes on either side of the
 coverage floor as evidence of a discrete tree-score plateau. In particular,
 two lower-threshold descendants that admit the same harmful leaf are enough to

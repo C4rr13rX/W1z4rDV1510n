@@ -2065,6 +2065,60 @@ def test_return_tree_severe_leaf_capacity_reversal_advances_to_recency():
     assert repair.parents == [base.genome_id]
 
 
+def test_return_tree_recency_gain_gets_bounded_coverage_recovery():
+    population = seed_genomes(8, random.Random(202))
+    champion = population[0]
+    champion.learner_kind = "extra_trees"
+    champion.fitness = 2400
+    champion.result = {"evaluated_folds": 3, "requested_folds": 3}
+    boundary = Genome(**{
+        **champion.__dict__, "learner_kind": "extra_trees_regressor",
+        "confidence_quantile": .1611117, "max_leaf_nodes": 11,
+        "min_samples_leaf": 8, "recency_half_life_days": 1431.1307,
+        "generation": 932, "parents": ["profitable-return-frontier"],
+        "genome_id": "", "fitness": 420,
+        "result": {"summary": {
+            "min_accuracy": .5864, "min_balanced_accuracy": .599,
+            "min_mcc": .203, "min_profit_factor": 1.0068,
+            "min_expectancy": .000078, "min_coverage": .5973,
+            "max_ece": .187,
+        }},
+    }).finalize()
+    recency_gain = Genome(**{
+        **boundary.__dict__, "recency_half_life_days": 1073.348,
+        "generation": 933, "parents": [boundary.genome_id],
+        "genome_id": "", "fitness": 428,
+        "result": {"summary": {
+            "min_accuracy": .5987, "min_balanced_accuracy": .6051,
+            "min_mcc": .210, "min_profit_factor": 1.0476,
+            "min_expectancy": .000549, "min_coverage": .5792,
+            "max_ece": .1971,
+        }},
+    }).finalize()
+    for genome in population[1:]:
+        genome.fitness = None
+        genome.result = None
+
+    after = evolution.introduce_champion_return_tree_variant(
+        population, champion, [boundary, recency_gain], 934
+    )
+
+    repair = next(
+        genome for genome in after
+        if genome.learner_kind == "extra_trees_regressor"
+    )
+    expected_recovery = min(.015, max(.005, (.60 - .5792) * .5))
+    assert repair.confidence_quantile == pytest.approx(
+        recency_gain.confidence_quantile - expected_recovery
+    )
+    assert repair.recency_half_life_days == pytest.approx(
+        recency_gain.recency_half_life_days
+    )
+    assert repair.max_leaf_nodes == recency_gain.max_leaf_nodes
+    assert repair.min_samples_leaf == recency_gain.min_samples_leaf
+    assert repair.parents == [recency_gain.genome_id]
+
+
 def test_nearby_return_tree_evidence_survives_champion_quantile_handoff(tmp_path):
     old = seed_genomes(1, random.Random(193))[0]
     old.learner_kind = "extra_trees"

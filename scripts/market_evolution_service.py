@@ -5216,6 +5216,62 @@ def introduce_champion_return_tree_variant(
         )) > 0
         for observed in topology_bases
     )
+    # A topology coordinate can improve direction and economics while moving
+    # the protected-score distribution just below the coverage floor.  Once
+    # that happens, test the interaction with one small cutoff recovery before
+    # resuming unrelated topology mutations.  The stricter accuracy,
+    # calibration, and economics requirements keep this from reopening the
+    # broad cutoff descent that ``priority_topology`` deliberately stops.
+    topology_recovery_bases = sorted(
+        (
+            observed for observed in topology_bases
+            if float(((observed.result or {}).get("summary") or {}).get(
+                "min_coverage", 0
+            )) >= .55
+            and PRESCREEN["coverage"] - float(
+                ((observed.result or {}).get("summary") or {}).get(
+                    "min_coverage", 0
+                )
+            ) > .01
+            and float(((observed.result or {}).get("summary") or {}).get(
+                "min_accuracy", 0
+            )) >= .595
+            and float(((observed.result or {}).get("summary") or {}).get(
+                "min_balanced_accuracy", 0
+            )) >= .59
+            and float(((observed.result or {}).get("summary") or {}).get(
+                "min_profit_factor", 0
+            )) >= 1.0
+            and float(((observed.result or {}).get("summary") or {}).get(
+                "min_expectancy", 0
+            )) > 0
+            and float(((observed.result or {}).get("summary") or {}).get(
+                "max_ece", 1
+            )) <= PRESCREEN["ece"]
+        ),
+        key=lambda observed: (
+            float(((observed.result or {}).get("summary") or {}).get(
+                "min_accuracy", 0
+            )),
+            float(((observed.result or {}).get("summary") or {}).get(
+                "min_profit_factor", 0
+            )),
+            float(((observed.result or {}).get("summary") or {}).get(
+                "min_coverage", 0
+            )),
+        ),
+        reverse=True,
+    )
+    for observed in topology_recovery_bases:
+        coverage = float(((observed.result or {}).get("summary") or {}).get(
+            "min_coverage", 0
+        ))
+        recovery = min(
+            .015, max(.005, (PRESCREEN["coverage"] - coverage) * .5)
+        )
+        quantile_trials.append((
+            observed, max(0.0, observed.confidence_quantile - recovery)
+        ))
     variant: Genome | None = None
     # First compose coverage search with the exact signed return-tree
     # phenotype. A threshold result from a different leaf topology is not an
