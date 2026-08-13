@@ -351,6 +351,19 @@ factor 1.029, positive expectancy, and 56.86 percent coverage. It still missed
 the protected accuracy, MCC, acted-observation, and coverage floors and was
 therefore rejected. This is useful boundary evidence, not a promotion.
 
+A profitable return cutoff that comes within one percentage point of required
+coverage but has already fallen below 60 percent directional accuracy is a
+signed Pareto boundary. The controller stops lowering that scalar: doing so
+would predictably exchange the accuracy objective for marginal coverage. Its
+next bounded trial keeps the exact cutoff, leaf capacity, calibration,
+features, and programs, and increases only the return tree's minimum leaf
+support. Every topology coordinate is derived from the signed return parent,
+not reconstructed from the classifier champion. Generation 1171 established
+this trigger on the 11-leaf lineage at 58.64 percent accuracy, 59.90 percent
+balanced accuracy, MCC 0.203, PF 1.0068, positive expectancy, and 59.73 percent
+coverage. The smoothing child remains ordinary research evidence and must pass
+all unchanged protected folds and admission gates.
+
 Coverage repair treats repeated identical outcomes on either side of the
 coverage floor as evidence of a discrete tree-score plateau. In particular,
 two lower-threshold descendants that admit the same harmful leaf are enough to

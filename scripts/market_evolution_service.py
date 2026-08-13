@@ -5165,10 +5165,20 @@ def introduce_champion_return_tree_variant(
                 and float(summary.get("min_expectancy", 0)) > 0
                 and coverage < PRESCREEN["coverage"]):
             coverage_gap = PRESCREEN["coverage"] - coverage
-            quantile_trials.append((observed, max(
-                0.0, observed.confidence_quantile
-                - max(.02, min(.08, coverage_gap * .5)),
-            )))
+            # Once a profitable curve is within one coverage point but has
+            # already fallen below 60% direction accuracy, another lower
+            # cutoff predictably trades away the objective we are trying to
+            # preserve. Hold that signed boundary and refine its ranking
+            # topology before admitting still weaker signals.
+            near_coverage_tradeoff = (
+                coverage_gap <= .01
+                and float(summary.get("min_accuracy", 0)) < .60
+            )
+            if not near_coverage_tradeoff:
+                quantile_trials.append((observed, max(
+                    0.0, observed.confidence_quantile
+                    - max(.02, min(.08, coverage_gap * .5)),
+                )))
     for base, quantile in quantile_trials:
         payload = asdict(base)
         payload.update({
@@ -5246,7 +5256,7 @@ def introduce_champion_return_tree_variant(
             )) >= .58
             and .95 <= float(((observed.result or {}).get("summary") or {}).get(
                 "min_profit_factor", 0
-            )) < 1.0
+            ))
         ),
         key=lambda observed: (
             float(((observed.result or {}).get("summary") or {}).get(
@@ -5262,12 +5272,12 @@ def introduce_champion_return_tree_variant(
         topology_bases = []
     for base in topology_bases:
         specifications = (
-            {"min_samples_leaf": min(100, champion.min_samples_leaf + 4)},
-            {"min_samples_leaf": min(100, champion.min_samples_leaf + 12)},
-            {"max_leaf_nodes": max(8, champion.max_leaf_nodes - 4)},
-            {"max_leaf_nodes": max(8, champion.max_leaf_nodes - 8)},
+            {"min_samples_leaf": min(100, base.min_samples_leaf + 4)},
+            {"min_samples_leaf": min(100, base.min_samples_leaf + 12)},
+            {"max_leaf_nodes": max(8, base.max_leaf_nodes - 2)},
+            {"max_leaf_nodes": max(8, base.max_leaf_nodes - 4)},
             {"recency_half_life_days": max(
-                45.0, champion.recency_half_life_days * .75
+                45.0, base.recency_half_life_days * .75
             )},
         )
         for specification in specifications:

@@ -1880,7 +1880,7 @@ def test_return_tree_smooths_ranking_before_admitting_weaker_signals():
     champion.result = {"evaluated_folds": 3, "requested_folds": 3}
     observed = Genome(**{
         **champion.__dict__, "learner_kind": "extra_trees_regressor",
-        "confidence_quantile": .15,
+        "confidence_quantile": .15, "max_leaf_nodes": 11,
         "generation": 916, "parents": [champion.genome_id],
         "genome_id": "", "fitness": 415,
         "result": {
@@ -1906,7 +1906,46 @@ def test_return_tree_smooths_ranking_before_admitting_weaker_signals():
     )
     assert repair.confidence_quantile == pytest.approx(.15)
     assert repair.min_samples_leaf == 12
-    assert repair.max_leaf_nodes == champion.max_leaf_nodes
+    assert repair.max_leaf_nodes == 11
+
+
+def test_return_tree_near_coverage_tradeoff_refines_ranking_not_cutoff():
+    population = seed_genomes(8, random.Random(199))
+    champion = population[0]
+    champion.learner_kind = "extra_trees"
+    champion.fitness = 2400
+    champion.result = {"evaluated_folds": 3, "requested_folds": 3}
+    observed = Genome(**{
+        **champion.__dict__, "learner_kind": "extra_trees_regressor",
+        "confidence_quantile": .1611, "max_leaf_nodes": 11,
+        "min_samples_leaf": 8, "generation": 923,
+        "parents": ["profitable-return-frontier"],
+        "genome_id": "", "fitness": 420,
+        "result": {
+            "evaluated_folds": 1, "requested_folds": 3,
+            "summary": {
+                "min_accuracy": .5864, "min_balanced_accuracy": .599,
+                "min_mcc": .203, "min_profit_factor": 1.0068,
+                "min_expectancy": .000078, "min_coverage": .5973,
+            },
+        },
+    }).finalize()
+    for genome in population[1:]:
+        genome.fitness = None
+        genome.result = None
+
+    after = evolution.introduce_champion_return_tree_variant(
+        population, champion, [observed], 924
+    )
+
+    repair = next(
+        genome for genome in after
+        if genome.learner_kind == "extra_trees_regressor"
+    )
+    assert repair.confidence_quantile == pytest.approx(.1611)
+    assert repair.max_leaf_nodes == 11
+    assert repair.min_samples_leaf == 12
+    assert repair.parents == [observed.genome_id]
 
 
 def test_nearby_return_tree_evidence_survives_champion_quantile_handoff(tmp_path):
