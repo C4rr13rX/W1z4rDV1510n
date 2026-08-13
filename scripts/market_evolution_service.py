@@ -1497,8 +1497,13 @@ def next_oriented_reliability_variants(
 
     # Once coarse pairs are exhausted, refine the strongest pool locally.
     if tested:
+        active_tested = {
+            key: candidate for key, candidate in tested.items()
+            if key[0] in active_pools
+        }
         best_pool, best_quantile = max(
-            tested, key=lambda key: reliability_evidence_rank(tested[key])
+            active_tested,
+            key=lambda key: reliability_evidence_rank(active_tested[key]),
         )
         pool_values = sorted(
             quantile for pool, quantile in tested if pool == best_pool

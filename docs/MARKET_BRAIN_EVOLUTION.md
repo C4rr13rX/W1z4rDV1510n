@@ -401,6 +401,21 @@ topology. A result below those quality bounds stops the interaction; it does
 not relax any fold, unseen-asset, calibration, profitability, ghost, or live
 gate.
 
+Live candidate `f853c5684321bb34` exercised that interaction on the stronger
+12-leaf parent. Moving q from `0.1820959` to `0.1670959` raised coverage from
+55.05 to 58.22 percent and retained PF 1.042 plus positive expectancy, but
+accuracy fell from 60.00 to 58.60 percent. The child therefore failed
+prescreen and, because it crossed below the 59.5-percent continuation bound,
+cannot trigger another cutoff descent in this lane.
+
+Plateau retirement applies to local refinement as well as the coarse pool
+schedule. Once a reliability feature pool is classified inert or
+outcome-plateaued, it cannot win the later best-score selection merely because
+one of its historical points outranks the remaining active pool. This closes a
+live loop in which version-8 `combined` reliability produced the same protected
+outcome 99 times at numerically distinct quantiles. Local refinement now ranks
+only active pools; all statistical and neural gates remain unchanged.
+
 Coverage repair treats repeated identical outcomes on either side of the
 coverage floor as evidence of a discrete tree-score plateau. In particular,
 two lower-threshold descendants that admit the same harmful leaf are enough to

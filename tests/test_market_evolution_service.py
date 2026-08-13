@@ -1314,6 +1314,53 @@ def test_orientation_scheduler_escapes_outcome_plateau_into_compact_pools():
     assert all(pool not in {"combined", "flow_news"} for pool, _ in proposals)
 
 
+def test_orientation_scheduler_never_locally_refines_retired_plateau_pool():
+    base = seed_genomes(1, random.Random(203))[0]
+    base.confidence_quantile = .237396
+    coarse = (.197396, .217396, .237396, .257396, .277396, .297396)
+    evidence = []
+    for cycle in range(2):
+        for index, quantile in enumerate(coarse):
+            evidence.append(Genome(**{
+                **base.__dict__, "calibration_reliability": True,
+                "calibration_reliability_version": 8,
+                "calibration_reliability_pool": "combined",
+                "confidence_quantile": quantile,
+                "generation": 600 + cycle * len(coarse) + index,
+                "parents": [f"combined-{cycle}-{index}"],
+                "genome_id": "", "fitness": 1600,
+                "result": {"summary": {
+                    "min_accuracy": .70, "min_balanced_accuracy": .69,
+                    "min_mcc": .38, "min_coverage": .74,
+                    "min_expectancy": .002, "min_profit_factor": 1.3,
+                }},
+            }).finalize())
+    for index, quantile in enumerate(coarse):
+        evidence.append(Genome(**{
+            **base.__dict__, "calibration_reliability": True,
+            "calibration_reliability_version": 8,
+            "calibration_reliability_pool": "flow_news",
+            "confidence_quantile": quantile,
+            "generation": 700 + index, "genome_id": "", "fitness": 1100,
+            "result": {"summary": {
+                "min_accuracy": .53 + index * .001,
+                "min_balanced_accuracy": .52 + index * .001,
+                "min_mcc": .05 + index * .001,
+                "min_coverage": .61 - index * .001,
+                "min_expectancy": -.001 + index * .00001,
+                "min_profit_factor": .90 + index * .001,
+            }},
+        }).finalize())
+
+    proposals = evolution.next_oriented_reliability_variants(
+        evidence, base.confidence_quantile
+    )
+
+    assert len(proposals) == 2
+    assert all(pool == "flow_news" for pool, _ in proposals)
+    assert all(quantile not in coarse for _, quantile in proposals)
+
+
 def test_full_fold_champion_coordinate_search_is_single_axis_and_remembers_evidence():
     population = seed_genomes(8, random.Random(178))
     champion = population[0]
