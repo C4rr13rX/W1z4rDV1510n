@@ -446,6 +446,15 @@ time. Closing the PowerShell window stops only `Get-Content -Wait`; it does not
 signal, kill, or restart the watcher. A desktop shortcut may safely open and
 close this viewer independently as often as needed.
 
+The protected-route replay preflight must cover both the cross-language route
+sentinel and the complete foundational Python execution/paraphrase suite. A
+single healthy language-operation pair (for example, `square`) cannot certify
+that unrelated multi-feature bindings such as guarded averages or word-count
+state updates remain reachable. Both probes are read-only. Any pressure or
+failure triggers one guarded refresh of the existing trusted bindings, followed
+by both probes and the complete admission battery before the accepted guard is
+advanced; any failure restores the prior guard and leaves the interval deferred.
+
 The resumed prompt carries the final acceptance contract, not merely the
 current corpus alarm. It requires a 1,000-task deterministic enterprise
 software obstacle course with capability-family remediation and full

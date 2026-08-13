@@ -2425,7 +2425,7 @@ def replay_interval_recall_command(args: argparse.Namespace, phase: Phase,
     return command
 
 
-PROTECTED_ROUTE_CERTIFICATE_VERSION = 3
+PROTECTED_ROUTE_CERTIFICATE_VERSION = 4
 PROTECTED_ROUTE_REFRESH_REPEATS = 8
 
 
@@ -2443,9 +2443,10 @@ def protected_route_pressure_reasons(report: dict) -> list[dict]:
     if not results:
         return [{"suite_missing": True, "failed": True}]
     for row in results:
-        kind = row.get("kind")
-        if kind not in ("trained", "paraphrase"):
+        raw_kind = row.get("kind")
+        if raw_kind not in ("trained", "paraphrase", "novel_paraphrase"):
             continue
+        kind = "paraphrase" if raw_kind == "novel_paraphrase" else raw_kind
         diagnostics = row.get("intent_diagnostics") or {}
         ranked = int(diagnostics.get("ranked_candidates") or 0)
         composite_saturated = diagnostics.get("composite_saturated") is True
@@ -2478,13 +2479,19 @@ def protected_route_pressure_reasons(report: dict) -> list[dict]:
 
 
 def run_protected_route_sentinel(args: argparse.Namespace, runtime: Path,
-                                 output: Path, *, repeats: int | None) -> dict:
+                                 output: Path, *, repeats: int | None,
+                                 suite: str = "multilanguage") -> dict:
     """Run the protected route suite with explicit mutation semantics."""
     output.unlink(missing_ok=True)
-    command = [
-        sys.executable, "scripts/programming_multilanguage_eval.py",
-        "--endpoint", args.endpoint, "--output", str(output),
-    ]
+    script = (
+        "scripts/programming_multilanguage_eval.py"
+        if suite == "multilanguage"
+        else "scripts/programming_code_eval.py"
+    )
+    command = [sys.executable, script, "--endpoint", args.endpoint,
+               "--output", str(output)]
+    if suite == "python":
+        command.append("--details")
     if repeats is None:
         command.append("--no-train")
     else:
@@ -2527,12 +2534,18 @@ def guarded_protected_route_preflight(
 
     reasons: list[dict] = []
     probe_path = runtime / f"{phase.name}.protected-route-preflight.json"
+    python_probe_path = runtime / f"{phase.name}.protected-python-route-preflight.json"
     training_path = runtime / f"{phase.name}.protected-route-refresh.json"
+    python_training_path = runtime / f"{phase.name}.protected-python-route-refresh.json"
     post_path = runtime / f"{phase.name}.protected-route-post-refresh.json"
+    python_post_path = runtime / f"{phase.name}.protected-python-route-post-refresh.json"
     report_path = runtime / f"{phase.name}.protected-route-admission.json"
     try:
         probe = run_protected_route_sentinel(
             args, runtime, probe_path, repeats=None
+        )
+        python_probe = run_protected_route_sentinel(
+            args, runtime, python_probe_path, repeats=None, suite="python"
         )
         after_probe = endpoint_json(
             args.endpoint, "/brain/stats", timeout=120.0
@@ -2544,6 +2557,7 @@ def guarded_protected_route_preflight(
                 f"{probe_delta}"
             )
         reasons = protected_route_pressure_reasons(probe)
+        reasons.extend(protected_route_pressure_reasons(python_probe))
         if not reasons:
             certificate = {
                 "version": PROTECTED_ROUTE_CERTIFICATE_VERSION,
@@ -2569,9 +2583,15 @@ def guarded_protected_route_preflight(
             args, runtime, training_path,
             repeats=PROTECTED_ROUTE_REFRESH_REPEATS,
         )
-        if training.get("exit_code") != 0:
+        python_training = run_protected_route_sentinel(
+            args, runtime, python_training_path,
+            repeats=PROTECTED_ROUTE_REFRESH_REPEATS, suite="python",
+        )
+        if (training.get("exit_code") != 0
+                or python_training.get("exit_code") != 0):
             raise RuntimeError(
-                f"protected route refresh failed execution: {training}"
+                "protected route refresh failed execution: "
+                f"multilanguage={training} python={python_training}"
             )
         publish(status_path, {
             "state": "protected_route_refresh_benchmarking",
@@ -2586,6 +2606,9 @@ def guarded_protected_route_preflight(
         post = run_protected_route_sentinel(
             args, runtime, post_path, repeats=None
         )
+        python_post = run_protected_route_sentinel(
+            args, runtime, python_post_path, repeats=None, suite="python"
+        )
         post_after = endpoint_json(
             args.endpoint, "/brain/stats", timeout=120.0
         )
@@ -2596,7 +2619,9 @@ def guarded_protected_route_preflight(
                 f"{post_delta}"
             )
         post_reasons = protected_route_pressure_reasons(post)
-        if post.get("exit_code") != 0 or post_reasons:
+        post_reasons.extend(protected_route_pressure_reasons(python_post))
+        if (post.get("exit_code") != 0
+                or python_post.get("exit_code") != 0 or post_reasons):
             raise RuntimeError(
                 "protected route refresh did not remove predicted pressure: "
                 f"exit={post.get('exit_code')} reasons={post_reasons}"
@@ -2609,7 +2634,8 @@ def guarded_protected_route_preflight(
             "phase": phase.name, "before": before, "after": after,
             "tick": after.get("tick"), "pressure_reasons": reasons,
             "presentations_per_route": PROTECTED_ROUTE_REFRESH_REPEATS,
-            "training": training, "post_refresh": post,
+            "training": training, "python_training": python_training,
+            "post_refresh": post, "python_post_refresh": python_post,
             "completion": completion,
             "updated_unix": time.time(),
         }

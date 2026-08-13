@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import base64
 import http.client
 import json
 import re
@@ -35,8 +36,8 @@ class Client:
         self.prefix = url.path.rstrip("/")
         self.conn = http.client.HTTPConnection(url.hostname, url.port or 80, timeout=60)
 
-    def chat_payload(self, prompt: str) -> dict:
-        self.conn.request("POST", f"{self.prefix}/brain/chat", json.dumps({"text": prompt}),
+    def post(self, path: str, payload: dict) -> dict:
+        self.conn.request("POST", f"{self.prefix}{path}", json.dumps(payload),
                           {"Content-Type": "application/json"})
         response = self.conn.getresponse()
         payload = response.read()
@@ -44,8 +45,13 @@ class Client:
             raise RuntimeError(f"HTTP {response.status}: {payload[:300]!r}")
         decoded = json.loads(payload)
         if not isinstance(decoded, dict):
-            raise RuntimeError(f"chat returned non-object payload: {type(decoded).__name__}")
+            raise RuntimeError(
+                f"{path} returned non-object payload: {type(decoded).__name__}"
+            )
         return decoded
+
+    def chat_payload(self, prompt: str) -> dict:
+        return self.post("/brain/chat", {"text": prompt})
 
     def chat(self, prompt: str) -> str:
         return str(self.chat_payload(prompt).get("reply") or "")
@@ -54,6 +60,26 @@ class Client:
 def load_examples() -> list[dict]:
     return [json.loads(line) for line in CORPUS.read_text(encoding="utf-8").splitlines()
             if line.strip()]
+
+
+def b64(value: str) -> str:
+    return base64.urlsafe_b64encode(value.encode()).rstrip(b"=").decode()
+
+
+def refresh_routes(client: Client, rows: list[dict], repeats: int) -> None:
+    """Re-advertise the existing protected bindings without new answers."""
+    exemplars = [
+        next(row for row in rows if str(row.get("response", "")).startswith(prefix))
+        for prefix, *_rest in CASES
+    ]
+    for _ in range(repeats):
+        for exemplar in exemplars:
+            prompt = str(exemplar["prompt"])
+            response = str(exemplar["response"])
+            client.post("/brain/observe", {"pool_id": 1, "frame": b64(prompt)})
+            client.post("/brain/observe", {"pool_id": 12, "frame": b64(prompt)})
+            client.post("/brain/observe", {"pool_id": 4, "frame": b64(response)})
+            client.post("/brain/tick", {})
 
 
 def syntax_valid(code: str) -> bool:
@@ -124,9 +150,14 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--endpoint", default="http://127.0.0.1:8291")
     parser.add_argument("--details", action="store_true")
+    parser.add_argument("--repeats", type=int, default=8)
+    parser.add_argument("--no-train", action="store_true")
+    parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     rows = load_examples()
     client = Client(args.endpoint)
+    if not args.no_train:
+        refresh_routes(client, rows, args.repeats)
     results = []
     for response_prefix, function, call_args, expected, novel_prompt in CASES:
         exemplar = next(row for row in rows if str(row.get("response", "")).startswith(response_prefix))
@@ -168,8 +199,12 @@ def main() -> int:
     report: dict[str, object] = {"summary": summary}
     if args.details:
         report["results"] = results
-    print(json.dumps(report, separators=(",", ":")))
-    return 0
+    encoded = json.dumps(report, separators=(",", ":"))
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    print(encoded)
+    return 0 if all(row["executes"] for row in results) else 1
 
 
 if __name__ == "__main__":

@@ -1315,6 +1315,13 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         self.assertTrue(reasons[0]["legacy_composite_missing"])
         self.assertFalse(reasons[0]["legacy_saturated"])
 
+        python_failure = json.loads(json.dumps(healthy))
+        python_failure["results"][0]["kind"] = "novel_paraphrase"
+        python_failure["results"][0]["executes"] = False
+        reasons = protected_route_pressure_reasons(python_failure)
+        self.assertEqual(len(reasons), 1)
+        self.assertEqual(reasons[0]["kind"], "paraphrase")
+
     def test_protected_route_sentinel_declares_mutation_semantics(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runtime = Path(directory)
@@ -1343,6 +1350,15 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
                 mutating = run.call_args.args[0]
                 self.assertNotIn("--no-train", mutating)
                 self.assertEqual(mutating[-2:], ["--repeats", "8"])
+
+                run_protected_route_sentinel(
+                    SimpleNamespace(endpoint="http://brain"), runtime,
+                    output, repeats=None, suite="python",
+                )
+                python_readonly = run.call_args.args[0]
+                self.assertIn("scripts/programming_code_eval.py", python_readonly)
+                self.assertIn("--details", python_readonly)
+                self.assertIn("--no-train", python_readonly)
 
     def test_committed_deferred_replay_recovers_without_duplicate_training(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
