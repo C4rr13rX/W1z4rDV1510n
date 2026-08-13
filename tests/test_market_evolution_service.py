@@ -2719,6 +2719,26 @@ def test_outcome_pool_profit_target_changes_acquisition_priority():
     ) > evolution.outcome_acquisition(conservative, uncertainty)
 
 
+def test_outcome_pool_accuracy_discovery_preserves_predicted_economics():
+    baseline = np.asarray([.9, .58, .57, .56, .64, .36, .55, .7, .7])
+    accurate = baseline.copy()
+    accurate[1:4] += np.asarray([.05, .04, .04])
+    unprofitable = accurate.copy()
+    unprofitable[5] = .20
+    uncertainty = np.zeros_like(baseline)
+
+    assert evolution.outcome_acquisition(
+        accurate, uncertainty, accuracy_discovery=True
+    ) > evolution.outcome_acquisition(
+        baseline, uncertainty, accuracy_discovery=True
+    )
+    assert evolution.outcome_acquisition(
+        accurate, uncertainty, accuracy_discovery=True
+    ) > evolution.outcome_acquisition(
+        unprofitable, uncertainty, accuracy_discovery=True
+    )
+
+
 def test_active_outcome_pool_reserves_only_one_reproduction_slot():
     class FixedOutcomeModel:
         def predict(self, values):
@@ -2754,6 +2774,41 @@ def test_active_outcome_pool_reserves_only_one_reproduction_slot():
     assert len(introduced) == 1
     assert introduced[0].fitness is None
     assert report["genome_id"] == introduced[0].genome_id
+
+
+def test_active_outcome_pool_switches_to_accuracy_discovery_on_plateau():
+    class FixedOutcomeModel:
+        def predict(self, values):
+            target = np.asarray([.8, .64, .62, .62, .66, .38, .58, .7, .7])
+            return np.tile(target, (len(values), 1))
+
+    population = seed_genomes(8, random.Random(424))
+    evaluated = seed_genomes(8, random.Random(425))
+    for index, genome in enumerate(evaluated):
+        genome.fitness = 2000 - index
+        genome.result = {
+            "evaluated_folds": 3, "requested_folds": 3,
+            "summary": {"min_accuracy": .56, "min_profit_factor": 1.0},
+        }
+    for genome in population[3:]:
+        genome.fitness = None
+        genome.result = None
+    width = len(evolution.genome_outcome_vector(population[0]))
+    targets = len(evolution.OUTCOME_POOL_TARGETS)
+    pool = evolution.GenomeOutcomePool(
+        np.zeros(width), np.ones(width), np.zeros(targets), np.ones(targets),
+        [FixedOutcomeModel(), FixedOutcomeModel()], 120,
+        [.05] * targets, [.10] * targets, [.4] * targets, True,
+    )
+
+    _, report = evolution.introduce_outcome_pool_variant(
+        population, evaluated, pool, 430, random.Random(426),
+        plateau_generations=24,
+    )
+
+    assert report["proposed"] is True
+    assert report["acquisition_mode"] == "accuracy_discovery"
+    assert report["plateau_generations"] == 24
 
 
 def test_reflexivity_variant_is_seeded_without_erasing_learner_diversity():

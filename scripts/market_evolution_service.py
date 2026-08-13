@@ -2806,8 +2806,22 @@ def nudge_genome(parent: Genome, generation: int, rng: random.Random) -> Genome:
 
 def outcome_acquisition(
     mean: np.ndarray, uncertainty: np.ndarray, *, profit_discovery: bool = False,
+    accuracy_discovery: bool = False,
 ) -> float:
     fold, accuracy, balanced, mcc, coverage, profit, expectancy, calibration, drawdown = mean
+    if accuracy_discovery:
+        # Once the validated champion has stopped moving, let the learned
+        # genome/outcome pool search deliberately for more directional signal.
+        # Predicted economics remain constraints rather than being traded away:
+        # profit is normalized from PF [0, 3], so one third represents PF 1.0.
+        return float(
+            4.0 * fold + 14.0 * accuracy + 5.0 * balanced + 2.0 * mcc
+            + 2.0 * coverage + 4.0 * profit + 1.5 * expectancy
+            + .5 * calibration + .5 * drawdown
+            - 8.0 * max(0.0, .60 - coverage)
+            - 12.0 * max(0.0, (1.0 / 3.0) - profit)
+            + 1.0 * float(np.mean(uncertainty))
+        )
     if profit_discovery:
         return float(
             1.0 * fold + 2.5 * accuracy + 1.0 * balanced + .75 * mcc
@@ -2831,6 +2845,7 @@ def introduce_outcome_pool_variant(
     population: list[Genome], evaluated: Sequence[Genome],
     pool: GenomeOutcomePool | None, generation: int, rng: random.Random,
     protected_parent_ids: set[str] | None = None,
+    plateau_generations: int = 0,
 ) -> tuple[list[Genome], dict[str, Any]]:
     report: dict[str, Any] = {
         "active": bool(pool and pool.active),
@@ -2893,11 +2908,13 @@ def introduce_outcome_pool_variant(
         return population, report
     candidates = list(proposals.values())
     means, uncertainties = pool.predict(candidates)
-    profit_discovery = generation % 3 == 0
+    accuracy_discovery = plateau_generations >= 24 and generation % 3 == 1
+    profit_discovery = not accuracy_discovery and generation % 3 == 0
     ranked = sorted(
         zip(candidates, means, uncertainties),
         key=lambda item: outcome_acquisition(
-            item[1], item[2], profit_discovery=profit_discovery
+            item[1], item[2], profit_discovery=profit_discovery,
+            accuracy_discovery=accuracy_discovery,
         ), reverse=True,
     )
     protected_parent_ids = protected_parent_ids or set()
@@ -2916,11 +2933,15 @@ def introduce_outcome_pool_variant(
         "predicted": dict(zip(OUTCOME_POOL_TARGETS, mean.tolist())),
         "uncertainty": dict(zip(OUTCOME_POOL_TARGETS, uncertainty.tolist())),
         "acquisition": outcome_acquisition(
-            mean, uncertainty, profit_discovery=profit_discovery
+            mean, uncertainty, profit_discovery=profit_discovery,
+            accuracy_discovery=accuracy_discovery,
         ),
         "acquisition_mode": (
-            "profit_discovery" if profit_discovery else "balanced_safe_improvement"
+            "accuracy_discovery" if accuracy_discovery else
+            "profit_discovery" if profit_discovery else
+            "balanced_safe_improvement"
         ),
+        "plateau_generations": int(plateau_generations),
         "candidate_search_size": len(candidates),
     })
     return population, report
@@ -5948,6 +5969,9 @@ def main() -> int:
                             regime_shift_frontier,
                         ) if genome is not None
                     },
+                    plateau_generations=(
+                        generation - champion.generation if champion else 0
+                    ),
                 )
             except Exception as exc:
                 outcome_pool_report = {

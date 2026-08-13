@@ -125,11 +125,16 @@ walk-forward and retention gates before replacing the accepted brain.
   learner class, causal feature/program combinations, calibration, memory, and
   emergent-pool topology. Chronological holdout error and rank correlation are
   published against a naive historical-mean baseline before activation.
-- The neural pool alternates balanced-safe improvement with bounded profit
-  discovery targeting PF 2.0. Its uncertainty can encourage a small departure
-  from known lineages, but its predictions are never fitness, fold evidence,
-  champion evidence, or trading admission; every proposed genome starts with
-  no fitness and must pass the unchanged protected tests.
+- The neural pool normally alternates balanced-safe improvement with bounded
+  profit discovery targeting PF 2.0. After 24 generations without a validated
+  champion change, one third of its advisory turns become accuracy discovery:
+  predicted accuracy, balanced accuracy, and MCC receive more search weight,
+  while candidates predicted below 60% coverage or PF 1.0 receive explicit
+  penalties. This is a plateau escape policy, not a weaker gate. Its uncertainty
+  can encourage a small departure from known lineages, but its predictions are
+  never fitness, fold evidence, champion evidence, or trading admission; every
+  proposed genome starts with no fitness and must pass the unchanged protected
+  tests.
 
 ## Stop conditions
 

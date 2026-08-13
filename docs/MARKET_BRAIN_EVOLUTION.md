@@ -250,3 +250,14 @@ later reserved search lanes cannot overwrite its protected population slot. The
 descendant must still pass every ordinary coverage,
 profitability, calibration, known/unseen-asset, protected-fold, neural, and
 ghost-only admission gate. Historical descendants suppress repeated probes.
+
+The learned genome-outcome pool also has an explicit plateau response. Its
+chronological validation must beat the historical-mean baseline before it can
+advise reproduction. Normally it alternates balanced-safe and profit-discovery
+acquisition. Once the full-fold champion is unchanged for 24 generations, it
+adds an accuracy-discovery turn every third generation, rewarding predicted
+directional accuracy, balanced accuracy, and MCC while strongly penalizing
+predicted coverage below 60 percent or normalized profit factor below 1.0. The
+pool still owns exactly one advisory slot and cannot supply fitness or admission
+evidence; the selected child remains unevaluated until every protected fold and
+unchanged safety gate signs its result.
