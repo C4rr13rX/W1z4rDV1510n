@@ -5130,12 +5130,56 @@ def introduce_champion_return_tree_variant(
             and float(summary.get("min_profit_factor", 0)) >= .95
         )
         evidence_quality.append((observed, strong_signal))
+    topology_bases = sorted(
+        (
+            observed for observed, _ in evidence_quality
+            if .50 <= float(((observed.result or {}).get("summary") or {}).get(
+                "min_coverage", 0
+            )) < PRESCREEN["coverage"]
+            and float(((observed.result or {}).get("summary") or {}).get(
+                "min_accuracy", 0
+            )) >= .58
+            and float(((observed.result or {}).get("summary") or {}).get(
+                "min_balanced_accuracy", 0
+            )) >= .58
+            and .95 <= float(((observed.result or {}).get("summary") or {}).get(
+                "min_profit_factor", 0
+            ))
+        ),
+        key=lambda observed: (
+            float(((observed.result or {}).get("summary") or {}).get(
+                "min_coverage", 0
+            )),
+            float(((observed.result or {}).get("summary") or {}).get(
+                "min_accuracy", 0
+            )),
+            float(((observed.result or {}).get("summary") or {}).get(
+                "min_profit_factor", 0
+            )),
+        ),
+        reverse=True,
+    )
+    priority_topology = any(
+        PRESCREEN["coverage"] - float(
+            ((observed.result or {}).get("summary") or {}).get("min_coverage", 0)
+        ) <= .01
+        and float(((observed.result or {}).get("summary") or {}).get(
+            "min_accuracy", 0
+        )) < .60
+        and float(((observed.result or {}).get("summary") or {}).get(
+            "min_profit_factor", 0
+        )) >= 1.0
+        and float(((observed.result or {}).get("summary") or {}).get(
+            "min_expectancy", 0
+        )) > 0
+        for observed in topology_bases
+    )
     variant: Genome | None = None
     # First compose coverage search with the exact signed return-tree
     # phenotype. A threshold result from a different leaf topology is not an
     # endpoint for this curve, and rebuilding from the classifier champion
     # would silently discard the discovered return-ranking capacity.
-    brackets = [
+    brackets = [] if priority_topology else [
         (strong.confidence_quantile - weak.confidence_quantile, strong,
          (strong.confidence_quantile + weak.confidence_quantile) / 2.0)
         for strong, is_strong in evidence_quality if is_strong
@@ -5174,7 +5218,7 @@ def introduce_champion_return_tree_variant(
                 coverage_gap <= .01
                 and float(summary.get("min_accuracy", 0)) < .60
             )
-            if not near_coverage_tradeoff:
+            if not near_coverage_tradeoff and not priority_topology:
                 quantile_trials.append((observed, max(
                     0.0, observed.confidence_quantile
                     - max(.02, min(.08, coverage_gap * .5)),
@@ -5215,7 +5259,8 @@ def introduce_champion_return_tree_variant(
     # Preserve the champion's direction classifier while a separate return
     # pool ranks WHEN to act. The launch requires signed evidence for both a
     # profitable selective region and a quantile that clears coverage.
-    if (variant is None and profitable_selective and coverage_anchors
+    if (variant is None and not priority_topology
+            and profitable_selective and coverage_anchors
             and not hybrid_evidence):
         base = max(
             coverage_anchors,
@@ -5242,32 +5287,6 @@ def introduce_champion_return_tree_variant(
     # admitting weaker signals. Smoother leaves can generalize return magnitude
     # across assets while the quantile remains fixed, making this a controlled
     # one-coordinate follow-up to the signed return-tree phenotype.
-    topology_bases = sorted(
-        (
-            observed for observed, _ in evidence_quality
-            if .50 <= float(((observed.result or {}).get("summary") or {}).get(
-                "min_coverage", 0
-            )) < PRESCREEN["coverage"]
-            and float(((observed.result or {}).get("summary") or {}).get(
-                "min_accuracy", 0
-            )) >= .58
-            and float(((observed.result or {}).get("summary") or {}).get(
-                "min_balanced_accuracy", 0
-            )) >= .58
-            and .95 <= float(((observed.result or {}).get("summary") or {}).get(
-                "min_profit_factor", 0
-            ))
-        ),
-        key=lambda observed: (
-            float(((observed.result or {}).get("summary") or {}).get(
-                "min_profit_factor", 0
-            )),
-            float(((observed.result or {}).get("summary") or {}).get(
-                "min_coverage", 0
-            )),
-        ),
-        reverse=True,
-    )
     if variant is not None:
         topology_bases = []
     for base in topology_bases:

@@ -364,6 +364,13 @@ balanced accuracy, MCC 0.203, PF 1.0068, positive expectancy, and 59.73 percent
 coverage. The smoothing child remains ordinary research evidence and must pass
 all unchanged protected folds and admission gates.
 
+This near-boundary topology repair has priority across the whole return-tree
+family, not merely within one leaf-capacity curve. Otherwise an unused cutoff
+from a more distant sibling can consume the shared specialist slot forever
+while the closest Pareto boundary is never repaired. Candidates are ordered by
+coverage proximity, then accuracy and economics; only after their finite
+topology coordinates are signed does scalar search on sibling curves resume.
+
 Coverage repair treats repeated identical outcomes on either side of the
 coverage floor as evidence of a discrete tree-score plateau. In particular,
 two lower-threshold descendants that admit the same harmful leaf are enough to

@@ -1930,12 +1930,26 @@ def test_return_tree_near_coverage_tradeoff_refines_ranking_not_cutoff():
             },
         },
     }).finalize()
+    distracting_cutoff = Genome(**{
+        **observed.__dict__, "confidence_quantile": .20,
+        "max_leaf_nodes": 8, "generation": 923,
+        "parents": ["other-profitable-return-frontier"],
+        "genome_id": "", "fitness": 418,
+        "result": {
+            "evaluated_folds": 1, "requested_folds": 3,
+            "summary": {
+                "min_accuracy": .61, "min_balanced_accuracy": .61,
+                "min_mcc": .22, "min_profit_factor": 1.07,
+                "min_expectancy": .0007, "min_coverage": .55,
+            },
+        },
+    }).finalize()
     for genome in population[1:]:
         genome.fitness = None
         genome.result = None
 
     after = evolution.introduce_champion_return_tree_variant(
-        population, champion, [observed], 924
+        population, champion, [observed, distracting_cutoff], 924
     )
 
     repair = next(
