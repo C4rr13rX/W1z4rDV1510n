@@ -1589,7 +1589,7 @@ def load_nearby_program_transfer_evidence(
 def load_nearby_return_tree_evidence(
     state_dir: Path, champion: Genome, evaluation_id: str,
 ) -> list[Genome]:
-    """Keep return-tree response curves across classifier quantile handoffs."""
+    """Keep compatible curves plus strong independent return-tree lineages."""
     evidence: dict[str, Genome] = {}
     for path in (state_dir / "candidates").glob("*.json"):
         try:
@@ -1614,7 +1614,18 @@ def load_nearby_return_tree_evidence(
             "genome_id": champion.genome_id,
         })
         reconstructed = Genome(**payload).finalize()
-        if genome_evaluation_key(reconstructed) != genome_evaluation_key(champion):
+        summary = (candidate.result or {}).get("summary") or {}
+        independent_frontier = (
+            candidate.learner_kind == "extra_trees_regressor"
+            and float(summary.get("min_accuracy", 0)) >= .60
+            and float(summary.get("min_balanced_accuracy", 0)) >= .60
+            and float(summary.get("min_mcc", -1)) >= .20
+            and float(summary.get("min_profit_factor", 0)) >= 1.05
+            and float(summary.get("min_expectancy", 0)) > 0
+            and .45 <= float(summary.get("min_coverage", 0)) < PRESCREEN["coverage"]
+        )
+        if (genome_evaluation_key(reconstructed) != genome_evaluation_key(champion)
+                and not independent_frontier):
             continue
         evidence[candidate.genome_id] = candidate
     return list(evidence.values())
@@ -3128,6 +3139,20 @@ def tree_leaf_refinement_key(genome: Genome) -> str:
     payload = asdict(genome)
     payload.update({
         "max_leaf_nodes": 8,
+        "generation": 0,
+        "parents": [],
+        "genome_id": "",
+        "fitness": None,
+        "result": None,
+    })
+    return genome_evaluation_key(Genome(**payload).finalize())
+
+
+def return_tree_threshold_key(genome: Genome) -> str:
+    """Identify one canonical predictive phenotype while ignoring cutoff."""
+    payload = asdict(genome)
+    payload.update({
+        "confidence_quantile": 0.0,
         "generation": 0,
         "parents": [],
         "genome_id": "",
@@ -5059,7 +5084,7 @@ def introduce_champion_return_tree_variant(
         for genome in [*population, *evidence]
         if genome.fitness is not None or genome in population
     }
-    quantiles: list[float] = []
+    quantile_trials: list[tuple[Genome, float]] = []
     return_evidence = sorted(
         (genome for genome in evidence
          if genome.learner_kind in {
@@ -5090,6 +5115,56 @@ def introduce_champion_return_tree_variant(
         )
         evidence_quality.append((observed, strong_signal))
     variant: Genome | None = None
+    # First compose coverage search with the exact signed return-tree
+    # phenotype. A threshold result from a different leaf topology is not an
+    # endpoint for this curve, and rebuilding from the classifier champion
+    # would silently discard the discovered return-ranking capacity.
+    brackets = [
+        (strong.confidence_quantile - weak.confidence_quantile, strong,
+         (strong.confidence_quantile + weak.confidence_quantile) / 2.0)
+        for strong, is_strong in evidence_quality if is_strong
+        for weak, weak_is_strong in evidence_quality if not weak_is_strong
+        if float(((strong.result or {}).get("summary") or {}).get(
+            "min_profit_factor", 0
+        )) >= 1.0
+        if float(((strong.result or {}).get("summary") or {}).get(
+            "min_expectancy", 0
+        )) > 0
+        if return_tree_threshold_key(strong) == return_tree_threshold_key(weak)
+        if weak.confidence_quantile < strong.confidence_quantile
+        and strong.confidence_quantile - weak.confidence_quantile >= .002
+    ]
+    if brackets:
+        _, strong, midpoint = min(brackets, key=lambda item: item[0])
+        quantile_trials.append((strong, midpoint))
+    for observed, strong_signal in sorted(
+        evidence_quality,
+        key=lambda item: tree_leaf_refinement_quality(item[0]),
+        reverse=True,
+    ):
+        summary = (observed.result or {}).get("summary", {})
+        coverage = float(summary.get("min_coverage", 0))
+        if (strong_signal
+                and float(summary.get("min_profit_factor", 0)) >= 1.0
+                and float(summary.get("min_expectancy", 0)) > 0
+                and coverage < PRESCREEN["coverage"]):
+            coverage_gap = PRESCREEN["coverage"] - coverage
+            quantile_trials.append((observed, max(
+                0.0, observed.confidence_quantile
+                - max(.02, min(.08, coverage_gap * .5)),
+            )))
+    for base, quantile in quantile_trials:
+        payload = asdict(base)
+        payload.update({
+            "learner_kind": "extra_trees_regressor",
+            "confidence_quantile": quantile,
+            "generation": generation, "parents": [base.genome_id],
+            "fitness": None, "result": None, "genome_id": "",
+        })
+        proposal = Genome(**payload).finalize()
+        if genome_evaluation_key(proposal) not in known_keys:
+            variant = proposal
+            break
     hybrid_evidence = [
         observed for observed in return_evidence
         if observed.learner_kind == "extra_trees_hybrid"
@@ -5114,7 +5189,8 @@ def introduce_champion_return_tree_variant(
     # Preserve the champion's direction classifier while a separate return
     # pool ranks WHEN to act. The launch requires signed evidence for both a
     # profitable selective region and a quantile that clears coverage.
-    if profitable_selective and coverage_anchors and not hybrid_evidence:
+    if (variant is None and profitable_selective and coverage_anchors
+            and not hybrid_evidence):
         base = max(
             coverage_anchors,
             key=lambda observed: (
@@ -5179,12 +5255,12 @@ def introduce_champion_return_tree_variant(
             )},
         )
         for specification in specifications:
-            payload = asdict(champion)
+            payload = asdict(base)
             payload.update({
                 "learner_kind": "extra_trees_regressor",
                 "confidence_quantile": base.confidence_quantile,
                 **specification,
-                "generation": generation, "parents": [champion.genome_id],
+                "generation": generation, "parents": [base.genome_id],
                 "fitness": None, "result": None, "genome_id": "",
             })
             proposal = Genome(**payload).finalize()
@@ -5193,45 +5269,17 @@ def introduce_champion_return_tree_variant(
                 break
         if variant is not None:
             break
-    # A coarse coverage jump can cross a discontinuous quality boundary. Once
-    # both sides are signed, bisect the narrowest strong/weak quantile bracket
-    # instead of extrapolating another destructive threshold.
-    brackets = [
-        (strong.confidence_quantile - weak.confidence_quantile,
-         (strong.confidence_quantile + weak.confidence_quantile) / 2.0)
-        for strong, is_strong in evidence_quality if is_strong
-        for weak, weak_is_strong in evidence_quality if not weak_is_strong
-        if weak.confidence_quantile < strong.confidence_quantile
-        and strong.confidence_quantile - weak.confidence_quantile >= .002
-    ]
-    if brackets:
-        _, midpoint = min(brackets)
-        quantiles.append(midpoint)
-    for observed, strong_signal in evidence_quality:
-        summary = (observed.result or {}).get("summary", {})
-        coverage = float(summary.get("min_coverage", 0))
-        if strong_signal and coverage < PRESCREEN["coverage"]:
-            coverage_gap = PRESCREEN["coverage"] - coverage
-            quantiles.append(max(
-                0.0,
-                observed.confidence_quantile
-                - max(.02, min(.08, coverage_gap * .5)),
-            ))
-    quantiles.append(champion.confidence_quantile)
-    for quantile in quantiles:
-        if variant is not None:
-            break
+    if variant is None:
         payload = asdict(champion)
         payload.update({
             "learner_kind": "extra_trees_regressor",
-            "confidence_quantile": quantile,
+            "confidence_quantile": champion.confidence_quantile,
             "generation": generation, "parents": [champion.genome_id],
             "fitness": None, "result": None, "genome_id": "",
         })
         proposal = Genome(**payload).finalize()
         if genome_evaluation_key(proposal) not in known_keys:
             variant = proposal
-            break
     if variant is None:
         return population
     protected_parent_ids = protected_parent_ids or set()

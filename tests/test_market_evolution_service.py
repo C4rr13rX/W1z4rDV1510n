@@ -1684,6 +1684,7 @@ def test_profitable_return_tree_repairs_coverage_before_more_topology():
     champion.result = {"evaluated_folds": 3, "requested_folds": 3}
     observed = Genome(**{
         **champion.__dict__, "learner_kind": "extra_trees_regressor",
+        "max_leaf_nodes": 11,
         "generation": 910, "parents": [champion.genome_id],
         "genome_id": "", "fitness": 405,
         "result": {
@@ -1691,7 +1692,7 @@ def test_profitable_return_tree_repairs_coverage_before_more_topology():
             "summary": {
                 "min_accuracy": .6115, "min_balanced_accuracy": .6127,
                 "min_mcc": .225, "min_profit_factor": 1.002,
-                "min_coverage": .483,
+                "min_expectancy": .001, "min_coverage": .483,
             },
         },
     }).finalize()
@@ -1711,6 +1712,8 @@ def test_profitable_return_tree_repairs_coverage_before_more_topology():
     assert repair.confidence_quantile == pytest.approx(
         observed.confidence_quantile - expected_step
     )
+    assert repair.max_leaf_nodes == 11
+    assert repair.parents == [observed.genome_id]
 
 
 def test_return_tree_bisects_signed_quality_coverage_boundary():
@@ -1721,10 +1724,10 @@ def test_return_tree_bisects_signed_quality_coverage_boundary():
     champion.result = {"evaluated_folds": 3, "requested_folds": 3}
     evidence = []
     for quantile, accuracy, balanced, mcc, profit, coverage in (
-        (.18, .611, .612, .225, .999, .483),
+        (.18, .611, .612, .225, 1.001, .483),
         (.12, .462, .462, -.077, .761, .619),
     ):
-        evidence.append(Genome(**{
+        payload = {
             **champion.__dict__, "learner_kind": "extra_trees_regressor",
             "confidence_quantile": quantile,
             "generation": 914, "parents": [champion.genome_id],
@@ -1734,10 +1737,16 @@ def test_return_tree_bisects_signed_quality_coverage_boundary():
                 "summary": {
                     "min_accuracy": accuracy,
                     "min_balanced_accuracy": balanced, "min_mcc": mcc,
-                    "min_profit_factor": profit, "min_coverage": coverage,
+                    "min_profit_factor": profit,
+                    "min_expectancy": .001 if profit >= 1 else -.001,
+                    "min_coverage": coverage,
                 },
             },
-        }).finalize())
+        }
+        if quantile == .12:
+            payload["learning_rate"] = champion.learning_rate * .5
+            payload["l2_regularization"] = champion.l2_regularization * 2
+        evidence.append(Genome(**payload).finalize())
     for genome in population[1:]:
         genome.fitness = None
         genome.result = None
@@ -1753,6 +1762,51 @@ def test_return_tree_bisects_signed_quality_coverage_boundary():
     assert repair.confidence_quantile == pytest.approx(.15)
 
 
+def test_return_tree_never_brackets_quantiles_across_different_topologies():
+    population = seed_genomes(8, random.Random(197))
+    champion = population[0]
+    champion.learner_kind = "extra_trees"
+    champion.max_leaf_nodes = 16
+    champion.fitness = 2400
+    champion.result = {"evaluated_folds": 3, "requested_folds": 3}
+    evidence = []
+    for leaves, quantile, accuracy, balanced, mcc, profit, coverage in (
+        (11, .18, .611, .612, .225, 1.01, .483),
+        (16, .12, .462, .462, -.077, .761, .619),
+    ):
+        evidence.append(Genome(**{
+            **champion.__dict__, "learner_kind": "extra_trees_regressor",
+            "max_leaf_nodes": leaves, "confidence_quantile": quantile,
+            "generation": 914, "parents": [champion.genome_id],
+            "genome_id": "", "fitness": 400,
+            "result": {
+                "evaluated_folds": 1, "requested_folds": 3,
+                "summary": {
+                    "min_accuracy": accuracy,
+                    "min_balanced_accuracy": balanced, "min_mcc": mcc,
+                    "min_profit_factor": profit,
+                    "min_expectancy": .001 if profit >= 1 else -.001,
+                    "min_coverage": coverage,
+                },
+            },
+        }).finalize())
+    for genome in population[1:]:
+        genome.fitness = None
+        genome.result = None
+
+    after = evolution.introduce_champion_return_tree_variant(
+        population, champion, evidence, 915
+    )
+
+    repair = next(
+        genome for genome in after
+        if genome.learner_kind == "extra_trees_regressor"
+    )
+    assert repair.max_leaf_nodes == 11
+    assert repair.confidence_quantile != pytest.approx(.15)
+    assert repair.parents == [evidence[0].genome_id]
+
+
 def test_return_tree_evidence_launches_direction_magnitude_hybrid():
     population = seed_genomes(8, random.Random(196))
     champion = population[0]
@@ -1761,8 +1815,7 @@ def test_return_tree_evidence_launches_direction_magnitude_hybrid():
     champion.result = {"evaluated_folds": 3, "requested_folds": 3}
     evidence = []
     for quantile, accuracy, profit, coverage in (
-        (.18, .611, 1.002, .483),
-        (.12, .462, .761, .619),
+        (.18, .611, 1.002, .619),
     ):
         evidence.append(Genome(**{
             **champion.__dict__, "learner_kind": "extra_trees_regressor",
@@ -1774,7 +1827,7 @@ def test_return_tree_evidence_launches_direction_magnitude_hybrid():
                 "summary": {
                     "min_accuracy": accuracy,
                     "min_balanced_accuracy": accuracy,
-                    "min_mcc": .20 if accuracy > .60 else -.07,
+                    "min_mcc": .20,
                     "min_profit_factor": profit, "min_coverage": coverage,
                 },
             },
@@ -1791,7 +1844,7 @@ def test_return_tree_evidence_launches_direction_magnitude_hybrid():
         genome for genome in after
         if genome.learner_kind == "extra_trees_hybrid"
     )
-    assert hybrid.confidence_quantile == pytest.approx(.12)
+    assert hybrid.confidence_quantile == pytest.approx(.18)
     assert hybrid.features == champion.features
 
 
@@ -1889,6 +1942,57 @@ def test_nearby_return_tree_evidence_survives_champion_quantile_handoff(tmp_path
     )
 
     assert [genome.genome_id for genome in evidence] == [return_tree.genome_id]
+
+
+def test_return_tree_evidence_retains_strong_independent_lineage(tmp_path):
+    champion = seed_genomes(1, random.Random(198))[0]
+    champion.learner_kind = "extra_trees"
+    champion.fitness = 2400
+    champion.result = {
+        "evaluation_signature": "scope-a",
+        "evaluated_folds": 3, "requested_folds": 3,
+    }
+    champion.finalize()
+    strong = Genome(**{
+        **champion.__dict__, "learner_kind": "extra_trees_regressor",
+        "max_leaf_nodes": 11, "calibration_safety": 2.7,
+        "generation": 920, "parents": ["independent-frontier"],
+        "genome_id": "", "fitness": 426,
+        "result": {
+            "evaluation_signature": "scope-a",
+            "evaluated_folds": 1, "requested_folds": 3,
+            "summary": {
+                "min_accuracy": .616, "min_balanced_accuracy": .625,
+                "min_mcc": .251, "min_profit_factor": 1.151,
+                "min_expectancy": .00168, "min_coverage": .514,
+            },
+        },
+    }).finalize()
+    weak = Genome(**{
+        **strong.__dict__, "max_leaf_nodes": 19,
+        "generation": 921, "genome_id": "", "fitness": 350,
+        "result": {
+            "evaluation_signature": "scope-a",
+            "evaluated_folds": 1, "requested_folds": 3,
+            "summary": {
+                "min_accuracy": .53, "min_balanced_accuracy": .52,
+                "min_mcc": .04, "min_profit_factor": .91,
+                "min_expectancy": -.001, "min_coverage": .64,
+            },
+        },
+    }).finalize()
+    (tmp_path / "candidates").mkdir()
+    for candidate in (strong, weak):
+        (tmp_path / "candidates" / f"{candidate.genome_id}.json").write_text(
+            json.dumps(candidate.__dict__), encoding="utf-8"
+        )
+
+    evidence = evolution.load_nearby_return_tree_evidence(
+        tmp_path, champion, "scope-a"
+    )
+
+    assert strong.genome_id in {genome.genome_id for genome in evidence}
+    assert weak.genome_id not in {genome.genome_id for genome in evidence}
 
 
 def test_extra_trees_return_regressor_ranks_signed_magnitude():

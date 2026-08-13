@@ -317,6 +317,17 @@ accuracy, MCC 0.251, positive expectancy, and profit factor 1.151. Because
 on leaf 14. That result remains research evidence only: one protected fold and
 roughly 51.43% minimum coverage do not satisfy admission.
 
+Return-tree threshold repair must preserve that exact signed phenotype. The
+coverage controller groups confidence results by every predictive coordinate
+except the confidence quantile, so a weak lower cutoff from a different leaf
+capacity cannot become the opposite endpoint of a bracket. When a profitable,
+positive-expectancy return lineage is selective, its next cutoff child inherits
+its leaf capacity, calibration, features, programs, and topology and names that
+signed candidate as its parent. Only after this same-phenotype curve is
+exhausted may the scheduler fall through to a hybrid or a new topology. This
+lets useful coordinates compose without granting partial-fold evidence any
+fitness or admission authority.
+
 Coverage repair treats repeated identical outcomes on either side of the
 coverage floor as evidence of a discrete tree-score plateau. In particular,
 two lower-threshold descendants that admit the same harmful leaf are enough to
