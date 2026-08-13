@@ -2356,6 +2356,21 @@ def evaluate_genome(genome: Genome, dataset: dict[str, Any], *, folds: int,
                     ) if reliability_fitted else None,
                     "reliability_fitted": reliability_fitted,
                 } if genome.learner_kind == "multiscale_regressor" else {}),
+                "selection_reliability": ({
+                    "enabled": True,
+                    "version": genome.calibration_reliability_version,
+                    "pool": genome.calibration_reliability_pool,
+                    "decay": genome.calibration_reliability_decay,
+                    "direction": model.reliability_direction,
+                    "model": (
+                        "recency_weighted_extra_trees"
+                        if genome.calibration_reliability_version >= 5
+                        else "nonlinear_extra_trees"
+                        if genome.calibration_reliability_version >= 2
+                        else "linear_logistic"
+                    ) if reliability_fitted else None,
+                    "fitted": reliability_fitted,
+                } if reliability_active else {}),
                 "calibration_model": evaluate_slice(
                     model, calibration_threshold, genome, threshold, cost_bps
                 ),
@@ -3956,6 +3971,13 @@ def introduce_extra_trees_coverage_variant(
     """Spend one slot expanding a strong nonlinear tree specialist."""
     if extra_trees_frontier_rank(frontier) is None:
         return population
+    summary = (frontier.result or {}).get("summary", {})
+    coverage = float(summary.get("min_coverage", 0))
+    use_reliability_rank = (
+        reversal_frontier is None
+        and coverage >= PRESCREEN["coverage"] - .01
+        and not frontier.calibration_reliability
+    )
     if (reversal_frontier is not None
             and reversal_frontier.confidence_quantile < frontier.confidence_quantile
             and genome_structure_key(reversal_frontier) == genome_structure_key(frontier)):
@@ -3963,16 +3985,32 @@ def introduce_extra_trees_coverage_variant(
             reversal_frontier.confidence_quantile + frontier.confidence_quantile
         ) / 2.0
     else:
-        coverage = float((frontier.result or {}).get("summary", {}).get(
-            "min_coverage", 0
-        ))
         coverage_gap = max(.001, PRESCREEN["coverage"] - coverage)
         phase = (.75, 1.0, 1.25)[generation % 3]
         offset = min(.06, max(.01, coverage_gap * .25)) * phase
         quantile = frontier.confidence_quantile - offset
     payload = asdict(frontier)
     payload.update({
-        "confidence_quantile": max(0.0, min(.30, quantile)),
+        # Once a profitable tree is within one point of the floor, another
+        # scalar threshold step can admit an entire harmful leaf. Instead,
+        # preserve its direction model and learn only a calibration-prefix
+        # correctness rank for abstention. A .30 quantile targets enough
+        # actions to cross the floor while protected evaluation remains final.
+        "confidence_quantile": (
+            .30 if use_reliability_rank else max(0.0, min(.30, quantile))
+        ),
+        "calibration_reliability": (
+            True if use_reliability_rank else frontier.calibration_reliability
+        ),
+        "calibration_reliability_version": (
+            1 if use_reliability_rank else frontier.calibration_reliability_version
+        ),
+        "calibration_reliability_pool": (
+            "core" if use_reliability_rank else frontier.calibration_reliability_pool
+        ),
+        "calibration_reliability_decay": (
+            0.0 if use_reliability_rank else frontier.calibration_reliability_decay
+        ),
         "generation": generation, "parents": [frontier.genome_id],
         "fitness": None, "result": None, "genome_id": "",
     })
@@ -4240,6 +4278,48 @@ def introduce_primary_coverage_variant(
                 payload.update({
                     "learner_kind": learner_kind,
                     "confidence_quantile": frontier.confidence_quantile,
+                    "generation": generation,
+                    "parents": causal_parent_ids,
+                    "fitness": None, "result": None, "genome_id": "",
+                })
+                proposal = Genome(**payload).finalize()
+                proposal_key = genome_evaluation_key(proposal)
+                if proposal_key in known_keys:
+                    if proposal_key not in evaluated_keys:
+                        return population
+                    continue
+                protected_parent_ids = protected_parent_ids or set()
+                replacement = next((
+                    index for index in range(len(population) - 1, 0, -1)
+                    if population[index].fitness is None
+                    and not (set(population[index].parents)
+                             & protected_parent_ids)
+                ), None)
+                if replacement is not None:
+                    population[replacement] = proposal
+                return population
+            # Direction, scalar threshold, causal margin interactions, and the
+            # finite return architectures have all produced signed failures.
+            # The remaining causal degree of freedom is WHEN to trust the
+            # original direction. Learn correctness only from the fold's
+            # calibration prefix and use it solely for abstention ranking.
+            # This cannot flip a prediction, see protected outcomes, or bypass
+            # any coverage/profit/calibration/unseen-asset gate.
+            reliability_trials = (
+                (1, "core"),
+                (2, "core"),
+                (3, "trend_regime"),
+                (3, "flow_news"),
+            )
+            for reliability_version, reliability_pool in reliability_trials:
+                payload = asdict(frontier)
+                payload.update({
+                    "learner_kind": "continuous_rank_regressor",
+                    "confidence_quantile": .30,
+                    "calibration_reliability": True,
+                    "calibration_reliability_version": reliability_version,
+                    "calibration_reliability_pool": reliability_pool,
+                    "calibration_reliability_decay": 0.0,
                     "generation": generation,
                     "parents": causal_parent_ids,
                     "fitness": None, "result": None, "genome_id": "",
@@ -4908,7 +4988,16 @@ def extra_trees_frontier_rank(genome: Genome | None) -> tuple[float, ...] | None
     coverage = float(summary.get("min_coverage", 0))
     expectancy = float(summary.get("min_expectancy", -1))
     profit = float(summary.get("min_profit_factor", 0))
-    if not (accuracy >= .62 and balanced >= .58 and mcc >= .15
+    # Preserve the strict accuracy requirement for broad coverage searches.
+    # A specialist already within one point of the action floor may instead
+    # qualify on strong balanced accuracy and MCC. That narrow exception lets
+    # calibration-only reliability ranking recover its last few actions
+    # without weakening the protected prescreen or admitting low-coverage
+    # trees into the persistent repair frontier.
+    accurate_enough = accuracy >= .62 or (
+        coverage >= PRESCREEN["coverage"] - .01 and accuracy >= .58
+    )
+    if not (accurate_enough and balanced >= .58 and mcc >= .15
             and .25 <= coverage < PRESCREEN["coverage"]
             and expectancy > 0 and profit >= 1.0):
         return None

@@ -2200,6 +2200,34 @@ def test_extra_trees_soft_accuracy_boundary_triggers_bisection():
     assert child.confidence_quantile == pytest.approx((.251 + .230) / 2)
 
 
+def test_near_coverage_extra_trees_learns_reliability_instead_of_dropping_leaf():
+    frontier = seed_genomes(4, random.Random(183))[-1]
+    frontier.learner_kind = "extra_trees"
+    frontier.confidence_quantile = .257
+    frontier.result = {"summary": {
+        "min_accuracy": .595, "min_balanced_accuracy": .603,
+        "min_mcc": .210, "min_coverage": .5984,
+        "min_expectancy": .00084, "min_profit_factor": 1.078,
+    }}
+    frontier.finalize()
+    population = seed_genomes(8, random.Random(184))
+    for genome in population[1:]:
+        genome.fitness = None
+        genome.result = None
+
+    repaired = evolution.introduce_extra_trees_coverage_variant(
+        population, frontier, 1115,
+    )
+    child = next(
+        genome for genome in repaired if genome.parents == [frontier.genome_id]
+    )
+    assert child.learner_kind == "extra_trees"
+    assert child.calibration_reliability
+    assert child.calibration_reliability_version == 1
+    assert child.calibration_reliability_pool == "core"
+    assert child.confidence_quantile == pytest.approx(.30)
+
+
 def test_profitable_primary_regressor_gets_independent_coverage_lane():
     frontier = seed_genomes(1, random.Random(197))[0]
     frontier.learner_kind = "regressor"
@@ -2439,6 +2467,96 @@ def test_primary_coverage_lane_escalates_architecture_after_margin_exhaustion():
         genome for genome in continued if ranked.genome_id in genome.parents
     )
     assert next_child.learner_kind == "extra_trees_regressor"
+
+
+def test_primary_coverage_lane_learns_calibration_only_reliability_after_architectures():
+    frontier = seed_genomes(1, random.Random(215))[0]
+    frontier.learner_kind = "regressor"
+    frontier.feature_programs = []
+    frontier.confidence_quantile = .21823
+    frontier.fitness = 410
+    good = {
+        "min_accuracy": .6467, "min_balanced_accuracy": .6452,
+        "min_mcc": .2923, "min_coverage": .5976,
+        "min_acted_observations": 150, "min_expectancy": .00221,
+        "min_profit_factor": 1.2156,
+    }
+    failure = {
+        "min_accuracy": .4392, "min_balanced_accuracy": .4525,
+        "min_mcc": -.0942, "min_coverage": .6380,
+        "min_acted_observations": 160, "min_expectancy": -.0041,
+        "min_profit_factor": .7512,
+    }
+    frontier.result = {"evaluated_folds": 1, "summary": good}
+    frontier.finalize()
+    reversal = Genome(**{
+        **frontier.__dict__, "confidence_quantile": .2181,
+        "generation": 1044, "parents": [frontier.genome_id],
+        "genome_id": "", "fitness": 300,
+        "result": {"evaluated_folds": 2, "summary": failure},
+    }).finalize()
+    ranked = Genome(**{
+        **frontier.__dict__, "learner_kind": "continuous_rank_regressor",
+        "generation": 1045, "parents": [frontier.genome_id],
+        "genome_id": "", "fitness": 300,
+        "result": {"evaluated_folds": 2, "summary": failure},
+    }).finalize()
+    evidence = [reversal, ranked]
+
+    margin_templates = (
+        {"op": "tanh_mix", "left": "asset_news_sentiment_acceleration",
+         "right": "flow_divergence", "scale": 1.0},
+        {"op": "signed_sqrt_product", "left": "market_breadth_r6",
+         "right": "relative_market_r6", "scale": 1.0},
+        {"op": "regime_gate", "left": "news_negative_share_24h",
+         "right": "volatility_ratio", "scale": 1.0},
+        {"op": "abs_gap", "left": "futures_spot_basis",
+         "right": "flow_imbalance", "scale": 1.0},
+    )
+    for generation, template in enumerate(margin_templates, 1046):
+        child = Genome(**{
+            **frontier.__dict__,
+            "features": sorted(set(frontier.features) | {
+                template["left"], template["right"],
+            }),
+            "feature_programs": [template],
+            "generation": generation,
+            "parents": [frontier.genome_id, ranked.genome_id],
+            "genome_id": "", "fitness": 300,
+            "result": {"evaluated_folds": 2, "summary": failure},
+        }).finalize()
+        evidence.append(child)
+    for generation, learner_kind in enumerate((
+        "decomposed_regressor", "extra_trees_regressor",
+        "multiscale_regressor",
+    ), 1050):
+        child = Genome(**{
+            **frontier.__dict__, "learner_kind": learner_kind,
+            "generation": generation,
+            "parents": [frontier.genome_id, ranked.genome_id,
+                        evidence[-1].genome_id],
+            "genome_id": "", "fitness": 300,
+            "result": {"evaluated_folds": 2, "summary": failure},
+        }).finalize()
+        evidence.append(child)
+
+    population = seed_genomes(8, random.Random(216))
+    for genome in population[1:]:
+        genome.fitness = None
+        genome.result = None
+    repaired = evolution.introduce_primary_coverage_variant(
+        population, frontier, evidence, 1053,
+    )
+    child = next(
+        genome for genome in repaired
+        if genome.calibration_reliability and frontier.genome_id in genome.parents
+    )
+    assert child.learner_kind == "continuous_rank_regressor"
+    assert child.calibration_reliability_version == 1
+    assert child.calibration_reliability_pool == "core"
+    assert child.confidence_quantile == pytest.approx(.30)
+    assert child.features == frontier.features
+    assert child.feature_programs == frontier.feature_programs
 
 
 def test_primary_coverage_lane_escapes_an_identical_score_plateau():
