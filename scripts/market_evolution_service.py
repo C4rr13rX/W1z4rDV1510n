@@ -501,7 +501,10 @@ class Surrogate:
         return np.asarray(self.model.predict(values), dtype=np.float64)
 
     def base_probability(self, values: np.ndarray) -> np.ndarray:
-        if self.kind in {"classifier", "extra_trees", "extra_trees_hybrid"}:
+        if self.kind in {
+            "classifier", "extra_trees", "extra_trees_ranked",
+            "extra_trees_hybrid",
+        }:
             return self.model.predict_proba(values)[:, list(self.model.classes_).index(1)]
         score = self.raw_score(values)
         normalized = np.clip(score / max(self.score_scale, 1e-9), -30, 30)
@@ -588,7 +591,7 @@ class Surrogate:
                     self.model.return_model.predict(values), dtype=np.float64,
                 ))
             score = np.maximum(probability, 1.0 - probability)
-            if self.kind == "continuous_rank_regressor":
+            if self.kind in {"continuous_rank_regressor", "extra_trees_ranked"}:
                 score = score + 1e-10 * self.causal_tie_break(values)
             return score
         design = self.reliability_design(values, probability)
@@ -601,7 +604,7 @@ class Surrogate:
             return 1.0 - score
         if self.reliability_direction == 0:
             return np.full(len(score), .5, dtype=np.float64)
-        if self.kind == "continuous_rank_regressor":
+        if self.kind in {"continuous_rank_regressor", "extra_trees_ranked"}:
             score = score + 1e-10 * self.causal_tie_break(values)
         return score
 
@@ -1302,7 +1305,10 @@ def genome_evaluation_key(genome: Genome) -> str:
     for key in ("genome_id", "fitness", "result", "generation", "parents"):
         payload.pop(key, None)
     learner = str(payload.get("learner_kind", "classifier"))
-    if learner in {"extra_trees", "extra_trees_regressor", "extra_trees_hybrid"}:
+    if learner in {
+        "extra_trees", "extra_trees_ranked", "extra_trees_regressor",
+        "extra_trees_hybrid",
+    }:
         # These learners use max_iter only as a bounded tree count. Their
         # learning-rate and L2 genes never reach either fitted estimator.
         payload["learning_rate"] = 0.0
@@ -2240,7 +2246,7 @@ def evaluate_genome(genome: Genome, dataset: dict[str, Any], *, folds: int,
                          if genome.learner_kind == "continuous_rank_regressor"
                          else "regressor"),
                     )
-            elif genome.learner_kind == "extra_trees":
+            elif genome.learner_kind in {"extra_trees", "extra_trees_ranked"}:
                 raw_model = ExtraTreesClassifier(
                     n_estimators=min(240, max(80, genome.max_iter)),
                     max_leaf_nodes=genome.max_leaf_nodes,
@@ -2248,7 +2254,7 @@ def evaluate_genome(genome: Genome, dataset: dict[str, Any], *, folds: int,
                     max_features="sqrt", class_weight=None, n_jobs=1,
                     random_state=1700 + fold,
                 ).fit(x_fit, y_fit, sample_weight=weights)
-                model = Surrogate(raw_model, "extra_trees")
+                model = Surrogate(raw_model, genome.learner_kind)
             elif genome.learner_kind == "extra_trees_hybrid":
                 direction_model = ExtraTreesClassifier(
                     n_estimators=min(240, max(80, genome.max_iter)),
@@ -2631,7 +2637,8 @@ def genome_from_dict(payload: dict[str, Any]) -> Genome:
 
 
 OUTCOME_POOL_LEARNERS = tuple(dict.fromkeys((
-    *LEARNER_KINDS, *sorted(RETURN_LEARNER_KINDS), "extra_trees_hybrid",
+    *LEARNER_KINDS, *sorted(RETURN_LEARNER_KINDS),
+    "extra_trees_hybrid", "extra_trees_ranked",
 )))
 OUTCOME_POOL_TARGETS = (
     "fold_survival", "accuracy", "balanced_accuracy", "mcc", "coverage",
@@ -3980,6 +3987,7 @@ def introduce_extra_trees_coverage_variant(
         and not frontier.calibration_reliability
     )
     reliability_trial: tuple[int, str, float] | None = None
+    use_ranked_tie_break = False
     if use_reliability_rank:
         signed_keys = {
             genome_evaluation_key(genome) for genome in evidence
@@ -4007,7 +4015,21 @@ def introduce_extra_trees_coverage_variant(
                 reliability_trial = trial
                 break
         if reliability_trial is None:
-            return population
+            probe = asdict(frontier)
+            probe.update({
+                "learner_kind": "extra_trees_ranked",
+                # Once tied confidence is continuously ranked, rejecting 40%
+                # targets the 60% protected coverage floor directly.
+                "confidence_quantile": 1.0 - PRESCREEN["coverage"],
+                "calibration_reliability": False,
+                "calibration_reliability_version": 0,
+                "calibration_reliability_pool": "core",
+                "calibration_reliability_decay": 0.0,
+                "fitness": None, "result": None, "genome_id": "",
+            })
+            if genome_evaluation_key(Genome(**probe).finalize()) in signed_keys:
+                return population
+            use_ranked_tie_break = True
     if (reversal_frontier is not None
             and reversal_frontier.confidence_quantile < frontier.confidence_quantile
             and genome_structure_key(reversal_frontier) == genome_structure_key(frontier)):
@@ -4021,23 +4043,26 @@ def introduce_extra_trees_coverage_variant(
         quantile = frontier.confidence_quantile - offset
     payload = asdict(frontier)
     payload.update({
-        # Once a profitable tree is within one point of the floor, another
-        # scalar threshold step can admit an entire harmful leaf. Instead,
-        # preserve its direction model and learn only a calibration-prefix
-        # correctness rank for abstention. A .30 quantile targets enough
-        # actions to cross the floor while protected evaluation remains final.
+        "learner_kind": (
+            "extra_trees_ranked" if use_ranked_tie_break
+            else frontier.learner_kind
+        ),
         "confidence_quantile": (
+            1.0 - PRESCREEN["coverage"] if use_ranked_tie_break else
             reliability_trial[2] if reliability_trial
             else max(0.0, min(.30, quantile))
         ),
         "calibration_reliability": (
+            False if use_ranked_tie_break else
             True if use_reliability_rank else frontier.calibration_reliability
         ),
         "calibration_reliability_version": (
+            0 if use_ranked_tie_break else
             reliability_trial[0] if reliability_trial
             else frontier.calibration_reliability_version
         ),
         "calibration_reliability_pool": (
+            "core" if use_ranked_tie_break else
             reliability_trial[1] if reliability_trial
             else frontier.calibration_reliability_pool
         ),

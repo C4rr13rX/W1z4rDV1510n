@@ -1168,6 +1168,30 @@ def test_continuous_rank_regressor_only_breaks_confidence_ties():
     assert np.array_equal(selection, ranked.selection_confidence(values))
 
 
+def test_ranked_extra_trees_breaks_only_classifier_confidence_ties():
+    class TwoLevelClassifier:
+        classes_ = np.asarray([-1, 1])
+
+        def predict_proba(self, values):
+            positive = np.where(values[:, 0] < 0, .55, .65)
+            return np.column_stack((1.0 - positive, positive))
+
+    values = np.asarray([
+        [-1.0, -2.0], [-1.0, -1.0], [-1.0, 0.0], [-1.0, 1.0],
+        [1.0, -2.0], [1.0, -1.0], [1.0, 0.0], [1.0, 1.0],
+    ])
+    ordinary = evolution.Surrogate(TwoLevelClassifier(), "extra_trees")
+    ranked = evolution.Surrogate(TwoLevelClassifier(), "extra_trees_ranked")
+
+    base = ordinary.selection_confidence(values)
+    selection = ranked.selection_confidence(values)
+
+    assert len(np.unique(base[:4])) == 1
+    assert len(np.unique(selection[:4])) == 4
+    assert max(selection[:4]) < min(selection[4:])
+    assert np.array_equal(ranked.predict(values), ordinary.predict(values))
+
+
 def test_nonlinear_calibration_reliability_discovers_feature_interactions():
     class ScoreModel:
         def predict(self, values):
@@ -2246,6 +2270,44 @@ def test_near_coverage_extra_trees_learns_reliability_instead_of_dropping_leaf()
     assert next_child.calibration_reliability_version == 1
     assert next_child.calibration_reliability_pool == "core"
     assert next_child.confidence_quantile == pytest.approx(.10)
+
+    signed = [child, next_child]
+    next_child.fitness = 300
+    next_child.result = {"evaluation_signature": "current", "summary": {
+        "min_accuracy": .546, "min_coverage": .727,
+        "min_expectancy": -.0015, "min_profit_factor": .876,
+    }}
+    for version, pool in (
+        (2, "core"), (3, "trend_regime"), (3, "flow_news"),
+    ):
+        payload = evolution.asdict(frontier)
+        payload.update({
+            "confidence_quantile": .10,
+            "calibration_reliability": True,
+            "calibration_reliability_version": version,
+            "calibration_reliability_pool": pool,
+            "generation": 1117 + len(signed),
+            "parents": [frontier.genome_id],
+            "genome_id": "", "fitness": 300,
+            "result": {"evaluation_signature": "current", "summary": {
+                "min_accuracy": .51, "min_coverage": .90,
+                "min_expectancy": -.003, "min_profit_factor": .73,
+            }},
+        })
+        signed.append(evolution.Genome(**payload).finalize())
+    population = seed_genomes(8, random.Random(186))
+    for genome in population[1:]:
+        genome.fitness = None
+        genome.result = None
+    repaired = evolution.introduce_extra_trees_coverage_variant(
+        population, frontier, 1122, evidence=signed,
+    )
+    ranked = next(
+        genome for genome in repaired if genome.parents == [frontier.genome_id]
+    )
+    assert ranked.learner_kind == "extra_trees_ranked"
+    assert not ranked.calibration_reliability
+    assert ranked.confidence_quantile == pytest.approx(.40)
 
 
 def test_profitable_primary_regressor_gets_independent_coverage_lane():
