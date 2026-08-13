@@ -3003,9 +3003,38 @@ def introduce_outcome_pool_variant(
         if population[index].fitness is None
         and not (set(population[index].parents) & protected_parent_ids)
     ), None)
-    if replacement is None:
+    replacement_scope = "unprotected"
+    selected = ranked[0] if replacement is not None else None
+    if selected is None:
+        # Reproduction can fill every pending slot with protected-frontier
+        # descendants, suppressing the adviser even when one lineage has two
+        # children. Replace only within the proposal's own protected lineage
+        # and only when another pending sibling survives.
+        for ranked_item in ranked:
+            proposal_protected_parents = (
+                set(ranked_item[0].parents) & protected_parent_ids
+            )
+            sibling_indices = [
+                index for index in range(1, len(population))
+                if population[index].fitness is None
+                and bool(
+                    set(population[index].parents)
+                    & proposal_protected_parents
+                )
+            ]
+            if len(sibling_indices) >= 2:
+                selected = ranked_item
+                replacement = sibling_indices[-1]
+                replacement_scope = "redundant_protected_sibling"
+                break
+    if replacement is None or selected is None:
+        report.update({
+            "known_phenotypes_filtered": known_phenotypes_filtered,
+            "duplicate_proposals_filtered": duplicate_proposals_filtered,
+            "replacement_scope": "none",
+        })
         return population, report
-    proposal, mean, uncertainty = ranked[0]
+    proposal, mean, uncertainty = selected
     population[replacement] = proposal
     report.update({
         "proposed": True, "genome_id": proposal.genome_id,
@@ -3025,6 +3054,7 @@ def introduce_outcome_pool_variant(
         "candidate_search_size": len(candidates),
         "known_phenotypes_filtered": known_phenotypes_filtered,
         "duplicate_proposals_filtered": duplicate_proposals_filtered,
+        "replacement_scope": replacement_scope,
     })
     return population, report
 
@@ -3197,6 +3227,98 @@ def selection_fitness(genome: Genome, neural_scores: dict[str, float] | None = N
     return float(genome.fitness if genome.fitness is not None else -math.inf) + float(
         (neural_scores or {}).get(genome.genome_id, 0.0)
     )
+
+
+def completed_brain_gate_evidence(
+    state_dir: Path, evaluation_id: str,
+) -> tuple[dict[str, float], set[str]]:
+    """Recover current-scope neural scores, including orphaned gate reports."""
+    phenotype_scores: dict[str, float] = {}
+    failed_phenotypes: set[str] = set()
+    for report_path in (state_dir / "brain-gate-reports").glob("*.smoke.json"):
+        genome_id = report_path.name.removesuffix(".smoke.json")
+        candidate_path = state_dir / "candidates" / f"{genome_id}.json"
+        try:
+            candidate = genome_from_dict(json.loads(
+                candidate_path.read_text(encoding="utf-8")
+            ))
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            continue
+        if ((candidate.result or {}).get("evaluation_signature")
+                != evaluation_id):
+            continue
+        phenotype = genome_evaluation_key(candidate)
+        score = brain_feedback_score(report)
+        phenotype_scores[phenotype] = min(
+            phenotype_scores.get(phenotype, score), score
+        )
+        if not bool(report.get("all_brain_floor_gates")):
+            failed_phenotypes.add(phenotype)
+    scores: dict[str, float] = {}
+    failed: set[str] = set()
+    if not phenotype_scores:
+        return scores, failed
+    for candidate_path in (state_dir / "candidates").glob("*.json"):
+        try:
+            candidate = genome_from_dict(json.loads(
+                candidate_path.read_text(encoding="utf-8")
+            ))
+        except (OSError, ValueError, TypeError):
+            continue
+        if ((candidate.result or {}).get("evaluation_signature")
+                != evaluation_id):
+            continue
+        phenotype = genome_evaluation_key(candidate)
+        if phenotype in phenotype_scores:
+            scores[candidate.genome_id] = phenotype_scores[phenotype]
+        if phenotype in failed_phenotypes:
+            failed.add(candidate.genome_id)
+    return scores, failed
+
+
+def best_brain_gate_eligible_champion(
+    state_dir: Path, evaluation_id: str, neural_scores: dict[str, float],
+    failed_gate_ids: set[str],
+) -> Genome | None:
+    """Recover the strongest fully screened candidate not neurally rejected."""
+    candidates: list[Genome] = []
+    for path in (state_dir / "candidates").glob("*.json"):
+        try:
+            candidate = genome_from_dict(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError, TypeError):
+            continue
+        result = candidate.result or {}
+        if (candidate.genome_id in failed_gate_ids
+                or candidate.fitness is None
+                or result.get("evaluation_signature") != evaluation_id
+                or int(result.get("evaluated_folds", 0))
+                < int(result.get("requested_folds", 3))):
+            continue
+        candidates.append(candidate)
+    return max(
+        candidates,
+        key=lambda genome: selection_fitness(genome, neural_scores),
+        default=None,
+    )
+
+
+def reconcile_brain_gate_champion(
+    state_dir: Path, champion: Genome | None, evaluation_id: str,
+    neural_scores: dict[str, float],
+) -> tuple[Genome | None, str | None, set[str]]:
+    """Invalidate a champion when a completed isolated gate rejected it."""
+    report_scores, failed_gate_ids = completed_brain_gate_evidence(
+        state_dir, evaluation_id
+    )
+    neural_scores.update(report_scores)
+    if champion is None or champion.genome_id not in failed_gate_ids:
+        return champion, None, failed_gate_ids
+    rejected = champion.genome_id
+    replacement = best_brain_gate_eligible_champion(
+        state_dir, evaluation_id, neural_scores, failed_gate_ids
+    )
+    return replacement, rejected, failed_gate_ids
 
 
 def champion_replacement_allowed(candidate: Genome, incumbent: Genome) -> bool:
@@ -5593,6 +5715,21 @@ def main() -> int:
                     rejected=rolled_back, restored=champion.genome_id,
                     reason="bounded_pareto_contract",
                 )
+            champion, gate_rejected, failed_gate_ids = reconcile_brain_gate_champion(
+                args.state_dir, champion, signature, neural_scores
+            )
+            if gate_rejected is not None:
+                if champion is not None:
+                    atomic_json(
+                        args.state_dir / "champion.json", asdict(champion)
+                    )
+                append_event(
+                    events_path, "brain_gate_champion_rolled_back",
+                    rejected=gate_rejected,
+                    restored=(champion.genome_id if champion else None),
+                    reason="completed_isolated_gate_failed",
+                    live_admission_effect="none",
+                )
         population, resumed_regime_conversions = cap_expensive_regime_candidates(
             population, generation, regime_shift_frontier
         )
@@ -5718,6 +5855,24 @@ def main() -> int:
                 append_event(
                     events_path, "stale_brain_gate_recovered", pid=stale_pid,
                     timeout_seconds=args.brain_gate_timeout_seconds,
+                    live_admission_effect="none",
+                )
+            champion, gate_rejected, failed_gate_ids = reconcile_brain_gate_champion(
+                args.state_dir, champion, signature, neural_scores
+            )
+            if gate_rejected is not None:
+                if champion is not None:
+                    atomic_json(
+                        args.state_dir / "champion.json", asdict(champion)
+                    )
+                pending_gate_genome = recover_pending_gate(
+                    args.state_dir, champion, None
+                )
+                append_event(
+                    events_path, "brain_gate_champion_rolled_back",
+                    rejected=gate_rejected,
+                    restored=(champion.genome_id if champion else None),
+                    reason="completed_isolated_gate_failed",
                     live_admission_effect="none",
                 )
             if gate_process is not None and gate_process.poll() is not None:
@@ -5954,11 +6109,17 @@ def main() -> int:
                           f"{(genome.result or {}).get('status')}", flush=True)
             population.sort(key=lambda genome: selection_fitness(genome, neural_scores),
                             reverse=True)
+            champion_eligible_population = [
+                genome for genome in population
+                if genome.genome_id not in failed_gate_ids
+            ]
             challenger = (
-                population[0] if champion is None else next((
-                    genome for genome in population
+                champion_eligible_population[0]
+                if champion is None and champion_eligible_population else
+                next((
+                    genome for genome in champion_eligible_population
                     if champion_replacement_allowed(genome, champion)
-                ), None)
+                ), None) if champion is not None else None
             )
             champion_changed = challenger is not None
             if challenger is not None:

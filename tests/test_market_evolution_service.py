@@ -2560,6 +2560,50 @@ def test_brain_gate_retry_ceiling_requires_two_reportless_launches(tmp_path):
     assert not evolution.brain_gate_retry_exhausted(tmp_path, events, genome_id)
 
 
+def test_completed_failed_brain_gate_rolls_champion_back_on_restart(tmp_path):
+    candidates = tmp_path / "candidates"
+    reports = tmp_path / "brain-gate-reports"
+    candidates.mkdir()
+    reports.mkdir()
+    rejected, fallback = seed_genomes(2, random.Random(435))
+    rejected.learner_kind = "extra_trees"
+    rejected.finalize()
+    alias = Genome(**{
+        **rejected.__dict__, "learning_rate": .3,
+        "l2_regularization": 29.0, "market_weight": .2,
+        "genome_id": "",
+    }).finalize()
+    for genome, fitness in ((rejected, 2000), (alias, 2010), (fallback, 1990)):
+        genome.fitness = fitness
+        genome.result = {
+            "status": "screened", "evaluated_folds": 3,
+            "requested_folds": 3, "evaluation_signature": "current",
+            "summary": {"min_accuracy": .56, "min_profit_factor": 1.0},
+        }
+        evolution.atomic_json(
+            candidates / f"{genome.genome_id}.json", genome.__dict__
+        )
+    evolution.atomic_json(
+        reports / f"{rejected.genome_id}.smoke.json",
+        {
+            "genome_id": rejected.genome_id,
+            "all_brain_floor_gates": False,
+            "promotion": "quarantined", "folds": [],
+        },
+    )
+    neural_scores = {}
+
+    restored, rejected_id, failed = evolution.reconcile_brain_gate_champion(
+        tmp_path, rejected, "current", neural_scores
+    )
+
+    assert rejected_id == rejected.genome_id
+    assert failed == {rejected.genome_id, alias.genome_id}
+    assert neural_scores[rejected.genome_id] == -25.0
+    assert neural_scores[alias.genome_id] == -25.0
+    assert restored is not None and restored.genome_id == fallback.genome_id
+
+
 def test_structure_evidence_recovers_indirect_descendants(tmp_path):
     frontier = seed_genomes(1, random.Random(205))[0]
     frontier.result = {"evaluation_signature": "scope-a", "summary": {}}
@@ -3139,6 +3183,57 @@ def test_active_outcome_pool_filters_signed_predictive_phenotypes(monkeypatch):
         genome for genome in updated if genome.genome_id == report["genome_id"]
     )
     assert evolution.genome_evaluation_key(proposed) not in known_keys
+
+
+def test_outcome_pool_replaces_only_redundant_same_protected_lineage():
+    class FixedOutcomeModel:
+        def predict(self, values):
+            target = np.asarray([.8, .64, .62, .62, .66, .38, .58, .7, .7])
+            return np.tile(target, (len(values), 1))
+
+    population = seed_genomes(8, random.Random(431))
+    evaluated = seed_genomes(8, random.Random(432))
+    protected = evaluated[0]
+    for index, genome in enumerate(evaluated):
+        genome.fitness = 2000 - index
+        genome.result = {
+            "evaluated_folds": 3, "requested_folds": 3,
+            "summary": {"min_accuracy": .56, "min_profit_factor": 1.0},
+        }
+    for index, genome in enumerate(population[1:], start=1):
+        genome.fitness = None
+        genome.result = None
+        genome.parents = [
+            protected.genome_id if index < 3 else evaluated[index].genome_id
+        ]
+        genome.finalize()
+    original_siblings = {
+        genome.genome_id for genome in population
+        if protected.genome_id in genome.parents
+    }
+    width = len(evolution.genome_outcome_vector(population[0]))
+    targets = len(evolution.OUTCOME_POOL_TARGETS)
+    pool = evolution.GenomeOutcomePool(
+        np.zeros(width), np.ones(width), np.zeros(targets), np.ones(targets),
+        [FixedOutcomeModel(), FixedOutcomeModel()], 120,
+        [.05] * targets, [.10] * targets, [.4] * targets, True,
+    )
+
+    updated, report = evolution.introduce_outcome_pool_variant(
+        population, evaluated, pool, 433, random.Random(434),
+        {genome.genome_id for genome in evaluated}, plateau_generations=24,
+    )
+
+    surviving_siblings = original_siblings & {
+        genome.genome_id for genome in updated
+    }
+    assert report["proposed"] is True
+    assert report["replacement_scope"] == "redundant_protected_sibling"
+    assert len(surviving_siblings) == 1
+    proposal = next(
+        genome for genome in updated if genome.genome_id == report["genome_id"]
+    )
+    assert proposal.parents == [protected.genome_id]
 
 
 def test_evaluation_key_normalizes_learner_inactive_coordinates():
