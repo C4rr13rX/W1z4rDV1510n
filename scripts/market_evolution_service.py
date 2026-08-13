@@ -1290,6 +1290,23 @@ def genome_evaluation_key(genome: Genome) -> str:
     payload = asdict(genome)
     for key in ("genome_id", "fitness", "result", "generation", "parents"):
         payload.pop(key, None)
+    learner = str(payload.get("learner_kind", "classifier"))
+    if learner in {"extra_trees", "extra_trees_regressor", "extra_trees_hybrid"}:
+        # These learners use max_iter only as a bounded tree count. Their
+        # learning-rate and L2 genes never reach either fitted estimator.
+        payload["learning_rate"] = 0.0
+        payload["l2_regularization"] = 0.0
+        payload["max_iter"] = min(240, max(80, int(payload["max_iter"])))
+    if learner not in {"decomposed_regressor", "regime_decomposed_regressor"}:
+        payload["market_weight"] = 1.0
+    if learner not in {"regime_regressor", "regime_decomposed_regressor"}:
+        payload["regime_feature"] = "rv24"
+        payload["regime_bins"] = 1
+    else:
+        # Both regime fitters enforce at least two buckets.
+        payload["regime_bins"] = max(2, int(payload["regime_bins"]))
+    if learner != "multiscale_regressor":
+        payload["calibration_orientation"] = False
     if int(payload.get("calibration_reliability_version", 0)) <= 0:
         # Version zero is deliberately inactive. Canonicalize it to the
         # ordinary phenotype, while restore_completed_candidates excludes old
@@ -2944,14 +2961,30 @@ def introduce_outcome_pool_variant(
     if not bases:
         return population, report
     known = {genome.genome_id for genome in [*population, *evaluated]}
+    known_evaluation_keys = {
+        genome_evaluation_key(genome) for genome in [*population, *evaluated]
+    }
     proposals: dict[str, Genome] = {}
+    known_phenotypes_filtered = 0
+    duplicate_proposals_filtered = 0
     for index in range(144):
         base = bases[index % len(bases)] if index < len(bases) else rng.choice(bases)
         proposal = (nudge_genome(base, generation, rng) if index % 2 == 0
                     else mutate(base, generation, rng))
-        if proposal.genome_id not in known:
-            proposals[proposal.genome_id] = proposal
+        evaluation_key = genome_evaluation_key(proposal)
+        if (proposal.genome_id in known
+                or evaluation_key in known_evaluation_keys):
+            known_phenotypes_filtered += 1
+            continue
+        if evaluation_key in proposals:
+            duplicate_proposals_filtered += 1
+            continue
+        proposals[evaluation_key] = proposal
     if not proposals:
+        report.update({
+            "known_phenotypes_filtered": known_phenotypes_filtered,
+            "duplicate_proposals_filtered": duplicate_proposals_filtered,
+        })
         return population, report
     candidates = list(proposals.values())
     means, uncertainties = pool.predict(candidates)
@@ -2990,6 +3023,8 @@ def introduce_outcome_pool_variant(
         ),
         "plateau_generations": int(plateau_generations),
         "candidate_search_size": len(candidates),
+        "known_phenotypes_filtered": known_phenotypes_filtered,
+        "duplicate_proposals_filtered": duplicate_proposals_filtered,
     })
     return population, report
 

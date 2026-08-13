@@ -3082,6 +3082,95 @@ def test_active_outcome_pool_switches_to_accuracy_discovery_on_plateau():
     assert report["plateau_generations"] == 24
 
 
+def test_active_outcome_pool_filters_signed_predictive_phenotypes(monkeypatch):
+    class FixedOutcomeModel:
+        def predict(self, values):
+            target = np.asarray([.8, .64, .62, .62, .66, .38, .58, .7, .7])
+            return np.tile(target, (len(values), 1))
+
+    population = seed_genomes(8, random.Random(427))
+    evaluated = seed_genomes(8, random.Random(428))
+    for index, genome in enumerate(evaluated):
+        genome.fitness = 2000 - index
+        genome.result = {
+            "evaluated_folds": 3, "requested_folds": 3,
+            "summary": {"min_accuracy": .56, "min_profit_factor": 1.0},
+        }
+    for genome in population[3:]:
+        genome.fitness = None
+        genome.result = None
+    width = len(evolution.genome_outcome_vector(population[0]))
+    targets = len(evolution.OUTCOME_POOL_TARGETS)
+    pool = evolution.GenomeOutcomePool(
+        np.zeros(width), np.ones(width), np.zeros(targets), np.ones(targets),
+        [FixedOutcomeModel(), FixedOutcomeModel()], 120,
+        [.05] * targets, [.10] * targets, [.4] * targets, True,
+    )
+    calls = 0
+
+    def mostly_known(_base, generation, _rng):
+        nonlocal calls
+        calls += 1
+        payload = dict(evaluated[0].__dict__)
+        payload.update({
+            "generation": generation, "parents": [evaluated[0].genome_id],
+            "genome_id": "", "fitness": None, "result": None,
+        })
+        if calls == 144:
+            payload["confidence_quantile"] += .011
+        return Genome(**payload).finalize()
+
+    monkeypatch.setattr(evolution, "nudge_genome", mostly_known)
+    monkeypatch.setattr(evolution, "mutate", mostly_known)
+    known_keys = {
+        evolution.genome_evaluation_key(genome)
+        for genome in [*population, *evaluated]
+    }
+
+    updated, report = evolution.introduce_outcome_pool_variant(
+        population, evaluated, pool, 430, random.Random(429),
+        plateau_generations=24,
+    )
+
+    assert report["proposed"] is True
+    assert report["known_phenotypes_filtered"] == 143
+    assert report["candidate_search_size"] == 1
+    proposed = next(
+        genome for genome in updated if genome.genome_id == report["genome_id"]
+    )
+    assert evolution.genome_evaluation_key(proposed) not in known_keys
+
+
+def test_evaluation_key_normalizes_learner_inactive_coordinates():
+    tree = seed_genomes(1, random.Random(430))[0]
+    tree.learner_kind = "extra_trees"
+    tree.max_iter = 300
+    tree.finalize()
+    alias = Genome(**{
+        **tree.__dict__, "learning_rate": .3, "l2_regularization": 29.0,
+        "max_iter": 360, "market_weight": .2, "regime_feature": "r24",
+        "regime_bins": 3, "calibration_orientation": True,
+        "genome_id": "",
+    }).finalize()
+    active_tree_change = Genome(**{
+        **tree.__dict__, "max_leaf_nodes": tree.max_leaf_nodes + 1,
+        "genome_id": "",
+    }).finalize()
+    classifier_change = Genome(**{
+        **tree.__dict__, "learner_kind": "classifier",
+        "learning_rate": .3, "genome_id": "",
+    }).finalize()
+    classifier_base = Genome(**{
+        **tree.__dict__, "learner_kind": "classifier", "genome_id": "",
+    }).finalize()
+
+    assert evolution.genome_evaluation_key(alias) == evolution.genome_evaluation_key(tree)
+    assert (evolution.genome_evaluation_key(active_tree_change)
+            != evolution.genome_evaluation_key(tree))
+    assert (evolution.genome_evaluation_key(classifier_change)
+            != evolution.genome_evaluation_key(classifier_base))
+
+
 def test_reflexivity_variant_is_seeded_without_erasing_learner_diversity():
     population = seed_genomes(12, random.Random(14))
     for genome in population:
