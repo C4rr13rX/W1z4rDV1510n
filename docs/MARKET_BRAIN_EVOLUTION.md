@@ -299,6 +299,16 @@ pool still owns exactly one advisory slot and cannot supply fitness or admission
 evidence; the selected child remains unevaluated until every protected fold and
 unchanged safety gate signs its result.
 
+Tree capacity is refined as a finite, evidence-backed integer coordinate. When
+three otherwise identical tree phenotypes on the same evaluation signature
+bracket a strong interior result, the controller compares their combined
+direction, MCC, economics, and coverage rather than continuing the original
+coarse four-leaf walk past a known weaker endpoint. It tests the midpoint toward
+the stronger neighbouring endpoint first, then the other midpoint, and stops
+when the adjacent integer values are already signed. This refinement owns at
+most one ordinary reproduction slot, cannot mix results across dataset
+signatures, and supplies no fitness or admission evidence by itself.
+
 Coverage repair treats repeated identical outcomes on either side of the
 coverage floor as evidence of a discrete tree-score plateau. In particular,
 two lower-threshold descendants that admit the same harmful leaf are enough to

@@ -3659,6 +3659,151 @@ def test_outcome_pool_replaces_only_redundant_same_protected_lineage():
     assert proposal.parents == [protected.genome_id]
 
 
+def _signed_leaf_variant(base, leaf, quality, generation, signature="current"):
+    accuracy, balanced, mcc, coverage, expectancy, profit = quality
+    payload = evolution.asdict(base)
+    payload.update({
+        "max_leaf_nodes": leaf,
+        "generation": generation,
+        "parents": [base.genome_id],
+        "genome_id": "",
+        "fitness": 400 + accuracy,
+        "result": {
+            "status": "prescreen_reject",
+            "evaluation_signature": signature,
+            "evaluated_folds": 1,
+            "requested_folds": 3,
+            "summary": {
+                "min_accuracy": accuracy,
+                "min_balanced_accuracy": balanced,
+                "min_mcc": mcc,
+                "min_coverage": coverage,
+                "min_expectancy": expectancy,
+                "min_profit_factor": profit,
+            },
+        },
+    })
+    return Genome(**payload).finalize()
+
+
+def test_tree_leaf_refinement_bisects_around_signed_local_optimum():
+    base = seed_genomes(1, random.Random(435))[0]
+    base.learner_kind = "extra_trees_regressor"
+    base.finalize()
+    lower = _signed_leaf_variant(
+        base, 8, (.596, .609, .221, .557, .00076, 1.066), 10,
+    )
+    center = _signed_leaf_variant(
+        base, 12, (.607, .615, .232, .522, .00148, 1.133), 11,
+    )
+    upper = _signed_leaf_variant(
+        base, 16, (.594, .599, .197, .502, -.00050, .958), 12,
+    )
+    population = seed_genomes(8, random.Random(436))
+    for genome in population[1:]:
+        genome.fitness = None
+        genome.result = None
+
+    updated, report = evolution.introduce_tree_leaf_refinement_variant(
+        population, [lower, center, upper], 13, "current",
+    )
+
+    assert report["active"] is True
+    assert report["proposed"] is True
+    assert report["signed_bracket"] == [8, 12, 16]
+    proposal = next(
+        genome for genome in updated if genome.genome_id == report["genome_id"]
+    )
+    assert proposal.max_leaf_nodes == 10
+    assert proposal.parents == [center.genome_id]
+    assert proposal.fitness is None and proposal.result is None
+
+
+def test_tree_leaf_refinement_stops_after_adjacent_midpoints_are_signed():
+    base = seed_genomes(1, random.Random(437))[0]
+    base.learner_kind = "regressor"
+    base.finalize()
+    evidence = [
+        _signed_leaf_variant(
+            base, leaf,
+            ((.60, .61, .20, .55, .0010, 1.10)
+             if leaf != 12 else (.62, .63, .26, .56, .0020, 1.30)),
+            20 + leaf,
+        )
+        for leaf in (11, 12, 13)
+    ]
+    population = seed_genomes(8, random.Random(438))
+    for genome in population[1:]:
+        genome.fitness = None
+        genome.result = None
+    before = [genome.genome_id for genome in population]
+
+    updated, report = evolution.introduce_tree_leaf_refinement_variant(
+        population, evidence, 40, "current",
+    )
+
+    assert report["proposed"] is False
+    assert [genome.genome_id for genome in updated] == before
+
+
+def test_tree_leaf_refinement_replaces_only_one_redundant_protected_sibling():
+    base = seed_genomes(1, random.Random(441))[0]
+    base.learner_kind = "extra_trees_regressor"
+    base.finalize()
+    evidence = [
+        _signed_leaf_variant(
+            base, leaf,
+            ((.59, .59, .18, .55, .0010, 1.08)
+             if leaf != 12 else (.62, .62, .25, .56, .0020, 1.30)),
+            70 + leaf,
+        )
+        for leaf in (8, 12, 16)
+    ]
+    population = seed_genomes(8, random.Random(442))
+    protected = "protected-frontier"
+    for genome in population[1:]:
+        genome.fitness = None
+        genome.result = None
+        genome.parents = [protected]
+        genome.finalize()
+    original_siblings = {genome.genome_id for genome in population[1:]}
+
+    updated, report = evolution.introduce_tree_leaf_refinement_variant(
+        population, evidence, 90, "current", {protected},
+    )
+
+    assert report["proposed"] is True
+    assert report["replacement_scope"] == "redundant_protected_sibling"
+    assert len(original_siblings & {genome.genome_id for genome in updated}) == 6
+
+
+def test_tree_leaf_refinement_never_brackets_across_evaluation_signatures():
+    base = seed_genomes(1, random.Random(439))[0]
+    base.learner_kind = "regressor"
+    base.finalize()
+    evidence = [
+        _signed_leaf_variant(
+            base, leaf,
+            ((.59, .59, .18, .55, .0010, 1.08)
+             if leaf != 12 else (.62, .62, .25, .56, .0020, 1.30)),
+            50 + leaf, signature=("old" if leaf == 16 else "current"),
+        )
+        for leaf in (8, 12, 16)
+    ]
+    population = seed_genomes(8, random.Random(440))
+    for genome in population[1:]:
+        genome.fitness = None
+        genome.result = None
+    before = [genome.genome_id for genome in population]
+
+    updated, report = evolution.introduce_tree_leaf_refinement_variant(
+        population, evidence, 60, "current",
+    )
+
+    assert report["active"] is False
+    assert [genome.genome_id for genome in updated] == before
+
+
 def test_evaluation_key_normalizes_learner_inactive_coordinates():
     tree = seed_genomes(1, random.Random(430))[0]
     tree.learner_kind = "extra_trees"

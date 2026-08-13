@@ -3123,6 +3123,181 @@ def introduce_outcome_pool_variant(
     return population, report
 
 
+def tree_leaf_refinement_key(genome: Genome) -> str:
+    """Identify one predictive phenotype while ignoring tree leaf capacity."""
+    payload = asdict(genome)
+    payload.update({
+        "max_leaf_nodes": 8,
+        "generation": 0,
+        "parents": [],
+        "genome_id": "",
+        "fitness": None,
+        "result": None,
+    })
+    return genome_evaluation_key(Genome(**payload).finalize())
+
+
+def tree_leaf_refinement_quality(genome: Genome) -> float:
+    """Balance direction, economics, and coverage for a signed tree result."""
+    summary = (genome.result or {}).get("summary") or {}
+    return float(
+        float(summary.get("min_accuracy", 0))
+        + float(summary.get("min_balanced_accuracy", 0))
+        + .5 * max(-1.0, float(summary.get("min_mcc", -1)))
+        + .05 * min(3.0, max(0.0, float(summary.get("min_profit_factor", 0))))
+        + .10 * float(summary.get("min_coverage", 0))
+    )
+
+
+def introduce_tree_leaf_refinement_variant(
+    population: list[Genome], evidence: Sequence[Genome], generation: int,
+    evaluation_id: str, protected_parent_ids: set[str] | None = None,
+) -> tuple[list[Genome], dict[str, Any]]:
+    """Refine a signed local tree-capacity optimum instead of walking past it.
+
+    Tree schedules historically moved in coarse four-leaf steps. Once three
+    otherwise identical current-data phenotypes bracket a strong interior
+    result, further movement toward an already weaker endpoint is wasteful.
+    Test the finite integer midpoints around that result, best-neighbour first,
+    and stop automatically when both sides are adjacent or already signed.
+    """
+    report: dict[str, Any] = {
+        "active": False, "proposed": False, "evaluation_id": evaluation_id,
+    }
+    if len(population) < 4 or not evidence or not evaluation_id:
+        return population, report
+    signed = [
+        genome for genome in evidence
+        if genome.fitness is not None
+        and (genome.result or {}).get("evaluation_signature") == evaluation_id
+        and genome.learner_kind in {
+            "regressor", "decomposed_regressor", "regime_regressor",
+            "regime_decomposed_regressor", "multiscale_regressor",
+            "extra_trees", "extra_trees_ranked", "extra_trees_regressor",
+            "extra_trees_hybrid",
+        }
+        and (genome.result or {}).get("status") != "failed"
+    ]
+    groups: dict[str, dict[int, Genome]] = {}
+    for genome in signed:
+        group = groups.setdefault(tree_leaf_refinement_key(genome), {})
+        leaf = int(genome.max_leaf_nodes)
+        incumbent = group.get(leaf)
+        if incumbent is None or tree_leaf_refinement_quality(genome) > (
+            tree_leaf_refinement_quality(incumbent)
+        ):
+            group[leaf] = genome
+    known_keys = {
+        genome_evaluation_key(genome) for genome in [*population, *signed]
+    }
+    refinements: list[tuple[float, Genome, Genome, Genome, list[int]]] = []
+    for by_leaf in groups.values():
+        ordered = sorted(by_leaf.items())
+        if len(ordered) < 3:
+            continue
+        for index in range(1, len(ordered) - 1):
+            _, lower = ordered[index - 1]
+            center_leaf, center = ordered[index]
+            _, upper = ordered[index + 1]
+            summary = (center.result or {}).get("summary") or {}
+            if not (
+                float(summary.get("min_accuracy", 0)) >= .58
+                and float(summary.get("min_balanced_accuracy", 0)) >= .58
+                and float(summary.get("min_mcc", -1)) >= .15
+                and float(summary.get("min_coverage", 0)) >= .50
+                and float(summary.get("min_expectancy", 0)) > 0
+                and float(summary.get("min_profit_factor", 0)) >= 1.0
+            ):
+                continue
+            center_quality = tree_leaf_refinement_quality(center)
+            if not (
+                center_quality > tree_leaf_refinement_quality(lower)
+                and center_quality > tree_leaf_refinement_quality(upper)
+            ):
+                continue
+            midpoint_options: list[tuple[float, int]] = []
+            for neighbour in (lower, upper):
+                gap = abs(int(neighbour.max_leaf_nodes) - center_leaf)
+                if gap <= 1:
+                    continue
+                midpoint = (int(neighbour.max_leaf_nodes) + center_leaf) // 2
+                if midpoint in by_leaf or midpoint == center_leaf:
+                    continue
+                midpoint_options.append((
+                    tree_leaf_refinement_quality(neighbour), midpoint,
+                ))
+            if midpoint_options:
+                midpoints = [
+                    value for _, value in sorted(midpoint_options, reverse=True)
+                ]
+                refinements.append((
+                    center_quality, center, lower, upper, midpoints,
+                ))
+    if not refinements:
+        return population, report
+    report["active"] = True
+    variant: Genome | None = None
+    selected: tuple[float, Genome, Genome, Genome, list[int]] | None = None
+    selected_leaf: int | None = None
+    for refinement in sorted(refinements, key=lambda item: item[0], reverse=True):
+        _, center, _, _, midpoints = refinement
+        for midpoint in midpoints:
+            payload = asdict(center)
+            payload.update({
+                "max_leaf_nodes": midpoint,
+                "generation": generation,
+                "parents": [center.genome_id],
+                "genome_id": "",
+                "fitness": None,
+                "result": None,
+            })
+            proposal = Genome(**payload).finalize()
+            if genome_evaluation_key(proposal) not in known_keys:
+                variant = proposal
+                selected = refinement
+                selected_leaf = midpoint
+                break
+        if variant is not None:
+            break
+    if variant is None or selected is None or selected_leaf is None:
+        return population, report
+    protected_parent_ids = protected_parent_ids or set()
+    replacement = next((
+        index for index in range(len(population) - 1, 0, -1)
+        if population[index].fitness is None
+        and not (set(population[index].parents) & protected_parent_ids)
+    ), None)
+    replacement_scope = "unprotected"
+    if replacement is None:
+        parent_counts = Counter(
+            parent for genome in population if genome.fitness is None
+            for parent in genome.parents if parent in protected_parent_ids
+        )
+        replacement = next((
+            index for index in range(len(population) - 1, 0, -1)
+            if population[index].fitness is None
+            and any(parent_counts[parent] > 1 for parent in population[index].parents)
+        ), None)
+        replacement_scope = "redundant_protected_sibling"
+    if replacement is None:
+        report["replacement_scope"] = "none"
+        return population, report
+    _, center, lower, upper, _ = selected
+    population[replacement] = variant
+    report.update({
+        "proposed": True,
+        "genome_id": variant.genome_id,
+        "parent_id": center.genome_id,
+        "max_leaf_nodes": selected_leaf,
+        "signed_bracket": [
+            int(lower.max_leaf_nodes), int(center.max_leaf_nodes),
+            int(upper.max_leaf_nodes),
+        ],
+        "replacement_scope": replacement_scope,
+    })
+    return population, report
+
+
 def introduce_missing_learner_species(
     population: list[Genome], generation: int, rng: random.Random,
     protected_parent_ids: set[str] | None = None,
@@ -6706,6 +6881,14 @@ def main() -> int:
                     })),
                 )
             )
+            outcome_evidence: list[Genome] = []
+            protected_search_parents = {
+                genome.genome_id for genome in (
+                    champion, coverage_frontier, multiscale_frontier,
+                    multiscale_boundary_frontier, extra_trees_frontier,
+                    regime_shift_frontier,
+                ) if genome is not None
+            }
             try:
                 outcome_evidence = outcome_pool_evidence(
                     args.state_dir, signature
@@ -6713,13 +6896,7 @@ def main() -> int:
                 outcome_pool = train_genome_outcome_pool(outcome_evidence)
                 population, outcome_pool_report = introduce_outcome_pool_variant(
                     population, outcome_evidence, outcome_pool, generation, rng,
-                    {
-                        genome.genome_id for genome in (
-                            champion, coverage_frontier, multiscale_frontier,
-                            multiscale_boundary_frontier, extra_trees_frontier,
-                            regime_shift_frontier,
-                        ) if genome is not None
-                    },
+                    protected_search_parents,
                     plateau_generations=(
                         generation - champion.generation if champion else 0
                     ),
@@ -6729,9 +6906,26 @@ def main() -> int:
                     "active": False, "proposed": False,
                     "error": repr(exc),
                 }
+            try:
+                population, leaf_refinement_report = (
+                    introduce_tree_leaf_refinement_variant(
+                        population, outcome_evidence, generation, signature,
+                        protected_search_parents,
+                    )
+                )
+            except Exception as exc:
+                leaf_refinement_report = {
+                    "active": False, "proposed": False, "error": repr(exc),
+                }
             atomic_json(args.state_dir / "genome_outcome_pool.json", {
                 "at": utc_now(), "generation": generation,
                 **outcome_pool_report,
+                "scope": "reproduction_advisory_only",
+                "live_admission_effect": "none",
+            })
+            atomic_json(args.state_dir / "tree_leaf_refinement.json", {
+                "at": utc_now(), "generation": generation,
+                **leaf_refinement_report,
                 "scope": "reproduction_advisory_only",
                 "live_admission_effect": "none",
             })
@@ -6800,6 +6994,9 @@ def main() -> int:
                 "outcome_pool_examples": int(outcome_pool_report.get("examples", 0)),
                 "outcome_pool_candidates": int(bool(
                     outcome_pool_report.get("proposed")
+                )),
+                "tree_leaf_refinement_candidates": int(bool(
+                    leaf_refinement_report.get("proposed")
                 )),
             })
             atomic_json(args.state_dir / "evolution_health.json", {
