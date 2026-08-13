@@ -1591,6 +1591,7 @@ def load_nearby_return_tree_evidence(
 ) -> list[Genome]:
     """Keep compatible curves plus strong independent return-tree lineages."""
     evidence: dict[str, Genome] = {}
+    signed_candidates: list[Genome] = []
     for path in (state_dir / "candidates").glob("*.json"):
         try:
             candidate = genome_from_dict(json.loads(path.read_text(encoding="utf-8")))
@@ -1602,6 +1603,13 @@ def load_nearby_return_tree_evidence(
                 }
                 or (candidate.result or {}).get("evaluation_signature") != evaluation_id):
             continue
+        signed_candidates.append(candidate)
+    frontier_structures = {
+        return_tree_threshold_key(candidate)
+        for candidate in signed_candidates
+        if profitable_return_tree_coverage_frontier(candidate)
+    }
+    for candidate in signed_candidates:
         payload = asdict(candidate)
         payload.update({
             "learner_kind": champion.learner_kind,
@@ -1614,9 +1622,11 @@ def load_nearby_return_tree_evidence(
             "genome_id": champion.genome_id,
         })
         reconstructed = Genome(**payload).finalize()
-        independent_frontier = profitable_return_tree_coverage_frontier(candidate)
+        independent_frontier_curve = (
+            return_tree_threshold_key(candidate) in frontier_structures
+        )
         if (genome_evaluation_key(reconstructed) != genome_evaluation_key(champion)
-                and not independent_frontier):
+                and not independent_frontier_curve):
             continue
         evidence[candidate.genome_id] = candidate
     return list(evidence.values())
@@ -7040,8 +7050,10 @@ def main() -> int:
                     for genome in population
                 ),
                 "champion_return_tree_candidates": sum(
-                    champion is not None
-                    and champion.genome_id in genome.parents
+                    bool(set(genome.parents) & {
+                        evidence.genome_id
+                        for evidence in champion_return_tree_evidence
+                    })
                     and genome.fitness is None
                     and genome.learner_kind in {
                         "extra_trees_regressor", "extra_trees_hybrid",

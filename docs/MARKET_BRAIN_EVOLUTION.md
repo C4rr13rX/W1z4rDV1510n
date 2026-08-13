@@ -331,6 +331,26 @@ curve remains actionable, it owns the one shared specialist slot ahead of new
 feature-program transfer; once its finite proposals are signed, program search
 automatically resumes.
 
+The controller also retains signed failures on that exact return-tree curve.
+They are negative boundary evidence, not reusable fitness: an unsafe cutoff is
+included in the structure-local bracket and in canonical phenotype
+deduplication, so it cannot be proposed again under a fresh lineage ID. The
+first live composed cutoff, candidate `053b48cdec3e2b48` at quantile
+`0.1454066`, raised coverage to 63.50 percent but fell to 43.49 percent
+directional accuracy, profit factor 0.641, and negative expectancy. It was
+correctly rejected. The next finite experiment must therefore bisect between
+that signed unsafe cutoff and the profitable selective endpoint rather than
+repeat either endpoint. Return-tree telemetry counts descendants of retained
+independent frontiers as return-tree candidates even when the current
+classifier is not their immediate parent.
+
+After deployment, the controller found a tighter signed 12-leaf curve and
+tested its midpoint as candidate `6e207432aecc93f0` at quantile `0.1697279`.
+It improved to 58.33 percent accuracy, 59.55 percent balanced accuracy, profit
+factor 1.029, positive expectancy, and 56.86 percent coverage. It still missed
+the protected accuracy, MCC, acted-observation, and coverage floors and was
+therefore rejected. This is useful boundary evidence, not a promotion.
+
 Coverage repair treats repeated identical outcomes on either side of the
 coverage floor as evidence of a discrete tree-score plateau. In particular,
 two lower-threshold descendants that admit the same harmful leaf are enough to

@@ -1981,8 +1981,21 @@ def test_return_tree_evidence_retains_strong_independent_lineage(tmp_path):
             },
         },
     }).finalize()
+    failed_cutoff = Genome(**{
+        **strong.__dict__, "confidence_quantile": .14,
+        "generation": 922, "genome_id": "", "fitness": 340,
+        "result": {
+            "evaluation_signature": "scope-a",
+            "evaluated_folds": 1, "requested_folds": 3,
+            "summary": {
+                "min_accuracy": .44, "min_balanced_accuracy": .44,
+                "min_mcc": -.12, "min_profit_factor": .64,
+                "min_expectancy": -.004, "min_coverage": .635,
+            },
+        },
+    }).finalize()
     (tmp_path / "candidates").mkdir()
-    for candidate in (strong, weak):
+    for candidate in (strong, weak, failed_cutoff):
         (tmp_path / "candidates" / f"{candidate.genome_id}.json").write_text(
             json.dumps(candidate.__dict__), encoding="utf-8"
         )
@@ -1993,6 +2006,9 @@ def test_return_tree_evidence_retains_strong_independent_lineage(tmp_path):
 
     assert strong.genome_id in {genome.genome_id for genome in evidence}
     assert weak.genome_id not in {genome.genome_id for genome in evidence}
+    assert failed_cutoff.genome_id in {
+        genome.genome_id for genome in evidence
+    }
     assert evolution.profitable_return_tree_coverage_frontier(strong)
     assert not evolution.profitable_return_tree_coverage_frontier(weak)
 
