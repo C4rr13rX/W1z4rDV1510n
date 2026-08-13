@@ -309,6 +309,14 @@ when the adjacent integer values are already signed. This refinement owns at
 most one ordinary reproduction slot, cannot mix results across dataset
 signatures, and supplies no fitness or admission evidence by itself.
 
+The first live refinement under signature `11a90...` narrowed the coarse
+8/12/16-leaf bracket through leaf 10 and then leaf 11. Leaf 11 became the
+strongest signed local point at 61.59% directional accuracy, 62.46% balanced
+accuracy, MCC 0.251, positive expectancy, and profit factor 1.151. Because
+10/11/12 were then adjacent, the adviser terminated instead of spending a slot
+on leaf 14. That result remains research evidence only: one protected fold and
+roughly 51.43% minimum coverage do not satisfy admission.
+
 Coverage repair treats repeated identical outcomes on either side of the
 coverage floor as evidence of a discrete tree-score plateau. In particular,
 two lower-threshold descendants that admit the same harmful leaf are enough to
