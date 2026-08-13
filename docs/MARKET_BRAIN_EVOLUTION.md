@@ -129,6 +129,21 @@ met, starts the evolution worker, publishes `supervisor_status.json`, and
 restarts unexpected worker exits. `launch_revenir.ps1` starts this watchdog
 instead of starting the memory-intensive worker directly.
 
+Do not lower the workstation's `3.5 GiB` free-RAM floor to push through a
+stall. Both the watchdog's launch gate and the service's generation-boundary
+gate count consecutive low-memory samples. After four samples they may ask
+Windows to evict reclaimable resident pages from a process only when all of
+these conditions hold: its executable name exactly matches
+`w1z4rd_node.exe`, its command contains `api --addr 127.0.0.1:8090`, it is the
+only match, and its loopback `/health` endpoint passes before the operation.
+Health is checked again afterward and attempts are rate-limited for 15
+minutes. The operation never terminates the node, changes a genome, relaxes an
+evaluation threshold, or enables trading. It also does not reduce private
+commitment, so repeated pressure remains an architecture signal requiring
+bounded neural retrieval or neuron-scoped sleep/checkpoint rather than more
+aggressive trimming. Every attempted action is appended as
+`memory_reclamation_attempt` evidence.
+
 The causal feature matrix is fingerprinted and cached at
 `runtime/cache/market-evolution-dataset-v4.joblib`; primary OHLCV files,
 supplemental derivatives, news, horizon, stride, seed, and evolution schema all

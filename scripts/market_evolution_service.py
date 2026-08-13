@@ -47,6 +47,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from scripts.market_memory_guard import VerifiedWorkingSetReclaimer
+
 FEATURE_SCHEMA = 5
 EVOLUTION_SCHEMA = 13
 LEARNER_KINDS = (
@@ -977,6 +979,51 @@ def claim_service(state_dir: Path) -> Path:
 
 def available_memory_gb() -> float:
     return (psutil.virtual_memory().available / 1024**3 if psutil is not None else 999.0)
+
+
+def wait_for_memory_floor(
+    state_dir: Path,
+    stop_path: Path,
+    required_gb: float,
+    poll_seconds: float,
+    phase: str,
+    *,
+    generation: int | None = None,
+    reclaim_after_polls: int = 4,
+    reclaimer: VerifiedWorkingSetReclaimer | None = None,
+    memory_reader: Any = available_memory_gb,
+) -> bool:
+    """Wait safely while optionally evicting one verified node working set."""
+    low_polls = 0
+    while not stop_path.exists():
+        available = memory_reader()
+        if available >= required_gb:
+            return True
+        low_polls += 1
+        payload: dict[str, Any] = {
+            "at": utc_now(), "phase": phase,
+            "available_memory_gb": available,
+            "required_memory_gb": required_gb,
+            "consecutive_low_memory_polls": low_polls,
+        }
+        if generation is not None:
+            payload["generation"] = generation
+        atomic_json(state_dir / "status.json", payload)
+        if reclaimer is not None and low_polls >= max(1, reclaim_after_polls):
+            evidence = reclaimer.attempt()
+            if evidence is not None:
+                append_event(
+                    state_dir / "events.jsonl", "memory_reclamation_attempt",
+                    phase=phase, generation=generation,
+                    available_memory_gb=available,
+                    required_memory_gb=required_gb, **evidence,
+                )
+                low_polls = 0
+                if evidence.get("outcome") == "trimmed":
+                    # Re-sample immediately; do not impose another full poll delay.
+                    continue
+        time.sleep(poll_seconds)
+    return False
 
 
 def dataset_signature(manifest: Path, supplemental_root: Path,
@@ -5295,6 +5342,15 @@ def main() -> int:
     )
     parser.add_argument("--min-free-memory-gb", type=float, default=8.0)
     parser.add_argument("--memory-poll-seconds", type=float, default=15.0)
+    parser.add_argument("--memory-reclaim-after-polls", type=int, default=4)
+    parser.add_argument("--memory-reclaim-process-name", default="w1z4rd_node.exe")
+    parser.add_argument(
+        "--memory-reclaim-command-fragment", default="api --addr 127.0.0.1:8090",
+    )
+    parser.add_argument(
+        "--memory-reclaim-health-url", default="http://127.0.0.1:8090/health",
+    )
+    parser.add_argument("--memory-reclaim-cooldown-seconds", type=float, default=900.0)
     parser.add_argument(
         "--dataset-refresh-seconds", type=float, default=1800.0,
         help=("fingerprint OHLCV, derivatives, and news at generation boundaries; "
@@ -5319,13 +5375,25 @@ def main() -> int:
     neural_scores: dict[str, float] = {}
     owner = claim_service(args.state_dir)
     rng = random.Random(args.seed)
-    while available_memory_gb() < args.min_free_memory_gb:
-        atomic_json(args.state_dir / "status.json", {
-            "at": utc_now(), "phase": "memory_wait_before_dataset",
-            "available_memory_gb": available_memory_gb(),
-            "required_memory_gb": args.min_free_memory_gb,
-        })
-        time.sleep(args.memory_poll_seconds)
+    memory_reclaimer = VerifiedWorkingSetReclaimer(
+        process_name=args.memory_reclaim_process_name,
+        command_fragment=args.memory_reclaim_command_fragment,
+        health_url=args.memory_reclaim_health_url,
+        cooldown_seconds=max(0.0, args.memory_reclaim_cooldown_seconds),
+    )
+    if not wait_for_memory_floor(
+        args.state_dir, stop_path, args.min_free_memory_gb,
+        args.memory_poll_seconds, "memory_wait_before_dataset",
+        reclaim_after_polls=args.memory_reclaim_after_polls,
+        reclaimer=memory_reclaimer,
+    ):
+        try:
+            if owner.read_text(encoding="ascii").strip() == str(os.getpid()):
+                owner.unlink(missing_ok=True)
+        except OSError:
+            pass
+        append_event(events_path, "stopped", generation=None, requested=True)
+        return 0
     data_signature = dataset_signature(args.manifest, args.supplemental_root, args.news)
     signature = evaluation_signature(
         data_signature, folds=args.folds, test_days=args.test_days,
@@ -5595,16 +5663,12 @@ def main() -> int:
                         action="live_population_revalidation",
                         rows=len(dataset["rows"]), assets=dataset["assets"],
                     )
-            while available_memory_gb() < args.min_free_memory_gb:
-                atomic_json(args.state_dir / "status.json", {
-                    "at": utc_now(), "phase": "memory_wait", "generation": generation,
-                    "available_memory_gb": available_memory_gb(),
-                    "required_memory_gb": args.min_free_memory_gb,
-                })
-                if stop_path.exists():
-                    break
-                time.sleep(args.memory_poll_seconds)
-            if stop_path.exists():
+            if not wait_for_memory_floor(
+                args.state_dir, stop_path, args.min_free_memory_gb,
+                args.memory_poll_seconds, "memory_wait", generation=generation,
+                reclaim_after_polls=args.memory_reclaim_after_polls,
+                reclaimer=memory_reclaimer,
+            ):
                 break
             population, reused_evidence = restore_completed_candidates(
                 population, args.state_dir, signature

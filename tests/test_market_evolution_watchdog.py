@@ -21,6 +21,33 @@ def test_waiter_stays_alive_until_memory_is_available(tmp_path, monkeypatch):
     assert sleeps == [2.0, 2.0]
 
 
+def test_waiter_reclaims_after_sustained_pressure_then_resamples_immediately(
+    tmp_path, monkeypatch,
+):
+    readings = iter([1.0, 1.0, 4.0])
+    sleeps = []
+    attempts = []
+    reclaimer = type("Reclaimer", (), {
+        "attempt": lambda self: attempts.append(True) or {
+            "outcome": "trimmed", "pid": 42,
+        },
+    })()
+    monkeypatch.setattr(watchdog.time, "sleep", sleeps.append)
+
+    assert watchdog.wait_until_launchable(
+        tmp_path, tmp_path / "STOP", 3.5, 2.0,
+        memory_reader=lambda: next(readings),
+        reclaim_after_polls=2, reclaimer=reclaimer,
+    )
+
+    assert attempts == [True]
+    assert sleeps == [2.0]
+    events = [json.loads(line) for line in
+              (tmp_path / "supervisor_events.jsonl").read_text().splitlines()]
+    assert events[-1]["event"] == "memory_reclamation_attempt"
+    assert events[-1]["outcome"] == "trimmed"
+
+
 def test_waiter_honors_stop_without_launching(tmp_path):
     (tmp_path / "STOP").write_text("stop\n")
     assert not watchdog.wait_until_launchable(

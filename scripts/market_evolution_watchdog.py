@@ -16,6 +16,8 @@ import subprocess
 import sys
 import time
 from typing import Callable
+import urllib.error
+import urllib.request
 
 try:
     import psutil
@@ -25,6 +27,10 @@ except ImportError:  # pragma: no cover
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_GHOST_STACK_ROOT = ROOT.parent / "CoolCryptoUtilities"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.market_memory_guard import VerifiedWorkingSetReclaimer
 
 
 def utc_now() -> str:
@@ -184,8 +190,12 @@ def wait_until_launchable(
     required_gb: float,
     poll_seconds: float,
     memory_reader: Callable[[], float] = available_memory_gb,
+    *,
+    reclaim_after_polls: int = 4,
+    reclaimer: VerifiedWorkingSetReclaimer | None = None,
 ) -> bool:
     """Return true once RAM is sufficient, or false after a stop request."""
+    low_polls = 0
     while not stop_path.exists():
         available = memory_reader()
         if available >= required_gb:
@@ -194,10 +204,23 @@ def wait_until_launchable(
                 required_memory_gb=required_gb,
             )
             return True
+        low_polls += 1
         publish_status(
             state_dir, "waiting_for_memory", available_memory_gb=available,
             required_memory_gb=required_gb,
+            consecutive_low_memory_polls=low_polls,
         )
+        if reclaimer is not None and low_polls >= max(1, reclaim_after_polls):
+            evidence = reclaimer.attempt()
+            if evidence is not None:
+                append_event(
+                    state_dir, "memory_reclamation_attempt",
+                    available_memory_gb=available,
+                    required_memory_gb=required_gb, **evidence,
+                )
+                low_polls = 0
+                if evidence.get("outcome") == "trimmed":
+                    continue
         time.sleep(poll_seconds)
     return False
 
@@ -214,6 +237,15 @@ def main() -> int:
     )
     parser.add_argument("--min-free-memory-gb", type=float, default=3.5)
     parser.add_argument("--memory-poll-seconds", type=float, default=15.0)
+    parser.add_argument("--memory-reclaim-after-polls", type=int, default=4)
+    parser.add_argument("--memory-reclaim-process-name", default="w1z4rd_node.exe")
+    parser.add_argument(
+        "--memory-reclaim-command-fragment", default="api --addr 127.0.0.1:8090",
+    )
+    parser.add_argument(
+        "--memory-reclaim-health-url", default="http://127.0.0.1:8090/health",
+    )
+    parser.add_argument("--memory-reclaim-cooldown-seconds", type=float, default=900.0)
     parser.add_argument("--restart-delay-seconds", type=float, default=30.0)
     parser.add_argument("--heartbeat-seconds", type=float, default=15.0)
     parser.add_argument("--ghost-stack-root", type=Path,
@@ -227,6 +259,8 @@ def main() -> int:
     if min(args.memory_poll_seconds, args.restart_delay_seconds,
            args.heartbeat_seconds, args.ghost_stack_check_seconds) <= 0:
         parser.error("poll, restart, and heartbeat intervals must be positive")
+    if args.memory_reclaim_after_polls < 1:
+        parser.error("memory reclaim polling threshold must be positive")
 
     args.state_dir.mkdir(parents=True, exist_ok=True)
     stop_path = args.state_dir / "STOP"
@@ -234,6 +268,12 @@ def main() -> int:
     append_event(args.state_dir, "supervisor_started", pid=os.getpid())
     ghost_stack_last_check = 0.0
     ghost_stack_last_attempt = 0.0
+    memory_reclaimer = VerifiedWorkingSetReclaimer(
+        process_name=args.memory_reclaim_process_name,
+        command_fragment=args.memory_reclaim_command_fragment,
+        health_url=args.memory_reclaim_health_url,
+        cooldown_seconds=max(0.0, args.memory_reclaim_cooldown_seconds),
+    )
     try:
         while not stop_path.exists():
             worker_pid = read_pid(args.state_dir / "service.pid")
@@ -257,6 +297,8 @@ def main() -> int:
             if not wait_until_launchable(
                 args.state_dir, stop_path, args.min_free_memory_gb,
                 args.memory_poll_seconds,
+                reclaim_after_polls=args.memory_reclaim_after_polls,
+                reclaimer=memory_reclaimer,
             ):
                 break
             command = [
@@ -264,6 +306,12 @@ def main() -> int:
                 "--state-dir", str(args.state_dir),
                 "--min-free-memory-gb", str(args.min_free_memory_gb),
                 "--memory-poll-seconds", str(args.memory_poll_seconds),
+                "--memory-reclaim-after-polls", str(args.memory_reclaim_after_polls),
+                "--memory-reclaim-process-name", args.memory_reclaim_process_name,
+                "--memory-reclaim-command-fragment", args.memory_reclaim_command_fragment,
+                "--memory-reclaim-health-url", args.memory_reclaim_health_url,
+                "--memory-reclaim-cooldown-seconds",
+                str(args.memory_reclaim_cooldown_seconds),
                 *args.service_args,
             ]
             creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0

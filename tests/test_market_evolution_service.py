@@ -26,6 +26,31 @@ from scripts.market_evolution_service import (
 )
 
 
+def test_service_memory_floor_reclaims_without_weakening_floor(tmp_path, monkeypatch):
+    readings = iter([1.0, 1.0, 4.0])
+    sleeps = []
+    attempts = []
+    reclaimer = type("Reclaimer", (), {
+        "attempt": lambda self: attempts.append(True) or {
+            "outcome": "trimmed", "pid": 42,
+        },
+    })()
+    monkeypatch.setattr(evolution.time, "sleep", sleeps.append)
+
+    assert evolution.wait_for_memory_floor(
+        tmp_path, tmp_path / "STOP", 3.5, 2.0, "memory_wait",
+        generation=7, reclaim_after_polls=2, reclaimer=reclaimer,
+        memory_reader=lambda: next(readings),
+    )
+
+    assert attempts == [True]
+    assert sleeps == [2.0]
+    events = [json.loads(line) for line in
+              (tmp_path / "events.jsonl").read_text().splitlines()]
+    assert events[-1]["event"] == "memory_reclamation_attempt"
+    assert events[-1]["generation"] == 7
+
+
 def test_genome_identity_is_deterministic_and_mutation_stays_bounded():
     parent = seed_genomes(5, random.Random(1))[0]
     clone = Genome(**{**parent.__dict__, "features": list(reversed(parent.features))}).finalize()
