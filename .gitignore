@@ -34,6 +34,7 @@
 !scripts/resume_brain_migration_when_safe.ps1
 !scripts/windows_memory.ps1
 !scripts/aws/show_programming_brain_watch.ps1
+!scripts/aws/start_programming_brain_proxy.ps1
 
 # ── Node / runtime config (generated per machine) ─────────────────────────────
 /node_config.json
@@ -112,3 +113,13 @@ node_modules/
 *.key
 *.pem
 *.p12
+*.pfx
+*.jks
+*.keystore
+.env
+.env.*
+!.env.example
+.secrets/
+.aws/
+credentials*.json
+service-account*.json
