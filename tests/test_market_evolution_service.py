@@ -2181,7 +2181,9 @@ def test_extra_trees_frontier_persists_and_expands_coverage(tmp_path):
     ]
     assert len(children) == 1
     assert children[0].learner_kind == "extra_trees"
-    assert children[0].confidence_quantile < frontier.confidence_quantile
+    assert children[0].confidence_quantile == pytest.approx(
+        frontier.confidence_quantile - .01
+    )
 
     reversal = Genome(**{
         **frontier.__dict__, "confidence_quantile": .22,

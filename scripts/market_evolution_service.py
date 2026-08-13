@@ -4012,6 +4012,29 @@ def introduce_extra_trees_coverage_variant(
         return population
     summary = (frontier.result or {}).get("summary", {})
     coverage = float(summary.get("min_coverage", 0))
+    accuracy = float(summary.get("min_accuracy", 0))
+    signed_keys = {
+        genome_evaluation_key(genome) for genome in evidence
+        if genome.fitness is not None
+    }
+    high_accuracy_quantile: float | None = None
+    if (reversal_frontier is None and accuracy >= .62
+            and coverage < PRESCREEN["coverage"] - .01):
+        # A large gap-derived threshold jump can erase the very directional
+        # edge this frontier exists to preserve. Trace a short monotonic curve
+        # and consume each signed phenotype once.
+        for offset in (.01, .02, .04, .06):
+            trial_quantile = max(0.0, frontier.confidence_quantile - offset)
+            probe = asdict(frontier)
+            probe.update({
+                "confidence_quantile": trial_quantile,
+                "fitness": None, "result": None, "genome_id": "",
+            })
+            if genome_evaluation_key(Genome(**probe).finalize()) not in signed_keys:
+                high_accuracy_quantile = trial_quantile
+                break
+        if high_accuracy_quantile is None:
+            return population
     use_reliability_rank = (
         reversal_frontier is None
         and coverage >= PRESCREEN["coverage"] - .01
@@ -4021,10 +4044,6 @@ def introduce_extra_trees_coverage_variant(
     use_ranked_tie_break = False
     ranked_quantile: float | None = None
     if use_reliability_rank:
-        signed_keys = {
-            genome_evaluation_key(genome) for genome in evidence
-            if genome.fitness is not None
-        }
         # First isolate how much of the calibration correctness rank may be
         # trusted before changing its model family or feature scope. Continue
         # only after the prior phenotype has a signed protected result.
@@ -4075,7 +4094,9 @@ def introduce_extra_trees_coverage_variant(
             if ranked_quantile is None:
                 return population
             use_ranked_tie_break = True
-    if (reversal_frontier is not None
+    if high_accuracy_quantile is not None:
+        quantile = high_accuracy_quantile
+    elif (reversal_frontier is not None
             and reversal_frontier.confidence_quantile < frontier.confidence_quantile
             and genome_structure_key(reversal_frontier) == genome_structure_key(frontier)):
         quantile = (
