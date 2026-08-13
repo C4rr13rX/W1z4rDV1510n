@@ -3967,6 +3967,7 @@ def introduce_extra_trees_coverage_variant(
     population: list[Genome], frontier: Genome | None, generation: int,
     reversal_frontier: Genome | None = None,
     protected_parent_ids: set[str] | None = None,
+    evidence: Sequence[Genome] = (),
 ) -> list[Genome]:
     """Spend one slot expanding a strong nonlinear tree specialist."""
     if extra_trees_frontier_rank(frontier) is None:
@@ -3978,6 +3979,35 @@ def introduce_extra_trees_coverage_variant(
         and coverage >= PRESCREEN["coverage"] - .01
         and not frontier.calibration_reliability
     )
+    reliability_trial: tuple[int, str, float] | None = None
+    if use_reliability_rank:
+        signed_keys = {
+            genome_evaluation_key(genome) for genome in evidence
+            if genome.fitness is not None
+        }
+        # First isolate how much of the calibration correctness rank may be
+        # trusted before changing its model family or feature scope. Continue
+        # only after the prior phenotype has a signed protected result.
+        for trial in (
+            (1, "core", .30), (1, "core", .10),
+            (2, "core", .10), (3, "trend_regime", .10),
+            (3, "flow_news", .10),
+        ):
+            version, pool, trial_quantile = trial
+            probe = asdict(frontier)
+            probe.update({
+                "confidence_quantile": trial_quantile,
+                "calibration_reliability": True,
+                "calibration_reliability_version": version,
+                "calibration_reliability_pool": pool,
+                "calibration_reliability_decay": 0.0,
+                "fitness": None, "result": None, "genome_id": "",
+            })
+            if genome_evaluation_key(Genome(**probe).finalize()) not in signed_keys:
+                reliability_trial = trial
+                break
+        if reliability_trial is None:
+            return population
     if (reversal_frontier is not None
             and reversal_frontier.confidence_quantile < frontier.confidence_quantile
             and genome_structure_key(reversal_frontier) == genome_structure_key(frontier)):
@@ -3997,16 +4027,19 @@ def introduce_extra_trees_coverage_variant(
         # correctness rank for abstention. A .30 quantile targets enough
         # actions to cross the floor while protected evaluation remains final.
         "confidence_quantile": (
-            .30 if use_reliability_rank else max(0.0, min(.30, quantile))
+            reliability_trial[2] if reliability_trial
+            else max(0.0, min(.30, quantile))
         ),
         "calibration_reliability": (
             True if use_reliability_rank else frontier.calibration_reliability
         ),
         "calibration_reliability_version": (
-            1 if use_reliability_rank else frontier.calibration_reliability_version
+            reliability_trial[0] if reliability_trial
+            else frontier.calibration_reliability_version
         ),
         "calibration_reliability_pool": (
-            "core" if use_reliability_rank else frontier.calibration_reliability_pool
+            reliability_trial[1] if reliability_trial
+            else frontier.calibration_reliability_pool
         ),
         "calibration_reliability_decay": (
             0.0 if use_reliability_rank else frontier.calibration_reliability_decay
@@ -6420,6 +6453,12 @@ def main() -> int:
                         multiscale_boundary_frontier,
                     ) if genome is not None
                 },
+                evidence=load_direct_descendant_evidence(
+                    args.state_dir,
+                    ({extra_trees_frontier.genome_id}
+                     if extra_trees_frontier is not None else set()),
+                    signature,
+                ),
             )
             population = introduce_regime_shift_variants(
                 population, regime_shift_frontier, generation,

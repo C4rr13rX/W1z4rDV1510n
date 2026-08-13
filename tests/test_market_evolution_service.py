@@ -2227,6 +2227,26 @@ def test_near_coverage_extra_trees_learns_reliability_instead_of_dropping_leaf()
     assert child.calibration_reliability_pool == "core"
     assert child.confidence_quantile == pytest.approx(.30)
 
+    child.fitness = 311
+    child.result = {"evaluation_signature": "current", "summary": {
+        "min_accuracy": .545, "min_balanced_accuracy": .549,
+        "min_mcc": .099, "min_coverage": .412,
+        "min_expectancy": -.0017, "min_profit_factor": .866,
+    }}
+    population = seed_genomes(8, random.Random(185))
+    for genome in population[1:]:
+        genome.fitness = None
+        genome.result = None
+    repaired = evolution.introduce_extra_trees_coverage_variant(
+        population, frontier, 1116, evidence=[child],
+    )
+    next_child = next(
+        genome for genome in repaired if genome.parents == [frontier.genome_id]
+    )
+    assert next_child.calibration_reliability_version == 1
+    assert next_child.calibration_reliability_pool == "core"
+    assert next_child.confidence_quantile == pytest.approx(.10)
+
 
 def test_profitable_primary_regressor_gets_independent_coverage_lane():
     frontier = seed_genomes(1, random.Random(197))[0]
