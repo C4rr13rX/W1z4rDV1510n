@@ -3441,7 +3441,14 @@ def introduce_coverage_repair_variants(
         genome for genome in evaluated
         if base.genome_id in genome.parents
         and genome_structure_key(genome) != genome_structure_key(base)
-        and int((genome.result or {}).get("evaluated_folds", 0)) >= 2
+        and (
+            int((genome.result or {}).get("evaluated_folds", 0)) >= 2
+            or (
+                genome.calibration_reliability
+                and genome.calibration_reliability_version >= 6
+                and int((genome.result or {}).get("evaluated_folds", 0)) >= 1
+            )
+        )
         and (
             float((genome.result or {}).get("summary", {}).get(
                 "min_accuracy", 1

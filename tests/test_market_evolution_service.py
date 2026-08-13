@@ -1043,6 +1043,39 @@ def test_failed_multiscale_children_probe_new_memory_scales():
         .283, .30,
     ]
 
+    # A mature reliability phenotype can fail the first protected fold. That
+    # is signed evidence, not a reason to regenerate the same cached version-7
+    # phenotype forever; early structural hypotheses above still need 2 folds.
+    threshold_failures = [
+        Genome(**{
+            **genome.__dict__, "generation": 330 + index,
+            "genome_id": "", "fitness": 1200,
+            "result": {"evaluated_folds": 1, "summary": {
+                "min_accuracy": .47, "min_balanced_accuracy": .48,
+                "min_mcc": -.03, "min_expectancy": -.001,
+                "min_profit_factor": .91, "min_coverage": .70,
+            }},
+        }).finalize()
+        for index, genome in enumerate(threshold_variants)
+    ]
+    orientation_population = evolution.introduce_coverage_repair_variants(
+        following,
+        [upper, *failed, *prior_memory_failures, *widened_failures,
+         *no_flip_failures, *linear_reliability_failures,
+         *nonlinear_failures, *isolated_failures, *integrated_failures,
+         *recent_failures, *mature_decay_failures, *threshold_failures],
+        44, lower,
+    )
+    orientation_variants = [
+        genome for genome in orientation_population
+        if genome.parents == [upper.genome_id] and genome.fitness is None
+    ]
+    assert len(orientation_variants) == 2
+    assert all(genome.calibration_reliability_version == 8
+               for genome in orientation_variants)
+    assert {genome.calibration_reliability_pool
+            for genome in orientation_variants} == {"flow_news", "combined"}
+
 
 def test_multiscale_regressor_tunes_blend_on_calibration_only():
     class FixedModel:
