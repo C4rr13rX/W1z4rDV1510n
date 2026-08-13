@@ -421,6 +421,26 @@ It raised coverage to 74.51 percent but scored only 52.69 percent accuracy, PF
 0.936, and negative expectancy, so prescreen rejected it. That signed failure
 is useful scheduler evidence and has no promotion effect.
 
+Minimum-leaf response is not monotonic. On the same 12-leaf return phenotype,
+support 12 was worse than support 8, but support 20 recovered to 60.26 percent
+accuracy, 61.20 percent balanced accuracy, PF 1.019, and positive expectancy.
+Its bounded cutoff child `73ac58fe4f342b67` then reached 59.75 percent
+accuracy, 60.15 percent balanced accuracy, PF 1.033, positive expectancy, and
+59.28 percent coverage. A scheduler must not prune a topology direction from
+one merely dominated intermediate. Once a recovered high-support endpoint is
+within one coverage point, the controller now signs its immediate support
+neighbors at fixed cutoff before changing coordinates.
+
+Generation 1200 independently found a smaller 10-leaf topology,
+`a7261f157d6dd22d`, with 60.26 percent accuracy, 61.49 percent balanced
+accuracy, PF 1.109, positive expectancy, and 54.75 percent coverage. Because it
+already clears the working direction and PF thresholds and misses the general
+55-percent recovery bound by only 0.25 percentage points, it receives exactly
+one bounded cutoff-recovery trial. This narrow economics override requires at
+least 60 percent accuracy and balanced accuracy, PF 1.10, positive expectancy,
+54 percent coverage, and valid ECE. It does not alter prescreen, multi-fold,
+unseen-asset, calibration, ghost, or live admission requirements.
+
 Coverage repair treats repeated identical outcomes on either side of the
 coverage floor as evidence of a discrete tree-score plateau. In particular,
 two lower-threshold descendants that admit the same harmful leaf are enough to

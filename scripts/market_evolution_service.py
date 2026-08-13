@@ -5230,9 +5230,25 @@ def introduce_champion_return_tree_variant(
     topology_recovery_bases = sorted(
         (
             observed for observed in topology_bases
-            if float(((observed.result or {}).get("summary") or {}).get(
-                "min_coverage", 0
-            )) >= .55
+            if (
+                float(((observed.result or {}).get("summary") or {}).get(
+                    "min_coverage", 0
+                )) >= .55
+                or (
+                    float(((observed.result or {}).get("summary") or {}).get(
+                        "min_coverage", 0
+                    )) >= .54
+                    and float(((observed.result or {}).get("summary") or {}).get(
+                        "min_accuracy", 0
+                    )) >= .60
+                    and float(((observed.result or {}).get("summary") or {}).get(
+                        "min_balanced_accuracy", 0
+                    )) >= .60
+                    and float(((observed.result or {}).get("summary") or {}).get(
+                        "min_profit_factor", 0
+                    )) >= 1.10
+                )
+            )
             and PRESCREEN["coverage"] - float(
                 ((observed.result or {}).get("summary") or {}).get(
                     "min_coverage", 0
@@ -5386,6 +5402,69 @@ def introduce_champion_return_tree_variant(
         proposal = Genome(**payload).finalize()
         if genome_evaluation_key(proposal) not in known_keys:
             variant = proposal
+    # A large smoothing step can recover direction after a weaker intermediate
+    # leaf size, but the recovered endpoint may still sit just below coverage.
+    # Search the immediate leaf neighborhood on that exact cutoff before
+    # changing another coordinate.  The lower neighbor is important because
+    # tree ensembles are not monotonic in ``min_samples_leaf``; only searching
+    # larger leaves can skip the local accuracy/coverage intersection.
+    recovered_leaf_bases = sorted(
+        (
+            observed for observed in topology_bases
+            if observed.min_samples_leaf >= champion.min_samples_leaf + 8
+            and 0 < PRESCREEN["coverage"] - float(
+                ((observed.result or {}).get("summary") or {}).get(
+                    "min_coverage", 0
+                )
+            ) <= .01
+            and float(((observed.result or {}).get("summary") or {}).get(
+                "min_accuracy", 0
+            )) >= .595
+            and float(((observed.result or {}).get("summary") or {}).get(
+                "min_balanced_accuracy", 0
+            )) >= .59
+            and float(((observed.result or {}).get("summary") or {}).get(
+                "min_profit_factor", 0
+            )) >= 1.0
+            and float(((observed.result or {}).get("summary") or {}).get(
+                "min_expectancy", 0
+            )) > 0
+            and float(((observed.result or {}).get("summary") or {}).get(
+                "max_ece", 1
+            )) <= PRESCREEN["ece"]
+        ),
+        key=lambda observed: (
+            float(((observed.result or {}).get("summary") or {}).get(
+                "min_accuracy", 0
+            )),
+            float(((observed.result or {}).get("summary") or {}).get(
+                "min_coverage", 0
+            )),
+            float(((observed.result or {}).get("summary") or {}).get(
+                "min_profit_factor", 0
+            )),
+        ),
+        reverse=True,
+    )
+    if variant is None:
+        for base in recovered_leaf_bases:
+            for min_samples_leaf in (
+                max(2, base.min_samples_leaf - 4),
+                min(100, base.min_samples_leaf + 4),
+            ):
+                payload = asdict(base)
+                payload.update({
+                    "learner_kind": "extra_trees_regressor",
+                    "min_samples_leaf": min_samples_leaf,
+                    "generation": generation, "parents": [base.genome_id],
+                    "fitness": None, "result": None, "genome_id": "",
+                })
+                proposal = Genome(**payload).finalize()
+                if genome_evaluation_key(proposal) not in known_keys:
+                    variant = proposal
+                    break
+            if variant is not None:
+                break
     # Near the economics boundary, improve the ranking function before
     # admitting weaker signals. Smoother leaves can generalize return magnitude
     # across assets while the quantile remains fixed, making this a controlled
