@@ -1194,12 +1194,23 @@ def brain_gate_retry_exhausted(
             and brain_gate_attempt_count(events_path, genome_id) >= max_attempts)
 
 
-def recover_pending_gate(state_dir: Path, champion: Genome | None,
-                         pending: str | None) -> str | None:
-    """Restore a neural-validation obligation that was not yet recorded."""
-    if pending or champion is None:
+def recover_pending_gate(
+    state_dir: Path, champion: Genome | None, pending: str | None,
+    *, prefer_champion: bool = False,
+) -> str | None:
+    """Restore a neural-validation obligation that was not yet recorded.
+
+    A current ungated champion is stronger evidence than a stale queued
+    hypothesis.  ``prefer_champion`` makes it the next obligation without
+    disturbing an already-running isolated gate.
+    """
+    if champion is None:
         return pending
     report = state_dir / "brain-gate-reports" / f"{champion.genome_id}.smoke.json"
+    if prefer_champion and not report.is_file():
+        return champion.genome_id
+    if pending:
+        return pending
     return None if report.is_file() else champion.genome_id
 
 
@@ -5723,6 +5734,10 @@ def main() -> int:
                     atomic_json(
                         args.state_dir / "champion.json", asdict(champion)
                     )
+                pending_gate_genome = recover_pending_gate(
+                    args.state_dir, champion, pending_gate_genome,
+                    prefer_champion=True,
+                )
                 append_event(
                     events_path, "brain_gate_champion_rolled_back",
                     rejected=gate_rejected,
@@ -5761,7 +5776,8 @@ def main() -> int:
         # one-expensive-regime resource migration above, diversity invariants
         # are applied only after evaluation at the next real breeding boundary.
         pending_gate_genome = recover_pending_gate(
-            args.state_dir, champion, pending_gate_genome
+            args.state_dir, champion, pending_gate_genome,
+            prefer_champion=True,
         )
         append_event(events_path, "resumed", generation=generation, population=len(population))
     else:

@@ -168,6 +168,20 @@ def test_unfinished_champion_gate_is_recovered_after_restart(tmp_path):
     assert recover_pending_gate(tmp_path, champion, "newer") == "newer"
 
 
+def test_gate_rollback_prioritizes_ungated_restored_champion(tmp_path):
+    champion = seed_genomes(4, random.Random(8))[0]
+    assert recover_pending_gate(
+        tmp_path, champion, "stale-queued-candidate", prefer_champion=True,
+    ) == champion.genome_id
+
+    report = tmp_path / "brain-gate-reports" / f"{champion.genome_id}.smoke.json"
+    report.parent.mkdir(parents=True)
+    report.write_text("{}")
+    assert recover_pending_gate(
+        tmp_path, champion, "stale-queued-candidate", prefer_champion=True,
+    ) == "stale-queued-candidate"
+
+
 def test_dataset_signature_covers_primary_and_news_inputs(tmp_path):
     primary = tmp_path / "primary.json"
     primary.write_text("[]")
