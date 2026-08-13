@@ -3288,6 +3288,60 @@ def test_outcome_pool_accuracy_discovery_preserves_predicted_economics():
     )
 
 
+def test_outcome_pool_ignores_an_unreliable_profit_ranking():
+    baseline = np.asarray([.9, .58, .57, .56, .64, .36, .55, .7, .7])
+    predicted_profit = baseline.copy()
+    predicted_profit[5] = .90
+    reliability = np.ones_like(baseline)
+    reliability[5] = 0.0
+    uncertainty = np.zeros_like(baseline)
+
+    assert evolution.outcome_acquisition(
+        predicted_profit, uncertainty, accuracy_discovery=True,
+        target_reliability=reliability,
+    ) == pytest.approx(evolution.outcome_acquisition(
+        baseline, uncertainty, accuracy_discovery=True,
+        target_reliability=reliability,
+    ))
+
+
+def test_outcome_pool_suppresses_profit_discovery_when_rank_is_unreliable():
+    class FixedOutcomeModel:
+        def predict(self, values):
+            target = np.asarray([.8, .64, .62, .62, .66, .72, .58, .7, .7])
+            return np.tile(target, (len(values), 1))
+
+    population = seed_genomes(8, random.Random(419))
+    evaluated = seed_genomes(8, random.Random(420))
+    for index, genome in enumerate(evaluated):
+        genome.fitness = 2000 - index
+        genome.result = {
+            "evaluated_folds": 3, "requested_folds": 3,
+            "summary": {"min_accuracy": .56, "min_profit_factor": 1.0},
+        }
+    for genome in population[3:]:
+        genome.fitness = None
+        genome.result = None
+    width = len(evolution.genome_outcome_vector(population[0]))
+    targets = len(evolution.OUTCOME_POOL_TARGETS)
+    correlations = [.4] * targets
+    correlations[evolution.OUTCOME_POOL_TARGETS.index("profit_factor")] = -.1
+    pool = evolution.GenomeOutcomePool(
+        np.zeros(width), np.ones(width), np.zeros(targets), np.ones(targets),
+        [FixedOutcomeModel(), FixedOutcomeModel()], 120,
+        [.05] * targets, [.10] * targets, correlations, True,
+    )
+
+    _, report = evolution.introduce_outcome_pool_variant(
+        population, evaluated, pool, 432, random.Random(421)
+    )
+
+    assert report["proposed"] is True
+    assert report["target_reliability"]["profit_factor"] is False
+    assert report["profit_discovery_suppressed"] is True
+    assert report["acquisition_mode"] == "balanced_safe_improvement"
+
+
 def test_active_outcome_pool_reserves_only_one_reproduction_slot():
     class FixedOutcomeModel:
         def predict(self, values):

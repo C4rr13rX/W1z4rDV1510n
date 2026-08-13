@@ -2904,36 +2904,47 @@ def nudge_genome(parent: Genome, generation: int, rng: random.Random) -> Genome:
 def outcome_acquisition(
     mean: np.ndarray, uncertainty: np.ndarray, *, profit_discovery: bool = False,
     accuracy_discovery: bool = False,
+    target_reliability: np.ndarray | None = None,
 ) -> float:
     fold, accuracy, balanced, mcc, coverage, profit, expectancy, calibration, drawdown = mean
+    reliable = (np.ones(len(mean), dtype=np.float64)
+                if target_reliability is None else np.asarray(
+                    target_reliability, dtype=np.float64
+                ))
+    profit_reliability = float(reliable[5])
+    expectancy_reliability = float(reliable[6])
     if accuracy_discovery:
         # Once the validated champion has stopped moving, let the learned
         # genome/outcome pool search deliberately for more directional signal.
-        # Predicted economics remain constraints rather than being traded away:
-        # profit is normalized from PF [0, 3], so one third represents PF 1.0.
+        # Chronologically validated predicted economics remain constraints
+        # rather than being traded away. Unreliable surrogate targets exert no
+        # acquisition force; protected evaluation remains authoritative.
         return float(
             4.0 * fold + 14.0 * accuracy + 5.0 * balanced + 2.0 * mcc
-            + 2.0 * coverage + 4.0 * profit + 1.5 * expectancy
+            + 2.0 * coverage + 4.0 * profit_reliability * profit
+            + 1.5 * expectancy_reliability * expectancy
             + .5 * calibration + .5 * drawdown
             - 8.0 * max(0.0, .60 - coverage)
-            - 12.0 * max(0.0, (1.0 / 3.0) - profit)
+            - 12.0 * profit_reliability * max(0.0, (1.0 / 3.0) - profit)
             + 1.0 * float(np.mean(uncertainty))
         )
     if profit_discovery:
         return float(
             1.0 * fold + 2.5 * accuracy + 1.0 * balanced + .75 * mcc
-            + 2.0 * coverage + 20.0 * profit + 1.5 * expectancy
+            + 2.0 * coverage + 20.0 * profit_reliability * profit
+            + 1.5 * expectancy_reliability * expectancy
             + .25 * calibration + .25 * drawdown
             - 4.0 * max(0.0, .60 - coverage)
-            - 3.0 * max(0.0, 2.0 / 3.0 - profit)
+            - 3.0 * profit_reliability * max(0.0, 2.0 / 3.0 - profit)
             + 1.25 * float(np.mean(uncertainty))
         )
     return float(
         4.0 * fold + 3.0 * accuracy + 1.5 * balanced + 1.0 * mcc
-        + 2.0 * coverage + 4.0 * profit + 1.5 * expectancy
+        + 2.0 * coverage + 4.0 * profit_reliability * profit
+        + 1.5 * expectancy_reliability * expectancy
         + .5 * calibration + .5 * drawdown
         - 5.0 * max(0.0, .60 - coverage)
-        - 5.0 * max(0.0, 2.0 / 3.0 - profit)
+        - 5.0 * profit_reliability * max(0.0, 2.0 / 3.0 - profit)
         + .75 * float(np.mean(uncertainty))
     )
 
@@ -2958,6 +2969,17 @@ def introduce_outcome_pool_variant(
     }
     if pool is None or not pool.active or not population or not evaluated:
         return population, report
+    target_reliability = np.asarray([
+        float(mae < baseline and rank >= .10)
+        for mae, baseline, rank in zip(
+            pool.validation_mae, pool.baseline_mae,
+            pool.validation_rank_correlation,
+        )
+    ], dtype=np.float64)
+    report["target_reliability"] = dict(zip(
+        OUTCOME_POOL_TARGETS,
+        (bool(value) for value in target_reliability),
+    ))
     signed = [genome for genome in evaluated if genome.fitness is not None]
     full_fold_bases = sorted(signed, key=lambda genome: (
             int((genome.result or {}).get("evaluated_folds", 0)),
@@ -3022,12 +3044,17 @@ def introduce_outcome_pool_variant(
     candidates = list(proposals.values())
     means, uncertainties = pool.predict(candidates)
     accuracy_discovery = plateau_generations >= 24 and generation % 3 == 1
-    profit_discovery = not accuracy_discovery and generation % 3 == 0
+    profit_discovery_requested = not accuracy_discovery and generation % 3 == 0
+    profit_index = OUTCOME_POOL_TARGETS.index("profit_factor")
+    profit_discovery = (
+        profit_discovery_requested and bool(target_reliability[profit_index])
+    )
     ranked = sorted(
         zip(candidates, means, uncertainties),
         key=lambda item: outcome_acquisition(
             item[1], item[2], profit_discovery=profit_discovery,
             accuracy_discovery=accuracy_discovery,
+            target_reliability=target_reliability,
         ), reverse=True,
     )
     protected_parent_ids = protected_parent_ids or set()
@@ -3077,6 +3104,7 @@ def introduce_outcome_pool_variant(
         "acquisition": outcome_acquisition(
             mean, uncertainty, profit_discovery=profit_discovery,
             accuracy_discovery=accuracy_discovery,
+            target_reliability=target_reliability,
         ),
         "acquisition_mode": (
             "accuracy_discovery" if accuracy_discovery else
@@ -3084,6 +3112,9 @@ def introduce_outcome_pool_variant(
             "balanced_safe_improvement"
         ),
         "plateau_generations": int(plateau_generations),
+        "profit_discovery_suppressed": bool(
+            profit_discovery_requested and not profit_discovery
+        ),
         "candidate_search_size": len(candidates),
         "known_phenotypes_filtered": known_phenotypes_filtered,
         "duplicate_proposals_filtered": duplicate_proposals_filtered,
