@@ -415,6 +415,11 @@ one of its historical points outranks the remaining active pool. This closes a
 live loop in which version-8 `combined` reliability produced the same protected
 outcome 99 times at numerically distinct quantiles. Local refinement now ranks
 only active pools; all statistical and neural gates remain unchanged.
+Generation 1196 supplied the live proof: the reserved child switched to
+`flow_news` candidate `32d723e59b0e1d14` instead of another `combined` alias.
+It raised coverage to 74.51 percent but scored only 52.69 percent accuracy, PF
+0.936, and negative expectancy, so prescreen rejected it. That signed failure
+is useful scheduler evidence and has no promotion effect.
 
 Coverage repair treats repeated identical outcomes on either side of the
 coverage floor as evidence of a discrete tree-score plateau. In particular,
