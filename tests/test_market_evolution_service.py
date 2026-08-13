@@ -2155,6 +2155,21 @@ def test_extra_trees_frontier_persists_and_expands_coverage(tmp_path):
     assert saved.genome_id == frontier.genome_id
     assert evolution.load_extra_trees_frontier(tmp_path).genome_id == frontier.genome_id
 
+    stronger_direction = Genome(**{
+        **frontier.__dict__, "confidence_quantile": .29,
+        "generation": 41, "parents": [frontier.genome_id],
+        "genome_id": "", "fitness": 420,
+        "result": {"summary": {
+            "min_accuracy": .675, "min_balanced_accuracy": .670,
+            "min_mcc": .34, "min_coverage": .35,
+            "min_expectancy": .0010, "min_profit_factor": 1.08,
+        }},
+    }).finalize()
+    saved = evolution.update_extra_trees_frontier(
+        tmp_path, saved, stronger_direction,
+    )
+    assert saved.genome_id == stronger_direction.genome_id
+
     following, _ = evolution.breed_population(
         evaluated, 40, random.Random(82), {}
     )

@@ -5104,7 +5104,15 @@ def extra_trees_frontier_rank(genome: Genome | None) -> tuple[float, ...] | None
             and .25 <= coverage < PRESCREEN["coverage"]
             and expectancy > 0 and profit >= 1.0):
         return None
-    return (coverage, accuracy, balanced, mcc, expectancy, profit)
+    # This is a research frontier, not an admission score. Preserve the best
+    # directional lineage long enough to repair its coverage; otherwise a
+    # nearly admitted but exhausted mask can permanently hide a materially
+    # more accurate, still-profitable hypothesis. Coverage remains a
+    # tie-breaker and every descendant must still pass the real prescreen.
+    return (
+        float(accuracy >= .62), accuracy, balanced, mcc,
+        coverage, expectancy, profit,
+    )
 
 
 def load_extra_trees_frontier(state_dir: Path) -> Genome | None:
