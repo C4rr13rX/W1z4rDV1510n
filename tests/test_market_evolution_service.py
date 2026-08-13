@@ -2274,6 +2274,91 @@ def test_extra_trees_loss_making_coverage_crossing_triggers_bisection():
     )
 
 
+def test_stale_extra_trees_frontier_is_revalidated_before_q_changes():
+    frontier = seed_genomes(4, random.Random(193))[-1]
+    frontier.learner_kind = "extra_trees"
+    frontier.confidence_quantile = .271
+    frontier.result = {"evaluation_signature": "old", "summary": {
+        "min_accuracy": .675, "min_balanced_accuracy": .664,
+        "min_mcc": .330, "min_coverage": .419,
+        "min_expectancy": .0036, "min_profit_factor": 1.37,
+    }}
+    frontier.finalize()
+    population = seed_genomes(8, random.Random(194))
+    repaired = evolution.introduce_extra_trees_coverage_variant(
+        population, frontier, 1141, evidence=(), evaluation_id="current"
+    )
+    child = next(
+        genome for genome in repaired if genome.parents == [frontier.genome_id]
+    )
+    assert child.confidence_quantile == pytest.approx(frontier.confidence_quantile)
+    assert evolution.genome_evaluation_key(child) == evolution.genome_evaluation_key(frontier)
+
+
+def test_failed_current_revalidation_retires_stale_tree_lane():
+    frontier = seed_genomes(4, random.Random(195))[-1]
+    frontier.learner_kind = "extra_trees"
+    frontier.confidence_quantile = .271
+    frontier.result = {"evaluation_signature": "old", "summary": {
+        "min_accuracy": .675, "min_balanced_accuracy": .664,
+        "min_mcc": .330, "min_coverage": .419,
+        "min_expectancy": .0036, "min_profit_factor": 1.37,
+    }}
+    frontier.finalize()
+    payload = evolution.asdict(frontier)
+    payload.update({
+        "generation": 1141, "parents": [frontier.genome_id],
+        "genome_id": "", "fitness": 360,
+        "result": {"evaluation_signature": "current", "summary": {
+            "min_accuracy": .564, "min_balanced_accuracy": .570,
+            "min_mcc": .14, "min_coverage": .624,
+            "min_expectancy": -.0029, "min_profit_factor": .77,
+        }},
+    })
+    revalidated = evolution.Genome(**payload).finalize()
+    population = seed_genomes(8, random.Random(196))
+    before = [genome.genome_id for genome in population]
+    repaired = evolution.introduce_extra_trees_coverage_variant(
+        population, frontier, 1142, evidence=[revalidated],
+        evaluation_id="current",
+    )
+    assert [genome.genome_id for genome in repaired] == before
+
+
+def test_identical_submilliquantile_tree_behavior_retires_bracket():
+    frontier = seed_genomes(4, random.Random(197))[-1]
+    frontier.learner_kind = "extra_trees"
+    frontier.confidence_quantile = .271
+    frontier.result = {"evaluation_signature": "current", "summary": {
+        "min_accuracy": .675, "min_balanced_accuracy": .664,
+        "min_mcc": .330, "min_coverage": .419,
+        "min_acted_observations": 110,
+        "min_expectancy": .0036, "min_profit_factor": 1.37,
+    }}
+    frontier.finalize()
+    evidence = []
+    for generation, quantile in ((1140, .2705), (1141, .2706)):
+        payload = evolution.asdict(frontier)
+        payload.update({
+            "confidence_quantile": quantile, "generation": generation,
+            "parents": [frontier.genome_id], "genome_id": "", "fitness": 360,
+            "result": {"evaluation_signature": "current", "summary": {
+                "min_accuracy": .564, "min_balanced_accuracy": .570,
+                "min_mcc": .14, "min_coverage": .624,
+                "min_acted_observations": 155,
+                "min_expectancy": -.0029, "min_profit_factor": .77,
+            }},
+        })
+        evidence.append(evolution.Genome(**payload).finalize())
+    population = seed_genomes(8, random.Random(198))
+    before = [genome.genome_id for genome in population]
+    repaired = evolution.introduce_extra_trees_coverage_variant(
+        population, frontier, 1142, reversal_frontier=evidence[-1],
+        evidence=evidence, evaluation_id="current",
+    )
+    assert [genome.genome_id for genome in repaired] == before
+
+
 def test_near_coverage_extra_trees_learns_reliability_instead_of_dropping_leaf():
     frontier = seed_genomes(4, random.Random(183))[-1]
     frontier.learner_kind = "extra_trees"

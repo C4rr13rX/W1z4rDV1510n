@@ -4006,10 +4006,38 @@ def introduce_extra_trees_coverage_variant(
     reversal_frontier: Genome | None = None,
     protected_parent_ids: set[str] | None = None,
     evidence: Sequence[Genome] = (),
+    evaluation_id: str | None = None,
 ) -> list[Genome]:
     """Spend one slot expanding a strong nonlinear tree specialist."""
     if extra_trees_frontier_rank(frontier) is None:
         return population
+    historical_frontier = frontier
+    current_baseline: Genome | None = None
+    stale_frontier = bool(
+        evaluation_id
+        and (frontier.result or {}).get("evaluation_signature") != evaluation_id
+    )
+    if stale_frontier:
+        frontier_key = genome_evaluation_key(frontier)
+        current_baseline = next((
+            genome for genome in evidence
+            if genome.fitness is not None
+            and (genome.result or {}).get("evaluation_signature") == evaluation_id
+            and genome_evaluation_key(genome) == frontier_key
+        ), None)
+        if current_baseline is not None:
+            # A coordinate experiment is causal only when its upper endpoint
+            # was measured on the same data. If exact revalidation no longer
+            # qualifies as a profitable research frontier, retire the stale
+            # lane instead of attributing dataset drift to confidence q.
+            if extra_trees_frontier_rank(current_baseline) is None:
+                return population
+            frontier = current_baseline
+    if (evaluation_id and reversal_frontier is not None
+            and (reversal_frontier.result or {}).get(
+                "evaluation_signature"
+            ) != evaluation_id):
+        reversal_frontier = None
     summary = (frontier.result or {}).get("summary", {})
     coverage = float(summary.get("min_coverage", 0))
     accuracy = float(summary.get("min_accuracy", 0))
@@ -4017,8 +4045,10 @@ def introduce_extra_trees_coverage_variant(
         genome_evaluation_key(genome) for genome in evidence
         if genome.fitness is not None
     }
+    revalidate_stale_frontier = stale_frontier and current_baseline is None
     high_accuracy_quantile: float | None = None
-    if (reversal_frontier is None and accuracy >= .62
+    if (not revalidate_stale_frontier and reversal_frontier is None
+            and accuracy >= .62
             and coverage < PRESCREEN["coverage"] - .01):
         # A large gap-derived threshold jump can erase the very directional
         # edge this frontier exists to preserve. Trace a short monotonic curve
@@ -4036,7 +4066,8 @@ def introduce_extra_trees_coverage_variant(
         if high_accuracy_quantile is None:
             return population
     use_reliability_rank = (
-        reversal_frontier is None
+        not revalidate_stale_frontier
+        and reversal_frontier is None
         and coverage >= PRESCREEN["coverage"] - .01
         and not frontier.calibration_reliability
     )
@@ -4094,7 +4125,9 @@ def introduce_extra_trees_coverage_variant(
             if ranked_quantile is None:
                 return population
             use_ranked_tie_break = True
-    if high_accuracy_quantile is not None:
+    if revalidate_stale_frontier:
+        quantile = historical_frontier.confidence_quantile
+    elif high_accuracy_quantile is not None:
         quantile = high_accuracy_quantile
     elif (reversal_frontier is not None
             and reversal_frontier.confidence_quantile < frontier.confidence_quantile
@@ -4107,7 +4140,28 @@ def introduce_extra_trees_coverage_variant(
         phase = (.75, 1.0, 1.25)[generation % 3]
         offset = min(.06, max(.01, coverage_gap * .25)) * phase
         quantile = frontier.confidence_quantile - offset
-    payload = asdict(frontier)
+    if (not revalidate_stale_frontier and reversal_frontier is not None
+            and frontier.confidence_quantile - reversal_frontier.confidence_quantile <= .001):
+        reversal_summary = (reversal_frontier.result or {}).get("summary", {})
+        reversal_behavior = tuple(round(float(reversal_summary.get(key, 0)), 9) for key in (
+            "min_accuracy", "min_balanced_accuracy", "min_mcc",
+            "min_coverage", "min_acted_observations", "min_expectancy",
+            "min_profit_factor",
+        ))
+        same_behavior = sum(
+            1 for genome in evidence
+            if genome.fitness is not None
+            and genome_structure_key(genome) == genome_structure_key(frontier)
+            and tuple(round(float((genome.result or {}).get("summary", {}).get(key, 0)), 9)
+                      for key in (
+                          "min_accuracy", "min_balanced_accuracy", "min_mcc",
+                          "min_coverage", "min_acted_observations", "min_expectancy",
+                          "min_profit_factor",
+                      )) == reversal_behavior
+        )
+        if same_behavior >= 2:
+            return population
+    payload = asdict(historical_frontier if revalidate_stale_frontier else frontier)
     payload.update({
         "learner_kind": (
             "extra_trees_ranked" if use_ranked_tie_break
@@ -4135,7 +4189,7 @@ def introduce_extra_trees_coverage_variant(
         "calibration_reliability_decay": (
             0.0 if use_reliability_rank else frontier.calibration_reliability_decay
         ),
-        "generation": generation, "parents": [frontier.genome_id],
+        "generation": generation, "parents": [historical_frontier.genome_id],
         "fitness": None, "result": None, "genome_id": "",
     })
     variant = Genome(**payload).finalize()
@@ -6573,6 +6627,7 @@ def main() -> int:
                      if extra_trees_frontier is not None else set()),
                     signature,
                 ),
+                evaluation_id=signature,
             )
             population = introduce_regime_shift_variants(
                 population, regime_shift_frontier, generation,

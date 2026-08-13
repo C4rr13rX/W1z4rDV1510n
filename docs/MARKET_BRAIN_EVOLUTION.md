@@ -144,6 +144,28 @@ bounded neural retrieval or neuron-scoped sleep/checkpoint rather than more
 aggressive trimming. Every attempted action is appended as
 `memory_reclamation_attempt` evidence.
 
+The local long-lived market node still uses the legacy monolithic
+`brain-data/brain.bin` plus separate cold-tier shards. Use the staged migration
+preflight before scheduling its conversion to the same neuron-addressable
+`.wbrain` architecture used by the programming brain:
+
+```powershell
+& scripts/prepare_market_brain_wbrain_migration.ps1
+```
+
+The default invocation is read-only and prints exact RAM, disk, source-size,
+and process-ownership evidence. `-Execute` is accepted only when one exact
+healthy `127.0.0.1:8090` node owns the legacy state and every resource gate
+passes. It builds the current resumable migrator, requires a successful neural
+checkpoint, gracefully stops that exact node, hard-links the immutable settled
+source into an isolated runtime directory, and monitors the conversion under
+the private-memory circuit breaker. Its `finally` path always restarts and
+health-checks the untouched legacy production directory. A completed staged
+container is not promoted automatically; cold-open, behavior, memory, Django,
+production-manager, and ghost-only gates must pass before a separate atomic
+switch-over. Partial staging remains resumable and can never shadow the live
+`brain.bin`.
+
 The causal feature matrix is fingerprinted and cached at
 `runtime/cache/market-evolution-dataset-v4.joblib`; primary OHLCV files,
 supplemental derivatives, news, horizon, stride, seed, and evolution schema all

@@ -32,6 +32,7 @@
 *.ps1
 !scripts/monitor_migration_memory.ps1
 !scripts/resume_brain_migration_when_safe.ps1
+!scripts/prepare_market_brain_wbrain_migration.ps1
 !scripts/windows_memory.ps1
 !scripts/aws/show_programming_brain_watch.ps1
 !scripts/aws/start_programming_brain_proxy.ps1
