@@ -3178,6 +3178,20 @@ def return_tree_threshold_key(genome: Genome) -> str:
     return genome_evaluation_key(Genome(**payload).finalize())
 
 
+def return_tree_min_leaf_key(genome: Genome) -> str:
+    """Identify a return-tree cutoff while ignoring minimum leaf support."""
+    payload = asdict(genome)
+    payload.update({
+        "min_samples_leaf": 1,
+        "generation": 0,
+        "parents": [],
+        "genome_id": "",
+        "fitness": None,
+        "result": None,
+    })
+    return genome_evaluation_key(Genome(**payload).finalize())
+
+
 def tree_leaf_refinement_quality(genome: Genome) -> float:
     """Balance direction, economics, and coverage for a signed tree result."""
     summary = (genome.result or {}).get("summary") or {}
@@ -5290,9 +5304,24 @@ def introduce_champion_return_tree_variant(
     if variant is not None:
         topology_bases = []
     for base in topology_bases:
+        min_leaf_reversal = any(
+            observed.min_samples_leaf > base.min_samples_leaf
+            and return_tree_min_leaf_key(observed) == return_tree_min_leaf_key(base)
+            and (
+                float(((observed.result or {}).get("summary") or {}).get(
+                    "min_accuracy", 0
+                )) < .50
+                or float(((observed.result or {}).get("summary") or {}).get(
+                    "min_profit_factor", 0
+                )) < .80
+            )
+            for observed in return_evidence
+        )
         specifications = (
-            {"min_samples_leaf": min(100, base.min_samples_leaf + 4)},
-            {"min_samples_leaf": min(100, base.min_samples_leaf + 12)},
+            *(() if min_leaf_reversal else (
+                {"min_samples_leaf": min(100, base.min_samples_leaf + 4)},
+                {"min_samples_leaf": min(100, base.min_samples_leaf + 12)},
+            )),
             {"max_leaf_nodes": max(8, base.max_leaf_nodes - 2)},
             {"max_leaf_nodes": max(8, base.max_leaf_nodes - 4)},
             {"recency_half_life_days": max(

@@ -371,6 +371,16 @@ while the closest Pareto boundary is never repaired. Candidates are ordered by
 coverage proximity, then accuracy and economics; only after their finite
 topology coordinates are signed does scalar search on sibling curves resume.
 
+Topology coordinates are themselves causal branches. If the first increase in
+minimum leaf support causes a severe reversal (accuracy below 50 percent or PF
+below 0.8), larger minimum-leaf settings are not attempted. The controller
+records that signed failure and advances to leaf capacity while restoring the
+parent's minimum support and cutoff. Candidate `6f2bcbcaf7cea5e0` supplied this
+evidence: support `8 -> 12` crossed coverage at 61.09 percent but collapsed to
+42.93 percent accuracy, PF 0.626, and negative expectancy. It was rejected; the
+next live-ledger proposal holds q `0.1611117`, restores support 8, and changes
+only leaf capacity `11 -> 9`.
+
 Coverage repair treats repeated identical outcomes on either side of the
 coverage floor as evidence of a discrete tree-score plateau. In particular,
 two lower-threshold descendants that admit the same harmful leaf are enough to

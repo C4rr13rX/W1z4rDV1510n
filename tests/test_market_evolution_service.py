@@ -1962,6 +1962,52 @@ def test_return_tree_near_coverage_tradeoff_refines_ranking_not_cutoff():
     assert repair.parents == [observed.genome_id]
 
 
+def test_return_tree_severe_min_leaf_reversal_advances_coordinate():
+    population = seed_genomes(8, random.Random(200))
+    champion = population[0]
+    champion.learner_kind = "extra_trees"
+    champion.fitness = 2400
+    champion.result = {"evaluated_folds": 3, "requested_folds": 3}
+    base = Genome(**{
+        **champion.__dict__, "learner_kind": "extra_trees_regressor",
+        "confidence_quantile": .1611, "max_leaf_nodes": 11,
+        "min_samples_leaf": 8, "generation": 925,
+        "parents": ["profitable-return-frontier"],
+        "genome_id": "", "fitness": 420,
+        "result": {"summary": {
+            "min_accuracy": .5864, "min_balanced_accuracy": .599,
+            "min_mcc": .203, "min_profit_factor": 1.0068,
+            "min_expectancy": .000078, "min_coverage": .5973,
+        }},
+    }).finalize()
+    failed_smoothing = Genome(**{
+        **base.__dict__, "min_samples_leaf": 12,
+        "generation": 926, "parents": [base.genome_id],
+        "genome_id": "", "fitness": 1220,
+        "result": {"summary": {
+            "min_accuracy": .4293, "min_balanced_accuracy": .4362,
+            "min_mcc": -.131, "min_profit_factor": .626,
+            "min_expectancy": -.0048, "min_coverage": .6109,
+        }},
+    }).finalize()
+    for genome in population[1:]:
+        genome.fitness = None
+        genome.result = None
+
+    after = evolution.introduce_champion_return_tree_variant(
+        population, champion, [base, failed_smoothing], 927
+    )
+
+    repair = next(
+        genome for genome in after
+        if genome.learner_kind == "extra_trees_regressor"
+    )
+    assert repair.confidence_quantile == pytest.approx(.1611)
+    assert repair.min_samples_leaf == 8
+    assert repair.max_leaf_nodes == 9
+    assert repair.parents == [base.genome_id]
+
+
 def test_nearby_return_tree_evidence_survives_champion_quantile_handoff(tmp_path):
     old = seed_genomes(1, random.Random(193))[0]
     old.learner_kind = "extra_trees"
