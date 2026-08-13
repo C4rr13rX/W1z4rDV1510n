@@ -1909,6 +1909,11 @@ def test_return_tree_evidence_launches_direction_magnitude_hybrid():
     population = seed_genomes(8, random.Random(196))
     champion = population[0]
     champion.learner_kind = "extra_trees"
+    champion.max_iter = 180
+    champion.max_leaf_nodes = 31
+    champion.min_samples_leaf = 9
+    champion.recency_half_life_days = 1700
+    champion.finalize()
     champion.fitness = 2400
     champion.result = {"evaluated_folds": 3, "requested_folds": 3}
     evidence = []
@@ -1918,6 +1923,8 @@ def test_return_tree_evidence_launches_direction_magnitude_hybrid():
         evidence.append(Genome(**{
             **champion.__dict__, "learner_kind": "extra_trees_regressor",
             "confidence_quantile": quantile,
+            "max_iter": 120, "max_leaf_nodes": 17,
+            "min_samples_leaf": 21, "recency_half_life_days": 900,
             "generation": 918, "parents": [champion.genome_id],
             "genome_id": "", "fitness": 400,
             "result": {
@@ -1944,6 +1951,15 @@ def test_return_tree_evidence_launches_direction_magnitude_hybrid():
     )
     assert hybrid.confidence_quantile == pytest.approx(.18)
     assert hybrid.features == champion.features
+    assert hybrid.max_iter == 180
+    assert hybrid.max_leaf_nodes == 31
+    assert hybrid.min_samples_leaf == 9
+    assert hybrid.recency_half_life_days == pytest.approx(1700)
+    assert hybrid.selection_max_iter == 120
+    assert hybrid.selection_max_leaf_nodes == 17
+    assert hybrid.selection_min_samples_leaf == 21
+    assert hybrid.selection_recency_half_life_days == pytest.approx(900)
+    assert hybrid.parents == [champion.genome_id, evidence[0].genome_id]
 
 
 def test_hybrid_uses_classifier_direction_and_return_magnitude_for_selection():
@@ -2433,6 +2449,30 @@ def test_extra_trees_return_regressor_ranks_signed_magnitude():
     prediction = model.predict(values)
     assert prediction[0] < 0 < prediction[-1]
     assert prediction[-1] > prediction[len(prediction) // 2]
+
+
+def test_hybrid_return_regressor_uses_separate_selection_coordinates():
+    genome = seed_genomes(1, random.Random(202))[0]
+    genome.learner_kind = "extra_trees_hybrid"
+    genome.max_iter = 180
+    genome.max_leaf_nodes = 31
+    genome.min_samples_leaf = 9
+    genome.selection_max_iter = 120
+    genome.selection_max_leaf_nodes = 17
+    genome.selection_min_samples_leaf = 21
+    genome.finalize()
+
+    direction_shape = evolution.new_extra_trees_return_regressor(genome, 20)
+    selection_shape = evolution.new_extra_trees_return_regressor(
+        genome, 20, selection_coordinates=True,
+    )
+
+    assert direction_shape.n_estimators == 180
+    assert direction_shape.max_leaf_nodes == 31
+    assert direction_shape.min_samples_leaf == 9
+    assert selection_shape.n_estimators == 120
+    assert selection_shape.max_leaf_nodes == 17
+    assert selection_shape.min_samples_leaf == 21
 
 
 def test_champion_replacement_rejects_material_profitability_regression():

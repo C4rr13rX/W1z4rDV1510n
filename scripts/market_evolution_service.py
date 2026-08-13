@@ -50,7 +50,7 @@ if str(ROOT) not in sys.path:
 from scripts.market_memory_guard import VerifiedWorkingSetReclaimer
 
 FEATURE_SCHEMA = 5
-EVOLUTION_SCHEMA = 13
+EVOLUTION_SCHEMA = 14
 LEARNER_KINDS = (
     "classifier", "regressor", "extra_trees", "decomposed_regressor",
     "regime_regressor", "regime_decomposed_regressor",
@@ -284,6 +284,10 @@ class Genome:
     presentations: int
     feature_programs: list[dict[str, Any]] = field(default_factory=list)
     recency_half_life_days: float = 720.0
+    selection_max_iter: int = 0
+    selection_max_leaf_nodes: int = 0
+    selection_min_samples_leaf: int = 0
+    selection_recency_half_life_days: float = 0.0
     learner_kind: str = "classifier"
     market_weight: float = 1.0
     regime_feature: str = "rv24"
@@ -331,6 +335,29 @@ class Genome:
         self.calibration_reliability_decay = max(
             0.0, min(8.0, float(self.calibration_reliability_decay))
         )
+        if self.learner_kind == "extra_trees_hybrid":
+            self.selection_max_iter = min(360, max(
+                80, int(self.selection_max_iter or self.max_iter)
+            ))
+            self.selection_max_leaf_nodes = min(72, max(
+                8, int(self.selection_max_leaf_nodes or self.max_leaf_nodes)
+            ))
+            self.selection_min_samples_leaf = min(100, max(
+                8, int(self.selection_min_samples_leaf or self.min_samples_leaf)
+            ))
+            self.selection_recency_half_life_days = min(2200.0, max(
+                45.0, float(
+                    self.selection_recency_half_life_days
+                    or self.recency_half_life_days
+                )
+            ))
+        else:
+            self.selection_max_iter = int(self.max_iter)
+            self.selection_max_leaf_nodes = int(self.max_leaf_nodes)
+            self.selection_min_samples_leaf = int(self.min_samples_leaf)
+            self.selection_recency_half_life_days = float(
+                self.recency_half_life_days
+            )
         if (self.regime_bins > 1
                 or self.learner_kind in {"regime_regressor", "regime_decomposed_regressor"}):
             self.features = sorted(set(self.features) | {self.regime_feature})
@@ -364,6 +391,12 @@ class Genome:
         )
         payload["calibration_reliability_pool"] = self.calibration_reliability_pool
         payload["calibration_reliability_decay"] = self.calibration_reliability_decay
+        payload["selection_max_iter"] = self.selection_max_iter
+        payload["selection_max_leaf_nodes"] = self.selection_max_leaf_nodes
+        payload["selection_min_samples_leaf"] = self.selection_min_samples_leaf
+        payload["selection_recency_half_life_days"] = (
+            self.selection_recency_half_life_days
+        )
         self.genome_id = hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()[:16]
@@ -762,13 +795,24 @@ def new_return_regressor(genome: Genome, random_state: int) -> HistGradientBoost
 
 
 def new_extra_trees_return_regressor(
-    genome: Genome, random_state: int,
+    genome: Genome, random_state: int, *, selection_coordinates: bool = False,
 ) -> ExtraTreesRegressor:
     """Rank signed return magnitude with the champion's nonlinear tree shape."""
+    max_iter = (
+        genome.selection_max_iter if selection_coordinates else genome.max_iter
+    )
+    max_leaf_nodes = (
+        genome.selection_max_leaf_nodes
+        if selection_coordinates else genome.max_leaf_nodes
+    )
+    min_samples_leaf = (
+        genome.selection_min_samples_leaf
+        if selection_coordinates else genome.min_samples_leaf
+    )
     return ExtraTreesRegressor(
-        n_estimators=min(240, max(80, genome.max_iter)),
-        max_leaf_nodes=genome.max_leaf_nodes,
-        min_samples_leaf=genome.min_samples_leaf,
+        n_estimators=min(240, max(80, max_iter)),
+        max_leaf_nodes=max_leaf_nodes,
+        min_samples_leaf=min_samples_leaf,
         max_features="sqrt", n_jobs=1, random_state=random_state,
     )
 
@@ -1314,6 +1358,17 @@ def genome_evaluation_key(genome: Genome) -> str:
         payload["learning_rate"] = 0.0
         payload["l2_regularization"] = 0.0
         payload["max_iter"] = min(240, max(80, int(payload["max_iter"])))
+    if learner == "extra_trees_hybrid":
+        payload["selection_max_iter"] = min(
+            240, max(80, int(payload["selection_max_iter"]))
+        )
+    else:
+        payload["selection_max_iter"] = int(payload["max_iter"])
+        payload["selection_max_leaf_nodes"] = int(payload["max_leaf_nodes"])
+        payload["selection_min_samples_leaf"] = int(payload["min_samples_leaf"])
+        payload["selection_recency_half_life_days"] = float(
+            payload["recency_half_life_days"]
+        )
     if learner not in {"decomposed_regressor", "regime_decomposed_regressor"}:
         payload["market_weight"] = 1.0
     if learner not in {"regime_regressor", "regime_decomposed_regressor"}:
@@ -2310,11 +2365,13 @@ def evaluate_genome(genome: Genome, dataset: dict[str, Any], *, folds: int,
                     random_state=1700 + fold,
                 ).fit(x_fit, y_fit, sample_weight=weights)
                 return_model = new_extra_trees_return_regressor(
-                    genome, 2700 + fold,
+                    genome, 2700 + fold, selection_coordinates=True,
                 ).fit(
                     x_fit,
                     np.asarray([row["return"] for row in fit], dtype=np.float64),
-                    sample_weight=weights,
+                    sample_weight=causal_weights(
+                        genome.selection_recency_half_life_days
+                    ),
                 )
                 raw_model = ExtraTreesHybridModel(direction_model, return_model)
                 model = Surrogate(raw_model, "extra_trees_hybrid")
@@ -2617,6 +2674,10 @@ def mutate(parent: Genome, generation: int, rng: random.Random) -> Genome:
         feature_programs=programs,
         recency_half_life_days=min(2200, max(45, parent.recency_half_life_days
                                            * math.exp(rng.gauss(0, .25)))),
+        selection_max_iter=parent.selection_max_iter,
+        selection_max_leaf_nodes=parent.selection_max_leaf_nodes,
+        selection_min_samples_leaf=parent.selection_min_samples_leaf,
+        selection_recency_half_life_days=parent.selection_recency_half_life_days,
         learner_kind=(rng.choice(LEARNER_KINDS)
                       if rng.random() < .12 else parent.learner_kind),
         market_weight=min(2.5, max(0.0, parent.market_weight + rng.gauss(0, .15))),
@@ -2670,6 +2731,19 @@ def crossover(left: Genome, right: Genome, generation: int, rng: random.Random) 
         feature_programs=inherited_programs,
         recency_half_life_days=choose(left.recency_half_life_days,
                                      right.recency_half_life_days),
+        selection_max_iter=choose(
+            left.selection_max_iter, right.selection_max_iter
+        ),
+        selection_max_leaf_nodes=choose(
+            left.selection_max_leaf_nodes, right.selection_max_leaf_nodes
+        ),
+        selection_min_samples_leaf=choose(
+            left.selection_min_samples_leaf, right.selection_min_samples_leaf
+        ),
+        selection_recency_half_life_days=choose(
+            left.selection_recency_half_life_days,
+            right.selection_recency_half_life_days,
+        ),
         learner_kind=choose(left.learner_kind, right.learner_kind),
         market_weight=choose(left.market_weight, right.market_weight),
         regime_feature=choose(left.regime_feature, right.regime_feature),
@@ -2693,6 +2767,17 @@ def genome_from_dict(payload: dict[str, Any]) -> Genome:
     compatible = dict(payload)
     compatible.setdefault("feature_programs", [])
     compatible.setdefault("recency_half_life_days", 720.0)
+    compatible.setdefault("selection_max_iter", compatible.get("max_iter", 0))
+    compatible.setdefault(
+        "selection_max_leaf_nodes", compatible.get("max_leaf_nodes", 0)
+    )
+    compatible.setdefault(
+        "selection_min_samples_leaf", compatible.get("min_samples_leaf", 0)
+    )
+    compatible.setdefault(
+        "selection_recency_half_life_days",
+        compatible.get("recency_half_life_days", 0.0),
+    )
     compatible.setdefault("learner_kind", "classifier")
     compatible.setdefault("market_weight", 1.0)
     compatible.setdefault("regime_feature", "rv24")
@@ -2765,6 +2850,13 @@ def genome_outcome_vector(genome: Genome) -> np.ndarray:
         _bounded(genome.presentations, 2, 9),
         _bounded(math.log(max(genome.recency_half_life_days, 1)), math.log(45),
                  math.log(2200)),
+        _bounded(genome.selection_max_iter, 80, 240),
+        _bounded(genome.selection_max_leaf_nodes, 8, 72),
+        _bounded(genome.selection_min_samples_leaf, 8, 100),
+        _bounded(
+            math.log(max(genome.selection_recency_half_life_days, 1)),
+            math.log(45), math.log(2200),
+        ),
         _bounded(genome.market_weight, 0, 2.5),
         _bounded(genome.regime_bins, 1, 3),
         _bounded(genome.calibration_safety, 1, 12),
@@ -5399,26 +5491,51 @@ def introduce_champion_return_tree_variant(
     ]
     # Preserve the champion's direction classifier while a separate return
     # pool ranks WHEN to act. The launch requires signed evidence for both a
-    # profitable selective region and a quantile that clears coverage.
+    # profitable selective region and a quantile that clears coverage on the
+    # same return-tree phenotype.  Keeping feature views identical makes this
+    # a causal topology/cutoff fusion instead of silently changing the
+    # champion direction model at the same time.
+    compatible_hybrid_pairs = [
+        (selective, anchor)
+        for selective in profitable_selective
+        for anchor in coverage_anchors
+        if return_tree_threshold_key(selective) == return_tree_threshold_key(anchor)
+        if selective.features == champion.features
+        and selective.feature_programs == champion.feature_programs
+        and anchor.features == champion.features
+        and anchor.feature_programs == champion.feature_programs
+    ]
     if (variant is None and not priority_topology
-            and profitable_selective and coverage_anchors
+            and compatible_hybrid_pairs
             and not hybrid_evidence):
-        base = max(
-            coverage_anchors,
-            key=lambda observed: (
-                float(((observed.result or {}).get("summary") or {}).get(
+        selection_source, base = max(
+            compatible_hybrid_pairs,
+            key=lambda pair: (
+                float(((pair[0].result or {}).get("summary") or {}).get(
                     "min_profit_factor", 0
                 )),
-                float(((observed.result or {}).get("summary") or {}).get(
+                float(((pair[0].result or {}).get("summary") or {}).get(
                     "min_accuracy", 0
+                )),
+                float(((pair[1].result or {}).get("summary") or {}).get(
+                    "min_profit_factor", 0
                 )),
             ),
         )
+        parents = list(dict.fromkeys((
+            champion.genome_id, selection_source.genome_id, base.genome_id,
+        )))
         payload = asdict(champion)
         payload.update({
             "learner_kind": "extra_trees_hybrid",
             "confidence_quantile": base.confidence_quantile,
-            "generation": generation, "parents": [champion.genome_id],
+            "selection_max_iter": selection_source.max_iter,
+            "selection_max_leaf_nodes": selection_source.max_leaf_nodes,
+            "selection_min_samples_leaf": selection_source.min_samples_leaf,
+            "selection_recency_half_life_days": (
+                selection_source.recency_half_life_days
+            ),
+            "generation": generation, "parents": parents,
             "fitness": None, "result": None, "genome_id": "",
         })
         proposal = Genome(**payload).finalize()
