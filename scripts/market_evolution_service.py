@@ -3838,6 +3838,19 @@ def introduce_primary_coverage_variant(
             )) < PRESCREEN["profit_factor"]
         )
     ), None)
+    reversal_plateau_evidence: list[Genome] = []
+    if reversal is not None:
+        reversal_summary = (reversal.result or {}).get("summary", {})
+        reversal_plateau_evidence = [
+            genome for genome in lower_evidence
+            if float(((genome.result or {}).get("summary") or {}).get(
+                "min_coverage", 0
+            )) >= PRESCREEN["coverage"]
+            and all(abs(
+                float(((genome.result or {}).get("summary") or {}).get(field, 0))
+                - float(reversal_summary.get(field, 0))
+            ) < 1e-9 for field in plateau_fields)
+        ]
     proposal_base = frontier
     if reversal is not None:
         ranked_variants = sorted((
@@ -3851,12 +3864,15 @@ def introduce_primary_coverage_variant(
             and frontier.genome_id in genome.parents
             for genome in evidence
         )
-        if (frontier.learner_kind == "regressor" and plateau_evidence
+        if (frontier.learner_kind == "regressor"
+                and (plateau_evidence or len(reversal_plateau_evidence) >= 2)
                 and not ranked_variant_seen):
             # Signed evidence proves the ordinary regressor has a discrete
-            # confidence plateau: above it coverage is short, below it an
-            # entire harmful leaf enters. Preserve direction/fit exactly and
-            # test a causal within-leaf rank before mutating more coordinates.
+            # confidence plateau. It may be visible either above the coverage
+            # boundary or as repeated identical reversals below it; requiring
+            # only the former caused endless scalar bisection toward the same
+            # floating-point endpoint. Preserve direction/fit exactly and test
+            # a causal within-leaf rank before mutating more coordinates.
             payload = asdict(frontier)
             payload.update({
                 "learner_kind": "continuous_rank_regressor",

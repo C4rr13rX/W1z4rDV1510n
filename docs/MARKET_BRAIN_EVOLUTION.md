@@ -261,3 +261,11 @@ predicted coverage below 60 percent or normalized profit factor below 1.0. The
 pool still owns exactly one advisory slot and cannot supply fitness or admission
 evidence; the selected child remains unevaluated until every protected fold and
 unchanged safety gate signs its result.
+
+Coverage repair treats repeated identical outcomes on either side of the
+coverage floor as evidence of a discrete tree-score plateau. In particular,
+two lower-threshold descendants that admit the same harmful leaf are enough to
+stop asymptotic scalar bisection. The lane preserves the model, features,
+programs, and frontier threshold while switching only to deterministic
+within-tie confidence ranking; that descendant still has to earn the ordinary
+coverage, accuracy, profitability, calibration, unseen-asset, and ghost gates.
