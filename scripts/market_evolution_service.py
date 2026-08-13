@@ -3985,6 +3985,12 @@ def introduce_primary_coverage_variant(
                 genome_evaluation_key(genome)
                 for genome in [*population, *evidence]
             }
+            evaluated_keys = {
+                genome_evaluation_key(genome)
+                for genome in [*population, *evidence]
+                if genome.fitness is not None
+            }
+            margin_trial_keys: list[str] = []
             for raw_template in margin_templates:
                 template = normalize_program(raw_template)
                 template_key = program_name(template)
@@ -4010,7 +4016,9 @@ def introduce_primary_coverage_variant(
                     "fitness": None, "result": None, "genome_id": "",
                 })
                 proposal = Genome(**payload).finalize()
-                if genome_evaluation_key(proposal) in known_keys:
+                proposal_key = genome_evaluation_key(proposal)
+                margin_trial_keys.append(proposal_key)
+                if proposal_key in known_keys:
                     continue
                 protected_parent_ids = protected_parent_ids or set()
                 replacement = next((
@@ -4022,6 +4030,62 @@ def introduce_primary_coverage_variant(
                 if replacement is not None:
                     population[replacement] = proposal
                 return population
+            if not all(key in evaluated_keys for key in margin_trial_keys):
+                # A structurally reserved probe still lacks signed evidence.
+                # Never leapfrog it merely because its phenotype is known.
+                return population
+            # Every bounded margin interaction has now produced evidence. A
+            # return-tree leaf can ignore an added observation completely, so
+            # returning to its scalar confidence boundary would recreate the
+            # disproven reversal. Hold the original observations, programs,
+            # threshold and fit coordinates fixed while escalating only the
+            # learner architecture. Once these finite ablations are exhausted,
+            # yield the protected lane to general search instead of cycling.
+            ranked_parent = max(
+                ranked_overfloor_failure, key=lambda genome: genome.generation
+            )
+            margin_trials = [
+                genome for genome in evidence
+                if genome.fitness is not None
+                and frontier.genome_id in genome.parents
+                and ranked_parent.genome_id in genome.parents
+                and genome.learner_kind == "regressor"
+                and genome.confidence_quantile == frontier.confidence_quantile
+            ]
+            causal_parent_ids = [frontier.genome_id, ranked_parent.genome_id]
+            if margin_trials:
+                causal_parent_ids.append(max(
+                    margin_trials, key=lambda genome: genome.generation
+                ).genome_id)
+            for learner_kind in (
+                "decomposed_regressor", "extra_trees_regressor",
+                "multiscale_regressor",
+            ):
+                payload = asdict(frontier)
+                payload.update({
+                    "learner_kind": learner_kind,
+                    "confidence_quantile": frontier.confidence_quantile,
+                    "generation": generation,
+                    "parents": causal_parent_ids,
+                    "fitness": None, "result": None, "genome_id": "",
+                })
+                proposal = Genome(**payload).finalize()
+                proposal_key = genome_evaluation_key(proposal)
+                if proposal_key in known_keys:
+                    if proposal_key not in evaluated_keys:
+                        return population
+                    continue
+                protected_parent_ids = protected_parent_ids or set()
+                replacement = next((
+                    index for index in range(len(population) - 1, 0, -1)
+                    if population[index].fitness is None
+                    and not (set(population[index].parents)
+                             & protected_parent_ids)
+                ), None)
+                if replacement is not None:
+                    population[replacement] = proposal
+                return population
+            return population
         if ranked_underfloor:
             # Continue threshold bisection inside the ranked species. Reverting
             # to the ordinary regressor here would recreate the leaf plateau

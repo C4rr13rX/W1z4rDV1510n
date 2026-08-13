@@ -2313,6 +2313,87 @@ def test_primary_coverage_lane_changes_margin_after_ranked_reversal():
     assert set(child.features) >= set(frontier.features)
 
 
+def test_primary_coverage_lane_escalates_architecture_after_margin_exhaustion():
+    frontier = seed_genomes(1, random.Random(211))[0]
+    frontier.learner_kind = "regressor"
+    frontier.feature_programs = []
+    frontier.confidence_quantile = .21823
+    frontier.fitness = 410
+    frontier.result = {"evaluated_folds": 1, "summary": {
+        "min_accuracy": .6467, "min_balanced_accuracy": .6452,
+        "min_mcc": .2923, "min_coverage": .5976,
+        "min_acted_observations": 150, "min_expectancy": .00221,
+        "min_profit_factor": 1.2156,
+    }}
+    frontier.finalize()
+    failure = {
+        "min_accuracy": .4392, "min_balanced_accuracy": .4525,
+        "min_mcc": -.0942, "min_coverage": .6380,
+        "min_acted_observations": 160, "min_expectancy": -.0041,
+        "min_profit_factor": .7512,
+    }
+    reversal = Genome(**{
+        **frontier.__dict__, "confidence_quantile": .2181,
+        "generation": 1044, "parents": [frontier.genome_id],
+        "genome_id": "", "fitness": 300,
+        "result": {"evaluated_folds": 2, "summary": failure},
+    }).finalize()
+    ranked = Genome(**{
+        **frontier.__dict__, "learner_kind": "continuous_rank_regressor",
+        "generation": 1045, "parents": [frontier.genome_id],
+        "genome_id": "", "fitness": 300,
+        "result": {"evaluated_folds": 2, "summary": failure},
+    }).finalize()
+    evidence = [reversal, ranked]
+
+    for generation in range(1046, 1050):
+        population = seed_genomes(8, random.Random(generation))
+        for genome in population[1:]:
+            genome.fitness = None
+            genome.result = None
+        repaired = evolution.introduce_primary_coverage_variant(
+            population, frontier, evidence, generation,
+        )
+        child = next(
+            genome for genome in repaired if ranked.genome_id in genome.parents
+        )
+        assert child.learner_kind == "regressor"
+        child.fitness = 300
+        child.result = {"evaluated_folds": 2, "summary": failure}
+        evidence.append(child)
+
+    population = seed_genomes(8, random.Random(1050))
+    for genome in population[1:]:
+        genome.fitness = None
+        genome.result = None
+    repaired = evolution.introduce_primary_coverage_variant(
+        population, frontier, evidence, 1050,
+    )
+    child = next(
+        genome for genome in repaired if ranked.genome_id in genome.parents
+    )
+    assert child.learner_kind == "decomposed_regressor"
+    assert child.confidence_quantile == frontier.confidence_quantile
+    assert child.features == frontier.features
+    assert child.feature_programs == frontier.feature_programs
+    assert evidence[-1].genome_id in child.parents
+
+    child.fitness = 300
+    child.result = {"evaluated_folds": 2, "summary": failure}
+    evidence.append(child)
+    next_population = seed_genomes(8, random.Random(1051))
+    for genome in next_population[1:]:
+        genome.fitness = None
+        genome.result = None
+    continued = evolution.introduce_primary_coverage_variant(
+        next_population, frontier, evidence, 1051,
+    )
+    next_child = next(
+        genome for genome in continued if ranked.genome_id in genome.parents
+    )
+    assert next_child.learner_kind == "extra_trees_regressor"
+
+
 def test_primary_coverage_lane_escapes_an_identical_score_plateau():
     frontier = seed_genomes(1, random.Random(201))[0]
     frontier.learner_kind = "regressor"

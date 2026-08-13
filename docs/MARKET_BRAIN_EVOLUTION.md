@@ -291,4 +291,10 @@ previously unseen causal margin interaction at the frontier threshold. It
 preserves the original feature core and fit hyperparameters, records both the
 durable frontier and failed ranked probe as parents, and remains subject to all
 unchanged gates. Historical signed phenotypes prevent cycling through an
-already disproven interaction.
+already disproven interaction. The interaction catalogue is finite. When every
+catalogued interaction has signed evidence, the scheduler holds the frontier's
+observations, programs, fit coordinates, and threshold fixed and tests, in
+order, decomposed-return, extra-trees-return, and multiscale-return learners.
+These are isolated architecture ablations, not promotion evidence. Once they
+are also exhausted, the reserved lane yields to general evolution; it never
+falls back to the already disproven scalar bisection.
