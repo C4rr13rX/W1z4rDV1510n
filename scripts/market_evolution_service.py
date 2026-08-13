@@ -3913,6 +3913,68 @@ def introduce_primary_coverage_variant(
                 )) < PRESCREEN["profit_factor"]
             )
         ]
+        if ranked_overfloor_failure and not ranked_underfloor:
+            # The same threshold failed after within-leaf ranking, so the
+            # discontinuity is not a score-tie artifact. Continuing scalar
+            # bisection would preserve the harmful acted set. Spend the lane
+            # on one deterministic causal margin interaction instead. The
+            # original feature core, fit hyperparameters, and gate threshold
+            # remain intact; protected folds decide whether the new ordering
+            # generalizes.
+            margin_templates = (
+                {"op": "tanh_mix",
+                 "left": "asset_news_sentiment_acceleration",
+                 "right": "flow_divergence", "scale": 1.0},
+                {"op": "signed_sqrt_product",
+                 "left": "market_breadth_r6",
+                 "right": "relative_market_r6", "scale": 1.0},
+                {"op": "regime_gate",
+                 "left": "news_negative_share_24h",
+                 "right": "volatility_ratio", "scale": 1.0},
+                {"op": "abs_gap", "left": "futures_spot_basis",
+                 "right": "flow_imbalance", "scale": 1.0},
+            )
+            known_keys = {
+                genome_evaluation_key(genome)
+                for genome in [*population, *evidence]
+            }
+            for raw_template in margin_templates:
+                template = normalize_program(raw_template)
+                template_key = program_name(template)
+                payload = asdict(frontier)
+                programs = [
+                    dict(program) for program in frontier.feature_programs
+                    if program_name(program) != template_key
+                ]
+                programs.append(template)
+                payload.update({
+                    "learner_kind": "regressor",
+                    "feature_programs": programs[-10:],
+                    "features": sorted(set(frontier.features) | {
+                        template["left"], template["right"],
+                    }),
+                    "confidence_quantile": frontier.confidence_quantile,
+                    "generation": generation,
+                    "parents": [
+                        frontier.genome_id,
+                        max(ranked_overfloor_failure,
+                            key=lambda genome: genome.generation).genome_id,
+                    ],
+                    "fitness": None, "result": None, "genome_id": "",
+                })
+                proposal = Genome(**payload).finalize()
+                if genome_evaluation_key(proposal) in known_keys:
+                    continue
+                protected_parent_ids = protected_parent_ids or set()
+                replacement = next((
+                    index for index in range(len(population) - 1, 0, -1)
+                    if population[index].fitness is None
+                    and not (set(population[index].parents)
+                             & protected_parent_ids)
+                ), None)
+                if replacement is not None:
+                    population[replacement] = proposal
+                return population
         if ranked_underfloor:
             # Continue threshold bisection inside the ranked species. Reverting
             # to the ordinary regressor here would recreate the leaf plateau

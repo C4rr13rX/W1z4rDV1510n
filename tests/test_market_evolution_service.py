@@ -2240,6 +2240,54 @@ def test_primary_coverage_lane_escapes_repeated_reversal_plateau():
     assert child.feature_programs == frontier.feature_programs
 
 
+def test_primary_coverage_lane_changes_margin_after_ranked_reversal():
+    frontier = seed_genomes(1, random.Random(209))[0]
+    frontier.learner_kind = "regressor"
+    frontier.confidence_quantile = .21823
+    frontier.fitness = 410
+    frontier.result = {"evaluated_folds": 1, "summary": {
+        "min_accuracy": .6467, "min_balanced_accuracy": .6452,
+        "min_mcc": .2923, "min_coverage": .5976,
+        "min_acted_observations": 150, "min_expectancy": .00221,
+        "min_profit_factor": 1.2156,
+    }}
+    frontier.finalize()
+    reversal_summary = {
+        "min_accuracy": .4392, "min_balanced_accuracy": .4525,
+        "min_mcc": -.0942, "min_coverage": .6380,
+        "min_acted_observations": 160, "min_expectancy": -.0041,
+        "min_profit_factor": .7512,
+    }
+    reversal = Genome(**{
+        **frontier.__dict__, "confidence_quantile": .2181,
+        "generation": 1044, "parents": [frontier.genome_id],
+        "genome_id": "", "fitness": 300,
+        "result": {"evaluated_folds": 2, "summary": reversal_summary},
+    }).finalize()
+    ranked = Genome(**{
+        **frontier.__dict__, "learner_kind": "continuous_rank_regressor",
+        "generation": 1045, "parents": [frontier.genome_id],
+        "genome_id": "", "fitness": 300,
+        "result": {"evaluated_folds": 2, "summary": reversal_summary},
+    }).finalize()
+    population = seed_genomes(8, random.Random(210))
+    for genome in population[1:]:
+        genome.fitness = None
+        genome.result = None
+
+    repaired = evolution.introduce_primary_coverage_variant(
+        population, frontier, [reversal, ranked], 1046,
+    )
+
+    child = next(
+        genome for genome in repaired if ranked.genome_id in genome.parents
+    )
+    assert child.learner_kind == "regressor"
+    assert child.confidence_quantile == pytest.approx(frontier.confidence_quantile)
+    assert child.feature_programs != frontier.feature_programs
+    assert set(child.features) >= set(frontier.features)
+
+
 def test_primary_coverage_lane_escapes_an_identical_score_plateau():
     frontier = seed_genomes(1, random.Random(201))[0]
     frontier.learner_kind = "regressor"

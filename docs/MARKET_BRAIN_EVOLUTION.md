@@ -269,3 +269,11 @@ stop asymptotic scalar bisection. The lane preserves the model, features,
 programs, and frontier threshold while switching only to deterministic
 within-tie confidence ranking; that descendant still has to earn the ordinary
 coverage, accuracy, profitability, calibration, unseen-asset, and ghost gates.
+If the same-threshold ranked ablation itself crosses coverage but reproduces
+the protected-fold accuracy/profit reversal, the discontinuity is not a tie
+artifact. The lane then stops changing the scalar threshold and tries one
+previously unseen causal margin interaction at the frontier threshold. It
+preserves the original feature core and fit hyperparameters, records both the
+durable frontier and failed ranked probe as parents, and remains subject to all
+unchanged gates. Historical signed phenotypes prevent cycling through an
+already disproven interaction.
