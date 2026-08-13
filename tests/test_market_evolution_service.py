@@ -2008,6 +2008,63 @@ def test_return_tree_severe_min_leaf_reversal_advances_coordinate():
     assert repair.parents == [base.genome_id]
 
 
+def test_return_tree_severe_leaf_capacity_reversal_advances_to_recency():
+    population = seed_genomes(8, random.Random(201))
+    champion = population[0]
+    champion.learner_kind = "extra_trees"
+    champion.fitness = 2400
+    champion.result = {"evaluated_folds": 3, "requested_folds": 3}
+    base = Genome(**{
+        **champion.__dict__, "learner_kind": "extra_trees_regressor",
+        "confidence_quantile": .1611, "max_leaf_nodes": 11,
+        "min_samples_leaf": 8, "generation": 928,
+        "parents": ["profitable-return-frontier"],
+        "genome_id": "", "fitness": 420,
+        "result": {"summary": {
+            "min_accuracy": .5864, "min_balanced_accuracy": .599,
+            "min_mcc": .203, "min_profit_factor": 1.0068,
+            "min_expectancy": .000078, "min_coverage": .5973,
+        }},
+    }).finalize()
+    failed_smoothing = Genome(**{
+        **base.__dict__, "min_samples_leaf": 12,
+        "generation": 929, "parents": [base.genome_id],
+        "genome_id": "", "fitness": 1220,
+        "result": {"summary": {
+            "min_accuracy": .43, "min_profit_factor": .63,
+            "min_coverage": .61,
+        }},
+    }).finalize()
+    failed_capacity = Genome(**{
+        **base.__dict__, "max_leaf_nodes": 9,
+        "generation": 930, "parents": [base.genome_id],
+        "genome_id": "", "fitness": 1210,
+        "result": {"summary": {
+            "min_accuracy": .42, "min_profit_factor": .66,
+            "min_coverage": .61,
+        }},
+    }).finalize()
+    for genome in population[1:]:
+        genome.fitness = None
+        genome.result = None
+
+    after = evolution.introduce_champion_return_tree_variant(
+        population, champion, [base, failed_smoothing, failed_capacity], 931
+    )
+
+    repair = next(
+        genome for genome in after
+        if genome.learner_kind == "extra_trees_regressor"
+    )
+    assert repair.confidence_quantile == pytest.approx(.1611)
+    assert repair.min_samples_leaf == 8
+    assert repair.max_leaf_nodes == 11
+    assert repair.recency_half_life_days == pytest.approx(
+        base.recency_half_life_days * .75
+    )
+    assert repair.parents == [base.genome_id]
+
+
 def test_nearby_return_tree_evidence_survives_champion_quantile_handoff(tmp_path):
     old = seed_genomes(1, random.Random(193))[0]
     old.learner_kind = "extra_trees"
@@ -2093,8 +2150,22 @@ def test_return_tree_evidence_retains_strong_independent_lineage(tmp_path):
             },
         },
     }).finalize()
+    failed_smoothing = Genome(**{
+        **strong.__dict__, "min_samples_leaf": strong.min_samples_leaf + 4,
+        "generation": 923, "parents": [strong.genome_id],
+        "genome_id": "", "fitness": 1200,
+        "result": {
+            "evaluation_signature": "scope-a",
+            "evaluated_folds": 1, "requested_folds": 3,
+            "summary": {
+                "min_accuracy": .43, "min_balanced_accuracy": .44,
+                "min_mcc": -.13, "min_profit_factor": .63,
+                "min_expectancy": -.0047, "min_coverage": .61,
+            },
+        },
+    }).finalize()
     (tmp_path / "candidates").mkdir()
-    for candidate in (strong, weak, failed_cutoff):
+    for candidate in (strong, weak, failed_cutoff, failed_smoothing):
         (tmp_path / "candidates" / f"{candidate.genome_id}.json").write_text(
             json.dumps(candidate.__dict__), encoding="utf-8"
         )
@@ -2106,6 +2177,9 @@ def test_return_tree_evidence_retains_strong_independent_lineage(tmp_path):
     assert strong.genome_id in {genome.genome_id for genome in evidence}
     assert weak.genome_id not in {genome.genome_id for genome in evidence}
     assert failed_cutoff.genome_id in {
+        genome.genome_id for genome in evidence
+    }
+    assert failed_smoothing.genome_id in {
         genome.genome_id for genome in evidence
     }
     assert evolution.profitable_return_tree_coverage_frontier(strong)

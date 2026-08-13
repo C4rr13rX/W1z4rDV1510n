@@ -381,6 +381,13 @@ evidence: support `8 -> 12` crossed coverage at 61.09 percent but collapsed to
 next live-ledger proposal holds q `0.1611117`, restores support 8, and changes
 only leaf capacity `11 -> 9`.
 
+Signed coordinate descendants are recovered through lineage closure, not only
+same-structure cutoff keys. This prevents a restart from forgetting that a
+topology branch failed. The ledger already contained the leaf-9 result at the
+same cutoff (`42%` accuracy and PF `0.66`), so smaller capacity is now stopped
+as well. The next bounded proposal restores leaves 11 and support 8, holds q
+`0.1611117`, and changes only recency half-life to 75 percent of the parent.
+
 Coverage repair treats repeated identical outcomes on either side of the
 coverage floor as evidence of a discrete tree-score plateau. In particular,
 two lower-threshold descendants that admit the same harmful leaf are enough to
