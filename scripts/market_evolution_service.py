@@ -2528,6 +2528,28 @@ def evaluate_genome(genome: Genome, dataset: dict[str, Any], *, folds: int,
     return genome
 
 
+def evaluate_genome_after_memory_floor(
+    genome: Genome, dataset: dict[str, Any], *, state_dir: Path,
+    stop_path: Path, required_memory_gb: float, poll_seconds: float,
+    generation: int, reclaim_after_polls: int,
+    reclaimer: VerifiedWorkingSetReclaimer | None, guard_each_candidate: bool,
+    folds: int, test_days: int, calibration_days: int, final_days: int,
+    horizon: int, cost_bps: float,
+) -> Genome | None:
+    """Keep a single-worker batch from consuming the floor between genomes."""
+    if guard_each_candidate and not wait_for_memory_floor(
+        state_dir, stop_path, required_memory_gb, poll_seconds,
+        "memory_wait_candidate", generation=generation,
+        reclaim_after_polls=reclaim_after_polls, reclaimer=reclaimer,
+    ):
+        return None
+    return evaluate_genome(
+        genome, dataset, folds=folds, test_days=test_days,
+        calibration_days=calibration_days, final_days=final_days,
+        horizon=horizon, cost_bps=cost_bps,
+    )
+
+
 def mutate(parent: Genome, generation: int, rng: random.Random) -> Genome:
     features = set(parent.features)
     programs = [dict(program) for program in parent.feature_programs]
@@ -6769,7 +6791,15 @@ def main() -> int:
             with ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
                 futures = {
                     executor.submit(
-                        evaluate_genome, genome, dataset, folds=args.folds,
+                        evaluate_genome_after_memory_floor, genome, dataset,
+                        state_dir=args.state_dir, stop_path=stop_path,
+                        required_memory_gb=args.min_free_memory_gb,
+                        poll_seconds=args.memory_poll_seconds,
+                        generation=generation,
+                        reclaim_after_polls=args.memory_reclaim_after_polls,
+                        reclaimer=memory_reclaimer,
+                        guard_each_candidate=args.workers == 1,
+                        folds=args.folds,
                         test_days=args.test_days, calibration_days=args.calibration_days,
                         final_days=args.final_days, horizon=args.horizon, cost_bps=args.cost_bps,
                     ): genome for genome in pending
@@ -6777,6 +6807,8 @@ def main() -> int:
                 completed = 0
                 for future in as_completed(futures):
                     genome = future.result()
+                    if genome is None:
+                        continue
                     completed += 1
                     if genome.result is not None:
                         genome.result["evaluation_signature"] = signature

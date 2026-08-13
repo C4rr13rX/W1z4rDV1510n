@@ -51,6 +51,57 @@ def test_service_memory_floor_reclaims_without_weakening_floor(tmp_path, monkeyp
     assert events[-1]["generation"] == 7
 
 
+def test_single_worker_checks_memory_floor_before_each_candidate(
+    tmp_path, monkeypatch,
+):
+    candidate = seed_genomes(1, random.Random(207))[0]
+    waits = []
+    evaluations = []
+    monkeypatch.setattr(
+        evolution, "wait_for_memory_floor",
+        lambda *args, **kwargs: waits.append((args, kwargs)) or True,
+    )
+    monkeypatch.setattr(
+        evolution, "evaluate_genome",
+        lambda genome, dataset, **kwargs: evaluations.append(
+            (genome, dataset, kwargs)
+        ) or genome,
+    )
+
+    result = evolution.evaluate_genome_after_memory_floor(
+        candidate, {"rows": []}, state_dir=tmp_path,
+        stop_path=tmp_path / "STOP", required_memory_gb=3.5,
+        poll_seconds=15, generation=1203, reclaim_after_polls=4,
+        reclaimer=None, guard_each_candidate=True, folds=3, test_days=28,
+        calibration_days=14, final_days=28, horizon=6, cost_bps=20,
+    )
+
+    assert result is candidate
+    assert len(waits) == 1
+    assert waits[0][0][4] == "memory_wait_candidate"
+    assert waits[0][1]["generation"] == 1203
+    assert len(evaluations) == 1
+
+
+def test_candidate_memory_stop_prevents_evaluation(tmp_path, monkeypatch):
+    candidate = seed_genomes(1, random.Random(208))[0]
+    monkeypatch.setattr(
+        evolution, "wait_for_memory_floor", lambda *args, **kwargs: False,
+    )
+    monkeypatch.setattr(
+        evolution, "evaluate_genome",
+        lambda *args, **kwargs: pytest.fail("evaluation must not start"),
+    )
+
+    assert evolution.evaluate_genome_after_memory_floor(
+        candidate, {"rows": []}, state_dir=tmp_path,
+        stop_path=tmp_path / "STOP", required_memory_gb=3.5,
+        poll_seconds=15, generation=1203, reclaim_after_polls=4,
+        reclaimer=None, guard_each_candidate=True, folds=3, test_days=28,
+        calibration_days=14, final_days=28, horizon=6, cost_bps=20,
+    ) is None
+
+
 def test_genome_identity_is_deterministic_and_mutation_stays_bounded():
     parent = seed_genomes(5, random.Random(1))[0]
     clone = Genome(**{**parent.__dict__, "features": list(reversed(parent.features))}).finalize()

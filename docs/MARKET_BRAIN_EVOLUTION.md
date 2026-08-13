@@ -441,6 +441,17 @@ least 60 percent accuracy and balanced accuracy, PF 1.10, positive expectancy,
 54 percent coverage, and valid ECE. It does not alter prescreen, multi-fold,
 unseen-asset, calibration, ghost, or live admission requirements.
 
+The RAM floor applies before every candidate when the production controller
+uses one evaluation worker, not only before the generation. A dataset refresh
+can begin just above the floor and then fault several gigabytes of model and
+feature pages during a long revalidation batch. On signature `d84f5d234348805b`,
+free RAM fell from 3.64 GB to 1.67 GB after three candidates while the legacy
+market node returned to a 16.63 GB working set. The verified exact-process,
+pre/post-health reclaim reduced that node to 0.53 GB and restored 13.48 GB free
+without restart or neural-state mutation. Subsequent single-worker candidates
+now run through the same configured 3.5 GB floor/reclaim circuit individually;
+parallel configurations retain their existing batch-start behavior.
+
 Coverage repair treats repeated identical outcomes on either side of the
 coverage floor as evidence of a discrete tree-score plateau. In particular,
 two lower-threshold descendants that admit the same harmful leaf are enough to
