@@ -5220,15 +5220,20 @@ def cap_expensive_regime_candidates(
 def cap_expensive_multiscale_candidates(
     population: list[Genome], generation: int,
     protected_parent_ids: set[str],
+    protected_evaluation_keys: set[str] | None = None,
 ) -> tuple[list[Genome], int]:
     """Reserve double-model compute for active multiscale frontier research."""
     known = {genome.genome_id for genome in population}
     converted = 0
+    protected_evaluation_keys = protected_evaluation_keys or set()
     protected_seen: set[tuple[tuple[str, ...], str]] = set()
     for index, source in enumerate(population):
         if source.learner_kind != "multiscale_regressor":
             continue
-        protected = bool(set(source.parents) & protected_parent_ids)
+        protected = (
+            bool(set(source.parents) & protected_parent_ids)
+            or genome_evaluation_key(source) in protected_evaluation_keys
+        )
         protected_key = (
             tuple(sorted(source.parents)), genome_structure_key(source),
         )
@@ -5251,6 +5256,20 @@ def cap_expensive_multiscale_candidates(
         population[index] = replacement
         converted += 1
     return population, converted
+
+
+def learner_ablation_evaluation_key(
+    frontier: Genome | None, learner_kind: str,
+) -> str | None:
+    """Identify one exact learner-only ablation independent of lineage."""
+    if frontier is None:
+        return None
+    payload = asdict(frontier)
+    payload.update({
+        "learner_kind": learner_kind,
+        "fitness": None, "result": None, "genome_id": "",
+    })
+    return genome_evaluation_key(Genome(**payload).finalize())
 
 
 def introduce_regime_repair_variants(
@@ -5547,6 +5566,11 @@ def main() -> int:
                     multiscale_frontier, multiscale_boundary_frontier,
                 ) if genome is not None
             },
+            set(filter(None, {
+                learner_ablation_evaluation_key(
+                    coverage_frontier, "multiscale_regressor"
+                ),
+            })),
         )
         if resumed_multiscale_conversions:
             append_event(
@@ -6159,6 +6183,11 @@ def main() -> int:
                             multiscale_frontier, multiscale_boundary_frontier,
                         ) if genome is not None
                     },
+                    set(filter(None, {
+                        learner_ablation_evaluation_key(
+                            coverage_frontier, "multiscale_regressor"
+                        ),
+                    })),
                 )
             )
             try:

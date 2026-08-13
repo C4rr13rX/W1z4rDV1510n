@@ -2871,6 +2871,43 @@ def test_resumed_multiscale_duplicate_of_evaluated_probe_is_converted():
     assert updated[-1].learner_kind == "regressor"
 
 
+def test_primary_coverage_multiscale_ablation_survives_compute_cap():
+    population = seed_genomes(6, random.Random(207))
+    frontier = population[0]
+    frontier.learner_kind = "regressor"
+    frontier.fitness = 410
+    frontier.result = {"status": "prescreen_reject", "summary": {}}
+    frontier.finalize()
+    payload = {
+        **frontier.__dict__,
+        "learner_kind": "multiscale_regressor",
+        "generation": 44,
+        "parents": [frontier.genome_id, "signed-boundary-evidence"],
+        "fitness": None, "result": None, "genome_id": "",
+    }
+    ablation = Genome(**payload).finalize()
+    unrelated = Genome(**{
+        **payload,
+        "features": sorted(set(frontier.features) | {"asset_news_volume_24h"}),
+        "parents": ["unrelated-mutation"],
+        "genome_id": "",
+    }).finalize()
+    population[-2:] = [ablation, unrelated]
+
+    updated, converted = evolution.cap_expensive_multiscale_candidates(
+        population, 44, set(), {
+            evolution.learner_ablation_evaluation_key(
+                frontier, "multiscale_regressor"
+            ),
+        },
+    )
+
+    assert converted == 1
+    assert updated[-2].genome_id == ablation.genome_id
+    assert updated[-2].learner_kind == "multiscale_regressor"
+    assert updated[-1].learner_kind == "regressor"
+
+
 def test_genome_outcome_pool_learns_live_metric_rankings():
     evidence = []
     for index in range(120):
