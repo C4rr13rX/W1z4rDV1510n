@@ -2690,6 +2690,102 @@ def guarded_protected_route_preflight(
         raise
 
 
+def refresh_replay_candidate_routes(
+        args: argparse.Namespace, phase: Phase, runtime: Path,
+        status_path: Path, interval_id: str) -> dict:
+    """Repair post-training route pressure inside the open replay guard."""
+    before = endpoint_json(args.endpoint, "/brain/stats", timeout=120.0)
+    stem = f"{phase.name}.deferred-replay-route"
+    probe_path = runtime / f"{stem}-preflight.json"
+    python_probe_path = runtime / f"{stem}-python-preflight.json"
+    training_path = runtime / f"{stem}-refresh.json"
+    python_training_path = runtime / f"{stem}-python-refresh.json"
+    post_path = runtime / f"{stem}-post-refresh.json"
+    python_post_path = runtime / f"{stem}-python-post-refresh.json"
+    report_path = runtime / f"{stem}-admission.json"
+
+    probe = run_protected_route_sentinel(
+        args, runtime, probe_path, repeats=None
+    )
+    python_probe = run_protected_route_sentinel(
+        args, runtime, python_probe_path, repeats=None, suite="python"
+    )
+    after_probe = endpoint_json(args.endpoint, "/brain/stats", timeout=120.0)
+    probe_delta = topology_delta(before, after_probe)
+    if any(probe_delta.values()):
+        raise RuntimeError(
+            "read-only replay-candidate route sentinel mutated topology: "
+            f"{probe_delta}"
+        )
+    reasons = protected_route_pressure_reasons(probe)
+    reasons.extend(protected_route_pressure_reasons(python_probe))
+    if not reasons:
+        return {
+            "passed": True, "refreshed": False, "interval_id": interval_id,
+            "pressure_reasons": [], "tick": before.get("tick"),
+        }
+
+    publish(status_path, {
+        "state": "deferred_replay_route_refresh_training",
+        "phase": phase.name, "interval_id": interval_id,
+        "pressure_reasons": reasons,
+        "presentations_per_route": PROTECTED_ROUTE_REFRESH_REPEATS,
+        "updated_unix": time.time(),
+    })
+    training = run_protected_route_sentinel(
+        args, runtime, training_path,
+        repeats=PROTECTED_ROUTE_REFRESH_REPEATS,
+    )
+    python_training = run_protected_route_sentinel(
+        args, runtime, python_training_path,
+        repeats=PROTECTED_ROUTE_REFRESH_REPEATS, suite="python",
+    )
+    if (training.get("exit_code") != 0
+            or python_training.get("exit_code") != 0):
+        raise RuntimeError(
+            "replay-candidate route refresh failed execution: "
+            f"multilanguage={training} python={python_training}"
+        )
+
+    post_before = endpoint_json(args.endpoint, "/brain/stats", timeout=120.0)
+    post = run_protected_route_sentinel(
+        args, runtime, post_path, repeats=None
+    )
+    python_post = run_protected_route_sentinel(
+        args, runtime, python_post_path, repeats=None, suite="python"
+    )
+    post_after = endpoint_json(args.endpoint, "/brain/stats", timeout=120.0)
+    post_delta = topology_delta(post_before, post_after)
+    if any(post_delta.values()):
+        raise RuntimeError(
+            "read-only replay-candidate post-refresh sentinel mutated topology: "
+            f"{post_delta}"
+        )
+    post_reasons = protected_route_pressure_reasons(post)
+    post_reasons.extend(protected_route_pressure_reasons(python_post))
+    if (post.get("exit_code") != 0
+            or python_post.get("exit_code") != 0 or post_reasons):
+        raise RuntimeError(
+            "replay-candidate route refresh did not remove pressure: "
+            f"multilanguage_exit={post.get('exit_code')} "
+            f"python_exit={python_post.get('exit_code')} "
+            f"reasons={post_reasons}"
+        )
+    report = {
+        "kind": "deferred_replay_candidate_route_refresh",
+        "passed": True, "refreshed": True, "phase": phase.name,
+        "interval_id": interval_id, "before": before, "after": post_after,
+        "pressure_reasons": reasons,
+        "presentations_per_route": PROTECTED_ROUTE_REFRESH_REPEATS,
+        "training": training, "python_training": python_training,
+        "post_refresh": post, "python_post_refresh": python_post,
+        "updated_unix": time.time(),
+    }
+    publish(report_path, report)
+    append_health_event(runtime, report)
+    return report
+
+
 def restore_rejected_deferred_replay(args: argparse.Namespace, runtime: Path,
                                      phase: Phase, event: dict,
                                      error: str) -> None:
@@ -2890,6 +2986,9 @@ def run_deferred_replays(args: argparse.Namespace, runtime: Path,
                 raise RuntimeError(
                     f"deferred interval recall failed: {interval_recall}"
                 )
+            route_refresh = refresh_replay_candidate_routes(
+                args, phase, runtime, status_path, interval_id
+            )
             completion = run_completion_gate(
                 args, phase, runtime, frozenset({interval_id})
             )
@@ -2897,6 +2996,7 @@ def run_deferred_replays(args: argparse.Namespace, runtime: Path,
                 "passed": True,
                 "interval": event,
                 "interval_recall": interval_recall,
+                "route_refresh": route_refresh,
                 "completion": completion,
                 "updated_unix": time.time(),
             }

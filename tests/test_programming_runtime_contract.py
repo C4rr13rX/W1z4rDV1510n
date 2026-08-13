@@ -1250,6 +1250,17 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         marker = source.index("publish(deferred_replay_marker_path(runtime)", preflight)
         self.assertLess(guard, preflight)
         self.assertLess(preflight, marker)
+        interval_recall = source.index(
+            "interval_recall = run_admission_json_command", marker
+        )
+        candidate_refresh = source.index(
+            "route_refresh = refresh_replay_candidate_routes", interval_recall
+        )
+        replay_completion = source.index(
+            "completion = run_completion_gate", candidate_refresh
+        )
+        self.assertLess(interval_recall, candidate_refresh)
+        self.assertLess(candidate_refresh, replay_completion)
         preflight_definition = source.index("def guarded_protected_route_preflight")
         completion = source.index(
             "completion = run_completion_gate", preflight_definition

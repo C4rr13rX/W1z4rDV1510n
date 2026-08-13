@@ -454,6 +454,11 @@ state updates remain reachable. Both probes are read-only. Any pressure or
 failure triggers one guarded refresh of the existing trusted bindings, followed
 by both probes and the complete admission battery before the accepted guard is
 advanced; any failure restores the prior guard and leaves the interval deferred.
+Because replay training can create pressure absent from the accepted base, run
+the same pair again after exact interval recall and before comprehensive
+admission. A required candidate-local refresh remains inside the open replay
+transaction: it is admitted together with the interval or rolled back together
+with it, never committed as a standalone maintenance result.
 
 The resumed prompt carries the final acceptance contract, not merely the
 current corpus alarm. It requires a 1,000-task deterministic enterprise
