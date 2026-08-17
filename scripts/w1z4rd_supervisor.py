@@ -82,6 +82,16 @@ DEFAULT_CONFIG = {
         "write_health_url": "http://localhost:8090/brain/tick",
         "write_health_timeout": 45.0,
         "write_health_misses_before_restart": 4,
+        # Seconds between write probes. Deliberately much larger than
+        # poll_interval for two reasons:
+        #   * /brain/tick MUTATES the fabric (it advances the tick counter),
+        #     so probing every 5 s would add ~17k spurious ticks a day.
+        #   * a blocked probe stalls this single-threaded loop for its full
+        #     timeout, which would otherwise starve the Django and crypto
+        #     checks of their 5 s cadence exactly when the box is unhealthy.
+        # A wedge is a sustained condition, not a transient, so 5 min
+        # sampling still catches it long before it matters.
+        "write_health_interval": 300.0,
         # After a node restart, wait this long for it to come back before
         # giving up on the cycle and trying again.
         "warmup_secs":     30.0,
@@ -854,6 +864,9 @@ def run_supervisor(cfg: dict, log: Logger, once: bool = False) -> int:
     # write probe waits out warmup_secs from this point so it never fires
     # against a node that is still deserialising its brain.
     node_first_healthy_unix = 0.0
+    # Last time the write probe actually ran, so it samples on its own
+    # (much slower) cadence rather than once per poll.
+    write_last_probe_unix = 0.0
     django_miss_count = 0
     training_last_relaunch = 0.0
     crypto_last_start: dict[str, float] = {}
@@ -877,6 +890,7 @@ def run_supervisor(cfg: dict, log: Logger, once: bool = False) -> int:
                 miss_count = 0
                 write_miss_count = 0
                 node_first_healthy_unix = 0.0
+                write_last_probe_unix = 0.0
                 time.sleep(cfg["node"]["warmup_secs"])
                 if once: return 0
                 continue
@@ -897,8 +911,11 @@ def run_supervisor(cfg: dict, log: Logger, once: bool = False) -> int:
             time.time() - node_first_healthy_unix
             if node_first_healthy_unix else 0.0
         )
-        if (write_url and write_limit and miss_count == 0
+        write_interval = float(ncfg.get("write_health_interval") or 0.0)
+        write_due = (time.time() - write_last_probe_unix) >= write_interval
+        if (write_url and write_limit and miss_count == 0 and write_due
                 and healthy_streak_secs >= float(ncfg.get("warmup_secs") or 0.0)):
+            write_last_probe_unix = time.time()
             if node_write_healthy(
                 write_url, float(ncfg.get("write_health_timeout") or 45.0)
             ):
@@ -920,6 +937,7 @@ def run_supervisor(cfg: dict, log: Logger, once: bool = False) -> int:
                     miss_count = 0
                     write_miss_count = 0
                     node_first_healthy_unix = 0.0
+                    write_last_probe_unix = 0.0
                     time.sleep(ncfg["warmup_secs"])
                     if once: return 0
                     continue
