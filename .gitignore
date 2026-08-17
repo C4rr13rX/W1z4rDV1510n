@@ -36,6 +36,8 @@
 !scripts/windows_memory.ps1
 !scripts/aws/show_programming_brain_watch.ps1
 !scripts/aws/start_programming_brain_proxy.ps1
+!scripts/install_supervisor_task.ps1
+!scripts/uninstall_supervisor_task.ps1
 
 # ── Node / runtime config (generated per machine) ─────────────────────────────
 /node_config.json
