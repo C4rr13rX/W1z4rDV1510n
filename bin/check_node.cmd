@@ -21,13 +21,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$ErrorActionPreference = 'SilentlyContinue';" ^
   "function Probe-Port($p) { try { $c = New-Object System.Net.Sockets.TcpClient; $iar = $c.BeginConnect('127.0.0.1', $p, $null, $null); $ok = $iar.AsyncWaitHandle.WaitOne(1500, $false); if ($ok -and $c.Connected) { $c.Close(); return $true } else { try { $c.Close() } catch {}; return $false } } catch { return $false } }" ^
   "$nodeListen = Probe-Port 8090;" ^
-  "$djListen   = Probe-Port 8000;" ^
+  "$djListen   = Probe-Port 8001;" ^
   "$h = $null; $hErr = '';" ^
   "$b = $null;" ^
   "$dj = $null; $djErr = '';" ^
   "if ($nodeListen) { try { $h  = Invoke-RestMethod -Uri http://127.0.0.1:8090/health -TimeoutSec 15 } catch { $hErr = $_.Exception.Message } }" ^
   "if ($nodeListen) { try { $b  = Invoke-RestMethod -Uri http://127.0.0.1:8090/brain  -TimeoutSec 20 } catch {} }" ^
-  "if ($djListen)   { try { $dj = Invoke-RestMethod -Uri http://127.0.0.1:8000/api/wizard-chat/status/ -TimeoutSec 15 } catch { $djErr = $_.Exception.Message } }" ^
+  "if ($djListen)   { try { $dj = Invoke-RestMethod -Uri http://127.0.0.1:8001/api/wizard-chat/status/ -TimeoutSec 15 } catch { $djErr = $_.Exception.Message } }" ^
   "Write-Host '===================================================='   -ForegroundColor Cyan;" ^
   "Write-Host '  W1z4rD V1510n  -  status at ' (Get-Date -Format 'HH:mm:ss') -ForegroundColor Cyan;" ^
   "Write-Host '===================================================='   -ForegroundColor Cyan;" ^
@@ -45,10 +45,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "    $nodeReachable = if ($dj.online) { 'yes' } else { 'no (' + $dj.error + ')' };" ^
   "    Write-Host ('[OK]  Django:  online at ' + $dj.endpoint + '  (node reachable from Django: ' + $nodeReachable + ')') -ForegroundColor Green" ^
   "} elseif ($djListen) {" ^
-  "    Write-Host '[??]  Django:  SLOW (port 8000 listening but no HTTP response in 15s)' -ForegroundColor Yellow;" ^
+  "    Write-Host '[??]  Django:  SLOW (port 8001 listening but no HTTP response in 15s)' -ForegroundColor Yellow;" ^
   "    if ($djErr) { Write-Host ('       last error: ' + $djErr) -ForegroundColor DarkYellow }" ^
   "} else {" ^
-  "    Write-Host '[--]  Django:  OFFLINE (port 8000 not listening)' -ForegroundColor Yellow" ^
+  "    Write-Host '[--]  Django:  OFFLINE (port 8001 not listening)' -ForegroundColor Yellow" ^
   "};" ^
   "Write-Host '';" ^
   "if ($b) {" ^

@@ -14,7 +14,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "try { $h  = Invoke-RestMethod -Uri http://localhost:8090/health -TimeoutSec 3 } catch {}" ^
   "try { $b  = Invoke-RestMethod -Uri http://localhost:8090/brain  -TimeoutSec 5 } catch {}" ^
   "try { $mp = Invoke-RestMethod -Uri http://localhost:8090/multi_pool/stats -TimeoutSec 3 } catch {}" ^
-  "try { $dj = Invoke-RestMethod -Uri http://127.0.0.1:8000/api/wizard-chat/status/ -TimeoutSec 3 } catch {}" ^
+  "try { $dj = Invoke-RestMethod -Uri http://127.0.0.1:8001/api/wizard-chat/status/ -TimeoutSec 3 } catch {}" ^
   "Write-Host '===================================================='   -ForegroundColor Cyan;" ^
   "Write-Host '  W1z4rD V1510n  -  status at ' (Get-Date -Format 'HH:mm:ss') -ForegroundColor Cyan;" ^
   "Write-Host '===================================================='   -ForegroundColor Cyan;" ^
@@ -24,7 +24,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "} else { Write-Host '[--]  Node:    OFFLINE (port 8090 not responding)' -ForegroundColor Red };" ^
   "if ($dj -and $dj.online) {" ^
   "    Write-Host ('[OK]  Django:  online at ' + $dj.endpoint) -ForegroundColor Green" ^
-  "} else { Write-Host '[--]  Django:  OFFLINE (port 8000 not responding)' -ForegroundColor Yellow };" ^
+  "} else { Write-Host '[--]  Django:  OFFLINE (port 8001 not responding)' -ForegroundColor Yellow };" ^
   "Write-Host '';" ^
   "if ($b) {" ^
   "    Write-Host '-- Slow pool --' -ForegroundColor Cyan;" ^

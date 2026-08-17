@@ -36,14 +36,32 @@ class Client:
         self.prefix = url.path.rstrip("/")
         self.conn = http.client.HTTPConnection(url.hostname, url.port or 80, timeout=60)
 
-    def post(self, path: str, payload: dict) -> dict:
+    def post(self, path: str, payload: dict):
+        """POST *payload* to *path* and return the decoded JSON.
+
+        Note the return type is deliberately untyped: not every brain route
+        answers with an object.  /brain/tick returns a bare tick counter
+        (e.g. ``983093``), and /brain/observe can answer with a scalar too.
+        An unconditional isinstance(decoded, dict) check here used to raise
+        "returned non-object payload: int" on the first tick of
+        refresh_routes(), which aborted the protected-route sentinel and
+        parked the whole curriculum in `deferred_replay_failed` with no
+        supervisor owning the terminal state.  Callers that genuinely need
+        a mapping use post_object() instead; every peer script
+        (programming_enterprise_eval.py et al) likewise returns the raw
+        decode.
+        """
         self.conn.request("POST", f"{self.prefix}{path}", json.dumps(payload),
                           {"Content-Type": "application/json"})
         response = self.conn.getresponse()
         payload = response.read()
         if response.status >= 400:
             raise RuntimeError(f"HTTP {response.status}: {payload[:300]!r}")
-        decoded = json.loads(payload)
+        return json.loads(payload)
+
+    def post_object(self, path: str, payload: dict) -> dict:
+        """POST and require a JSON object back (for routes we parse fields of)."""
+        decoded = self.post(path, payload)
         if not isinstance(decoded, dict):
             raise RuntimeError(
                 f"{path} returned non-object payload: {type(decoded).__name__}"
@@ -51,7 +69,7 @@ class Client:
         return decoded
 
     def chat_payload(self, prompt: str) -> dict:
-        return self.post("/brain/chat", {"text": prompt})
+        return self.post_object("/brain/chat", {"text": prompt})
 
     def chat(self, prompt: str) -> str:
         return str(self.chat_payload(prompt).get("reply") or "")

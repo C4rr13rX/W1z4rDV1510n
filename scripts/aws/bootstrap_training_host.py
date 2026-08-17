@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import time
 from datetime import datetime, timedelta, timezone
@@ -26,11 +27,26 @@ def aws(
     capture: bool = True,
     check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
+    # Force UTF-8 inside the CLI too.  The bundled interpreter otherwise
+    # encodes its stdout with the console codepage and dies with
+    # "'charmap' codec can't encode ..." when remote stdout contains any
+    # non-ASCII byte, which we'd only see as a non-zero exit.
+    child_env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
     return subprocess.run(
         ["aws", *arguments, "--profile", profile, "--region", REGION],
         cwd=ROOT,
         check=check,
+        env=child_env,
         text=True,
+        # Decode as UTF-8 and never raise on stray bytes.  Without this,
+        # text=True falls back to the Windows ANSI codepage (cp1252), so a
+        # single non-ASCII byte in remote stdout -- systemd's "*" bullet,
+        # a box-drawing character, any UTF-8 log line -- raised
+        # UnicodeDecodeError/'charmap' errors and aborted the whole call.
+        # That surfaced as "relay failed" in programming_brain_proxy.py
+        # even when the remote command had succeeded.
+        encoding="utf-8",
+        errors="replace",
         capture_output=capture,
     )
 

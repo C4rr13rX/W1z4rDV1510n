@@ -36,7 +36,14 @@ warmup_secs = 1800.0
 # console every cycle). The SPA root is served by whitenoise from the
 # Vue dist bundle and answers in <10 ms regardless of node state, so
 # it cleanly measures only Django liveness.
-health_url = "http://127.0.0.1:8000/"
+#
+# Port 8001, not 8000: launch_revenir.ps1 binds waitress to 8001 and
+# monitor_everything.ps1 probes 8001. The stale 8000 value here meant
+# every django probe failed against a healthy panel, so the supervisor
+# killed + relaunched Django on a loop (each cycle spawning another
+# CoolCryptoUtilities console) and never converged.
+port = 8001
+health_url = "http://127.0.0.1:8001/"
 health_timeout = 10.0
 health_misses_before_restart = 5
 

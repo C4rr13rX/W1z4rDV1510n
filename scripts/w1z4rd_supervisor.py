@@ -106,12 +106,60 @@ DEFAULT_CONFIG = {
         "working_dir":    "D:\\Projects\\CoolCryptoUtilities\\web",
         "launcher":       "run_waitress.py",
         "host":           "127.0.0.1",
-        "port":           8000,
+        # 8001 is the canonical R3V3N!R panel port: launch_revenir.ps1 and
+        # scripts/operations/monitor_everything.ps1 both bind/probe 8001.
+        # The old 8000 default meant every probe failed against a perfectly
+        # healthy panel, so the supervisor "restarted" Django every 3 polls
+        # and spawned a fresh CoolCryptoUtilities console each cycle.
+        "port":           8001,
         "threads":        8,
-        "health_url":     "http://127.0.0.1:8000/api/wizard-chat/status/",
+        # Probe the SPA root, not /api/wizard-chat/status/ — the status
+        # endpoint fans out to the node's /health + /brain and can take
+        # 4-6 s under training load, pushing past health_timeout and
+        # triggering the same false-positive restarts.
+        "health_url":     "http://127.0.0.1:8001/",
         "health_timeout": 5.0,
         "health_misses_before_restart": 3,
         "warmup_secs":    15.0,
+    },
+    "crypto_stack": {
+        # The R3V3N!R trading services. These are process-level watches, not
+        # HTTP health checks: each entry is matched by a substring of the
+        # python command line, and relaunched with its own argv if absent.
+        #
+        # Before this existed the supervisor watched only node + Django, so
+        # when the production manager died nothing noticed — the heartbeat
+        # sat 3+ days stale while the desktop icons still reported a
+        # healthy-looking stack. launch_revenir.ps1 could bring them back,
+        # but only if a human double-clicked it.
+        "enabled":        True,
+        "project_root":   "D:\\Projects\\CoolCryptoUtilities",
+        "python":         "D:\\Projects\\CoolCryptoUtilities\\.venv\\Scripts\\python.exe",
+        "log_dir":        "D:\\Projects\\CoolCryptoUtilities\\logs",
+        # Public wallet address (not a secret) — mirrors launch_revenir.ps1.
+        # default_env_user returns None outside the manage.py boot path,
+        # which otherwise leaves PortfolioState unable to derive the wallet.
+        "primary_wallet": "0x291c854811e92906a658fb94aa511bf919f968ad",
+        # Grace period after a relaunch before that service is eligible to
+        # be relaunched again (slow imports: TF, pandas, web3).
+        "restart_backoff_secs": 180.0,
+        "services": [
+            {
+                "name":  "production_manager",
+                "match": "start_production",
+                "args":  ["-u", "main.py", "--action", "start_production", "--stay-alive"],
+                "log":   "prod_direct",
+            },
+            {
+                "name":  "brain_feeder",
+                "match": "run_brain_feeder",
+                "args":  ["scripts/run_brain_feeder.py"],
+                "log":   "feeder_direct",
+                # Skip while a history supervisor is training, to avoid
+                # fighting it for the node's inner lock.
+                "skip_if_running": "brain_history_supervisor",
+            },
+        ],
     },
 }
 
@@ -163,8 +211,18 @@ class Logger:
         ts = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         line = f"[{ts}] {level:5s}  {msg}\n"
         self._fh.write(line)
-        print(line, end="", file=sys.stdout)
-        sys.stdout.flush()
+        # Mirror to stdout only when there is one.  Under pythonw.exe (and
+        # under a Scheduled Task with no console) sys.stdout is None or a
+        # closed handle, so an unguarded print()/flush() raises and kills
+        # the supervisor moments after the "supervisor starting" line --
+        # exactly the silent death that left the log looking like it had
+        # started fine and then nothing ever ran again.
+        try:
+            if sys.stdout is not None:
+                print(line, end="", file=sys.stdout)
+                sys.stdout.flush()
+        except (OSError, ValueError):
+            pass
 
     def info(self, msg: str) -> None:  self.write("INFO",  msg)
     def warn(self, msg: str) -> None:  self.write("WARN",  msg)
@@ -490,6 +548,153 @@ def start_django(cfg: dict, log: Logger) -> int | None:
         return None
 
 
+# ── Crypto stack (R3V3N!R trading services) ────────────────────────────────
+
+
+def _python_cmdlines() -> list[str]:
+    """Every running python process's command line (Windows via WMI, else ps).
+
+    One snapshot per poll, so N service checks cost one subprocess call
+    instead of N.
+    """
+    lines: list[str] = []
+    if os.name == "nt":
+        # Query WMI in-process via COM.  Shelling out to powershell.exe
+        # looked simpler but fails under pythonw.exe/Scheduled Task: with no
+        # console to inherit, the child gets invalid std handles and returns
+        # nothing, so every service looked dead.  win32com is not guaranteed
+        # present, so fall back to wmic (deprecated but still shipped) and
+        # finally to CREATE_NO_WINDOW powershell.
+        try:
+            import win32com.client  # type: ignore
+
+            wmi = win32com.client.GetObject("winmgmts:")
+            query = ("SELECT CommandLine FROM Win32_Process WHERE "
+                     "Name='python.exe' OR Name='pythonw.exe'")
+            lines = [str(proc.CommandLine) for proc in wmi.ExecQuery(query)
+                     if proc.CommandLine]
+        except Exception:
+            lines = []
+        if not lines:
+            CREATE_NO_WINDOW = 0x08000000
+            for argv in (
+                ["wmic", "process", "where",
+                 "name='python.exe' or name='pythonw.exe'",
+                 "get", "CommandLine", "/format:list"],
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                 "Get-CimInstance Win32_Process -Filter \"Name='python.exe' OR "
+                 "Name='pythonw.exe'\" | ForEach-Object { $_.CommandLine }"],
+            ):
+                try:
+                    out = subprocess.run(
+                        argv, capture_output=True, text=True, timeout=30,
+                        encoding="utf-8", errors="replace",
+                        stdin=subprocess.DEVNULL,
+                        creationflags=CREATE_NO_WINDOW,
+                    )
+                except Exception:
+                    continue
+                found = []
+                for raw in out.stdout.splitlines():
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    # wmic /format:list emits "CommandLine=<value>".
+                    if line.startswith("CommandLine="):
+                        line = line[len("CommandLine="):].strip()
+                    if line:
+                        found.append(line)
+                if found:
+                    lines = found
+                    break
+    else:
+        try:
+            out = subprocess.run(["ps", "-eo", "command"],
+                                  capture_output=True, text=True, timeout=15)
+            lines = [ln.strip() for ln in out.stdout.splitlines()[1:] if ln.strip()]
+        except Exception:
+            pass
+    return lines
+
+
+def start_crypto_service(cfg: dict, service: dict, log: Logger) -> int | None:
+    """Launch one crypto-stack service detached, mirroring launch_revenir.ps1."""
+    ccfg = cfg["crypto_stack"]
+    python = ccfg["python"]
+    if not pathlib.Path(python).exists():
+        log.error(f"crypto python not found: {python}")
+        return None
+    project_root = ccfg["project_root"]
+
+    env = os.environ.copy()
+    env["PRIMARY_WALLET"] = str(ccfg.get("primary_wallet") or "")
+    # Force re-hydration from the vault; a stale value here leaves the
+    # manager without wallet-derived state.
+    env["SECURE_ENV_HYDRATED"] = ""
+    # Deliberately do NOT set SKIP_TF_CONFIGURE: let pipeline._load_tf try
+    # the import once and log a single clear warning if it fails, rather
+    # than silently disabling every TF-dependent subsystem.
+    env.pop("SKIP_TF_CONFIGURE", None)
+
+    log_dir = pathlib.Path(ccfg["log_dir"])
+    log_dir.mkdir(parents=True, exist_ok=True)
+    stem = service.get("log") or service["name"]
+    try:
+        creation = 0
+        if os.name == "nt":
+            DETACHED_PROCESS = 0x00000008
+            CREATE_NEW_PROCESS_GROUP = 0x00000200
+            creation = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+        with open(log_dir / f"{stem}.log", "ab") as outf, \
+             open(log_dir / f"{stem}.err", "ab") as errf:
+            proc = subprocess.Popen(
+                [python, *service["args"]],
+                cwd=project_root,
+                env=env,
+                stdout=outf, stderr=errf, stdin=subprocess.DEVNULL,
+                creationflags=creation if os.name == "nt" else 0,
+                close_fds=True,
+            )
+        log.info(f"started crypto service {service['name']}, PID={proc.pid}")
+        return proc.pid
+    except Exception as exc:
+        log.error(f"failed to launch {service['name']}: {exc}")
+        return None
+
+
+def check_crypto_stack(cfg: dict, log: Logger, last_start: dict[str, float]) -> None:
+    """Relaunch any crypto-stack service that isn't running."""
+    ccfg = cfg.get("crypto_stack") or {}
+    if not ccfg.get("enabled"):
+        return
+    services = ccfg.get("services") or []
+    if not services:
+        return
+    cmdlines = _python_cmdlines()
+    if not cmdlines:
+        # A failed snapshot must not be read as "everything is dead" — that
+        # would relaunch the whole stack on top of itself.
+        log.warn("could not enumerate python processes; skipping crypto checks")
+        return
+
+    backoff = float(ccfg.get("restart_backoff_secs", 180.0))
+    now = time.time()
+    for service in services:
+        needle = service["match"].lower()
+        if any(needle in line.lower() for line in cmdlines):
+            continue
+        guard = (service.get("skip_if_running") or "").lower()
+        if guard and any(guard in line.lower() for line in cmdlines):
+            log.info(f"{service['name']} down but {service['skip_if_running']} "
+                      f"is running; leaving it alone")
+            continue
+        if now - last_start.get(service["name"], 0.0) < backoff:
+            continue
+        log.warn(f"crypto service {service['name']} not running; launching")
+        start_crypto_service(cfg, service, log)
+        last_start[service["name"]] = now
+
+
 # ── Training management ────────────────────────────────────────────────────
 
 
@@ -586,6 +791,7 @@ def run_supervisor(cfg: dict, log: Logger, once: bool = False) -> int:
     miss_count = 0
     django_miss_count = 0
     training_last_relaunch = 0.0
+    crypto_last_start: dict[str, float] = {}
 
     while True:
         # --- Node liveness ---
@@ -622,6 +828,13 @@ def run_supervisor(cfg: dict, log: Logger, once: bool = False) -> int:
                     django_miss_count = 0
                     time.sleep(dcfg["warmup_secs"])
 
+        # --- Crypto stack liveness (production manager, brain feeder) ---
+        try:
+            check_crypto_stack(cfg, log, crypto_last_start)
+        except Exception as exc:
+            # Never let a trading-stack check kill the node watchdog.
+            log.error(f"crypto stack check failed: {exc}")
+
         # --- Training liveness ---
         tcfg = cfg["training"]
         if tcfg.get("enabled") and not training_running():
@@ -656,6 +869,15 @@ def main() -> int:
     except KeyboardInterrupt:
         log.info("supervisor stopped by signal")
         return 0
+    except Exception:
+        # A watchdog that dies silently is worse than useless: the stack
+        # looks supervised while nothing is watching it.  Record the full
+        # traceback to the log (the only place visible under a Scheduled
+        # Task) and exit non-zero so the task's RestartOnFailure brings us
+        # back.
+        import traceback
+        log.error("supervisor crashed:\n" + traceback.format_exc())
+        return 1
 
 
 if __name__ == "__main__":
