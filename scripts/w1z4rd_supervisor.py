@@ -77,6 +77,12 @@ DEFAULT_CONFIG = {
         "min_sys_avail_mb": 4096,
         # Autocheckpoint cadence (seconds), also mirroring start_node.ps1.
         "autocheckpoint_secs": 900,
+        # Explicit brain directory (exported as W1Z4RD_NODE_BRAIN_DIR).
+        # Empty = let the node resolve it, which prefers
+        # <W1Z4RDV1510N_DATA_DIR>/brain. Set this whenever the brain lives
+        # somewhere other than under data_dir, or a relaunch will start from
+        # an empty fabric and orphan the running brain.
+        "node_brain_dir": "",
         # Probe a route that actually exercises the write path. /health is
         # a static struct and stays fast even when the fabric is wedged.
         "write_health_url": "http://localhost:8090/brain/tick",
@@ -481,6 +487,13 @@ def start_node(cfg: dict, log: Logger) -> int | None:
     checkpoint_secs = node_cfg.get("autocheckpoint_secs")
     if checkpoint_secs:
         env["W1Z4RD_BRAIN_AUTOCHECKPOINT_SECS"] = str(int(checkpoint_secs))
+    # Pin the brain directory when configured. default_node_brain_dir()
+    # otherwise prefers <W1Z4RDV1510N_DATA_DIR>/brain, which is NOT where the
+    # live node checkpoints -- a relaunch would start from an empty fabric and
+    # orphan the running brain.
+    node_brain_dir = node_cfg.get("node_brain_dir")
+    if node_brain_dir:
+        env["W1Z4RD_NODE_BRAIN_DIR"] = str(node_brain_dir)
     stdout_path = pathlib.Path(node_cfg["data_dir"]) / "training" / "node_stdout.log"
     stderr_path = pathlib.Path(node_cfg["data_dir"]) / "training" / "node_stderr.log"
     stdout_path.parent.mkdir(parents=True, exist_ok=True)

@@ -36,6 +36,22 @@ min_sys_avail_mb = 6144
 # checkpointed at all (its brain.bin was 12 weeks stale), so a force-kill was
 # the only way out and lost everything held in RAM.
 autocheckpoint_secs = 600
+# Pin the brain directory explicitly.
+#
+# default_node_brain_dir() prefers <W1Z4RDV1510N_DATA_DIR> when a brain.bin
+# already sits there, else <data_dir>/brain, else ./brain-data. data_dir must
+# stay D:\w1z4rdv1510n-data (the training logs live under it), but the brain
+# itself now lives in the project's brain-data/ — that is where the running
+# node checkpoints. Without this override a supervisor relaunch would resolve
+# to D:\w1z4rdv1510n-data\brain and silently start from an empty fabric,
+# orphaning the live brain.
+#
+# The 10.7 GB D:\w1z4rdv1510n-data\brain.bin that used to win this lookup was
+# pre-architecture-change and unloadable: its leading u64 pool-count reads 2
+# where the current format writes 3 (+ a 4th binding pool), so the current
+# deserializer misread the following length field and tried to allocate 4.5
+# exabytes. Deleted 2026-08-17 along with its orphaned 833 MB WAL.
+node_brain_dir = "D:\\Projects\\W1z4rDV1510n\\brain-data"
 
 [django]
 # Use the SPA root, NOT /api/wizard-chat/status/. The status endpoint
