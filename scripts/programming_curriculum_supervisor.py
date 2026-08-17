@@ -3026,6 +3026,28 @@ def run_deferred_replays(args: argparse.Namespace, runtime: Path,
                 raise RuntimeError(
                     f"deferred interval recall failed: {interval_recall}"
                 )
+            # Consolidate before the behavioural gate.
+            #
+            # The replay worker has just written a whole interval (up to 131k
+            # rows) into the fabric. Immediately afterwards, generalisation is
+            # transiently degraded while trained recall stays perfect -- the
+            # classic corpus-interference signature. Measured 2026-08-17 on the
+            # 19:55 gate: 7 of 12 suites failed, every one of them with
+            # `trained` at full marks and only `paraphrase` short
+            # (python_enterprise 4/5, project 2/4, composition 0/2). Re-running
+            # the very same suites minutes later, against the same brain and
+            # with no intervention, returned exit=0 at 5/5 and 4/4.
+            #
+            # settle_brain_for_admission() runs /brain/sleep + /brain/checkpoint,
+            # which is exactly the consolidation that resolves it -- and its own
+            # docstring says the gate should "evaluate the same fully settled
+            # state that the next rollback guard will protect". It was already
+            # called before training but never between training and this gate,
+            # so the gate kept judging an unsettled brain and rejecting
+            # intervals that would have passed.
+            settlement = settle_brain_for_admission(
+                args, phase, runtime, int(event["end_row"])
+            )
             route_refresh = refresh_replay_candidate_routes(
                 args, phase, runtime, status_path, interval_id
             )
@@ -3036,6 +3058,7 @@ def run_deferred_replays(args: argparse.Namespace, runtime: Path,
                 "passed": True,
                 "interval": event,
                 "interval_recall": interval_recall,
+                "settlement": settlement,
                 "route_refresh": route_refresh,
                 "completion": completion,
                 "updated_unix": time.time(),
