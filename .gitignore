@@ -38,6 +38,11 @@
 !scripts/aws/start_programming_brain_proxy.ps1
 !scripts/install_supervisor_task.ps1
 !scripts/uninstall_supervisor_task.ps1
+# Not machine-specific: this defines the node's launch contract (RAM floor,
+# autocheckpoint cadence, brain dir). Leaving it untracked let start_node.ps1
+# drift out of sync with the supervisor, which is how a node ended up running
+# with no RAM ceiling and resolving to a different brain directory.
+!start_node.ps1
 
 # ── Node / runtime config (generated per machine) ─────────────────────────────
 /node_config.json
