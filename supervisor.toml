@@ -27,6 +27,15 @@ health_misses_before_restart = 180
 # misses.  Without this, the supervisor was killing the binary mid-
 # deserialise every ~10 min, never letting it finish.
 warmup_secs = 1800.0
+# RAM politeness floor. 6 GB rather than the 4 GB code default: this box has
+# 31.8 GB shared with the trading stack, market evolution (~7 GB) and Django,
+# and on 2026-08-17 a node launched with NO floor reached 57 GB private,
+# drove free RAM to 1.1 GB, and wedged its own write path on page-ins.
+min_sys_avail_mb = 6144
+# Checkpoint every 10 min rather than 15. The node that wedged had never
+# checkpointed at all (its brain.bin was 12 weeks stale), so a force-kill was
+# the only way out and lost everything held in RAM.
+autocheckpoint_secs = 600
 
 [django]
 # Use the SPA root, NOT /api/wizard-chat/status/. The status endpoint
