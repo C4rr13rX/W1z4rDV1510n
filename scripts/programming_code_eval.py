@@ -34,7 +34,14 @@ class Client:
     def __init__(self, endpoint: str) -> None:
         url = urlparse(endpoint)
         self.prefix = url.path.rstrip("/")
-        self.conn = http.client.HTTPConnection(url.hostname, url.port or 80, timeout=60)
+        self.host = url.hostname
+        self.port = url.port or 80
+        self.conn = self._connect()
+
+    def _connect(self) -> http.client.HTTPConnection:
+        # Long timeout: a single /brain/observe can block for many seconds
+        # while the node holds its inner lock during training.
+        return http.client.HTTPConnection(self.host, self.port, timeout=300)
 
     def post(self, path: str, payload: dict):
         """POST *payload* to *path* and return the decoded JSON.
@@ -51,13 +58,30 @@ class Client:
         (programming_enterprise_eval.py et al) likewise returns the raw
         decode.
         """
-        self.conn.request("POST", f"{self.prefix}{path}", json.dumps(payload),
-                          {"Content-Type": "application/json"})
-        response = self.conn.getresponse()
-        payload = response.read()
+        body = json.dumps(payload)
+        headers = {"Content-Type": "application/json"}
+        # A refresh pass issues thousands of requests over one keep-alive
+        # connection; the node closes it periodically (and always across a
+        # checkpoint), which surfaced as BrokenPipeError/RemoteDisconnected
+        # and aborted the whole protected-route refresh mid-run. Reconnect
+        # once and retry -- these calls are idempotent presentations.
+        for attempt in (1, 2):
+            try:
+                self.conn.request("POST", f"{self.prefix}{path}", body, headers)
+                response = self.conn.getresponse()
+                raw = response.read()
+                break
+            except (http.client.HTTPException, OSError):
+                try:
+                    self.conn.close()
+                except Exception:
+                    pass
+                self.conn = self._connect()
+                if attempt == 2:
+                    raise
         if response.status >= 400:
-            raise RuntimeError(f"HTTP {response.status}: {payload[:300]!r}")
-        return json.loads(payload)
+            raise RuntimeError(f"HTTP {response.status}: {raw[:300]!r}")
+        return json.loads(raw)
 
     def post_object(self, path: str, payload: dict) -> dict:
         """POST and require a JSON object back (for routes we parse fields of)."""
