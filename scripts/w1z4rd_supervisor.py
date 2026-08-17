@@ -62,6 +62,26 @@ DEFAULT_CONFIG = {
         "health_misses_before_restart": 3,
         # Seconds between health probes.
         "poll_interval":   5.0,
+        # RAM politeness floor, mirroring start_node.ps1. The tier
+        # orchestrator evicts neurons to the SSD cold tier as available
+        # system RAM approaches this, so the node never outgrows the box.
+        #
+        # start_node.ps1 has always set this, but start_node() below did
+        # not -- a supervisor-launched node therefore ran with NO ceiling.
+        # Observed 2026-08-17: 47 GB commit on a 32 GB machine, 11 GB
+        # resident, pagefile at 34.8 GB, C: queue 6 at 1049% disk time.
+        # Every /brain/tick and /brain/observe then blocked on a page-in
+        # (one thread had burned 39 h of CPU in PageIn wait) while /health
+        # kept answering instantly from a static struct -- so the watchdog
+        # saw a healthy node while nothing could learn.
+        "min_sys_avail_mb": 4096,
+        # Autocheckpoint cadence (seconds), also mirroring start_node.ps1.
+        "autocheckpoint_secs": 900,
+        # Probe a route that actually exercises the write path. /health is
+        # a static struct and stays fast even when the fabric is wedged.
+        "write_health_url": "http://localhost:8090/brain/tick",
+        "write_health_timeout": 45.0,
+        "write_health_misses_before_restart": 4,
         # After a node restart, wait this long for it to come back before
         # giving up on the cycle and trying again.
         "warmup_secs":     30.0,
@@ -297,6 +317,36 @@ def node_healthy(url: str, timeout: float) -> bool:
         return False
 
 
+def node_write_healthy(url: str, timeout: float) -> bool:
+    """True iff the node can still service a WRITE-path request.
+
+    /health returns a static struct and keeps answering in ~1 ms even when
+    the fabric is wedged.  On 2026-08-17 the node had grown past physical
+    RAM and every write route blocked indefinitely on page-ins, yet the
+    watchdog saw a green /health for days while nothing could learn.
+
+    /brain/tick is the cheapest route that actually takes the fabric lock,
+    so a hang here is the signal the read-only probe cannot give us. Any
+    HTTP answer counts as alive -- we are testing liveness, not the tick
+    value. An empty URL disables the probe.
+    """
+    if not url:
+        return True
+    request = urllib.request.Request(
+        url, data=b"{}", headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            response.read()
+            return True
+    except urllib.error.HTTPError:
+        # 4xx/5xx still proves the handler ran rather than blocking.
+        return True
+    except (urllib.error.URLError, ConnectionError, OSError):
+        return False
+
+
 def try_graceful_shutdown(url: str, log: Logger, timeout: float = 8.0) -> bool:
     """POST /shutdown so the node flushes multi-pool hot tiers + cross
     synapses + raw pool to disk before exiting.  Returns True if the node
@@ -411,6 +461,16 @@ def start_node(cfg: dict, log: Logger) -> int | None:
         return None
     env = os.environ.copy()
     env["W1Z4RDV1510N_DATA_DIR"] = node_cfg["data_dir"]
+    # Mirror start_node.ps1's politeness contract. Without these the node
+    # has no RAM ceiling: it grew to 47 GB commit on a 32 GB box, paged
+    # continuously, and every write route (/brain/tick, /brain/observe,
+    # /brain/chat) blocked forever on page-ins while /health stayed fast.
+    min_avail = node_cfg.get("min_sys_avail_mb")
+    if min_avail:
+        env["W1Z4RD_TIER_MIN_SYS_AVAIL_MB"] = str(int(min_avail))
+    checkpoint_secs = node_cfg.get("autocheckpoint_secs")
+    if checkpoint_secs:
+        env["W1Z4RD_BRAIN_AUTOCHECKPOINT_SECS"] = str(int(checkpoint_secs))
     stdout_path = pathlib.Path(node_cfg["data_dir"]) / "training" / "node_stdout.log"
     stderr_path = pathlib.Path(node_cfg["data_dir"]) / "training" / "node_stderr.log"
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
@@ -789,6 +849,11 @@ def run_supervisor(cfg: dict, log: Logger, once: bool = False) -> int:
     log.info("supervisor starting")
 
     miss_count = 0
+    write_miss_count = 0
+    # When /health first started answering after the last (re)start. The
+    # write probe waits out warmup_secs from this point so it never fires
+    # against a node that is still deserialising its brain.
+    node_first_healthy_unix = 0.0
     django_miss_count = 0
     training_last_relaunch = 0.0
     crypto_last_start: dict[str, float] = {}
@@ -799,17 +864,65 @@ def run_supervisor(cfg: dict, log: Logger, once: bool = False) -> int:
             if miss_count > 0:
                 log.info(f"node recovered after {miss_count} miss(es)")
             miss_count = 0
+            if not node_first_healthy_unix:
+                node_first_healthy_unix = time.time()
         else:
             miss_count += 1
+            node_first_healthy_unix = 0.0
             log.warn(f"node health probe failed ({miss_count}/"
                       f"{cfg['node']['health_misses_before_restart']})")
             if miss_count >= cfg["node"]["health_misses_before_restart"]:
                 log.error("node appears dead; relaunching")
                 start_node(cfg, log)
                 miss_count = 0
+                write_miss_count = 0
+                node_first_healthy_unix = 0.0
                 time.sleep(cfg["node"]["warmup_secs"])
                 if once: return 0
                 continue
+
+        # --- Node WRITE path liveness ---
+        # /health is a static struct, so it stays green while the fabric is
+        # wedged. Probing a route that takes the fabric lock is the only way
+        # to notice a node that is "up" but can no longer learn.
+        #
+        # Only probe once the node has been answering /health for a while:
+        # during the 12-15 min startup deserialise the write path is
+        # legitimately busy, and killing the node mid-load is exactly the
+        # false positive warmup_secs exists to prevent.
+        ncfg = cfg["node"]
+        write_url = ncfg.get("write_health_url") or ""
+        write_limit = int(ncfg.get("write_health_misses_before_restart") or 0)
+        healthy_streak_secs = (
+            time.time() - node_first_healthy_unix
+            if node_first_healthy_unix else 0.0
+        )
+        if (write_url and write_limit and miss_count == 0
+                and healthy_streak_secs >= float(ncfg.get("warmup_secs") or 0.0)):
+            if node_write_healthy(
+                write_url, float(ncfg.get("write_health_timeout") or 45.0)
+            ):
+                if write_miss_count > 0:
+                    log.info(
+                        f"node write path recovered after {write_miss_count} miss(es)"
+                    )
+                write_miss_count = 0
+            else:
+                write_miss_count += 1
+                log.warn(
+                    "node WRITE path probe failed "
+                    f"({write_miss_count}/{write_limit}) — /health may still be "
+                    "green while the fabric cannot learn"
+                )
+                if write_miss_count >= write_limit:
+                    log.error("node write path wedged; relaunching")
+                    start_node(cfg, log)
+                    miss_count = 0
+                    write_miss_count = 0
+                    node_first_healthy_unix = 0.0
+                    time.sleep(ncfg["warmup_secs"])
+                    if once: return 0
+                    continue
 
         # --- Django liveness (R3V3N!R control tower) ---
         dcfg = cfg.get("django") or {}
