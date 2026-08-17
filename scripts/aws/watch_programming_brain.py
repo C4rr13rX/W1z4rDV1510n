@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -301,14 +302,52 @@ def format_codex_event(payload: dict) -> str:
     return f"CODEX {event_type} {item_type} {summary}".rstrip()
 
 
+def resolve_codex() -> str | None:
+    """Absolute path to the codex launcher, or None if it isn't installed.
+
+    npm installs codex on Windows as codex.cmd/codex.ps1 shims rather than a
+    real .exe. subprocess without shell=True goes straight to CreateProcess,
+    which only runs actual binaries, so a bare "codex" raised
+    WinError 2 ("The system cannot find the file specified") on every alarm
+    -- the watcher's header rendered fine and then every poll logged
+    PROBE ERROR. shutil.which() resolves the shim, and PATHEXT ordering can
+    put .ps1 first, which CreateProcess also cannot execute, so prefer the
+    .cmd/.bat form explicitly.
+    """
+    direct = shutil.which("codex")
+    candidates: list[str] = []
+    if direct:
+        stem = Path(direct).with_suffix("")
+        candidates.extend(str(stem) + ext for ext in (".cmd", ".bat", ".exe"))
+        candidates.append(direct)
+    for ext in (".cmd", ".bat", ".exe"):
+        found = shutil.which("codex" + ext)
+        if found:
+            candidates.append(found)
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file():
+            return candidate
+    return None
+
+
 def invoke_codex(session_id: str, decision: Decision, probe: dict,
                  log_dir: Path, activity_path: Path) -> int:
     log_dir.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     stdout_path = log_dir / f"codex-{stamp}.jsonl"
     stderr_path = log_dir / f"codex-{stamp}.stderr.log"
+    executable = resolve_codex()
+    if executable is None:
+        # Report it once, clearly, instead of raising WinError 2 on every poll.
+        append_activity(
+            activity_path,
+            "CODEX UNAVAILABLE: no codex launcher on PATH; "
+            "install with `npm i -g @openai/codex`. Supervision continues; "
+            "alarms are logged but cannot wake Codex.",
+        )
+        return 127
     command = [
-        "codex", "exec", "resume",
+        executable, "exec", "resume",
         "-c", 'approval_policy="never"',
         "-c", 'sandbox_mode="danger-full-access"',
         "--json", session_id, "-",
@@ -439,16 +478,30 @@ def main() -> int:
                 f"minimum_outstanding={probe.get('curriculum', {}).get('minimum_outstanding_rows', '-')}",
             )
             if trigger and not args.dry_run:
-                returncode = invoke_codex(
-                    args.session_id, decision, probe,
-                    args.state_path.parent / "logs", activity_path,
-                )
+                # Waking Codex is a REMEDIATION, not part of the probe. Keep
+                # its failures out of the probe's except block: a missing
+                # codex CLI used to surface as "PROBE ERROR ... cannot find
+                # the file specified" on every poll, which read as though the
+                # AWS probe itself had broken and hid the numbers it had just
+                # fetched successfully.
+                try:
+                    returncode = invoke_codex(
+                        args.session_id, decision, probe,
+                        args.state_path.parent / "logs", activity_path,
+                    )
+                except Exception as exc:  # noqa: BLE001 - remediation only
+                    returncode = 127
+                    append_activity(activity_path, f"CODEX INVOKE FAILED {exc}")
                 state["last_codex_returncode"] = returncode
                 state["last_codex_unix"] = time.time()
                 if returncode == 0:
                     state["last_invoked_fingerprint"] = decision.fingerprint
                     state["last_invoked_unix"] = time.time()
                 atomic_json(args.state_path, state)
+            # The probe succeeded; make sure a stale error from an earlier
+            # cycle does not keep showing up in the header.
+            state.pop("probe_error", None)
+            atomic_json(args.state_path, state)
         except Exception as exc:
             state.update({"probe_error": str(exc), "updated_unix": time.time()})
             atomic_json(args.state_path, state)
