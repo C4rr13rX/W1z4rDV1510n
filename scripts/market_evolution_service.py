@@ -3918,6 +3918,58 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def fit_live_surrogate(genome_payload: dict[str, Any],
+                       *, dataset: dict[str, Any] | None = None) -> Any:
+    """Return a fitted Surrogate for a genome, for live scoring.
+
+    The GA never persists a fitted estimator -- only the genome spec -- so a
+    consumer that wants to score live bars has to refit. Doing that by
+    reimplementing the learner branches would drift from what was measured,
+    so this reuses the evaluation path and hands back the model it produced.
+
+    Returns None when the genome cannot be fitted; callers must treat that as
+    "unscorable" rather than substituting a guess.
+    """
+    try:
+        genome = genome_from_dict(genome_payload)
+    except (TypeError, ValueError, KeyError):
+        return None
+
+    if dataset is None:
+        try:
+            dataset = load_dataset_cached(
+                ROOT / "runtime/benchmarks/market-corpus-manifest.json",
+                Path(r"D:\Projects\CoolCryptoUtilities\data\binance_public"),
+                12, 12, "market-perpetual-v1",
+                Path(r"D:\Projects\CoolCryptoUtilities\data\news\historical_deduplicated.json"),
+                ROOT / "runtime/cache/market-evolution-dataset-v4.joblib",
+            )
+        except Exception:
+            return None
+
+    captured: list[Any] = []
+    original = globals().get("Surrogate")
+    if original is None:
+        return None
+
+    def capture(*args: Any, **kwargs: Any) -> Any:
+        model = original(*args, **kwargs)
+        captured.append(model)
+        return model
+
+    globals()["Surrogate"] = capture
+    try:
+        evaluate_genome(genome, dataset, folds=1, test_days=28,
+                        calibration_days=30, final_days=21, horizon=12,
+                        cost_bps=OBJECTIVE_COST_BPS)
+    except Exception:
+        pass
+    finally:
+        globals()["Surrogate"] = original
+
+    return captured[-1] if captured else None
+
+
 def champion_replacement_allowed(candidate: Genome, incumbent: Genome) -> bool:
     """Require a bounded Pareto improvement for the durable research champion."""
     if (candidate.fitness is None or incumbent.fitness is None
