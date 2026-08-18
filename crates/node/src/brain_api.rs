@@ -3653,6 +3653,22 @@ async fn h_brain_chat(
         .unwrap_or_default();
     let diagnostic_unweighted_candidates = unweighted_feature_candidates.len();
     for candidate in unweighted_feature_candidates {
+        // This population is recalled by label alone, with no filter. When the
+        // labels are narrow, a single mislabel therefore decides the answer:
+        // the out-of-vocabulary prompt "distributed consensus protocol with
+        // Byzantine fault tolerance" was tagged CONCURRENCY:BOUNDED_ASYNC and
+        // pulled in the unrelated bounded_map manifest, answering a request the
+        // brain must refuse. Require a manifest admitted on thin label evidence
+        // to share subject vocabulary with the request; richer label sets carry
+        // enough agreement to outvote one bad label and are left alone.
+        if is_complete_file_manifest(&candidate)
+            && composition_features
+                .as_ref()
+                .is_some_and(|(_, labels)| labels.len() < 4)
+            && !prompt_shares_manifest_subject(prompt, &candidate)
+        {
+            continue;
+        }
         if !feature_candidates.contains(&candidate) {
             feature_candidates.push(candidate);
         }
