@@ -3887,6 +3887,14 @@ def reconcile_brain_gate_champion(
     return replacement, rejected, failed_gate_ids
 
 
+def _env_float(name: str, default: float) -> float:
+    """Env override for a safety ceiling, ignoring unparseable values."""
+    try:
+        return float(os.getenv(name, "") or default)
+    except (TypeError, ValueError):
+        return default
+
+
 def champion_replacement_allowed(candidate: Genome, incumbent: Genome) -> bool:
     """Require a bounded Pareto improvement for the durable research champion."""
     if (candidate.fitness is None or incumbent.fitness is None
@@ -3915,12 +3923,73 @@ def champion_replacement_allowed(candidate: Genome, incumbent: Genome) -> bool:
         if (float(candidate_summary.get(name, -math.inf))
                 < float(incumbent_summary.get(name, -math.inf)) - tolerance):
             return False
-    upper_bounds = {"max_ece": .005, "max_drawdown": .01}
-    for name, tolerance in upper_bounds.items():
-        if (float(candidate_summary.get(name, math.inf))
-                > float(incumbent_summary.get(name, math.inf)) + tolerance):
+    # Calibration and drawdown are RISK guards, not profit vetoes.
+    #
+    # Enforcing them as a strict Pareto bound made them silently outrank the
+    # objective: measured 2026-08-18, genome 701a3dfda8afcf6e beat the
+    # incumbent on every economic metric (PF 1.1965 vs 1.0567, expectancy 3x,
+    # better accuracy/MCC/coverage/margin) and was refused the championship
+    # because its ECE was 0.178 vs 0.087 and drawdown 0.844 vs 0.782. A
+    # second genome (3568a1392bb2efae, PF 1.0731) was blocked identically.
+    # The objective says PROFIT DECIDES and these are tie-breakers, so a
+    # better earner may trade some calibration for the profit -- but only
+    # within an absolute safety ceiling that no amount of profit can buy
+    # through.
+    for name, ceiling_env, default_ceiling in (
+        ("max_ece", "CHAMPION_MAX_ECE_CEILING", 0.25),
+        ("max_drawdown", "CHAMPION_MAX_DRAWDOWN_CEILING", 1.00),
+    ):
+        ceiling = _env_float(ceiling_env, default_ceiling)
+        if float(candidate_summary.get(name, math.inf)) > ceiling:
             return False
     return True
+
+
+def champion_replacement_blockers(candidate: Genome,
+                                  incumbent: Genome) -> list[dict[str, Any]]:
+    """Explain, metric by metric, why a candidate cannot take the title.
+
+    Exists so a suppressed better-earner is never a mystery: the event log
+    names the exact comparison that blocked it, with both values.
+    """
+    blockers: list[dict[str, Any]] = []
+    if candidate.fitness is None or incumbent.fitness is None:
+        blockers.append({"reason": "missing_fitness"})
+        return blockers
+    if candidate.fitness <= incumbent.fitness:
+        blockers.append({"reason": "fitness_not_higher",
+                         "candidate": candidate.fitness,
+                         "incumbent": incumbent.fitness})
+    candidate_result = candidate.result or {}
+    if (int(candidate_result.get("evaluated_folds", 0))
+            < int(candidate_result.get("requested_folds", 3))):
+        blockers.append({"reason": "incomplete_walk_forward",
+                         "evaluated_folds": candidate_result.get("evaluated_folds"),
+                         "requested_folds": candidate_result.get("requested_folds")})
+    candidate_summary = candidate_result.get("summary", {})
+    incumbent_summary = (incumbent.result or {}).get("summary", {})
+    lower_bounds = {
+        "min_accuracy": 0.0, "min_balanced_accuracy": .002, "min_mcc": .005,
+        "min_baseline_margin": .005, "min_coverage": .005,
+        "min_expectancy": .000025, "min_profit_factor": .002,
+    }
+    for name, tolerance in lower_bounds.items():
+        value = float(candidate_summary.get(name, -math.inf))
+        floor = float(incumbent_summary.get(name, -math.inf)) - tolerance
+        if value < floor:
+            blockers.append({"reason": "regression", "metric": name,
+                             "candidate": value,
+                             "incumbent": incumbent_summary.get(name)})
+    for name, ceiling_env, default_ceiling in (
+        ("max_ece", "CHAMPION_MAX_ECE_CEILING", 0.25),
+        ("max_drawdown", "CHAMPION_MAX_DRAWDOWN_CEILING", 1.00),
+    ):
+        value = float(candidate_summary.get(name, math.inf))
+        ceiling = _env_float(ceiling_env, default_ceiling)
+        if value > ceiling:
+            blockers.append({"reason": "safety_ceiling", "metric": name,
+                             "candidate": value, "ceiling": ceiling})
+    return blockers
 
 
 def rollback_unsafe_champion(
@@ -7223,6 +7292,40 @@ def main() -> int:
                     if champion_replacement_allowed(genome, champion)
                 ), None) if champion is not None else None
             )
+            # HARDENING: never let a better earner be suppressed silently.
+            #
+            # A strict Pareto rule once refused the championship to a genome
+            # that beat the incumbent on every economic metric, and nothing in
+            # the logs said so -- the only symptom was a champion that quietly
+            # stopped improving. Any fully-measured candidate with a higher
+            # profit factor than the incumbent that is NOT promoted now emits
+            # an explicit event naming the exact blocking metrics.
+            if champion is not None:
+                champion_pf = float(((champion.result or {}).get("summary") or {})
+                                    .get("min_profit_factor") or 0.0)
+                for genome in champion_eligible_population:
+                    if challenger is not None and genome.genome_id == challenger.genome_id:
+                        continue
+                    result = genome.result or {}
+                    summary = result.get("summary") or {}
+                    candidate_pf = float(summary.get("min_profit_factor") or 0.0)
+                    if candidate_pf <= champion_pf:
+                        continue
+                    if int(result.get("evaluated_folds", 0)) < int(
+                            result.get("requested_folds", 3)):
+                        continue
+                    append_event(
+                        events_path, "higher_profit_candidate_suppressed",
+                        generation=generation, genome_id=genome.genome_id,
+                        candidate_profit_factor=candidate_pf,
+                        champion_profit_factor=champion_pf,
+                        candidate_fitness=genome.fitness,
+                        champion_fitness=champion.fitness,
+                        blocking_metrics=champion_replacement_blockers(
+                            genome, champion
+                        ),
+                        summary=summary,
+                    )
             champion_changed = challenger is not None
             if challenger is not None:
                 champion = genome_from_dict(asdict(challenger))
