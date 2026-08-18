@@ -2070,6 +2070,36 @@ def seed_genomes(population: int, rng: random.Random) -> list[Genome]:
     return result
 
 
+def position_turnover(acted_rows: Sequence[dict[str, Any]],
+                      predicted: np.ndarray) -> np.ndarray:
+    """Per-observation share of a round-trip cost that was actually incurred.
+
+    A round-trip fee is paid when a position is opened or reversed, not for
+    every bar it is held. Walking each asset in time order, an observation
+    costs a full round trip only when its direction differs from that
+    asset's previous acted direction; continuing the same direction costs
+    nothing extra.
+
+    This is measured from the predictions themselves -- no assumed holding
+    period. If the model flips direction every bar the result is all 1.0 and
+    the charge is identical to the old per-bar model; the saving only
+    appears to the extent the model genuinely holds.
+    """
+    turnover = np.ones(len(acted_rows), dtype=np.float64)
+    order = sorted(range(len(acted_rows)),
+                   key=lambda i: (str(acted_rows[i].get("asset", "")),
+                                  float(acted_rows[i].get("timestamp", 0.0))))
+    previous: dict[str, int] = {}
+    for index in order:
+        asset = str(acted_rows[index].get("asset", ""))
+        direction = int(predicted[index])
+        if previous.get(asset) == direction and direction != 0:
+            # Position simply held: no entry, no exit, no fee.
+            turnover[index] = 0.0
+        previous[asset] = direction
+    return turnover
+
+
 def _portfolio_drawdown(selected: Sequence[dict[str, Any]], predicted: np.ndarray,
                         cost_bps: float) -> float:
     by_time: dict[float, list[float]] = {}
@@ -2137,7 +2167,8 @@ def evaluate_slice(model: Surrogate, selected: list[dict[str, Any]],
         return {"observations": len(selected), "acted_observations": 0, "coverage": 0.0}
     predicted = model.predict(x)[mask]
     acted_rows = [row for row, keep in zip(selected, mask) if keep]
-    result = metrics(actual[mask], predicted, probability[mask], realized[mask], cost_bps)
+    result = metrics(actual[mask], predicted, probability[mask], realized[mask],
+                     cost_bps, turnover=position_turnover(acted_rows, predicted))
     momentum = np.asarray([1 if row["features"]["r12"] > 0 else -1 for row in selected],
                           dtype=np.int8)[mask]
     baseline = max(float((momentum == actual[mask]).mean()),

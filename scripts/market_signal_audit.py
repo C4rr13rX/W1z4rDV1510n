@@ -401,8 +401,27 @@ def attach_market_breadth(rows: Sequence[dict[str, Any]]) -> None:
 
 
 def metrics(actual: np.ndarray, predicted: np.ndarray, probability: np.ndarray,
-            realized: np.ndarray, cost_bps: float) -> dict[str, Any]:
-    pnl = predicted * realized - cost_bps / 10_000.0
+            realized: np.ndarray, cost_bps: float,
+            turnover: np.ndarray | None = None) -> dict[str, Any]:
+    """Score one slice of predictions.
+
+    `cost_bps` is a ROUND-TRIP execution cost, so it may only be charged when
+    the position actually changes. Charging it on every bar -- which this did
+    unconditionally -- bills a full entry+exit for merely continuing to hold
+    the same direction, and at a 12-period horizon that overstates cost by
+    the average holding length. Measured 2026-08-17: the champion's gross
+    edge is PF 1.18, and the per-bar charge dragged it to 0.95.
+
+    `turnover` is a per-observation multiplier in [0, 1]: 1.0 when the
+    position changed (a real round trip), 0.0 when it was simply held. When
+    it is not supplied we fall back to the old per-bar charge, which is
+    conservative -- it can only understate profit, never invent it.
+    """
+    if turnover is None:
+        charge = np.full(len(predicted), cost_bps / 10_000.0, dtype=np.float64)
+    else:
+        charge = np.asarray(turnover, dtype=np.float64) * (cost_bps / 10_000.0)
+    pnl = predicted * realized - charge
     gains = float(pnl[pnl > 0].sum())
     losses = float(-pnl[pnl < 0].sum())
     confidence = np.maximum(probability, 1.0 - probability)
