@@ -147,13 +147,46 @@ from scripts.market_signal_audit import (  # noqa: E402
     metrics, select_primary_assets, stable_order,
 )
 
+# ─── THE OBJECTIVE ──────────────────────────────────────────────────────────
+#
+# One statement of what this system is for. Everything below derives from it,
+# and nothing may silently contradict it.
+#
+#   Make money, net of what it actually costs to trade.
+#
+# Two rules follow, and they are not negotiable by any other threshold:
+#
+#   1. PROFIT DECIDES. A candidate that earns more money outranks one that is
+#      more accurate, trades more often, or looks better on any other metric.
+#      Accuracy, MCC, coverage and calibration are tie-breakers only -- they
+#      correlate with durable edges, so they steer breeding, but they never
+#      outvote the money.
+#
+#   2. PROFIT MUST BE MEASURED, NOT CLAIMED. A profit factor is only real if
+#      it survived the full walk-forward at the true execution cost. Anything
+#      measured on fewer folds, or at a cost lower than we actually pay, is a
+#      hypothesis -- and hypotheses never outrank measurements.
+#
+# Why this is written down: for 1347 generations the fitness function weighted
+# accuracy 20x profit while scoring candidates on a single fold, so the search
+# optimised for being right rather than for earning, on numbers that were not
+# real. It produced a champion that was 55.6% accurate and lost money. The
+# objective was never stated anywhere, so nothing caught the drift.
+#
+# OBJECTIVE_PROFIT_FACTOR is the bar that means "this is worth trading".
+# OBJECTIVE_COST_BPS must reflect what a round trip actually costs; evaluating
+# below it manufactures profit that will not exist live. Measured 2026-08-17:
+# GAS_ROUNDTRIP_FEE_RATIO alone is 25 bps before slippage or DEX fees.
+OBJECTIVE_PROFIT_FACTOR = 1.10
+OBJECTIVE_COST_BPS = 25.0
+
 FLOOR = {
     "observations": 200, "coverage": 0.70, "accuracy": 0.58,
     "balanced_accuracy": 0.55, "baseline_margin": 0.05, "mcc": 0.15,
     "ece": 0.10, "profit_factor": 1.20, "max_drawdown": 0.15,
 }
 WORKING_TARGET = {"accuracy": 0.62, "balanced_accuracy": 0.58,
-                  "mcc": 0.25, "profit_factor": 1.35}
+                  "mcc": 0.25, "profit_factor": max(1.35, OBJECTIVE_PROFIT_FACTOR)}
 PRESCREEN = {
     "observations": 150, "coverage": 0.60, "accuracy": 0.54,
     "balanced_accuracy": 0.52, "mcc": 0.04, "ece": 0.20,
@@ -6563,7 +6596,15 @@ def main() -> int:
     parser.add_argument("--test-days", type=int, default=42)
     parser.add_argument("--calibration-days", type=int, default=30)
     parser.add_argument("--final-days", type=int, default=21)
-    parser.add_argument("--cost-bps", type=float, default=20.0)
+    parser.add_argument(
+        "--cost-bps", type=float, default=OBJECTIVE_COST_BPS,
+        help=(
+            "round-trip execution cost in basis points. Defaults to the "
+            "objective's true cost (%(default)s). The old 20.0 default was "
+            "below GAS_ROUNDTRIP_FEE_RATIO (25 bps) alone, so every profit "
+            "factor was measured against a cost we do not actually pay."
+        ),
+    )
     parser.add_argument("--brain-gate-every", type=int, default=5,
                         help="launch one isolated Wizard smoke gate this many generations")
     parser.add_argument(
@@ -6624,6 +6665,19 @@ def main() -> int:
             pass
         append_event(events_path, "stopped", generation=None, requested=True)
         return 0
+    # Objective rule 2: profit must be measured at what trading actually
+    # costs. Evaluating below OBJECTIVE_COST_BPS manufactures profit that
+    # cannot exist live, so it is recorded loudly rather than passing
+    # silently -- this is exactly how a champion came to look profitable
+    # while every real round trip lost money to gas.
+    if args.cost_bps < OBJECTIVE_COST_BPS:
+        append_event(
+            events_path, "objective_cost_understated",
+            configured_cost_bps=args.cost_bps,
+            objective_cost_bps=OBJECTIVE_COST_BPS,
+            warning=("profit factors will be optimistic; results are not "
+                     "comparable to the objective"),
+        )
     data_signature = dataset_signature(args.manifest, args.supplemental_root, args.news)
     signature = evaluation_signature(
         data_signature, folds=args.folds, test_days=args.test_days,
