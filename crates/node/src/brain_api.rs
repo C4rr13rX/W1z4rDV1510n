@@ -3923,7 +3923,24 @@ async fn h_brain_chat(
                     .is_some_and(|artifact| composed_artifact_contains_fragment(artifact, exact))
         });
     let explicitly_requests_source_unit = explicitly_requests_source_unit(prompt);
-    let trained_bytes = if raw_is_exact && raw_trained.is_some() {
+    // `has_exact_trained_binding` reports that the last-observed sequence has
+    // *a* binding posting -- existence, not correctness. For an unseen request
+    // that is enough to hand back whatever trained manifest sits nearest in
+    // the raw pool: "distributed consensus protocol with Byzantine fault
+    // tolerance" returned the bounded_map concurrency manifest, and the
+    // never-probed "gossip membership protocol with failure detectors"
+    // returned a circuit breaker. Both are confident answers to requests the
+    // brain has never learned.
+    //
+    // Direct sensory evidence stays the strongest tier, but when the recalled
+    // artifact is a complete manifest whose own vocabulary the request never
+    // mentions, the honest answer is to fall through to the derived pools
+    // rather than to assert it. Non-manifest recalls are untouched.
+    let raw_manifest_supported = raw_trained.as_ref().is_none_or(|candidate| {
+        !is_complete_file_manifest(candidate)
+            || prompt_shares_manifest_subject(prompt, candidate)
+    });
+    let trained_bytes = if raw_is_exact && raw_trained.is_some() && raw_manifest_supported {
         // Direct sensory evidence is the strongest tier. Derived diagnostic
         // pools may compose novel requests, but can never overwrite an
         // ordered prompt episode the brain actually observed.
