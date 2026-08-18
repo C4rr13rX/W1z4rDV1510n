@@ -3932,23 +3932,6 @@ async fn h_brain_chat(
                     .is_some_and(|artifact| composed_artifact_contains_fragment(artifact, exact))
         });
     let explicitly_requests_source_unit = explicitly_requests_source_unit(prompt);
-    // `has_exact_trained_binding` reports that the last-observed sequence has
-    // *a* binding posting -- existence, not correctness. For an unseen request
-    // that is enough to hand back whatever trained manifest sits nearest in
-    // the raw pool: "distributed consensus protocol with Byzantine fault
-    // tolerance" returned the bounded_map concurrency manifest, and the
-    // never-probed "gossip membership protocol with failure detectors"
-    // returned a circuit breaker. Both are confident answers to requests the
-    // brain has never learned.
-    //
-    // Direct sensory evidence stays the strongest tier, but when the recalled
-    // artifact is a complete manifest whose own vocabulary the request never
-    // mentions, the honest answer is to fall through to the derived pools
-    // rather than to assert it. Non-manifest recalls are untouched.
-    let raw_manifest_supported = raw_trained.as_ref().is_none_or(|candidate| {
-        !is_complete_file_manifest(candidate)
-            || prompt_shares_manifest_subject(prompt, candidate)
-    });
     // Which branch below produced the answer. This chain has fourteen arms
     // and several can return the same artifact, so a wrong answer gives no
     // hint about which one to fix: four successive guesses at the OOV leak
@@ -3957,7 +3940,7 @@ async fn h_brain_chat(
     // coming from somewhere else entirely. Reporting the branch turns that
     // search into a single question, so it is worth keeping.
     let mut answer_branch = "none";
-    let trained_bytes = if raw_is_exact && raw_trained.is_some() && raw_manifest_supported {
+    let trained_bytes = if raw_is_exact && raw_trained.is_some() {
         answer_branch = "raw_is_exact";
         // Direct sensory evidence is the strongest tier. Derived diagnostic
         // pools may compose novel requests, but can never overwrite an
@@ -3974,12 +3957,13 @@ async fn h_brain_chat(
         prompt,
     ) && composed.is_some()
     {
+        answer_branch = "request_prefers_composed";
         // A ready, behavior-complete container is stronger than one plain
         // source candidate for a request that asks independent subsystems to
         // work together. This ordering is invariant to later corpus rank.
         composed
     } else if !explicitly_requests_source_unit && ranked_single_manifest.is_some() {
-        answer_branch = "request_prefers_composed";
+        answer_branch = "ranked_single_manifest_early";
         // Preserve a learned project/file response contract unless the user
         // explicitly asks for one source unit. A popular plain source from
         // the same sparse behavior class must not shadow a compatible
@@ -3991,6 +3975,7 @@ async fn h_brain_chat(
             !is_grounded_code_fragment(candidate) && exact_feature_compatible
         })
     {
+        answer_branch = "exact_feature_nonfragment";
         // An exact sparse-intent episode is stronger evidence than a fuzzy
         // assembly of several partially matching artifacts.  In particular,
         // LANGUAGE + BEHAVIOR can identify a learned single-function answer
@@ -3998,18 +3983,18 @@ async fn h_brain_chat(
         // form a syntactically valid but unrelated composition.
         exact_feature
     } else if ranked_validated_source.is_some() {
-        answer_branch = "ranked_single_manifest_early";
+        answer_branch = "ranked_validated_source";
         // Apply the complete deterministic request before candidate-window
         // truncation. Popular but behaviorally incompatible corpus actions
         // cannot crowd a rarer correct learned episode out of bounded recall.
         ranked_validated_source
     } else if raw_semantically_validated.is_some() {
-        answer_branch = "exact_feature_nonfragment";
+        answer_branch = "raw_semantically_validated";
         // Feature and atom-motif pools independently agree on this learned
         // action. This path remains read-only and cannot synthesize source.
         raw_semantically_validated
     } else if raw_motif_trained.as_ref().is_some_and(|candidate| {
-        answer_branch = "ranked_validated_source";
+        answer_branch = "raw_motif_trained";
         prompt_derived_feature_artifact_compatible(
             &diagnostic_intent_labels,
             prompt,
@@ -4020,10 +4005,10 @@ async fn h_brain_chat(
         // displace one unambiguous complete feature episode.
         raw_motif_trained
     } else if composed.is_some() {
-        answer_branch = "raw_semantically_validated";
+        answer_branch = "composed";
         composed
     } else if ranked_single_manifest.is_some() {
-        answer_branch = "raw_motif_trained";
+        answer_branch = "ranked_single_manifest_late";
         // Ranked feature evidence is stronger than raw character similarity.
         // This is the normal path for a paraphrase that omits one constraint
         // from a learned single-language project episode.
@@ -4035,21 +4020,22 @@ async fn h_brain_chat(
                 && !programming_language_intent
         })
     {
+        answer_branch = "exact_feature_fragment";
         // An isolated exact fragment is useful training evidence, but it is
         // not a complete user-facing artifact. Return it only after grounded
         // composition and complete ranked manifests have both failed.
         exact_feature
     } else if ranked_single_source.is_some() {
-        answer_branch = "composed";
+        answer_branch = "ranked_single_source";
         // Ranked sparse intent has independently grounded the requested
         // language and behavior. Plain single-file source is valid here as
         // long as its shape agrees with that language.
         ranked_single_source
     } else if chat_query_pools.len() > 1 && !programming_language_intent {
-        answer_branch = "ranked_single_manifest_late";
+        answer_branch = "multi_pool_decode";
         brain.decode_best_trained_binding_multi(&chat_query_pools, action_pool)
     } else {
-        answer_branch = "exact_feature_fragment";
+        answer_branch = "no_answer";
         None
     };
     let trained_decode: Option<String> =
