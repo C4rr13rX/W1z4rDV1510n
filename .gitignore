@@ -131,3 +131,4 @@ node_modules/
 .aws/
 credentials*.json
 service-account*.json
+*.xlsx
