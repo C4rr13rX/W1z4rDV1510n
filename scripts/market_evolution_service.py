@@ -152,6 +152,12 @@ PRESCREEN = {
     "balanced_accuracy": 0.52, "mcc": 0.04, "ece": 0.20,
     "profit_factor": 0.85,
 }
+# A candidate whose worst section is at least break-even earns the remaining
+# walk-forward folds even when it misses the non-economic prescreen floors.
+# Profit is the objective, so profitable evidence must be measured to
+# completion rather than discarded on fold 1 -- but it earns MEASUREMENT,
+# never admission. 1.0 = must at least not be losing money to continue.
+PROFIT_CONTINUE_FLOOR = 1.0
 COMPETENCE_FLOOR = {
     "observations": 30, "accuracy": 0.55, "balanced_accuracy": 0.52,
     "mcc": 0.04, "profit_factor": 1.05,
@@ -2228,20 +2234,50 @@ def curriculum_fitness(
     retains accuracy pressure while making coverage collapse and negative
     economics expensive enough to breed targeted repairs instead of winners.
     """
+    # PROFIT IS THE OBJECTIVE.
+    #
+    # The previous weighting made accuracy worth 20x profit (500 * accuracy
+    # vs 25 * profit_factor), so the search optimised for being right rather
+    # than for making money -- and it worked: the champion sits at 55.6%
+    # accuracy with PF 0.981, i.e. accurate and unprofitable. Profit now
+    # dominates, and because a fold_count term worth 1000 would still swamp
+    # it, fold completeness is folded into profit instead: an unmeasured
+    # candidate cannot outrank a measured profitable one.
+    #
+    # Accuracy/MCC/margin remain as small tie-breakers only. They correlate
+    # with durable edges, so they still steer breeding, but they can no
+    # longer outvote the money.
+    profit_edge = min_profit - 1.0
+    # Profit is only believable in proportion to how much walk-forward it
+    # survived. A fold-1 PF of 1.377 that collapses to 0.936 on three folds
+    # (measured 2026-08-17, 12 of 12 candidates) must never outrank a
+    # smaller profit that held up. Discounting the reward by evidence depth
+    # makes an unmeasured claim structurally unable to win.
+    evidence = min(1.0, max(0, fold_count) / 3.0)
     return (
-        1000 * (fold_count - 1)
-        + 500 * min_accuracy
-        + 150 * min_balanced
-        + 100 * min_mcc
-        + 80 * min_margin
-        + 25 * min(min_profit, 2.0)
-        + 2000 * min(0.01, max(-0.01, min_expectancy))
+        # Dominant term: real profit above break-even, discounted by how
+        # thoroughly it was actually measured.
+        4000 * max(-1.0, min(1.0, profit_edge)) * evidence
+        # Losing money is punished at full weight regardless of evidence
+        # depth -- we never need more folds to reject a loser.
+        - 6000 * max(0, -profit_edge)
+        + 3000 * min(0.01, max(-0.01, min_expectancy)) * 100 * evidence
+        # Completing the walk-forward is itself rewarded, so a candidate can
+        # never gain by being abandoned early.
+        + 600 * (fold_count - 1)
+        # Tie-breakers.
+        + 60 * min_accuracy
+        + 40 * min_balanced
+        + 40 * min_mcc
+        + 30 * min_margin
         - 25 * max_ece
-        - 5 * max_drawdown
-        - 250 * max(0, PRESCREEN["coverage"] - min_coverage)
-        - .75 * max(0, PRESCREEN["observations"] - min_observations)
+        - 15 * max_drawdown
+        # Coverage is a *soft* preference now, not a wall: more profitable
+        # trades is better than fewer, but a high-coverage money-loser is
+        # still worse than a selective winner.
+        - 60 * max(0, PRESCREEN["coverage"] - min_coverage)
+        - .25 * max(0, PRESCREEN["observations"] - min_observations)
         - 100 * max(0, -min_margin)
-        - 40 * max(0, 1.0 - min_profit)
         + (25 * conditional_ghost_accuracy if conditional_ghost_pass else 0)
     )
 
@@ -2502,10 +2538,28 @@ def evaluate_genome(genome: Genome, dataset: dict[str, Any], *, folds: int,
                 competence_passes(fold_result[name])
                 for name in ("conditional_ghost_known", "conditional_ghost_unseen")
             )
-            # A globally weak model may still contain a repeatable local edge.
-            # Let that evidence earn later protected folds, but never let it
-            # satisfy the broad floor or live admission contract.
-            if not broad_prescreen_pass and not conditional_prescreen_pass:
+            # PROFIT EARNS THE REMAINING FOLDS.
+            #
+            # Breaking here on the non-economic floors is what produced a
+            # 1347-generation search built on noise: a candidate that looked
+            # profitable on fold 1 was abandoned before folds 2-3 could test
+            # it, and its optimistic fold-1 profit_factor was recorded as if
+            # it were the verdict. Measured 2026-08-17 on the 12 best such
+            # candidates: fold-1 PF 1.23-1.38 collapsed to 0.79-0.98 once the
+            # remaining folds actually ran. Every one of them. The GA was
+            # therefore selecting partly on single-fold luck.
+            #
+            # So: if a candidate is profitable so far, it does NOT get to
+            # keep that number for free -- it must survive the rest of the
+            # walk-forward. Cheap models that are already losing money still
+            # break early, which is what keeps the search fast.
+            profit_so_far = min(
+                (fold_result[name].get("profit_factor") or 0.0)
+                for name in ("known_asset_future", "unseen_asset_future")
+            )
+            profit_earns_more_folds = profit_so_far >= PROFIT_CONTINUE_FLOOR
+            if (not broad_prescreen_pass and not conditional_prescreen_pass
+                    and not profit_earns_more_folds):
                 break
         sections = [fold_result[name] for fold_result in fold_results
                     for name in ("known_asset_future", "unseen_asset_future")]
