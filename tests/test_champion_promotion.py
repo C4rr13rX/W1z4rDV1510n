@@ -107,3 +107,50 @@ def test_blockers_name_the_offending_metric_and_values():
     assert ece["reason"] == "safety_ceiling"
     assert ece["candidate"] == pytest.approx(0.40)
     assert ece["ceiling"] == pytest.approx(0.25)
+
+def test_a_coverage_regression_cannot_veto_a_better_earner():
+    """Coverage is not profit, and gating on it cost real money.
+
+    Measured on this run's event log: 40 candidates that out-earned the
+    incumbent were suppressed, 23 of them blocked ONLY by a diagnostic
+    regression, with min_coverage the single most common blocker (26 of 84).
+    Genome df3a00203d29 earned PF 1.2132 against an incumbent's 1.1682 and was
+    refused for trading less often (coverage 0.48 vs 0.80).
+
+    Across 1069 full-fold genomes in the same run corr(coverage, expectancy)
+    is -0.003: how often a genome trades says essentially nothing about what
+    it earns.
+    """
+    incumbent = make("incumbent", fitness=2450.0, pf=1.1682, ece=0.09,
+                     drawdown=0.78, coverage=0.8024, expectancy=0.0018)
+    better = make("df3a00203d29", fitness=2734.1, pf=1.2132, ece=0.09,
+                  drawdown=0.78, coverage=0.4799, expectancy=0.00215)
+    assert champion_replacement_allowed(better, incumbent)
+
+
+def test_a_profit_regression_still_blocks():
+    """Profit and expectancy remain hard vetoes -- this is profit-FIRST, not
+    profit-only-when-convenient."""
+    incumbent = make("incumbent", fitness=2450.0, pf=1.20, ece=0.09,
+                     drawdown=0.78, expectancy=0.0020)
+    poorer = make("poorer", fitness=9999.0, pf=1.05, ece=0.01,
+                  drawdown=0.10, expectancy=0.0020)
+    assert not champion_replacement_allowed(poorer, incumbent)
+
+    losing = make("losing", fitness=9999.0, pf=1.25, ece=0.01,
+                  drawdown=0.10, expectancy=0.0001)
+    assert not champion_replacement_allowed(losing, incumbent)
+
+
+def test_a_diagnostic_regression_is_reported_even_though_it_does_not_block():
+    """A promotion that trades accuracy for profit must stay auditable."""
+    incumbent = make("incumbent", fitness=2450.0, pf=1.1682, ece=0.09,
+                     drawdown=0.78, coverage=0.8024, expectancy=0.0018)
+    better = make("better", fitness=2734.1, pf=1.2132, ece=0.09,
+                  drawdown=0.78, coverage=0.4799, expectancy=0.00215)
+    blockers = champion_replacement_blockers(better, incumbent)
+    observed = [b for b in blockers if b["reason"] == "observed_regression"]
+    assert any(b["metric"] == "min_coverage" for b in observed)
+    # ...but nothing that actually blocks the promotion.
+    assert not [b for b in blockers if b["reason"] == "regression"]
+
