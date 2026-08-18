@@ -271,6 +271,38 @@ def retain_attempt(passed: bool, retain_failed: bool) -> bool:
     return passed or retain_failed
 
 
+#: How many failed attempt runtimes to keep for diagnosis. Each one holds a
+#: per-fold brain checkpoint of roughly 1.3 GB, so retaining every failure
+#: without limit fills the disk: 117 checkpoints reached 87 GB and stopped the
+#: evolution service outright ("No space left on device" in the watchdog),
+#: which is a far worse outcome than losing the oldest diagnostics.
+RETAINED_FAILED_ATTEMPTS = 12
+
+
+def prune_retained_attempts(gate_root: Path, keep: int = RETAINED_FAILED_ATTEMPTS) -> int:
+    """Drop all but the newest ``keep`` attempt runtimes under one gate.
+
+    Returns the number removed. Failures here are non-fatal: a gate result is
+    still valid if its housekeeping could not run.
+    """
+    try:
+        attempts = sorted(
+            (path for path in gate_root.glob("attempt-*") if path.is_dir()),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return 0
+    removed = 0
+    for stale in attempts[keep:]:
+        try:
+            shutil.rmtree(stale)
+            removed += 1
+        except OSError:
+            continue
+    return removed
+
+
 def evenly_spaced(rows: Sequence[dict[str, Any]], count: int) -> list[dict[str, Any]]:
     if len(rows) <= count:
         return list(rows)
@@ -511,6 +543,12 @@ def main() -> int:
         except OSError as error:
             report["attempt_runtime_retained"] = True
             report["attempt_cleanup_error"] = repr(error)
+    else:
+        # Retained runtimes are diagnostic, not durable state. Cap them so a
+        # long run of failing gates cannot fill the disk and stop evolution.
+        report["attempt_runtimes_pruned"] = prune_retained_attempts(
+            args.attempt_root.parent
+        )
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(report, indent=2, allow_nan=False), encoding="utf-8")
     print(json.dumps({"genome_id": genome.genome_id, "passed": passed,
