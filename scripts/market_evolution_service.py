@@ -1150,6 +1150,29 @@ def evaluation_signature(data_signature: str, *, folds: int, test_days: int,
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
+def refresh_genome_audit(state_dir: Path, generation: int) -> None:
+    """Keep the auditable spreadsheet current as the search runs.
+
+    The event log is the system of record; this is the reviewable view of it.
+    Rebuilding is cheap relative to a generation and never blocks evolution --
+    any failure is swallowed, because losing the audit view must not stop the
+    search. Cadence is env-tunable for very fast generations.
+    """
+    every = 1
+    try:
+        every = max(1, int(os.getenv("GENOME_AUDIT_EVERY_GENERATIONS", "1")))
+    except (TypeError, ValueError):
+        every = 1
+    if generation % every:
+        return
+    try:
+        from scripts.export_genome_audit import build
+
+        build(state_dir, state_dir / "genome_audit.xlsx", OBJECTIVE_PROFIT_FACTOR)
+    except Exception:
+        pass
+
+
 def append_event(path: Path, event: str, **payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
@@ -7753,6 +7776,7 @@ def main() -> int:
             append_event(events_path, "generation_completed", generation=generation,
                          champion=champion.genome_id if champion else None,
                          champion_fitness=champion.fitness if champion else None)
+            refresh_genome_audit(args.state_dir, generation)
             write_live_status(
                 args.state_dir, "generation_complete", generation,
                 population=len(population), champion=champion.genome_id if champion else None,
