@@ -3718,6 +3718,19 @@ async fn h_brain_chat(
             if let Some(candidate) = raw_trained
                 .as_ref()
                 .filter(|bytes| is_complete_file_manifest(bytes))
+                // A single behaviour label is weaker evidence than four, and
+                // the label extractor can be wrong: an out-of-vocabulary
+                // request ("Byzantine fault tolerance") may still be tagged
+                // CONCURRENCY:BOUNDED_ASYNC, which would hand it an unrelated
+                // trained manifest and turn an honest abstention into a
+                // confident wrong answer. Require the prompt itself to
+                // corroborate the artifact -- the same check the exact and
+                // ranked feature routes already apply -- so a mislabelled
+                // prompt cannot admit a manifest it does not support.
+                .filter(|bytes| {
+                    labels.len() >= 4
+                        || prompt_derived_feature_artifact_compatible(labels, prompt, bytes)
+                })
             {
                 if !feature_candidates.contains(candidate) {
                     feature_candidates.push(candidate.clone());
@@ -6076,39 +6089,52 @@ mod tests {
         assert_eq!(value["files"]["service.py"], "from domain import VALUE\n");
     }
 
-    /// A narrow request must still be able to offer its manifest.
+    /// A narrow request must still be able to offer its manifest -- but only
+    /// when the prompt corroborates it.
     ///
     /// `sqlite_transaction` paraphrases label only LANGUAGE:PYTHON plus
     /// PERSISTENCE:ATOMIC_TRANSACTION. Under a bare `labels.len() >= 4` gate
     /// the raw-recalled manifest never joined the candidate pool, so a corpus
-    /// function that merely mentioned `.execute(` won a project request. Two
-    /// labels naming a concrete behaviour are enough evidence to compete.
+    /// function that merely mentioned `.execute(` won a project request.
+    ///
+    /// Widening on the label alone is not safe either: the extractor tagged
+    /// the out-of-vocabulary prompt "distributed consensus protocol with
+    /// Byzantine fault tolerance" as CONCURRENCY:BOUNDED_ASYNC, which handed
+    /// it an unrelated `bounded_map` manifest and broke OOV honesty. A single
+    /// behaviour label therefore admits a manifest only with prompt support.
     #[test]
-    fn a_concrete_behaviour_admits_a_manifest_however_few_labels() {
-        let admits = |labels: &[&str]| {
+    fn a_narrow_label_admits_a_manifest_only_with_prompt_support() {
+        let admits = |labels: &[&str], corroborated: bool| {
             let behaviour_grounded = labels
                 .iter()
                 .any(|label| label.contains(":") && !label.contains(":LANGUAGE:"));
-            labels.len() >= 4 || behaviour_grounded
+            (labels.len() >= 4 || behaviour_grounded)
+                && (labels.len() >= 4 || corroborated)
         };
 
-        // The regression this fixes: narrow but concrete.
-        assert!(admits(&[
+        let narrow = [
             "instruction_intent:LANGUAGE:PYTHON",
             "instruction_intent:PERSISTENCE:ATOMIC_TRANSACTION",
-        ]));
+        ];
+        // The regression this fixes: narrow, concrete, and supported.
+        assert!(admits(&narrow, true));
+        // The safety case: narrow, concrete, but the prompt does not back it.
+        assert!(!admits(&narrow, false));
 
         // Language alone names no behaviour and stays on the richer path.
-        assert!(!admits(&["instruction_intent:LANGUAGE:PYTHON"]));
-        assert!(!admits(&[]));
+        assert!(!admits(&["instruction_intent:LANGUAGE:PYTHON"], true));
+        assert!(!admits(&[], true));
 
-        // Multi-facet requests keep qualifying exactly as before.
-        assert!(admits(&[
-            "instruction_intent:LANGUAGE:PYTHON",
-            "instruction_intent:STRUCTURE:MULTIFILE",
-            "instruction_intent:IO:FILESYSTEM",
-            "instruction_intent:REPORTING:INVENTORY",
-        ]));
+        // Multi-facet requests keep qualifying on label evidence alone.
+        assert!(admits(
+            &[
+                "instruction_intent:LANGUAGE:PYTHON",
+                "instruction_intent:STRUCTURE:MULTIFILE",
+                "instruction_intent:IO:FILESYSTEM",
+                "instruction_intent:REPORTING:INVENTORY",
+            ],
+            false,
+        ));
     }
 
 }
