@@ -3653,22 +3653,6 @@ async fn h_brain_chat(
         .unwrap_or_default();
     let diagnostic_unweighted_candidates = unweighted_feature_candidates.len();
     for candidate in unweighted_feature_candidates {
-        // This population is recalled by label alone, with no filter. When the
-        // labels are narrow, a single mislabel therefore decides the answer:
-        // the out-of-vocabulary prompt "distributed consensus protocol with
-        // Byzantine fault tolerance" was tagged CONCURRENCY:BOUNDED_ASYNC and
-        // pulled in the unrelated bounded_map manifest, answering a request the
-        // brain must refuse. Require a manifest admitted on thin label evidence
-        // to share subject vocabulary with the request; richer label sets carry
-        // enough agreement to outvote one bad label and are left alone.
-        if is_complete_file_manifest(&candidate)
-            && composition_features
-                .as_ref()
-                .is_some_and(|(_, labels)| labels.len() < 4)
-            && !prompt_shares_manifest_subject(prompt, &candidate)
-        {
-            continue;
-        }
         if !feature_candidates.contains(&candidate) {
             feature_candidates.push(candidate);
         }
@@ -3825,6 +3809,27 @@ async fn h_brain_chat(
     let exact_feature = composition_features.as_ref().and_then(|(pool_id, labels)| {
         brain.decode_exact_feature_binding(*pool_id, labels, action_pool)
     });
+    // Several independent routes push into this pool and most apply no
+    // compatibility check, so filtering any one of them leaves the others
+    // open -- guarding the raw_trained gate and then the unweighted loop each
+    // failed to move the result for exactly that reason. Filter once, here,
+    // after every producer has run and before anything consumes the pool.
+    //
+    // A manifest recalled on thin label evidence must share subject
+    // vocabulary with the request. The out-of-vocabulary prompt "distributed
+    // consensus protocol with Byzantine fault tolerance" was tagged
+    // CONCURRENCY:BOUNDED_ASYNC and inherited the unrelated bounded_map
+    // manifest, answering a request the brain is required to refuse. Four or
+    // more labels carry enough agreement to outvote a single bad label and
+    // are left untouched.
+    if let Some((_, labels)) = composition_features.as_ref() {
+        if labels.len() < 4 {
+            feature_candidates.retain(|candidate| {
+                !is_complete_file_manifest(candidate)
+                    || prompt_shares_manifest_subject(prompt, candidate)
+            });
+        }
+    }
     let ranked_single_manifest = composition_features
         .as_ref()
         .and_then(|(_, labels)| {
