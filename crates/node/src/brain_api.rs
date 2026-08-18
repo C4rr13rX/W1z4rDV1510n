@@ -2764,6 +2764,62 @@ fn derived_feature_artifact_compatible(labels: &[String], bytes: &[u8]) -> bool 
 /// Exact raw sensory episodes remain authoritative, but no feature, motif,
 /// composition, or autonomous route may weaken prompt-specific constraints
 /// to the broader language+behavior class.
+/// Does the request share subject vocabulary with a recalled manifest?
+///
+/// A single behaviour label is weak evidence and the intent extractor can be
+/// wrong: "distributed consensus protocol with Byzantine fault tolerance" was
+/// labelled CONCURRENCY:BOUNDED_ASYNC, which would hand it the unrelated
+/// `bounded_map` manifest and turn an honest abstention into a confident wrong
+/// answer. Requiring the prompt and the manifest to agree on at least one
+/// substantive term keeps a mislabelled request from inheriting a manifest
+/// nothing in its wording supports.
+///
+/// This deliberately compares against identifiers and file names rather than
+/// prose, since that is the only vocabulary a manifest carries.
+fn prompt_shares_manifest_subject(prompt: &str, bytes: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return false;
+    };
+    let Some(files) = value.get("files").and_then(|files| files.as_object()) else {
+        return false;
+    };
+
+    // Terms the manifest itself declares: file stems and identifier words.
+    let mut manifest_terms: std::collections::HashSet<String> = Default::default();
+    let mut absorb = |text: &str| {
+        for word in text
+            .to_ascii_lowercase()
+            .split(|c: char| !c.is_ascii_alphanumeric())
+        {
+            if word.len() >= 4 {
+                manifest_terms.insert(word.to_string());
+            }
+        }
+    };
+    for (name, content) in files {
+        absorb(name);
+        if let Some(source) = content.as_str() {
+            absorb(source);
+        }
+    }
+
+    // A request term counts only if it is substantive: short words and the
+    // scaffolding every programming prompt shares carry no subject evidence.
+    const SCAFFOLDING: [&str; 16] = [
+        "python", "typescript", "rust", "java", "code", "write", "implement",
+        "create", "build", "function", "using", "with", "that", "this", "file",
+        "files",
+    ];
+    prompt
+        .to_ascii_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|word| {
+            word.len() >= 4
+                && !SCAFFOLDING.contains(&word)
+                && manifest_terms.contains(word)
+        })
+}
+
 fn prompt_derived_feature_artifact_compatible(
     labels: &[String],
     prompt: &str,
@@ -3728,8 +3784,20 @@ async fn h_brain_chat(
                 // ranked feature routes already apply -- so a mislabelled
                 // prompt cannot admit a manifest it does not support.
                 .filter(|bytes| {
-                    labels.len() >= 4
-                        || prompt_derived_feature_artifact_compatible(labels, prompt, bytes)
+                    if labels.len() >= 4 {
+                        return true;
+                    }
+                    // `prompt_derived_feature_artifact_compatible` checks the
+                    // artifact against the labels, not the labels against the
+                    // prompt, and it waives most checks for a complete
+                    // manifest -- so a mislabelled prompt passes it. When a
+                    // single behaviour label carries the decision, require the
+                    // request and the manifest to share subject vocabulary.
+                    // (`programming_behavior_compatible` cannot serve here: its
+                    // cues are code tokens like `asyncio.semaphore(`, which no
+                    // natural-language prompt contains.)
+                    prompt_derived_feature_artifact_compatible(labels, prompt, bytes)
+                        && prompt_shares_manifest_subject(prompt, bytes)
                 })
             {
                 if !feature_candidates.contains(candidate) {
@@ -6087,6 +6155,35 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&assembled).unwrap();
         assert_eq!(value["files"]["domain.py"], "VALUE=1\n");
         assert_eq!(value["files"]["service.py"], "from domain import VALUE\n");
+    }
+
+    /// The OOV leak: a mislabelled prompt must not inherit a manifest.
+    ///
+    /// "distributed consensus protocol with Byzantine fault tolerance" was
+    /// tagged CONCURRENCY:BOUNDED_ASYNC and admitted the bounded_map manifest,
+    /// answering a request the brain is required to refuse.
+    #[test]
+    fn a_mislabelled_prompt_does_not_inherit_an_unrelated_manifest() {
+        let bounded_map = br#"{"files":{"concurrency.py":"import asyncio\nasync def bounded_map(worker, items, limit):\n    semaphore = asyncio.Semaphore(limit)\n"}}"#;
+
+        // The out-of-vocabulary request shares no subject vocabulary.
+        assert!(!prompt_shares_manifest_subject(
+            "Implement a Python distributed consensus protocol with Byzantine fault tolerance.",
+            bounded_map,
+        ));
+
+        // The request this manifest genuinely answers still qualifies.
+        assert!(prompt_shares_manifest_subject(
+            "Write a Python bounded_map helper that limits concurrency with a semaphore.",
+            bounded_map,
+        ));
+
+        // Shared scaffolding alone ("Python", "code", "write") is not subject
+        // evidence -- otherwise every programming prompt would match.
+        assert!(!prompt_shares_manifest_subject(
+            "Write Python code using this file.",
+            bounded_map,
+        ));
     }
 
     /// A narrow request must still be able to offer its manifest -- but only
