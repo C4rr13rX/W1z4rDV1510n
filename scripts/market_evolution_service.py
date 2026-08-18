@@ -50,7 +50,14 @@ if str(ROOT) not in sys.path:
 from scripts.market_memory_guard import VerifiedWorkingSetReclaimer
 
 FEATURE_SCHEMA = 5
-EVOLUTION_SCHEMA = 14
+# 15: profit-first objective (2026-08-17). curriculum_fitness was rewritten
+# so profit dominates and the reward scales with how many walk-forward folds
+# actually ran. Every cached result therefore carries a fitness computed
+# under the OLD accuracy-first weighting -- the incumbent champion was still
+# holding 2384.7 for a PF 0.983 model that scores ~1009 now, which would let
+# stale scores outrank freshly measured profit. Bumping the schema retires
+# that evidence so selection compares like with like.
+EVOLUTION_SCHEMA = 15
 LEARNER_KINDS = (
     "classifier", "regressor", "extra_trees", "decomposed_regressor",
     "regime_regressor", "regime_decomposed_regressor",
