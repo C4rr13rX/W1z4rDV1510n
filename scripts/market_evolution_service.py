@@ -6667,6 +6667,25 @@ def main() -> int:
         pending_gate_genome = state.get("pending_brain_gate")
         neural_scores = {str(key): float(value)
                          for key, value in state.get("neural_scores", {}).items()}
+        # A champion whose fitness was computed under a previous objective
+        # must not defend its title against freshly scored rivals. The
+        # dataset check below only catches new DATA; bumping EVOLUTION_SCHEMA
+        # (i.e. changing how fitness is computed) left the incumbent holding
+        # a stale score. Observed 2026-08-17 after the profit-first rewrite:
+        # the champion kept fitness 2384.7 for a PF 0.983 model that scores
+        # ~1009 under the new function, so no honestly-measured challenger
+        # could ever displace it.
+        champion_signature = (champion.result or {}).get("evaluation_signature") \
+            if champion is not None else None
+        if champion is not None and champion_signature != signature:
+            append_event(
+                events_path, "champion_retired_stale_objective",
+                generation=generation, genome=champion.genome_id,
+                stale_fitness=champion.fitness,
+                previous_signature=champion_signature,
+                current_signature=signature,
+            )
+            champion = None
         if state.get("dataset_signature") != signature:
             population = invalidate_population_for_new_evidence(
                 population, generation, rng
