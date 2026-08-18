@@ -2446,16 +2446,35 @@ fn programming_behavior_compatible(labels: &[String], lowercase: &str) -> bool {
         .iter()
         .any(|label| label.ends_with(":PERSISTENCE:ATOMIC_TRANSACTION"))
         && !paired_ledger_update
-        && ![
-            "rollback",
-            "commit",
-            "begin(",
-            "with sqlite3.connect",
+    {
+        // A bare transaction keyword is not evidence of a transaction.
+        //
+        // Accepting any candidate that merely mentions "rollback" let an
+        // unrelated corpus function satisfy this guard: measured 2026-08-18,
+        // the sqlite_transaction paraphrase recalled BigchainDB's
+        // `def rollback(cls, bigchain, new_height, txn_ids)` -- an election
+        // cleanup routine -- and it outranked the correct multi-file
+        // manifest, because "rollback" appears in its name.
+        //
+        // Require the transaction verb to co-occur with actual persistence
+        // work (a connection or cursor executing statements). That admits
+        // the real sqlite manifest while rejecting a function that only
+        // happens to share vocabulary.
+        let transaction_verb = ["rollback", "commit", "begin("]
+            .iter()
+            .any(|evidence| lowercase.contains(evidence));
+        let persistence_work = [
+            "sqlite3.connect",
+            "cursor()",
+            ".execute(",
+            "connection.",
+            "conn.",
         ]
         .iter()
-        .any(|evidence| lowercase.contains(evidence))
-    {
-        return false;
+        .any(|evidence| lowercase.contains(evidence));
+        if !(transaction_verb && persistence_work) {
+            return false;
+        }
     }
     true
 }
@@ -5862,6 +5881,28 @@ mod tests {
         let repository = br#"{"files":{"repository.py":"import sqlite3\n\ndef transfer(db_path, source_id, target_id, amount):\n    with sqlite3.connect(db_path) as connection:\n        debited = connection.execute('UPDATE accounts SET balance = balance - ?', (amount,))\n        credited = connection.execute('UPDATE accounts SET balance = balance + ?', (amount,))\n"}}"#;
         assert!(!programming_response_compatible(&transaction, audit));
         assert!(programming_response_compatible(&transaction, repository));
+
+        // A bare transaction keyword must not satisfy the guard. This exact
+        // corpus function (BigchainDB election cleanup) was recalled for the
+        // sqlite_transaction paraphrase on 2026-08-18 and outranked the
+        // correct manifest purely because "rollback" is in its name.
+        let transaction_only = vec![
+            "instruction_intent:LANGUAGE:PYTHON".to_string(),
+            "instruction_intent:PERSISTENCE:ATOMIC_TRANSACTION".to_string(),
+        ];
+        let unrelated_rollback = b"def rollback(cls, bigchain, new_height, txn_ids):
+    # delete election results
+    return None";
+        assert!(!programming_response_compatible(
+            &transaction_only,
+            unrelated_rollback
+        ));
+        // The real manifest still passes: its transaction verb co-occurs with
+        // genuine persistence work.
+        assert!(programming_response_compatible(
+            &transaction_only,
+            repository
+        ));
         assert_eq!(
             single_language_ranked_manifest(
                 &transaction,
