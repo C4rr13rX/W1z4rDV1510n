@@ -177,7 +177,12 @@ from scripts.market_signal_audit import (  # noqa: E402
 # OBJECTIVE_COST_BPS must reflect what a round trip actually costs; evaluating
 # below it manufactures profit that will not exist live. Measured 2026-08-17:
 # GAS_ROUNDTRIP_FEE_RATIO alone is 25 bps before slippage or DEX fees.
-OBJECTIVE_PROFIT_FACTOR = 1.10
+# Lowered 1.10 -> 1.05 on 2026-08-18 to start accumulating ghost evidence
+# while the search continues. This is the bar for "worth trading at all",
+# not a claim that 1.05 is the goal: ghost results, not backtest profit,
+# decide live promotion, so a lower entry bar buys real execution data
+# sooner without weakening the graduation gate that actually risks money.
+OBJECTIVE_PROFIT_FACTOR = 1.05
 OBJECTIVE_COST_BPS = 25.0
 
 FLOOR = {
