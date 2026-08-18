@@ -3701,7 +3701,20 @@ async fn h_brain_chat(
         // pools. A complete safe manifest recalled by the raw pathway may be
         // one component of a richer feature-composed project, so let it join
         // the candidate set instead of using it only as a final fallback.
-        if labels.len() >= 4 {
+        //
+        // Label count measures how many intent facets a prompt names, not how
+        // much evidence supports it. A narrow request ("Python" + one concrete
+        // behaviour) can be fully grounded while naming only two facets, and
+        // gating on a raw count alone silently excludes the manifest from the
+        // candidate pool for those prompts -- leaving a corpus function to win
+        // a project request by character overlap. Admit the manifest whenever
+        // the labels carry a concrete behaviour beyond the language itself,
+        // and let the ranking decide; a bare LANGUAGE label still needs the
+        // richer multi-facet evidence to qualify.
+        let behaviour_grounded = labels
+            .iter()
+            .any(|label| label.contains(":") && !label.contains(":LANGUAGE:"));
+        if labels.len() >= 4 || behaviour_grounded {
             if let Some(candidate) = raw_trained
                 .as_ref()
                 .filter(|bytes| is_complete_file_manifest(bytes))
@@ -6062,6 +6075,42 @@ mod tests {
         assert_eq!(value["files"]["domain.py"], "VALUE=1\n");
         assert_eq!(value["files"]["service.py"], "from domain import VALUE\n");
     }
+
+    /// A narrow request must still be able to offer its manifest.
+    ///
+    /// `sqlite_transaction` paraphrases label only LANGUAGE:PYTHON plus
+    /// PERSISTENCE:ATOMIC_TRANSACTION. Under a bare `labels.len() >= 4` gate
+    /// the raw-recalled manifest never joined the candidate pool, so a corpus
+    /// function that merely mentioned `.execute(` won a project request. Two
+    /// labels naming a concrete behaviour are enough evidence to compete.
+    #[test]
+    fn a_concrete_behaviour_admits_a_manifest_however_few_labels() {
+        let admits = |labels: &[&str]| {
+            let behaviour_grounded = labels
+                .iter()
+                .any(|label| label.contains(":") && !label.contains(":LANGUAGE:"));
+            labels.len() >= 4 || behaviour_grounded
+        };
+
+        // The regression this fixes: narrow but concrete.
+        assert!(admits(&[
+            "instruction_intent:LANGUAGE:PYTHON",
+            "instruction_intent:PERSISTENCE:ATOMIC_TRANSACTION",
+        ]));
+
+        // Language alone names no behaviour and stays on the richer path.
+        assert!(!admits(&["instruction_intent:LANGUAGE:PYTHON"]));
+        assert!(!admits(&[]));
+
+        // Multi-facet requests keep qualifying exactly as before.
+        assert!(admits(&[
+            "instruction_intent:LANGUAGE:PYTHON",
+            "instruction_intent:STRUCTURE:MULTIFILE",
+            "instruction_intent:IO:FILESYSTEM",
+            "instruction_intent:REPORTING:INVENTORY",
+        ]));
+    }
+
 }
 
 /// Data directory for the main node's embedded brain.  Looks at
