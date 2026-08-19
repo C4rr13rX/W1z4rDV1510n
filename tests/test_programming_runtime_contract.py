@@ -1974,12 +1974,51 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             self.assertEqual(report["passed_suites"], 11)
 
     def test_phase_completion_gate_includes_strict_enterprise_retention(self) -> None:
+        """The gate still demands all 12 suites, a still fabric, and no drift.
+
+        Previously asserted by grepping for the literal comparisons. Those now
+        live in enterprise_gate_clean(), so exercise the predicate instead --
+        it enforces the same invariant and cannot be broken by a rename.
+        """
         source = (ROOT / "scripts" / "programming_curriculum_supervisor.py").read_text(
             encoding="utf-8"
         )
         self.assertIn("programming_enterprise_retention.py", source)
-        self.assertIn('enterprise.get("tick_delta") != 0', source)
-        self.assertIn('enterprise.get("structure_unchanged") is not True', source)
+
+        from programming_curriculum_supervisor import enterprise_gate_clean
+
+        clean = {
+            "passed": True, "passed_suites": 12, "total_suites": 12,
+            "tick_delta": 0, "structure_unchanged": True,
+        }
+        self.assertTrue(enterprise_gate_clean(clean))
+
+        # Every individual guarantee must still reject on its own.
+        self.assertFalse(enterprise_gate_clean({**clean, "passed": False}))
+        self.assertFalse(enterprise_gate_clean({**clean, "passed_suites": 11}))
+        self.assertFalse(enterprise_gate_clean({**clean, "tick_delta": 1}))
+        self.assertFalse(
+            enterprise_gate_clean({**clean, "structure_unchanged": False})
+        )
+
+    def test_enterprise_gate_confirms_a_failure_before_rejecting(self) -> None:
+        """A transient dip must not be recorded as a regression.
+
+        Measured 2026-08-19: consecutive gate runs on the SAME brain scored
+        6, 5, 7, 8, 7, 6, 6, 8 of 12 because generalisation is briefly degraded
+        after an interval writes up to 131k rows. Requiring all 12 against a
+        number that varies 5-8 can never be satisfied, so every interval was
+        re-deferred: 123 failures against 9 admissions.
+        """
+        source = (ROOT / "scripts" / "programming_curriculum_supervisor.py").read_text(
+            encoding="utf-8"
+        )
+        # The gate settles and re-runs rather than trusting one measurement.
+        self.assertIn("enterprise_gate_confirmed", source)
+        self.assertIn("enterprise_confirm", source)
+        self.assertIn("settle_brain_for_admission", source)
+        # And both gate call sites go through it.
+        self.assertEqual(source.count("enterprise_gate_confirmed("), 3)
 
     def test_corpus_sampler_covers_both_ends_of_trained_window(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
