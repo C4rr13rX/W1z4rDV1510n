@@ -402,8 +402,25 @@ impl Fabric {
                 )
                 .min(system_pressure);
                 last_pressure_x1k = (pressure * 1000.0) as u64;
-                let (effective_min_age, effective_max_evict, effective_scan) =
+                let (effective_min_age, base_max_evict, base_scan) =
                     emergency_caps(pressure <= 0.5);
+                // Scale the per-pass caps by how far over budget this pool is.
+                //
+                // The caps are constants, so eviction had a fixed throughput
+                // ceiling while ingest had none. Measured 2026-08-19 over 45s:
+                // +46,156 resident terminals against ~1,572 evictions, which
+                // at ~14.7 terminals per neuron retires ~23,108 -- exactly
+                // half the inflow. The node grew at half the ingest rate
+                // forever, and no amount of pressure fixed it, because
+                // pressure scales the eviction THRESHOLD and the shortfall was
+                // in THROUGHPUT.
+                let effort = TierOrchestrator::eviction_effort(
+                    p.total_terminals,
+                    params.target_terminals_per_pool,
+                );
+                let effective_max_evict =
+                    ((base_max_evict as f32) * effort) as usize;
+                let effective_scan = ((base_scan as f32) * effort) as usize;
                 // Fast path: when pressure_factor is at its clamped
                 // max (way under budget AND the system has headroom),
                 // skip the per-neuron scan entirely.  Threshold would

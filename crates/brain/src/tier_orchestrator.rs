@@ -374,6 +374,28 @@ impl TierOrchestrator {
         min_mb > 0 && available_mb < min_mb
     }
 
+    /// How hard eviction must work to hold a terminal budget.
+    ///
+    /// The per-pass caps (`max_evict_per_pass`, `scan_budget`) are fixed, so
+    /// eviction has a fixed ceiling on throughput while ingest does not.
+    /// Measured 2026-08-19 over 45s: resident terminals grew by 46,156 while
+    /// ~1,572 neurons were evicted -- at ~14.7 terminals per neuron that
+    /// retires ~23,108, exactly **50% of inflow**. The node therefore grew at
+    /// half the ingest rate indefinitely, regardless of pressure, because
+    /// scaling an eviction *threshold* cannot raise a *throughput* ceiling.
+    ///
+    /// Returns a multiplier for the per-pass caps, from the ratio of resident
+    /// terminals to budget. 1.0 while inside budget; grows linearly with the
+    /// overage so a pool at 1.8x budget does ~1.8x the work. Clamped so one
+    /// pass can never monopolise the tick.
+    pub fn eviction_effort(resident_terminals: usize, budget: usize) -> f32 {
+        if budget == 0 {
+            return 1.0;
+        }
+        let ratio = resident_terminals as f32 / budget as f32;
+        ratio.clamp(1.0, 16.0)
+    }
+
     /// Decide whether a candidate evicts.  Pure; used by tests.
     pub fn should_evict(
         params: &OrchestratorParams,
@@ -388,6 +410,43 @@ impl TierOrchestrator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Eviction had a fixed throughput ceiling while ingest had none.
+    ///
+    /// Measured 2026-08-19 over a 45s window on the live node: resident
+    /// terminals grew by 46,156 while roughly 1,572 neurons were evicted. At
+    /// ~14.7 terminals per neuron that retires ~23,108 -- exactly half the
+    /// inflow -- so the node grew at half the ingest rate indefinitely.
+    /// Raising pressure could not help: pressure scales the eviction
+    /// THRESHOLD (`should_evict`), and the shortfall was in per-pass
+    /// THROUGHPUT (`max_evict_per_pass`, `scan_budget`).
+    #[test]
+    fn eviction_effort_scales_with_the_budget_overage() {
+        let budget = 1_000_000;
+
+        // Inside budget: no extra work, so normal training pays nothing.
+        assert_eq!(TierOrchestrator::eviction_effort(500_000, budget), 1.0);
+        assert_eq!(TierOrchestrator::eviction_effort(budget, budget), 1.0);
+
+        // The measured state: 7.09M terminals across 4 pools is ~1.77M per
+        // pool, i.e. 1.8x budget, and must do ~1.8x the work.
+        let effort = TierOrchestrator::eviction_effort(1_773_513, budget);
+        assert!((effort - 1.7735).abs() < 1e-3, "effort was {effort}");
+
+        // The point is proportionality, not a single pass clearing the
+        // backlog: eviction runs every tick, so a 1.77x lift compounds. One
+        // pass retires ~1.77x what it did before, which is what turns a
+        // 50%-of-inflow deficit into a surplus over many passes.
+        let before = 256.0 * 14.7;
+        let after = (256.0 * effort) * 14.7;
+        assert!(after > before * 1.7, "after {after} vs before {before}");
+
+        // Clamped so one pool can never monopolise the tick.
+        assert_eq!(TierOrchestrator::eviction_effort(usize::MAX, budget), 16.0);
+        // A disabled budget must not divide by zero.
+        assert_eq!(TierOrchestrator::eviction_effort(5_000_000, 0), 1.0);
+    }
+
 
     /// Eviction pressure cannot bound allocation; admission has to.
     ///
