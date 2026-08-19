@@ -361,6 +361,19 @@ impl TierOrchestrator {
         }
     }
 
+    /// Is the machine below the politeness floor?  Pure so it is testable;
+    /// callers pass the current available system RAM.
+    ///
+    /// This is the ADMISSION question, distinct from
+    /// [`system_pressure_factor`], which only scales how eagerly resident
+    /// neurons are evicted. Scaling an eviction threshold cannot bound
+    /// allocation: when page-in outruns eviction the node keeps growing.
+    /// Measured 2026-08-19 it reached 13.7-16.1 GB against a 6 GB floor with
+    /// only 0.45-1.15 GB left for the rest of the machine.
+    pub fn below_floor(available_mb: u64, min_mb: u64) -> bool {
+        min_mb > 0 && available_mb < min_mb
+    }
+
     /// Decide whether a candidate evicts.  Pure; used by tests.
     pub fn should_evict(
         params: &OrchestratorParams,
@@ -375,6 +388,36 @@ impl TierOrchestrator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Eviction pressure cannot bound allocation; admission has to.
+    ///
+    /// `should_evict` scales a THRESHOLD, so it only changes how likely a
+    /// resident neuron is to leave. When page-in outruns eviction the node
+    /// keeps climbing: measured 2026-08-19 it oscillated between 13.7 and
+    /// 16.1 GB against a 6 GB floor while the machine sat at 0.45-1.15 GB
+    /// free. `hydrate_for_propagation` consults this before pulling anything
+    /// back out of the cold tier.
+    #[test]
+    fn below_floor_gates_admission_independently_of_eviction() {
+        let floor_mb = 6_144;
+
+        // The measured failure: plenty of pressure, still admitting.
+        assert!(TierOrchestrator::below_floor(1_100, floor_mb));
+        assert!(TierOrchestrator::below_floor(460, floor_mb));
+        // At or above the floor, admission is allowed.
+        assert!(!TierOrchestrator::below_floor(floor_mb, floor_mb));
+        assert!(!TierOrchestrator::below_floor(12_000, floor_mb));
+        // 0 disables the check, matching min_system_available_mb's contract.
+        assert!(!TierOrchestrator::below_floor(1, 0));
+
+        // The distinction that matters: at 1.1 GB against a 6 GB floor the
+        // pressure factor is already clamped to maximum aggression, yet
+        // eviction alone did not hold the line -- so admission must also stop.
+        let pressure = TierOrchestrator::system_pressure_factor(1_100, floor_mb);
+        assert!((pressure - 0.25).abs() < 1e-6, "pressure was {pressure}");
+        assert!(TierOrchestrator::below_floor(1_100, floor_mb));
+    }
+
 
     #[test]
     fn pressure_factor_in_range() {

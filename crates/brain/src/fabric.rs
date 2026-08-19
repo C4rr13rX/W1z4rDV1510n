@@ -1237,6 +1237,27 @@ impl Fabric {
         if params.max_page_in_per_pass == 0 {
             return 0;
         }
+        // Hard admission check against the politeness floor.
+        //
+        // Eviction scales a THRESHOLD (`should_evict`: score > evict_threshold
+        // * pressure_factor), which makes eviction likelier but cannot bound
+        // allocation: when page-in outruns eviction the node keeps climbing.
+        // Measured 2026-08-19 the node oscillated between 13.7 and 16.1 GB
+        // against a 6 GB floor, leaving 0.45-1.15 GB free and starving every
+        // other process on the box.
+        //
+        // Page-in is the growth path -- it pulls terminals out of the cold
+        // tier and into RAM -- so it is the one place a floor can actually be
+        // enforced. Below the floor, refuse to hydrate at all and let the
+        // eviction pass reclaim. Propagation still runs; it simply walks the
+        // resident fabric, which is the same thing that happens when a
+        // neuron's terminals were never paged in.
+        if crate::tier_orchestrator::TierOrchestrator::below_floor(
+            crate::tier_orchestrator::TierOrchestrator::system_available_mb(),
+            params.min_system_available_mb,
+        ) {
+            return 0;
+        }
         const VISIT_BUDGET: usize = 4_096;
 
         let mut frontier: Vec<(PoolId, NeuronId)> = {
