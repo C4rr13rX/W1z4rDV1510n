@@ -933,7 +933,20 @@ def run_supervisor(cfg: dict, log: Logger, once: bool = False) -> int:
             node_first_healthy_unix = 0.0
             log.warn(f"node health probe failed ({miss_count}/"
                       f"{cfg['node']['health_misses_before_restart']})")
-            if miss_count >= cfg["node"]["health_misses_before_restart"]:
+            # The miss budget exists to tolerate a node that is slow to answer
+            # -- a cold fabric load can take minutes. It should NOT be spent
+            # waiting on a node that is not running at all: measured
+            # 2026-08-19 a killed node sat dead for 70 probes (~11 min of a
+            # ~30 min budget) while the supervisor patiently counted, with
+            # nothing to recover.
+            #
+            # An absent process is unambiguous, so relaunch at once and keep
+            # the budget for the ambiguous case.
+            node_absent = not find_processes(
+                pathlib.Path(cfg["node"]["binary"]).name)
+            if node_absent:
+                log.error("node process is not running; relaunching now")
+            if node_absent or miss_count >= cfg["node"]["health_misses_before_restart"]:
                 log.error("node appears dead; relaunching")
                 start_node(cfg, log)
                 miss_count = 0

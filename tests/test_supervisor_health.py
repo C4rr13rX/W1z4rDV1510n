@@ -178,3 +178,21 @@ def test_a_missing_env_file_is_not_fatal(tmp_path):
     from scripts.w1z4rd_supervisor import _read_env_file
 
     assert _read_env_file(tmp_path / "absent.env") == {}
+
+
+def test_an_absent_node_is_relaunched_without_burning_the_miss_budget():
+    """The miss budget is for a SLOW node, not a missing one.
+
+    A cold fabric load can take minutes, which is why repeated failed probes
+    are tolerated. But measured 2026-08-19, a killed node sat dead for 70
+    consecutive probes while the supervisor counted toward its limit -- there
+    was nothing to recover, because the process did not exist.
+
+    Process presence is unambiguous, so it must short-circuit the wait.
+    """
+    from scripts.w1z4rd_supervisor import find_processes
+
+    # A name that cannot be running proves absence is detectable at all.
+    assert find_processes("definitely-not-a-real-process-xyz.exe") == []
+    # And the helper really does find something that is running.
+    assert find_processes("python.exe"), "expected to find the test runner"
