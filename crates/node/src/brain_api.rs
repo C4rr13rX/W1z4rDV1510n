@@ -3699,6 +3699,43 @@ async fn h_brain_chat(
         // episode. Recover through grounded LANGUAGE+BEHAVIOR conjunctions,
         // never through a language-only or generic-project match.
         for subset in manifest_component_feature_pairs(labels) {
+            // Char-motif recall for THIS component, contributed to the pool.
+            //
+            // decode_best_binding_by_char_motifs_with_margin_where reads
+            // straight out of the brain and never populates
+            // feature_candidates, so merge_grounded_file_manifests -- which
+            // reads only that pool and needs >= 2 manifests -- could not see
+            // manifests the brain demonstrably retrieves. Measured
+            // 2026-08-19 on a fully settled brain: asked individually,
+            // "default-deny authorization" and "correlated logging with
+            // secret redaction" each returned a real manifest via
+            // raw_semantically_validated, yet the composite request for a
+            // project containing both answered `no_answer` with
+            // manifest_composition_ready=False. A two-behaviour composite
+            // failed identically to a four-behaviour one, so this is not
+            // about request size.
+            //
+            // Query per component rather than on the whole prompt: a combined
+            // request's motifs match no single component's training episode.
+            // The same subject-vocabulary guard applies, so a component
+            // cannot inherit a manifest its own labels do not support.
+            if let Some((candidate, _, _)) =
+                brain.decode_best_binding_by_char_motifs_with_margin_where(
+                    POOL_TEXT,
+                    prompt.as_bytes(),
+                    action_pool,
+                    0.0,
+                    0.0,
+                    &|candidate| {
+                        is_complete_file_manifest(candidate)
+                            && programming_response_compatible(&subset, candidate)
+                    },
+                )
+            {
+                if !feature_candidates.contains(&candidate) {
+                    feature_candidates.push(candidate);
+                }
+            }
             let mut component_candidates =
                 brain.decode_ranked_feature_bindings_with_context_where(
                 *pool_id, &subset, action_pool, 8,
@@ -6217,6 +6254,58 @@ mod tests {
     /// tagged CONCURRENCY:BOUNDED_ASYNC and admitted the bounded_map manifest,
     /// answering a request the brain is required to refuse.
     #[test]
+    /// Composition needs manifests IN the candidate pool, not merely
+    /// retrievable from the brain.
+    ///
+    /// `merge_grounded_file_manifests` reads only `feature_candidates` and
+    /// requires two manifests. The char-motif route
+    /// (`decode_best_binding_by_char_motifs_with_margin_where`) answers
+    /// straight from the brain without ever populating that pool, so on
+    /// 2026-08-19 a settled brain returned a real manifest for "default-deny
+    /// authorization" and another for "correlated logging with secret
+    /// redaction" individually, while a project request asking for both
+    /// answered `no_answer` with manifest_composition_ready=False. A
+    /// two-behaviour composite failed exactly like a four-behaviour one, so
+    /// the gap is contribution to the pool, not request size.
+    #[test]
+    fn composition_needs_two_manifests_in_the_candidate_pool() {
+        let authorization = br#"{"files":{"authorization.py":"def is_authorized(p):\n    return \"admin\" in p\n"}}"#.to_vec();
+        let observability = br#"{"files":{"observability.py":"import json\ndef log(e, correlation_id):\n    print(e)\n"}}"#.to_vec();
+        let plain_source = b"def helper():".to_vec();
+
+        assert!(is_complete_file_manifest(&authorization));
+        assert!(is_complete_file_manifest(&observability));
+        assert!(!is_complete_file_manifest(&plain_source));
+
+        let labels = vec![
+            "instruction_intent:LANGUAGE:PYTHON".to_string(),
+            "instruction_intent:SECURITY:AUTHORIZATION".to_string(),
+        ];
+
+        // One manifest plus plain source cannot compose -- the measured
+        // failure, where only the char-motif route held the second manifest.
+        let one = vec![authorization.clone(), plain_source.clone()];
+        assert!(merge_grounded_file_manifests(&labels, &one).is_none());
+
+        // Two manifests in the pool is exactly what the fix contributes.
+        let two = vec![authorization, observability, plain_source];
+        let merged = merge_grounded_file_manifests(&labels, &two);
+        assert!(merged.is_some(), "two manifests in the pool must compose");
+        let value: serde_json::Value =
+            serde_json::from_slice(&merged.unwrap()).unwrap();
+        let files = value["files"].as_object().unwrap();
+        assert!(files.contains_key("authorization.py"), "{files:?}");
+        assert!(files.contains_key("observability.py"), "{files:?}");
+    }
+
+    /// The OOV leak: a mislabelled prompt must not inherit a manifest.
+    ///
+    /// "distributed consensus protocol with Byzantine fault tolerance" was
+    /// tagged CONCURRENCY:BOUNDED_ASYNC and admitted the bounded_map manifest,
+    /// answering a request the brain is required to refuse.
+    #[test]
+
+
     fn a_mislabelled_prompt_does_not_inherit_an_unrelated_manifest() {
         let bounded_map = br#"{"files":{"concurrency.py":"import asyncio\nasync def bounded_map(worker, items, limit):\n    semaphore = asyncio.Semaphore(limit)\n"}}"#;
 
