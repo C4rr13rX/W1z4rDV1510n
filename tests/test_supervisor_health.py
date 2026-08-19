@@ -139,3 +139,42 @@ def test_write_probe_waits_out_the_startup_warmup():
     assert would_probe(first_healthy, first_healthy + warmup + 1, 1) is False
     # A restart clears the timer, so the next node re-serves its warmup.
     assert would_probe(0.0, first_healthy + warmup + 1, 0) is False
+
+
+def test_the_crypto_env_file_is_actually_loaded(tmp_path):
+    """.env knobs were silently inert.
+
+    The crypto stack reads GHOST_PAIR_LIMIT, ENABLE_LIVE_TRADING,
+    GENOME_PAIR_SEED and the rest with plain os.getenv, nothing in that
+    project calls load_dotenv, and this launcher only copied the supervisor's
+    own environment. So editing .env changed nothing and the code default was
+    always used -- measured 2026-08-18 when GENOME_PAIR_SEED=8 had no effect
+    on a restarted stack.
+    """
+    from scripts.w1z4rd_supervisor import _read_env_file
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join([
+            "# a comment",
+            "GENOME_PAIR_SEED=8",
+            'ENABLE_LIVE_TRADING="0"',
+            "GHOST_PAIR_LIMIT = 36 ",
+            "",
+            "MALFORMED_LINE",
+        ]),
+        encoding="utf-8")
+
+    values = _read_env_file(env_file)
+    assert values["GENOME_PAIR_SEED"] == "8"
+    assert values["ENABLE_LIVE_TRADING"] == "0"
+    assert values["GHOST_PAIR_LIMIT"] == "36"
+    assert "MALFORMED_LINE" not in values
+    assert not any(key.startswith("#") for key in values)
+
+
+def test_a_missing_env_file_is_not_fatal(tmp_path):
+    """A stack without .env must still launch on code defaults."""
+    from scripts.w1z4rd_supervisor import _read_env_file
+
+    assert _read_env_file(tmp_path / "absent.env") == {}

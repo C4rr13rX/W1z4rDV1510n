@@ -700,6 +700,30 @@ def _python_cmdlines() -> list[str]:
     return lines
 
 
+
+def _read_env_file(path: pathlib.Path) -> dict[str, str]:
+    """Parse a KEY=VALUE .env file. Returns {} when absent or unreadable.
+
+    Deliberately minimal: no interpolation or export handling, because the
+    crypto stack's .env is a flat list of literals and a partial parse is
+    worse than none.
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    values: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if key:
+            values[key] = value.strip().strip('"').strip("'")
+    return values
+
+
 def start_crypto_service(cfg: dict, service: dict, log: Logger) -> int | None:
     """Launch one crypto-stack service detached, mirroring launch_revenir.ps1."""
     ccfg = cfg["crypto_stack"]
@@ -710,6 +734,18 @@ def start_crypto_service(cfg: dict, service: dict, log: Logger) -> int | None:
     project_root = ccfg["project_root"]
 
     env = os.environ.copy()
+    # The crypto stack configures itself through CoolCryptoUtilities/.env --
+    # GHOST_PAIR_LIMIT, ENABLE_LIVE_TRADING, GENOME_PAIR_SEED and the rest are
+    # all read with plain os.getenv. Nothing in that project calls
+    # load_dotenv, and this launcher only inherited the supervisor's own
+    # environment, so every one of those knobs was silently inert: editing
+    # .env changed nothing and the default was always used. Load it here so
+    # the file means what it appears to mean.
+    #
+    # Real environment wins over the file, so an operator override on the
+    # supervisor process is never clobbered by a stale checked-in value.
+    for key, value in _read_env_file(pathlib.Path(project_root) / ".env").items():
+        env.setdefault(key, value)
     env["PRIMARY_WALLET"] = str(ccfg.get("primary_wallet") or "")
     # Force re-hydration from the vault; a stale value here leaves the
     # manager without wallet-derived state.
