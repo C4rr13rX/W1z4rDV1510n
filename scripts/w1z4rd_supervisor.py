@@ -282,6 +282,10 @@ def boost_priority() -> None:
         pass
 
 
+#: Windows: run a helper without flashing a console window on the desktop.
+CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+
+
 def find_processes(name_substr: str, cmd_substr: str = "") -> list[int]:
     """Return PIDs of processes whose image name contains `name_substr`
     and (optionally) whose command line contains `cmd_substr`.  Uses
@@ -294,6 +298,12 @@ def find_processes(name_substr: str, cmd_substr: str = "") -> list[int]:
                  f"name like '%{name_substr}%'",
                  "get", "ProcessId,CommandLine", "/format:csv"],
                 capture_output=True, text=True, timeout=10,
+                # Without this, every probe flashes a console window on the
+                # user's desktop. The poll loop calls this once per node check
+                # (~10s), so the effect is a window opening and closing like
+                # clockwork, forever. The other wmic call in this file already
+                # passes the flag; this one was simply missed.
+                creationflags=CREATE_NO_WINDOW,
             )
             for line in out.stdout.splitlines():
                 parts = line.strip().split(",", 2)
@@ -399,6 +409,7 @@ def kill_processes_by_image(image_name: str, log: Logger,
             out = subprocess.run(
                 ["tasklist", "/FI", f"IMAGENAME eq {image_name}", "/FO", "CSV", "/NH"],
                 capture_output=True, text=True, timeout=10,
+                creationflags=CREATE_NO_WINDOW,
             )
             pids: list[int] = []
             for line in out.stdout.splitlines():
@@ -414,7 +425,8 @@ def kill_processes_by_image(image_name: str, log: Logger,
             for pid in pids:
                 try:
                     subprocess.run(["taskkill", "/F", "/PID", str(pid)],
-                                    capture_output=True, timeout=5)
+                                    capture_output=True, timeout=5,
+                                    creationflags=CREATE_NO_WINDOW)
                     killed += 1
                 except Exception as exc:
                     log.warn(f"taskkill PID={pid} failed: {exc}")
@@ -548,6 +560,7 @@ def _kill_listeners_on_port(port: int, log: Logger) -> int:
         out = subprocess.run(
             ["netstat", "-ano", "-p", "TCP"],
             capture_output=True, text=True, timeout=10,
+            creationflags=CREATE_NO_WINDOW,
         )
         pids: set[int] = set()
         for raw in out.stdout.splitlines():
@@ -568,7 +581,8 @@ def _kill_listeners_on_port(port: int, log: Logger) -> int:
         for pid in pids:
             try:
                 subprocess.run(["taskkill", "/F", "/PID", str(pid)],
-                                capture_output=True, timeout=5)
+                                capture_output=True, timeout=5,
+                                creationflags=CREATE_NO_WINDOW)
                 killed += 1
             except Exception as exc:
                 log.warn(f"taskkill PID={pid} on port {port} failed: {exc}")
@@ -833,7 +847,8 @@ def find_git_bash() -> str | None:
             return c
     try:
         out = subprocess.run(["where", "bash.exe"], capture_output=True,
-                              text=True, timeout=5)
+                              text=True, timeout=5,
+                              creationflags=CREATE_NO_WINDOW)
         for line in out.stdout.splitlines():
             line = line.strip()
             if line and pathlib.Path(line).exists():
