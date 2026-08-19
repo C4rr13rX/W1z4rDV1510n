@@ -953,7 +953,24 @@ def run_supervisor(cfg: dict, log: Logger, once: bool = False) -> int:
                 write_miss_count = 0
                 node_first_healthy_unix = 0.0
                 write_last_probe_unix = 0.0
-                time.sleep(cfg["node"]["warmup_secs"])
+                # Warmup exists so health probes do not fire while a node is
+                # legitimately slow to come up (a cold fabric load takes
+                # minutes). It must NOT be a blind sleep: at warmup_secs=1800
+                # the supervisor went deaf for 30 minutes, so a node that
+                # exited seconds after launch sat dead the whole time --
+                # measured 2026-08-19, the log simply stopped at "started
+                # node" while nothing was running.
+                #
+                # Wait out the warmup in short steps, watching only for the
+                # unambiguous signal (process gone). A slow starter is still
+                # left alone; a dead one is caught within seconds.
+                warmup_deadline = time.time() + float(cfg["node"]["warmup_secs"])
+                node_binary = pathlib.Path(cfg["node"]["binary"]).name
+                while time.time() < warmup_deadline:
+                    time.sleep(min(10.0, max(1.0, warmup_deadline - time.time())))
+                    if not find_processes(node_binary):
+                        log.error("node exited during warmup; relaunching")
+                        break
                 if once: return 0
                 continue
 
