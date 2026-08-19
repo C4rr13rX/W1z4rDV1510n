@@ -4031,7 +4031,19 @@ def champion_replacement_allowed(candidate: Genome, incumbent: Genome) -> bool:
         ("max_drawdown", "CHAMPION_MAX_DRAWDOWN_CEILING", 1.00),
     ):
         ceiling = _env_float(ceiling_env, default_ceiling)
-        if float(candidate_summary.get(name, math.inf)) > ceiling:
+        # A ceiling the SITTING champion already violates is unfalsifiable: it
+        # refuses every challenger while the incumbent keeps the title on a
+        # worse number, so nothing can ever replace it. Measured 2026-08-18 the
+        # champion carried max_drawdown 2.14 against this 1.00 ceiling, and 21
+        # better-earning candidates were refused for drawdowns of 2.04-2.20 --
+        # several of them BELOW the incumbent's own.
+        #
+        # When the incumbent is already over a ceiling, the honest bar is "no
+        # worse than what is actually running", so the guard still blocks a
+        # deterioration but cannot defend an incumbent that fails its own
+        # standard. A candidate inside the ceiling is always acceptable.
+        effective = max(ceiling, float(incumbent_summary.get(name, -math.inf)))
+        if float(candidate_summary.get(name, math.inf)) > effective:
             return False
     return True
 
@@ -4088,9 +4100,12 @@ def champion_replacement_blockers(candidate: Genome,
     ):
         value = float(candidate_summary.get(name, math.inf))
         ceiling = _env_float(ceiling_env, default_ceiling)
-        if value > ceiling:
+        effective = max(ceiling, float(incumbent_summary.get(name, -math.inf)))
+        if value > effective:
             blockers.append({"reason": "safety_ceiling", "metric": name,
-                             "candidate": value, "ceiling": ceiling})
+                             "candidate": value, "ceiling": ceiling,
+                             "effective_ceiling": effective,
+                             "incumbent": incumbent_summary.get(name)})
     return blockers
 
 

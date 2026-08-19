@@ -154,3 +154,38 @@ def test_a_diagnostic_regression_is_reported_even_though_it_does_not_block():
     # ...but nothing that actually blocks the promotion.
     assert not [b for b in blockers if b["reason"] == "regression"]
 
+def test_a_ceiling_the_incumbent_violates_cannot_defend_it():
+    """An unfalsifiable gate keeps a worse champion forever.
+
+    Measured 2026-08-18: the sitting champion carried max_drawdown 2.1447
+    against a 1.00 ceiling -- it was promoted before the ceiling existed and
+    would fail its own standard. Meanwhile 21 better-earning candidates were
+    refused for drawdowns of 2.04-2.20, several BELOW the incumbent's. Nothing
+    could ever replace it.
+    """
+    incumbent = make("incumbent", fitness=2450.0, pf=1.0809, ece=0.09,
+                     drawdown=2.1447, expectancy=0.00091)
+    # Better earner, and a drawdown BETTER than the incumbent's, but still
+    # over the nominal 1.00 ceiling.
+    better = make("better", fitness=2734.1, pf=1.0944, ece=0.09,
+                  drawdown=2.0437, expectancy=0.00095)
+    assert champion_replacement_allowed(better, incumbent)
+
+
+def test_a_deterioration_beyond_the_incumbent_still_blocks():
+    """Relaxing to the incumbent's level must not become "anything goes"."""
+    incumbent = make("incumbent", fitness=2450.0, pf=1.0809, ece=0.09,
+                     drawdown=2.1447, expectancy=0.00091)
+    worse = make("worse", fitness=9999.0, pf=1.30, ece=0.09,
+                 drawdown=2.9000, expectancy=0.0030)
+    assert not champion_replacement_allowed(worse, incumbent)
+
+
+def test_a_healthy_incumbent_keeps_the_real_ceiling():
+    """When the incumbent is inside the ceiling, the ceiling is the bar."""
+    incumbent = make("incumbent", fitness=2450.0, pf=1.10, ece=0.09,
+                     drawdown=0.80, expectancy=0.0018)
+    reckless = make("reckless", fitness=9999.0, pf=1.40, ece=0.09,
+                    drawdown=1.50, expectancy=0.0040)
+    assert not champion_replacement_allowed(reckless, incumbent)
+
