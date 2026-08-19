@@ -1751,12 +1751,29 @@ def enterprise_gate_confirmed(args, phase, runtime, trained_rows, stage_label,
     real regression and still rejects the interval. This keeps the all-12
     standard intact -- it only stops counting a transient dip as a verdict.
     """
-    enterprise = evaluate("enterprise", [
-        sys.executable, "scripts/programming_enterprise_retention.py",
-        "--endpoint", args.endpoint,
-        "--output", str(output_path),
-        "--suite-timeout", "900",
-    ], timeout=4 * 3600.0)
+    def run_gate(stage: str) -> dict:
+        """Return the gate report even when suites failed.
+
+        programming_enterprise_retention.py exits non-zero whenever any suite
+        fails, and run_json_command turns that into GateCommandFailure before
+        the report can be inspected. The report is still written to
+        --output, and a partial pass is exactly what has to be re-measured
+        rather than trusted, so read it back instead of discarding it.
+        """
+        try:
+            return evaluate(stage, [
+                sys.executable, "scripts/programming_enterprise_retention.py",
+                "--endpoint", args.endpoint,
+                "--output", str(output_path),
+                "--suite-timeout", "900",
+            ], timeout=4 * 3600.0)
+        except GateCommandFailure:
+            report = read_json(output_path)
+            if not report:
+                raise
+            return report
+
+    enterprise = run_gate("enterprise")
     if enterprise_gate_clean(enterprise):
         return enterprise
 
@@ -1769,12 +1786,7 @@ def enterprise_gate_confirmed(args, phase, runtime, trained_rows, stage_label,
         "note": "settling and re-running before treating this as a regression",
     })
     settle_brain_for_admission(args, phase, runtime, trained_rows)
-    confirm = evaluate("enterprise_confirm", [
-        sys.executable, "scripts/programming_enterprise_retention.py",
-        "--endpoint", args.endpoint,
-        "--output", str(output_path),
-        "--suite-timeout", "900",
-    ], timeout=4 * 3600.0)
+    confirm = run_gate("enterprise_confirm")
     append_health_event(runtime, {
         "kind": "enterprise_gate_confirmation",
         "phase": phase.name,
