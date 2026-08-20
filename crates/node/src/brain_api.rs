@@ -1910,23 +1910,63 @@ fn single_language_ranked_manifest(
     prompt: &str,
     candidates: &[Vec<u8>],
 ) -> Option<Vec<u8>> {
-    (labels
+    if labels
         .iter()
         .filter(|label| label.contains(":LANGUAGE:"))
         .count()
-        == 1)
-        .then(|| {
-            candidates
-                .iter()
-                .find(|candidate| {
-                    is_complete_file_manifest(candidate)
-                        && prompt_programming_response_compatible(
-                            labels, prompt, candidate,
-                        )
+        != 1
+    {
+        return None;
+    }
+    // Prefer a manifest that satisfies every label.
+    if let Some(candidate) = candidates.iter().find(|candidate| {
+        is_complete_file_manifest(candidate)
+            && prompt_programming_response_compatible(labels, prompt, candidate)
+    }) {
+        return Some(candidate.clone());
+    }
+    // Otherwise accept one that satisfies the language plus ANY single
+    // requested behaviour, rather than answering nothing.
+    //
+    // The extractor infers labels from wording, and it over-labels. The
+    // platform suite's versioned_migrations paraphrase -- "fresh and legacy
+    // SQLite databases reach the same structure" -- yields PYTHON,
+    // SCHEMA_MIGRATION **and** ATOMIC_TRANSACTION, because reaching the same
+    // structure reads as a transaction. migrations.py answers the migration
+    // request completely and contains none of the transaction cues
+    // (rollback/commit/begin), so requiring all labels rejected the only
+    // correct manifest and the chain fell through to no_answer. Measured
+    // 2026-08-20: the same manifest is returned happily when the extractor
+    // emits just PYTHON + SCHEMA_MIGRATION.
+    //
+    // This is a fallback, not a relaxation: the all-label match still wins,
+    // and a manifest matching NO requested behaviour is still refused, so a
+    // cross-domain answer cannot get through.
+    let language: Vec<String> = labels
+        .iter()
+        .filter(|label| label.contains(":LANGUAGE:"))
+        .cloned()
+        .collect();
+    let behaviours: Vec<&String> = labels
+        .iter()
+        .filter(|label| label.contains(':') && !label.contains(":LANGUAGE:"))
+        .collect();
+    if behaviours.len() < 2 {
+        return None;
+    }
+    candidates
+        .iter()
+        .find(|candidate| {
+            is_complete_file_manifest(candidate)
+                && behaviours.iter().any(|behaviour| {
+                    let mut subset = language.clone();
+                    subset.push((*behaviour).clone());
+                    prompt_programming_response_compatible(
+                        &subset, prompt, candidate,
+                    )
                 })
-                .cloned()
         })
-        .flatten()
+        .cloned()
 }
 
 /// A derived programming-language signal is a domain boundary, not merely a
@@ -6343,6 +6383,55 @@ mod tests {
     /// tagged CONCURRENCY:BOUNDED_ASYNC and admitted the bounded_map manifest,
     /// answering a request the brain is required to refuse.
     #[test]
+    /// An over-labelled prompt must not lose its only correct manifest.
+    ///
+    /// The extractor infers labels from wording and over-labels. The platform
+    /// suite's versioned_migrations paraphrase -- "fresh and legacy SQLite
+    /// databases reach the same structure" -- yields PYTHON, SCHEMA_MIGRATION
+    /// *and* ATOMIC_TRANSACTION. migrations.py answers the migration request
+    /// completely but contains no transaction cue (rollback/commit/begin), so
+    /// requiring every label rejected it and the chain fell through to
+    /// no_answer. Measured 2026-08-20: the identical manifest is returned
+    /// when the extractor emits only PYTHON + SCHEMA_MIGRATION.
+    #[test]
+    fn an_over_labelled_prompt_still_finds_its_single_behaviour_manifest() {
+        let migrations = br#"{"files":{"migrations.py":"import sqlite3\ndef migrate(db_path):\n    with sqlite3.connect(db_path) as connection:\n        connection.execute(\"PRAGMA user_version\")\n"}}"#.to_vec();
+        let unrelated = br#"{"files":{"circuit.py":"class CircuitBreaker:\n    pass\n"}}"#.to_vec();
+        let prompt = "Write Python database upgrade paths using schema versions.";
+
+        let over_labelled = vec![
+            "instruction_intent:LANGUAGE:PYTHON".to_string(),
+            "instruction_intent:PERSISTENCE:SCHEMA_MIGRATION".to_string(),
+            "instruction_intent:PERSISTENCE:ATOMIC_TRANSACTION".to_string(),
+        ];
+
+        // The manifest satisfies SCHEMA_MIGRATION but not ATOMIC_TRANSACTION,
+        // and must still be found.
+        let found = single_language_ranked_manifest(
+            &over_labelled, prompt, &[migrations.clone()],
+        );
+        assert!(found.is_some(), "an over-labelled prompt lost its manifest");
+
+        // A manifest matching NO requested behaviour is still refused, so a
+        // cross-domain answer cannot slip through this fallback.
+        let refused = single_language_ranked_manifest(
+            &over_labelled, prompt, &[unrelated],
+        );
+        assert!(refused.is_none(), "unrelated manifest must not be accepted");
+
+        // With a single behaviour the strict path already applies; the
+        // fallback must not widen that case.
+        let single = vec![
+            "instruction_intent:LANGUAGE:PYTHON".to_string(),
+            "instruction_intent:PERSISTENCE:ATOMIC_TRANSACTION".to_string(),
+        ];
+        assert!(
+            single_language_ranked_manifest(&single, prompt, &[migrations])
+                .is_none(),
+            "one behaviour must keep the strict all-label contract"
+        );
+    }
+
     /// A Python request must not compose a JavaScript file.
     ///
     /// `programming_response_compatible` only checks that each REQUESTED
