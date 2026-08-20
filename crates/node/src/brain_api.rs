@@ -1882,6 +1882,18 @@ fn subset_behaviour_is_evidenced(subset: &[String], bytes: &[u8]) -> bool {
         })
 }
 
+/// File names inside a manifest, for diagnostics.
+fn manifest_file_names(bytes: &[u8]) -> Vec<String> {
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .and_then(|value| {
+            value.get("files").and_then(|files| files.as_object()).map(|files| {
+                files.keys().cloned().collect::<Vec<_>>()
+            })
+        })
+        .unwrap_or_default()
+}
+
 fn behaviour_query_frame(subset: &[String], prompt: &str) -> String {
     let behaviour = subset
         .iter()
@@ -4002,6 +4014,10 @@ async fn h_brain_chat(
         }
     }
     let mut diagnostic_component_routes = Vec::<serde_json::Value>::new();
+    // What each language+behaviour subset actually contributed to the pool.
+    // Six blind attempts at cross_project's authorized_transfer paraphrase
+    // each reasoned from source and were wrong; this reports the fact.
+    let mut diagnostic_component_recall = Vec::<serde_json::Value>::new();
     if let Some((pool_id, labels)) = composition_features.as_ref() {
         for candidate in brain.decode_ranked_feature_bindings_with_context_where(
             *pool_id,
@@ -4054,8 +4070,6 @@ async fn h_brain_chat(
             // request's motifs match no single component's training episode.
             // The same subject-vocabulary guard applies, so a component
             // cannot inherit a manifest its own labels do not support.
-            // Exclude manifests already contributed by an earlier subset.
-            //
             // The query frame is the whole prompt, so char motifs rank by
             // resemblance to the COMBINED request and every subset returns
             // the same best manifest. Measured 2026-08-20 on cross_project's
@@ -4065,11 +4079,6 @@ async fn h_brain_chat(
             // even though the paraphrase's own words retrieve
             // authorization.py when asked alone. Skipping what is already
             // present lets each subsequent subset surface its own component.
-            let already: Vec<Vec<u8>> = feature_candidates
-                .iter()
-                .filter(|candidate| is_complete_file_manifest(candidate))
-                .cloned()
-                .collect();
             // Query with the BEHAVIOUR's own vocabulary, not the combined
             // prompt. Char motifs rank by textual resemblance, so a composite
             // request retrieves whichever component it most resembles and the
@@ -4080,6 +4089,11 @@ async fn h_brain_chat(
             // compose both files with the SAME three labels -- proving the
             // gate is prompt text, not intent.
             let component_query = behaviour_query_frame(&subset, prompt);
+            let subset_name: String = subset
+                .iter()
+                .map(|label| label.rsplit(':').next().unwrap_or(label))
+                .collect::<Vec<_>>()
+                .join("+");
             if let Some((candidate, _, _)) =
                 brain.decode_best_binding_by_char_motifs_with_margin_where(
                     POOL_TEXT,
@@ -4089,7 +4103,6 @@ async fn h_brain_chat(
                     0.0,
                     &|candidate| {
                         is_complete_file_manifest(candidate)
-                            && !already.iter().any(|seen| seen == candidate)
                             && programming_response_compatible(&subset, candidate)
                             // Require the behaviour this subset names, not
                             // merely compatibility. programming_response_compatible
@@ -4110,6 +4123,10 @@ async fn h_brain_chat(
                     },
                 )
             {
+                diagnostic_component_recall.push(json!({
+                    "subset": subset_name.clone(),
+                    "files": manifest_file_names(&candidate),
+                }));
                 if !feature_candidates.contains(&candidate) {
                     feature_candidates.push(candidate);
                 }
@@ -4250,14 +4267,62 @@ async fn h_brain_chat(
     // are left untouched.
     if let Some((_, labels)) = composition_features.as_ref() {
         if labels.len() < 4 {
+            // A COMPONENT is judged against the behaviour it supplies, not
+            // against the whole request.
+            //
+            // prompt_shares_manifest_subject_with_labels asks whether a
+            // manifest matches the ENTIRE label set. That is right for a
+            // manifest proposed as the whole answer, and wrong for one
+            // contributed as a part: measured 2026-08-20 on cross_project's
+            // authorized_transfer paraphrase, per-component recall correctly
+            // returned repository.py for PYTHON+ATOMIC_TRANSACTION and
+            // authorization.py for PYTHON+AUTHORIZATION, and this retain then
+            // deleted authorization.py because "access-control modules" shares
+            // no vocabulary with it AND it does not satisfy ATOMIC_TRANSACTION.
+            // The pool arrived at composition holding one manifest, so the
+            // project shipped one file.
+            //
+            // Accept a manifest that corroborates ANY ONE requested behaviour
+            // on the same terms. The out-of-vocabulary guard is unaffected:
+            // the Byzantine prompt carries a single behaviour label, so "any
+            // one" and "all" are the same test for it.
+            let behaviours: Vec<String> = labels
+                .iter()
+                .filter(|label| {
+                    label.contains(':') && !label.contains(":LANGUAGE:")
+                })
+                .cloned()
+                .collect();
+            let language: Vec<String> = labels
+                .iter()
+                .filter(|label| label.contains(":LANGUAGE:"))
+                .cloned()
+                .collect();
             feature_candidates.retain(|candidate| {
-                !is_complete_file_manifest(candidate)
-                    || prompt_shares_manifest_subject_with_labels(
-                        labels, prompt, candidate,
-                    )
+                if !is_complete_file_manifest(candidate) {
+                    return true;
+                }
+                if prompt_shares_manifest_subject_with_labels(
+                    labels, prompt, candidate,
+                ) {
+                    return true;
+                }
+                behaviours.len() >= 2
+                    && behaviours.iter().any(|behaviour| {
+                        let mut subset = language.clone();
+                        subset.push(behaviour.clone());
+                        prompt_shares_manifest_subject_with_labels(
+                            &subset, prompt, candidate,
+                        )
+                    })
             });
         }
     }
+    let diagnostic_pool_manifests: Vec<serde_json::Value> = feature_candidates
+        .iter()
+        .filter(|candidate| is_complete_file_manifest(candidate))
+        .map(|candidate| json!({"files": manifest_file_names(candidate)}))
+        .collect();
     let ranked_single_manifest = composition_features
         .as_ref()
         .and_then(|(_, labels)| {
@@ -4623,6 +4688,8 @@ async fn h_brain_chat(
             "composite_saturated": diagnostic_feature_route_pressure.composite_saturated,
             "fragment_candidates": diagnostic_fragment_candidates,
             "component_routes": diagnostic_component_routes,
+            "component_recall": diagnostic_component_recall,
+            "pool_manifests": diagnostic_pool_manifests,
             "exact_feature": diagnostic_exact_feature,
             "exact_complete_manifest": diagnostic_exact_manifest,
             "fragment_composition_ready": diagnostic_fragment_composition_ready,
