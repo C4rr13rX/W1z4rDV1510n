@@ -900,7 +900,16 @@ def start_runtime_node(runtime: Path, executable: Path, endpoint: str,
             raise RuntimeError(f"recovered brain server exited with {process.returncode}")
         try:
             owner_pid = endpoint_listener_pid(endpoint)
-            endpoint_json(endpoint, "/brain/stats", timeout=2.0)
+            # A cold `.wbrain` answers its first requests off SSD: measured
+            # 2026-08-20 a single 29-byte observe took 4.3 s while the store
+            # warmed. A fixed 2 s probe therefore raised on every attempt, so
+            # readiness could never be reached and the supervisor killed and
+            # relaunched the brain 578 times. Scale the probe with the
+            # caller's own deadline instead of racing the warm-up.
+            endpoint_json(
+                endpoint, "/brain/stats",
+                timeout=max(2.0, min(30.0, timeout / 4.0)),
+            )
             if owner_pid == process.pid:
                 return process
             if owner_pid:
