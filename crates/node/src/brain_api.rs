@@ -3978,6 +3978,22 @@ async fn h_brain_chat(
             // request's motifs match no single component's training episode.
             // The same subject-vocabulary guard applies, so a component
             // cannot inherit a manifest its own labels do not support.
+            // Exclude manifests already contributed by an earlier subset.
+            //
+            // The query frame is the whole prompt, so char motifs rank by
+            // resemblance to the COMBINED request and every subset returns
+            // the same best manifest. Measured 2026-08-20 on cross_project's
+            // authorized_transfer paraphrase: every subset resolved to
+            // repository.py, authorization.py never entered the pool, and the
+            // composed project shipped one file where the case needs two --
+            // even though the paraphrase's own words retrieve
+            // authorization.py when asked alone. Skipping what is already
+            // present lets each subsequent subset surface its own component.
+            let already: Vec<Vec<u8>> = feature_candidates
+                .iter()
+                .filter(|candidate| is_complete_file_manifest(candidate))
+                .cloned()
+                .collect();
             if let Some((candidate, _, _)) =
                 brain.decode_best_binding_by_char_motifs_with_margin_where(
                     POOL_TEXT,
@@ -3987,6 +4003,7 @@ async fn h_brain_chat(
                     0.0,
                     &|candidate| {
                         is_complete_file_manifest(candidate)
+                            && !already.iter().any(|seen| seen == candidate)
                             && programming_response_compatible(&subset, candidate)
                             // programming_response_compatible only checks that
                             // each REQUESTED language is present, not that
