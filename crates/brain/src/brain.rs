@@ -1019,6 +1019,60 @@ fn recurrence_posting_refresh_due(use_count: u64) -> bool {
 
 const MAX_ROUTED_BINDING_CANDIDATES: usize = 512;
 
+/// Fraction of a decode that is one short block repeated end to end.
+///
+/// This is the actual runaway-emergence signal. Destructive collapse can
+/// produce concepts that decode by tiling a shorter pattern
+/// ("animalanimalanimal", "bodybodybody"), and those need rejecting.
+///
+/// It was previously approximated by two length proxies -- a 24-byte cap and
+/// a unique-byte ratio -- both of which answer "is this a runaway?" by asking
+/// "is this long?". That holds only while every trained answer is a category
+/// word. Measured 2026-08-20 against real source files: a 2,898-byte Python
+/// module scores a unique-byte ratio of 0.020, far under the 0.6 floor, purely
+/// because byte diversity saturates at 256 while length does not. Every real
+/// unit was rejected; the substrate could return nothing longer than 80 bytes.
+///
+/// Periodicity is scale-free: real code scores 0.000 whether it is 300 bytes
+/// or 300 KB, while the runaway tilings above score 0.667-0.992.
+///
+/// Uses the KMP failure function: for a string of length `n` whose longest
+/// proper border is `f`, the smallest candidate period is `n - f`, and the
+/// string is exactly that block tiled when `n % (n - f) == 0`.
+fn tiled_fraction(bytes: &[u8]) -> f32 {
+    let n = bytes.len();
+    if n < 2 {
+        return 0.0;
+    }
+    let mut failure = vec![0_usize; n];
+    let mut k = 0_usize;
+    for index in 1..n {
+        while k > 0 && bytes[index] != bytes[k] {
+            k = failure[k - 1];
+        }
+        if bytes[index] == bytes[k] {
+            k += 1;
+        }
+        failure[index] = k;
+    }
+    let period = n - failure[n - 1];
+    if period < n && n % period == 0 {
+        1.0 - (period as f32 / n as f32)
+    } else {
+        0.0
+    }
+}
+
+/// Reject a decode only when it is mostly one repeated block.
+///
+/// Deliberately length-independent: a correct answer may be a category word or
+/// an entire source tree, and the substrate must not decide between them by
+/// size.
+fn decode_is_runaway_tiling(bytes: &[u8]) -> bool {
+    const TILING_REJECT_FRACTION: f32 = 0.5;
+    tiled_fraction(bytes) >= TILING_REJECT_FRACTION
+}
+
 fn add_binding_evidence(
     evidence: &mut AHashMap<NeuronId, u16>,
     ids: impl IntoIterator<Item = NeuronId>,
@@ -3169,14 +3223,10 @@ impl Brain {
         let p = pool_handle.read();
 
         const ACTIVATION_FLOOR: f32 = 0.001;
-        // Skip runaway-emergence concepts.  The substrate's emergence
-        // can produce concepts whose decode runs many characters by
-        // tiling a shorter pattern (e.g., "animalanimalanimal" or
-        // "bodybodybody" emerging under dense-burst training).
-        // Trained category responses are short (≤ 18 bytes for
-        // "musical_instrument", ≤ 6 for most).  A 24-byte cap keeps
-        // legitimate trained answers while filtering runaways.
-        const MAX_REASONABLE_DECODE: usize = 24;
+        // Runaway-emergence concepts are rejected by `decode_is_runaway_tiling`
+        // on periodicity alone. The former 24-byte cap assumed every trained
+        // answer was a category word and silently truncated the substrate to
+        // fragments once it was trained on whole source files.
 
         // Score concepts by AVG-MEMBER-ACTIVATION (the same signal
         // /integrate's Stage 6 selection uses): the concept whose
@@ -3187,11 +3237,9 @@ impl Brain {
         //
         // Tiebreak by concept depth (deeper hierarchy wins).
         //
-        // Sanity filters reject runaway-emergence concepts:
-        //   - decode > 24 bytes (longer than any trained categorical
-        //     response; runaway tilings exceed this)
-        //   - low unique-byte ratio for decodes >= 8 bytes (catches
-        //     'bodybody' / 'animalanim' style partial repeats)
+        // The sanity filter rejects a decode that is mostly one repeated
+        // block, which is what runaway emergence actually produces. Length
+        // is deliberately not a criterion.
         let mut best: Option<(NeuronId, Vec<u8>, f32, usize)> = None;
         for (nid, _act) in target_acts.iter() {
             let n = match p.get(*nid) {
@@ -3221,15 +3269,8 @@ impl Brain {
             }
             // Decode + sanity filters.
             let decoded = p.decode_concept_members(&n.members);
-            if decoded.is_empty() || decoded.len() > MAX_REASONABLE_DECODE {
+            if decoded.is_empty() || decode_is_runaway_tiling(&decoded) {
                 continue;
-            }
-            if decoded.len() >= 8 {
-                let unique: ahash::AHashSet<u8> = decoded.iter().copied().collect();
-                let ratio = unique.len() as f32 / decoded.len() as f32;
-                if ratio < 0.6 {
-                    continue;
-                }
             }
             let depth = {
                 let mut max_d = 0;
@@ -8890,5 +8931,74 @@ impl Brain {
             }
         }
         stats
+    }
+}
+
+#[cfg(test)]
+mod decode_shape_tests {
+    use super::{decode_is_runaway_tiling, tiled_fraction};
+
+    /// Runaway emergence tiles a short block; that is the signal to reject on.
+    #[test]
+    fn periodic_tilings_are_rejected() {
+        for payload in [
+            &b"animalanimalanimal"[..],
+            &b"bodybodybodybody"[..],
+            &b"alaalaalaalaala"[..],
+            &b"oooooooooooooooo"[..],
+        ] {
+            assert!(
+                decode_is_runaway_tiling(payload),
+                "{:?} should be rejected, fraction {}",
+                String::from_utf8_lossy(payload),
+                tiled_fraction(payload),
+            );
+        }
+    }
+
+    /// The property the old length filters broke: a correct answer may be an
+    /// entire source file, and size must not decide whether it is returned.
+    #[test]
+    fn real_source_is_kept_at_any_length() {
+        let module = concat!(
+            "from django.apps import AppConfig\n\n\n",
+            "class CalculatorConfig(AppConfig):\n",
+            "    default_auto_field = \"django.db.models.BigAutoField\"\n",
+            "    name = \"calculator\"\n",
+            "    verbose_name = \"Scientific calculator\"\n\n",
+            "    def ready(self):\n",
+            "        from . import signals  # noqa: F401\n",
+        );
+        assert!(!decode_is_runaway_tiling(module.as_bytes()));
+        assert_eq!(tiled_fraction(module.as_bytes()), 0.0);
+
+        // Same content repeated is still not a tiling of a SHORT block by the
+        // fraction rule only if it genuinely differs; an exact doubling is.
+        let doubled = format!("{module}{module}");
+        assert!(decode_is_runaway_tiling(doubled.as_bytes()));
+
+        // Length alone never rejects: 300 KB of varied content passes.
+        let large: Vec<u8> = (0..300_000_u32)
+            .map(|index| (index.wrapping_mul(2_654_435_761) >> 24) as u8)
+            .collect();
+        assert!(!decode_is_runaway_tiling(&large));
+    }
+
+    /// Short trained category answers keep working unchanged.
+    #[test]
+    fn short_category_answers_are_unaffected() {
+        for payload in [&b"toy"[..], &b"body"[..], &b"musical_instrument"[..]] {
+            assert!(!decode_is_runaway_tiling(payload));
+        }
+    }
+
+    #[test]
+    fn degenerate_inputs_are_safe() {
+        assert!(!decode_is_runaway_tiling(b""));
+        assert!(!decode_is_runaway_tiling(b"x"));
+        assert_eq!(tiled_fraction(b""), 0.0);
+        assert_eq!(tiled_fraction(b"x"), 0.0);
+        // Two identical bytes IS a tiling of period 1.
+        assert!(decode_is_runaway_tiling(b"xx"));
     }
 }
