@@ -1495,6 +1495,15 @@ fn merge_grounded_file_manifests(labels: &[String], candidates: &[Vec<u8>]) -> O
     let manifests: Vec<&Vec<u8>> = candidates
         .iter()
         .filter(|candidate| is_complete_file_manifest(candidate))
+        // Enforce the language here rather than at each producer. Six
+        // separate call sites push into feature_candidates, so filtering any
+        // one of them leaves the rest open -- measured 2026-08-19, gating the
+        // per-component contribution alone still merged `order_service.js`
+        // into a PYTHON-only project and broke its `from api import OrderApi`.
+        // This is the single point every composed manifest passes through.
+        .filter(|candidate| {
+            manifest_files_match_requested_languages(labels, candidate)
+        })
         .collect();
     if manifests.len() < 2 {
         return None;
@@ -6349,6 +6358,22 @@ mod tests {
 
         // No language label means no opinion.
         assert!(manifest_files_match_requested_languages(&[], &javascript));
+
+        // And the merge itself must refuse a foreign manifest, not just the
+        // per-component contribution: six call sites push into
+        // feature_candidates, so gating one producer left the rest open and
+        // order_service.js still reached the composed project.
+        let authorization = br#"{"files":{"authorization.py":"def is_authorized(p):\n    return True\n"}}"#.to_vec();
+        let observability = br#"{"files":{"observability.py":"import json\ndef log(e, c):\n    print(e)\n"}}"#.to_vec();
+        let pool = vec![authorization, observability, javascript.clone()];
+        let merged = merge_grounded_file_manifests(&python_only, &pool)
+            .expect("two python manifests must still compose");
+        let value: serde_json::Value = serde_json::from_slice(&merged).unwrap();
+        let files = value["files"].as_object().unwrap();
+        assert!(
+            !files.keys().any(|name| name.ends_with(".js")),
+            "a PYTHON-only request must not compose a .js file: {files:?}"
+        );
     }
 
     /// Composition needs manifests IN the candidate pool, not merely
