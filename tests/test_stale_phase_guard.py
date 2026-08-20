@@ -164,3 +164,39 @@ def test_completed_phase_owns_guard_requires_an_integer_row(tmp_path):
     )
     assert not sup.completed_phase_owns_guard(runtime, {"row": 421477})
     assert not sup.completed_phase_owns_guard(runtime, {})
+
+
+def test_recovery_without_a_quarantine_restarts_instead_of_failing(tmp_path,
+                                                                   monkeypatch):
+    """No quarantine means nothing to roll back, not an error.
+
+    perform_automatic_recovery() called restore_canary_quarantine()
+    unconditionally, which raises "no continuous-canary quarantine exists"
+    when the marker is absent. The phase then sat in
+    automatic_quarantine_recovery_failed with no brain server running at all.
+    """
+    import argparse
+
+    runtime = tmp_path / "runtime"
+    (runtime / "brain").mkdir(parents=True)
+    status = runtime / "status.json"
+    calls = []
+
+    monkeypatch.setattr(sup, "stop_runtime_node",
+                        lambda *a, **k: calls.append("stop"))
+    monkeypatch.setattr(sup, "start_runtime_node",
+                        lambda *a, **k: calls.append("start"))
+
+    def explode(*a, **k):
+        raise AssertionError("must not try to restore an absent quarantine")
+
+    monkeypatch.setattr(sup, "restore_canary_quarantine", explode)
+
+    args = argparse.Namespace(
+        auto_quarantine_recovery=True,
+        endpoint="http://127.0.0.1:18095",
+        node_bin=tmp_path / "brain_server",
+    )
+
+    assert sup.perform_automatic_recovery(args, next_phase(), runtime, status)
+    assert calls == ["stop", "start"], "recovery must leave a live brain"

@@ -2431,6 +2431,33 @@ def perform_automatic_recovery(args: argparse.Namespace, phase: Phase,
         "phase": phase.name,
         "updated_unix": time.time(),
     })
+    if not read_json(canary_quarantine_path(runtime)):
+        # Nothing was quarantined, so there is no guarded snapshot to roll
+        # back to and restore_canary_quarantine() would raise "no
+        # continuous-canary quarantine exists". Recovery still has to leave a
+        # live brain behind: the caller reached here because the node was
+        # stopped or unhealthy, and returning False without restarting it
+        # strands the phase with no server at all.
+        try:
+            stop_runtime_node(runtime, args.endpoint)
+            start_runtime_node(runtime, args.node_bin, args.endpoint)
+        except (RuntimeError, OSError, psutil.Error) as exc:
+            publish(status_path, {
+                "state": "automatic_quarantine_recovery_failed",
+                "phase": phase.name,
+                "error": f"restart without quarantine failed: {exc}",
+                "updated_unix": time.time(),
+            })
+            return False
+        append_health_event(runtime, {
+            "kind": "automatic_quarantine_recovery",
+            "phase": phase.name,
+            "passed": True,
+            "restored": None,
+            "note": "no quarantine to restore; restarted the brain server",
+            "updated_unix": time.time(),
+        })
+        return True
     try:
         stop_runtime_node(runtime, args.endpoint)
         restored = restore_canary_quarantine(runtime, finalize=False)
