@@ -1307,6 +1307,12 @@ impl Fabric {
             // Phase 1: discover targets, grouped by source pool so each
             // source pool is read-locked exactly once per hop.
             let mut targets: Vec<(PoolId, NeuronId)> = Vec::new();
+            // Strongest relation that reached each target this hop. When the
+            // budget cannot admit every discovered neuron, it must be spent on
+            // the most strongly related ones rather than on whichever happened
+            // to be visited first -- a scarce budget should cost precision, not
+            // correctness.
+            let mut relation_strength: AHashMap<(PoolId, NeuronId), f32> = AHashMap::new();
             let mut by_pool: AHashMap<PoolId, Vec<NeuronId>> = AHashMap::new();
             for (pid, nid) in frontier.drain(..) {
                 by_pool.entry(pid).or_default().push(nid);
@@ -1324,6 +1330,18 @@ impl Fabric {
                     let Some(n) = pool.get(nid) else { continue };
                     for t in &n.terminals {
                         let key = (t.target.pool, t.target.neuron);
+                        // Consolidation is the durable half of the relation:
+                        // a repeatedly reinforced edge outranks a strong but
+                        // transient one.
+                        let strength = t.weight.abs() * (1.0 + t.consolidation as f32);
+                        relation_strength
+                            .entry(key)
+                            .and_modify(|best| {
+                                if strength > *best {
+                                    *best = strength;
+                                }
+                            })
+                            .or_insert(strength);
                         if visited.insert(key) {
                             targets.push(key);
                         }
@@ -1350,7 +1368,19 @@ impl Fabric {
                     if !pool.has_storage_tier() {
                         continue;
                     }
-                    for nid in nids {
+                    // Rank candidates by how strongly they are related to what
+                    // is already firing, so a budget that cannot admit all of
+                    // them admits the most relevant. Descending, id-tiebroken
+                    // so the choice stays deterministic.
+                    let mut ranked: Vec<NeuronId> = nids;
+                    ranked.sort_unstable_by(|left, right| {
+                        let ls = relation_strength.get(&(pid, *left)).copied().unwrap_or(0.0);
+                        let rs = relation_strength.get(&(pid, *right)).copied().unwrap_or(0.0);
+                        rs.partial_cmp(&ls)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then_with(|| left.cmp(right))
+                    });
+                    for nid in ranked {
                         if *already + to_page.len() >= max_page_in {
                             break;
                         }
