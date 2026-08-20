@@ -242,3 +242,62 @@ fn replay_does_not_poison_eviction_without_a_persisted_cold_offset() {
     assert!(!pool.is_evicted(id));
     assert!(pool.get(id).is_some());
 }
+
+/// A `.wbrain` commit publishes a WAL snapshot barrier.
+///
+/// Context (2026-08-20): `Brain::checkpoint` -- the legacy `brain.bin` path --
+/// has always flushed the WAL, appended a `SnapshotMarker` and compacted.
+/// `serialize_all_neurons_for_idle`, the `.wbrain` path production actually
+/// runs, did none of that. Recovery reads `load_events_after_marker`, so every
+/// restart replayed from a stale marker and landed at a tick BEHIND the
+/// committed container. Measured on the AWS brain: 60/60 corpus rows recalled
+/// exactly, checkpoint reported `ok: true`, restart returned 0/60 with the
+/// tick down ~10,000.
+///
+/// This asserts the commit leaves the WAL in the same shape the legacy path
+/// does. The full rewind is a cross-process property -- commit, exit, restart,
+/// compare ticks -- reproduced directly against the host rather than here.
+#[test]
+fn wbrain_commit_publishes_a_snapshot_marker() {
+    let dir = tmpdir("wbrain_marker");
+    let container = dir.join("brain.wbrain");
+
+    let mut brain = build_brain_with_wal(&dir);
+    for _ in 0..8 {
+        brain.observe(1, b"durable payload alpha");
+        brain.advance_tick();
+    }
+    let committed_tick = brain.fabric().current_tick();
+
+    brain.attach_wbrain(&container).expect("attach wbrain");
+    brain
+        .serialize_all_neurons_for_idle()
+        .expect("commit the container");
+
+    // A published barrier means recovery has nothing left to replay from
+    // before the commit.
+    let stale: Vec<u64> = load_events_after_marker(&dir)
+        .expect("load events after marker")
+        .iter()
+        .filter_map(event_tick)
+        .filter(|tick| *tick < committed_tick)
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "recovery would replay {} event(s) predating the commit at tick          {committed_tick} (ticks {stale:?})",
+        stale.len(),
+    );
+    drop(brain);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Tick of an event when it carries one, for the rewind assertion above.
+fn event_tick(event: &w1z4rd_brain::store::WalEvent) -> Option<u64> {
+    use w1z4rd_brain::store::WalEvent as E;
+    match event {
+        E::SnapshotMarker { tick, .. } => Some(*tick),
+        E::AtomCreated { born_tick, .. } => Some(*born_tick),
+        E::ConceptEmerged { born_tick, .. } => Some(*born_tick),
+        _ => None,
+    }
+}

@@ -8287,7 +8287,51 @@ impl Brain {
         file.set_tick(self.fabric.current_tick());
         file.commit_manifest()?;
         file.flush()?;
+        self.publish_wal_snapshot_barrier();
         Ok(serialized)
+    }
+
+    /// Record that the container now covers everything the WAL has replayed.
+    ///
+    /// `Brain::checkpoint` (the legacy `brain.bin` path) has always emitted a
+    /// `SnapshotMarker` here, but `serialize_all_neurons_for_idle` -- the
+    /// `.wbrain` path production actually runs -- did not. Recovery reads
+    /// `load_events_after_marker`, so without a fresh marker every restart
+    /// replayed from a stale one and landed at a tick BEHIND the committed
+    /// container. Measured 2026-08-20: trained and recalled 60/60 corpus rows
+    /// exactly, checkpointed with `ok: true`, restarted, and got 0/60 back
+    /// with the tick down ~10,000. That is why admission gates kept seeing an
+    /// untrained brain no matter what was fed to it.
+    ///
+    /// Best-effort by design: the container is already committed and durable
+    /// at this point, so a WAL bookkeeping failure must not fail the
+    /// checkpoint. It is logged and the next barrier supersedes it.
+    fn publish_wal_snapshot_barrier(&self) {
+        // A NoopStore (no WAL attached) makes every call below inert.
+        let store = self.fabric.store_clone();
+        if let Err(error) = store.flush() {
+            tracing::warn!("WAL flush before .wbrain marker failed: {}", error);
+            return;
+        }
+        let wall_time_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis() as i64)
+            .unwrap_or(0);
+        let marker = crate::store::WalEvent::SnapshotMarker {
+            tick: self.fabric.current_tick(),
+            wall_time_ms,
+        };
+        if let Err(error) = store.append(&marker) {
+            tracing::warn!("WAL marker append failed for .wbrain commit: {}", error);
+            return;
+        }
+        if let Err(error) = store.flush() {
+            tracing::warn!("WAL flush after .wbrain marker failed: {}", error);
+            return;
+        }
+        if let Err(error) = store.compact_after_checkpoint() {
+            tracing::warn!("WAL compaction after .wbrain commit failed: {}", error);
+        }
     }
 
     pub fn uses_wbrain_storage(&self) -> bool {
