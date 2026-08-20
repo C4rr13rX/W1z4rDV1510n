@@ -16,10 +16,13 @@ from scripts.aws.watch_programming_brain import (
 def test_curriculum_plan_has_one_authoritative_logical_row_total() -> None:
     base = curriculum_phases(Path("corpora"))
     seeded = curriculum_phases(Path("corpora"), include_seed=True)
-    assert sum(phase.rows for phase in base) == 6_738_759
-    assert sum(phase.rows for phase in seeded) == 6_748_185
-    assert sum(phase.rows * phase.repeats for phase in seeded) == 6_754_044
-    assert [phase.name for phase in seeded[-7:]] == [phase.name for phase in base]
+    # 2026-08-20: webstack-units adds 60 logical rows at repeats=4, covering
+    # the Django/Vue/three.js gap that left the brain unable to answer eight
+    # of ten decomposed web-stack tasks.
+    assert sum(phase.rows for phase in base) == 6_738_819
+    assert sum(phase.rows for phase in seeded) == 6_748_245
+    assert sum(phase.rows * phase.repeats for phase in seeded) == 6_754_284
+    assert [phase.name for phase in seeded[-8:]] == [phase.name for phase in base]
 
 
 def probe(state: str, *, supervisors: int = 1, wrappers: int = 1,

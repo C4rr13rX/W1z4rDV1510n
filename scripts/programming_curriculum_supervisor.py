@@ -104,6 +104,15 @@ def curriculum_phases(corpus_root: Path, include_seed: bool = False) -> list[Pha
               corpus_root / "jupyter_scientific_para4.jsonl", 2_760_496),
         Phase("jupyter-scientific-partial", "domain_scientific_python_001",
               corpus_root / "jupyter_scientific_partial.jsonl", 206_948),
+        # Measured 2026-08-20, the brain could not build a Django + Vue +
+        # three.js application: of ten decomposed single-unit tasks eight
+        # returned nothing and two returned unrelated Python, because none of
+        # the corpora above carry web-stack material and django/vue/threejs
+        # produce no intent labels at all. 20 units x 3 phrasings, authored
+        # under CC0-1.0. Small, so it repeats like the algorithms corpus
+        # rather than being physically duplicated on disk.
+        Phase("webstack-units", "programming_webstack_001",
+              corpus_root / "webstack_units.jsonl", 60, repeats=4),
     ]
     if include_seed:
         phases[0:0] = [
@@ -1516,10 +1525,41 @@ def record_deferred_failure(runtime: Path, phase: Phase, candidate_row: int,
         use_passing_canary,
     )
     if not ranges:
-        raise RuntimeError(
-            "failed canary contains no newly trained, non-deferred rows: "
-            f"phase={phase.name} boundary={candidate_row}"
+        # Every row in the failed window is already an unresolved deferred
+        # obligation, so this failure is fully accounted for and there is
+        # nothing new to blame. Quarantining here would fail training closed
+        # against evidence that has already been recorded, which is what made
+        # a fully-deferred span retry forever instead of retiring.
+        #
+        # The logical cursor still has to move past the block, exactly as the
+        # midphase path already does, or the next supervisor re-benchmarks the
+        # same empty sample and lands back here.
+        advanced = advance_guard_across_deferred_block(
+            runtime, phase, candidate_row
         )
+        covering = deferred_coverage_ids(
+            runtime, phase.name, int(last_good.get("row") or 0), candidate_row
+        ) or []
+        report = {
+            "kind": "fully_deferred_failure_absorbed",
+            "phase": phase.name,
+            "trained_rows": candidate_row,
+            "durable_next_row": durable_row,
+            "passed": False,
+            "neural_state_changed": False,
+            "guard_advanced": advanced is not None,
+            "deferred_interval_ids": covering,
+            "reason": reason,
+            "error": error,
+            "updated_unix": time.time(),
+        }
+        append_health_event(runtime, report)
+        return {
+            **report,
+            "interval_id": "",
+            "suspect_intervals": [],
+            "deferred_events": [],
+        }
     events = []
     for suspect_start, suspect_end in ranges:
         interval_id = deferred_interval_id(

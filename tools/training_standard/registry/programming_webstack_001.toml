@@ -1,0 +1,106 @@
+[script]
+id          = "programming_webstack_001"
+category    = "code_generation"
+phase       = 32
+description = """
+Web stack — Django REST backend, Vue frontend, three.js 3D rendering.
+
+Measured 2026-08-20, the brain could not build a Django + Vue + three.js
+application. Of ten decomposed single-unit tasks, eight returned nothing
+and two returned unrelated Python: a Postgres migration for "Django
+model", `def square(n)` for "Vue component". The words django, vue and
+threejs produced zero intent labels, so the domain was not recognised at
+all — none of CodeSearchNet Python, the Jupyter notebooks, MathInstruct
+or MetaMathQA carry web-stack material.
+
+Corpus: 20 units x 3 phrasings = 60 episodes, authored for this corpus
+and published under CC0-1.0, so it carries no third-party licence
+obligation and nothing is scraped. One unit is one class, component or
+module — the granularity the agent decomposes into and composes from.
+
+Coverage: Django model/serializer/view/urls/settings/appconfig/tests, a
+safe ast-based expression evaluator and grid sampler, Vue
+keypad/store/entry/controls/viewport, and three.js scene/surface
+mesh/axes/camera framing.
+
+The units interlock: sample_surface returns {x,y,z}, the Django surface
+view passes that grid through unchanged, the JS client fetches it, and
+buildSurfaceMesh destructures the same keys.
+"""
+depends_on  = ["programming_literacy_python_001", "code_gen_javascript_001"]
+
+[[inputs]]
+kind = "corpus"
+path = "data/training/webstack_units.jsonl"
+
+[[benchmarks]]
+label         = "django rest view"
+prompt        = "Write a Django REST APIView that computes a posted expression and answers with JSON."
+must_include  = ["APIView", "def post", "Response"]
+forbidden     = ["TODO"]
+must_be_valid = "python"
+min_score     = 0.5
+
+[[benchmarks]]
+label         = "django urls"
+prompt        = "Write the Django URL configuration wiring calculator endpoints to their views."
+must_include  = ["urlpatterns", "path(", "as_view"]
+forbidden     = ["TODO"]
+must_be_valid = "python"
+min_score     = 0.5
+
+[[benchmarks]]
+label         = "safe expression evaluator"
+prompt        = "Write a Python expression evaluator using ast that refuses arbitrary code."
+must_include  = ["ast", "def "]
+forbidden     = ["eval(", "TODO"]
+must_be_valid = "python"
+min_score     = 0.5
+
+[[benchmarks]]
+label         = "surface grid sampling"
+prompt        = "Write a Python routine that evaluates an expression across a 2D grid for surface plotting."
+must_include  = ["def ", "for ", "return"]
+forbidden     = ["TODO"]
+must_be_valid = "python"
+min_score     = 0.4
+
+[[benchmarks]]
+label         = "vue keypad component"
+prompt        = "Write a Vue single file component with a calculator keypad that emits the typed expression."
+must_include  = ["<template>", "export default", "$emit"]
+forbidden     = ["TODO"]
+min_score     = 0.5
+
+[[benchmarks]]
+label         = "vue api client"
+prompt        = "Write a JavaScript module that posts a math expression to a REST endpoint and returns the parsed JSON result."
+must_include  = ["fetch", "await", "JSON.stringify"]
+forbidden     = ["TODO"]
+must_be_valid = "javascript"
+min_score     = 0.5
+
+[[benchmarks]]
+label         = "threejs scene"
+prompt        = "Write a JavaScript class that creates a three.js scene with a perspective camera and orbit controls."
+must_include  = ["THREE.Scene", "PerspectiveCamera", "OrbitControls"]
+forbidden     = ["TODO"]
+must_be_valid = "javascript"
+min_score     = 0.5
+
+[[benchmarks]]
+label         = "threejs surface mesh"
+prompt        = "Write a JavaScript function that builds a three.js surface mesh from a grid of z values."
+must_include  = ["PlaneGeometry", "position", "Mesh"]
+forbidden     = ["TODO"]
+must_be_valid = "javascript"
+min_score     = 0.5
+
+[[regression_protects]]
+script_id = "programming_literacy_python_001"
+
+[[regression_protects]]
+script_id = "domain_scientific_python_001"
+
+[[regression_protects]]
+script_id = "code_gen_javascript_001"
