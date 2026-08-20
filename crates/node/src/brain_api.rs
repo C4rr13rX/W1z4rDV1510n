@@ -51,16 +51,31 @@ pub const POOL_TURN: PoolId = 5;
 /// 0.082-0.217 against the wrong ones, so 0.35 sits inside that gap.
 const UNLABELED_RECALL_MIN_SCORE: f32 = 0.35;
 
-/// Separation the winner must hold over the runner-up.
+/// Separation the winner must hold over the runner-up, per distinct unit.
 ///
-/// This is the half that decides an unknown. A prompt about something never
-/// trained still has a nearest neighbour, and that neighbour can clear a score
-/// floor on shared surface vocabulary alone. What it cannot do is stand well
-/// clear of every rival. Requiring real separation makes the route settle onto
-/// a known and leave an unknown alone, rather than answering whatever was
-/// closest. The labelled route uses 0.025 with labels to back it; unlabelled
-/// recall carries the whole burden, so it demands an order of magnitude more.
-const UNLABELED_RECALL_MIN_MARGIN: f32 = 0.15;
+/// Measured over the trained corpus, best-per-unit so paraphrases of one unit
+/// are not treated as each other's rivals:
+///
+///   novel phrasing                          score   margin  picks
+///   "Build a Django REST endpoint ..."       0.647   0.064   view     correct
+///   "I need a three.js scene class ..."      0.555   0.278   scene    correct
+///   "Give me a Vue keypad component ..."     0.496   0.138   keypad   correct
+///   "Make a Django model to store ..."       0.661   0.255   model    correct
+///   "Write a three.js surface mesh ..."      0.598   0.168   surface  correct
+///   "What is the capital of France?"         0.182   0.002   --       abstains
+///
+/// The score floor is what actually separates a known from an unknown: 0.496
+/// worst correct against 0.182 for the untrained prompt. Margin is a weak
+/// tiebreak on top, not the primary gate -- a correct match can legitimately
+/// sit near a sibling unit (view at 0.064) because the corpus deliberately
+/// contains related components. An earlier 0.15 margin was calibrated from
+/// three examples and rejected two of five correct answers.
+///
+/// What margin still buys: the untrained prompt separates by 0.002, i.e. it
+/// has a nearest neighbour but no real preference among them. That is the
+/// signature of an unknown, and 0.03 excludes it without touching a genuine
+/// recall.
+const UNLABELED_RECALL_MIN_MARGIN: f32 = 0.03;
 
 // ---------------------------------------------------------------------
 // Shared state
@@ -4056,6 +4071,16 @@ async fn h_brain_chat(
     let diagnostic_recall_derived = recall_derived_route
         .as_ref()
         .map(|(_, score, margin)| (*score, *margin));
+    // Why the route did or did not run, so a silent None is never ambiguous.
+    let diagnostic_recall_derived_state = if raw_is_exact {
+        "skipped_exact"
+    } else if composition_features.is_some() {
+        "skipped_labelled"
+    } else if diagnostic_recall_derived.is_some() {
+        "admitted"
+    } else {
+        "below_threshold"
+    };
     let recall_derived_bytes = recall_derived_route.map(|(bytes, _, _)| bytes);
     let diagnostic_feature_route_pressure = composition_features
         .as_ref()
@@ -4804,6 +4829,7 @@ async fn h_brain_chat(
             "fragment_composition_ready": diagnostic_fragment_composition_ready,
             "manifest_composition_ready": diagnostic_manifest_composition_ready,
             "answer_branch": answer_branch,
+            "recall_derived_state": diagnostic_recall_derived_state,
             "recall_derived_score": diagnostic_recall_derived.map(|(score, _)| score),
             "recall_derived_margin": diagnostic_recall_derived.map(|(_, margin)| margin),
             "raw_fallback_inhibited": programming_language_intent
