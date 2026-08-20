@@ -1265,14 +1265,22 @@ impl Fabric {
         //
         // Page-in is the growth path -- it pulls terminals out of the cold
         // tier and into RAM -- so it is the one place a floor can actually be
-        // enforced. Below the floor, refuse to hydrate at all and let the
-        // eviction pass reclaim. Propagation still runs; it simply walks the
-        // resident fabric, which is the same thing that happens when a
-        // neuron's terminals were never paged in.
-        if crate::tier_orchestrator::TierOrchestrator::below_floor(
+        // enforced. Below the floor, cut page-in down to a small reserve and
+        // let the eviction pass reclaim.
+        //
+        // It must not cut to zero. "Propagation still walks the resident
+        // fabric" only holds when something is resident; a `.wbrain` brain
+        // starts with every body asleep, so refusing outright makes the walk
+        // traverse an empty set and the brain answers nothing -- silently, and
+        // indistinguishably from genuinely knowing nothing. Measured
+        // 2026-08-20 that is exactly what the AWS brain did: 93.8M learned
+        // terminals, 0 resident, every recall empty.
+        let max_page_in = crate::tier_orchestrator::TierOrchestrator::page_in_budget(
             crate::tier_orchestrator::TierOrchestrator::system_available_mb(),
             params.min_system_available_mb,
-        ) {
+            params.max_page_in_per_pass,
+        );
+        if max_page_in == 0 {
             return 0;
         }
         const VISIT_BUDGET: usize = 4_096;
@@ -1343,7 +1351,7 @@ impl Fabric {
                         continue;
                     }
                     for nid in nids {
-                        if *already + to_page.len() >= params.max_page_in_per_pass {
+                        if *already + to_page.len() >= max_page_in {
                             break;
                         }
                         if !pool.is_evicted(nid) {

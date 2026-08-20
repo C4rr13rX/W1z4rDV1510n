@@ -4210,11 +4210,32 @@ impl Pool {
         // Composite label = concatenation of member labels, separated by a
         // glyph that can't appear in base64-url-safe payloads.  Stable and
         // human-readable for debugging.
-        let composite_label: String = members
-            .iter()
-            .map(|id| self.neurons[*id as usize].label.as_str())
-            .collect::<Vec<_>>()
-            .join("~");
+        // Under `.wbrain` every member body sleeps on SSD until it is asked
+        // for by id. Indexing a sleeping slot panics with "attempted direct
+        // access to a sleeping neuron", which killed the inference worker
+        // mid-request and left the server restart-looping. Page each member
+        // in first, and treat one that cannot be loaded as a reason to skip
+        // this promotion rather than to abort the process: the run stays
+        // available to a later crystallisation once its members are resident.
+        // A page-in error is not itself fatal: a pool with no store attached
+        // keeps its neurons resident, so `ensure_loaded` reports "no store"
+        // for members that are already in hand. Only genuine absence, checked
+        // below, is a reason to decline.
+        for id in members.iter() {
+            if self.neurons.get(*id as usize).is_none() {
+                let _ = self.ensure_loaded(*id);
+            }
+        }
+        let mut composite_label = String::new();
+        for (position, id) in members.iter().enumerate() {
+            let Some(neuron) = self.neurons.get(*id as usize) else {
+                return;
+            };
+            if position > 0 {
+                composite_label.push('~');
+            }
+            composite_label.push_str(neuron.label.as_str());
+        }
         if self.label_to_id.contains_key(&composite_label) {
             // Already promoted (e.g. via a different sequence path).  Skip.
             return;
@@ -4408,5 +4429,36 @@ mod resident_slot_tests {
             ),
         ));
         assert_eq!(slots.resident_ids(), vec![42, 9_000_000]);
+    }
+
+    /// A sleeping slot must never be reachable through `Index`.
+    ///
+    /// This is the exact shape that killed the AWS inference worker:
+    /// `promote_to_concept` built its composite label with
+    /// `self.neurons[id].label`, and under `.wbrain` every member body sleeps
+    /// on SSD until it is asked for by id.
+    #[test]
+    #[should_panic(expected = "attempted direct access to a sleeping neuron")]
+    fn indexing_a_sleeping_slot_panics() {
+        let slots = NeuronSlots::sleeping(1_000, 0);
+        let _ = &slots[7];
+    }
+
+    #[test]
+    fn promoting_a_run_whose_members_sleep_does_not_panic() {
+        // A pool whose slots are all asleep and which has no store to page
+        // them back in: the promotion must decline, not abort the process.
+        let mut pool = Pool::new(
+            PoolConfig::defaults("sleeping-promotion", 0),
+            Box::new(InstructionIntentEncoding {
+                prefix: "intent".to_string(),
+            }),
+        );
+        pool.neurons = NeuronSlots::sleeping(64, 0);
+
+        pool.promote_to_concept(vec![1, 2, 3], 1);
+
+        // Declined cleanly: no concept was appended for the sleeping run.
+        assert_eq!(pool.neurons.len(), 64);
     }
 }

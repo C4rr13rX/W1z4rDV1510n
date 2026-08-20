@@ -255,6 +255,13 @@ pub struct OrchestratorStatsSnapshot {
     pub total_ns:         u64,
 }
 
+/// Neurons one pass may still page in while under the politeness floor.
+///
+/// Small enough that bulk hydration is effectively stopped -- the growth path
+/// the floor exists to bound -- but non-zero so a single recall can assemble
+/// the neurons it needs instead of answering from an empty resident set.
+const PAGE_IN_RESERVE_UNDER_FLOOR: usize = 8;
+
 /// Per-pool round-robin scan cursor.  Persisting it across passes makes
 /// the orchestrator walk the whole neuron table over time even though
 /// each pass only touches `scan_budget` entries.
@@ -374,6 +381,26 @@ impl TierOrchestrator {
         min_mb > 0 && available_mb < min_mb
     }
 
+    /// How many neurons one hydration pass may page in.
+    ///
+    /// The floor exists to bound *growth*, not to switch recall off. Refusing
+    /// to hydrate at all is only equivalent to "walk the resident fabric" when
+    /// something is already resident: a `.wbrain` brain starts with every body
+    /// asleep, so a hard refusal makes propagation walk an empty set and the
+    /// brain answers nothing at all -- silently, and with full confidence that
+    /// it simply knows nothing.
+    ///
+    /// Under the floor, page-in is therefore reduced to a small reserve rather
+    /// than zero. One request can still assemble the handful of neurons it
+    /// needs while bulk hydration stops, which is what actually bounded the
+    /// 13.7-16.1 GB oscillation.
+    pub fn page_in_budget(available_mb: u64, min_mb: u64, max_per_pass: usize) -> usize {
+        if !Self::below_floor(available_mb, min_mb) {
+            return max_per_pass;
+        }
+        PAGE_IN_RESERVE_UNDER_FLOOR.min(max_per_pass)
+    }
+
     /// How hard eviction must work to hold a terminal budget.
     ///
     /// The per-pass caps (`max_evict_per_pass`, `scan_budget`) are fixed, so
@@ -475,6 +502,37 @@ mod tests {
         let pressure = TierOrchestrator::system_pressure_factor(1_100, floor_mb);
         assert!((pressure - 0.25).abs() < 1e-6, "pressure was {pressure}");
         assert!(TierOrchestrator::below_floor(1_100, floor_mb));
+    }
+
+    /// Under the floor page-in must shrink, never stop.
+    ///
+    /// Refusing outright is only equivalent to "walk the resident fabric" when
+    /// something is resident. A `.wbrain` brain starts fully asleep, so a zero
+    /// budget makes every recall answer from an empty set -- measured
+    /// 2026-08-20 on the AWS brain: 93.8M learned terminals, 0 resident, every
+    /// reply empty, indistinguishable from knowing nothing.
+    #[test]
+    fn page_in_keeps_a_reserve_under_the_floor() {
+        let floor_mb = 6_144;
+
+        // Above the floor nothing is withheld.
+        assert_eq!(TierOrchestrator::page_in_budget(12_000, floor_mb, 128), 128);
+        assert_eq!(
+            TierOrchestrator::page_in_budget(floor_mb, floor_mb, 128),
+            128
+        );
+
+        // Under it, bulk hydration stops but recall can still assemble.
+        let starved = TierOrchestrator::page_in_budget(460, floor_mb, 128);
+        assert!(starved > 0, "a zero budget silently disables recall");
+        assert!(starved < 128, "bulk hydration must still be curtailed");
+
+        // The operator's own cap is never exceeded, floor or no floor.
+        assert_eq!(TierOrchestrator::page_in_budget(460, floor_mb, 4), 4);
+        // And an explicitly disabled pager stays disabled.
+        assert_eq!(TierOrchestrator::page_in_budget(460, floor_mb, 0), 0);
+        // 0 disables the floor check entirely.
+        assert_eq!(TierOrchestrator::page_in_budget(1, 0, 128), 128);
     }
 
 
