@@ -1327,6 +1327,59 @@ async fn h_logic_recognize(
                 "template_count": brain.eem().semantic_template_count()}))
 }
 
+/// Does every file in a manifest belong to a language the request asked for?
+///
+/// `manifest_language_coverage` checks the converse -- that each requested
+/// language appears -- and says nothing about extra languages. Composing a
+/// component by behaviour alone therefore pulled `order_service.js` into a
+/// Python-only project, so its integration test could not import `api`.
+/// Extension-less files (READMEs, configs) are neutral and never rejected.
+fn manifest_files_match_requested_languages(labels: &[String], bytes: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return false;
+    };
+    let Some(files) = value.get("files").and_then(|files| files.as_object()) else {
+        return false;
+    };
+    let requested: std::collections::BTreeSet<&str> = labels
+        .iter()
+        .filter_map(|label| label.split(":LANGUAGE:").nth(1))
+        .map(|language| language.split(':').next().unwrap_or(language))
+        .collect();
+    if requested.is_empty() {
+        return true;
+    }
+    let allowed: Vec<&str> = requested
+        .iter()
+        .flat_map(|language| match *language {
+            "PYTHON" => vec![".py"],
+            "TYPESCRIPT" => vec![".ts", ".tsx"],
+            "JAVASCRIPT" => vec![".js", ".mjs", ".cjs", ".jsx"],
+            "RUST" => vec![".rs"],
+            "GO" => vec![".go"],
+            "JAVA" => vec![".java"],
+            "CSHARP" | "C_SHARP" => vec![".cs"],
+            _ => vec![],
+        })
+        .collect();
+    if allowed.is_empty() {
+        return true;
+    }
+    // Any file carrying a KNOWN source extension must be one the request
+    // asked for. Unknown extensions stay neutral.
+    const KNOWN: [&str; 11] = [
+        ".py", ".ts", ".tsx", ".js", ".mjs", ".cjs", ".jsx", ".rs", ".go",
+        ".java", ".cs",
+    ];
+    files.keys().all(|name| {
+        let lower = name.to_ascii_lowercase();
+        if !KNOWN.iter().any(|suffix| lower.ends_with(suffix)) {
+            return true;
+        }
+        allowed.iter().any(|suffix| lower.ends_with(suffix))
+    })
+}
+
 fn manifest_language_coverage(labels: &[String], files: &serde_json::Map<String, serde_json::Value>)
     -> bool
 {
@@ -3729,6 +3782,15 @@ async fn h_brain_chat(
                     &|candidate| {
                         is_complete_file_manifest(candidate)
                             && programming_response_compatible(&subset, candidate)
+                            // programming_response_compatible only checks that
+                            // each REQUESTED language is present, not that
+                            // foreign ones are absent, so a Python-only
+                            // request happily accepted a manifest whose file
+                            // was order_service.js -- composing a .js file
+                            // into a Python project and breaking its import.
+                            && manifest_files_match_requested_languages(
+                                &subset, candidate,
+                            )
                     },
                 )
             {
@@ -6254,6 +6316,41 @@ mod tests {
     /// tagged CONCURRENCY:BOUNDED_ASYNC and admitted the bounded_map manifest,
     /// answering a request the brain is required to refuse.
     #[test]
+    /// A Python request must not compose a JavaScript file.
+    ///
+    /// `programming_response_compatible` only checks that each REQUESTED
+    /// language is present, never that foreign ones are absent. Composing a
+    /// component by behaviour alone therefore pulled `order_service.js` into a
+    /// Python-only project on 2026-08-19: the merged manifest was
+    /// authorization.py + observability.py + repository.py + order_service.js,
+    /// so the suite's integration test could not `from api import OrderApi`.
+    #[test]
+    fn a_component_manifest_must_match_the_requested_language() {
+        let python_only = vec!["instruction_intent:LANGUAGE:PYTHON".to_string()];
+
+        let javascript = br#"{"files":{"order_service.js":"export function submit(id) { return id; }"}}"#.to_vec();
+        let python = br#"{"files":{"api.py":"def submit(request_id):\n    return request_id\n"}}"#.to_vec();
+        let mixed = br#"{"files":{"api.py":"def submit(x):\n    return x\n","order_service.js":"export const x = 1;"}}"#.to_vec();
+        let with_readme = br#"{"files":{"api.py":"def submit(x):\n    return x\n","README":"notes"}}"#.to_vec();
+
+        assert!(!manifest_files_match_requested_languages(&python_only, &javascript));
+        assert!(!manifest_files_match_requested_languages(&python_only, &mixed));
+        assert!(manifest_files_match_requested_languages(&python_only, &python));
+        // Extension-less files are neutral, not foreign.
+        assert!(manifest_files_match_requested_languages(&python_only, &with_readme));
+
+        // A request that DOES ask for JavaScript still accepts it.
+        let polyglot = vec![
+            "instruction_intent:LANGUAGE:PYTHON".to_string(),
+            "instruction_intent:LANGUAGE:JAVASCRIPT".to_string(),
+        ];
+        assert!(manifest_files_match_requested_languages(&polyglot, &javascript));
+        assert!(manifest_files_match_requested_languages(&polyglot, &mixed));
+
+        // No language label means no opinion.
+        assert!(manifest_files_match_requested_languages(&[], &javascript));
+    }
+
     /// Composition needs manifests IN the candidate pool, not merely
     /// retrievable from the brain.
     ///
