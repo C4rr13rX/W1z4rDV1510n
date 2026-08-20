@@ -1844,6 +1844,34 @@ fn exact_manifest_subset_candidates(
 /// rather than a component. These pairs let a richer learned component (for
 /// example JavaScript+idempotency+outbox) respond to a grounded request that
 /// explicitly supplies JavaScript+outbox without inventing source.
+/// A query frame naming one behaviour, for per-component recall.
+///
+/// Char-motif recall ranks by textual resemblance, so querying a composite
+/// request retrieves only the component it most resembles. Pairing the
+/// prompt with the behaviour's canonical wording lets each component be
+/// found on its own terms while keeping the request's own text as context.
+fn behaviour_query_frame(subset: &[String], prompt: &str) -> String {
+    let behaviour = subset
+        .iter()
+        .find(|label| label.contains(':') && !label.contains(":LANGUAGE:"));
+    let Some(behaviour) = behaviour else {
+        return prompt.to_string();
+    };
+    // The label's own tail is the canonical name of the behaviour:
+    // "instruction_intent:SECURITY:AUTHORIZATION" -> "security authorization".
+    let canonical = behaviour
+        .rsplit(':')
+        .take(2)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace('_', " ")
+        .to_ascii_lowercase();
+    format!("{prompt} {canonical}")
+}
+
 fn manifest_component_feature_pairs(labels: &[String]) -> Vec<Vec<String>> {
     let languages: Vec<_> = labels
         .iter()
@@ -3994,10 +4022,20 @@ async fn h_brain_chat(
                 .filter(|candidate| is_complete_file_manifest(candidate))
                 .cloned()
                 .collect();
+            // Query with the BEHAVIOUR's own vocabulary, not the combined
+            // prompt. Char motifs rank by textual resemblance, so a composite
+            // request retrieves whichever component it most resembles and the
+            // others are never reached. Measured 2026-08-20 on cross_project's
+            // authorized_transfer paraphrase: "database transaction and
+            // access-control modules" resolved every subset to repository.py,
+            // and appending the single word "authorization" was enough to
+            // compose both files with the SAME three labels -- proving the
+            // gate is prompt text, not intent.
+            let component_query = behaviour_query_frame(&subset, prompt);
             if let Some((candidate, _, _)) =
                 brain.decode_best_binding_by_char_motifs_with_margin_where(
                     POOL_TEXT,
-                    prompt.as_bytes(),
+                    component_query.as_bytes(),
                     action_pool,
                     0.0,
                     0.0,
@@ -6566,6 +6604,39 @@ mod tests {
     /// consensus protocol with Byzantine fault tolerance" is labelled
     /// CONCURRENCY:BOUNDED_ASYNC and bounded_map genuinely satisfies that cue,
     /// so python_enterprise oov went 3/3 -> 2/3 on 2026-08-20.
+    /// Each component must be searched on its own terms.
+    ///
+    /// Char-motif recall ranks by textual resemblance, so a composite request
+    /// retrieves only the component it most resembles. Measured 2026-08-20 on
+    /// cross_project's authorized_transfer paraphrase: "database transaction
+    /// and access-control modules" resolved EVERY subset to repository.py,
+    /// and appending the single word "authorization" composed both files with
+    /// the SAME three labels -- the gate is prompt text, not intent.
+    #[test]
+    fn a_component_query_names_its_own_behaviour() {
+        let prompt = "Build Python database transaction and access-control modules.";
+        let subset = vec![
+            "instruction_intent:LANGUAGE:PYTHON".to_string(),
+            "instruction_intent:SECURITY:AUTHORIZATION".to_string(),
+        ];
+        let frame = behaviour_query_frame(&subset, prompt);
+        assert!(frame.contains(prompt), "the request's own text is context");
+        assert!(frame.contains("authorization"), "frame was {frame:?}");
+        assert!(frame.contains("security"), "frame was {frame:?}");
+
+        // Underscores become words so multi-word behaviours read naturally.
+        let idempotent = vec![
+            "instruction_intent:LANGUAGE:PYTHON".to_string(),
+            "instruction_intent:API:IDEMPOTENT_COMMAND".to_string(),
+        ];
+        let frame = behaviour_query_frame(&idempotent, prompt);
+        assert!(frame.contains("idempotent command"), "frame was {frame:?}");
+
+        // A language-only subset has no behaviour to name.
+        let language_only = vec!["instruction_intent:LANGUAGE:PYTHON".to_string()];
+        assert_eq!(behaviour_query_frame(&language_only, prompt), prompt);
+    }
+
     #[test]
     fn a_label_stands_in_for_subject_only_when_the_prompt_names_it() {
         let authz = "instruction_intent:SECURITY:AUTHORIZATION";
