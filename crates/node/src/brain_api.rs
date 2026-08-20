@@ -2912,13 +2912,33 @@ fn prompt_shares_manifest_subject(prompt: &str, bytes: &[u8]) -> bool {
         "create", "build", "function", "using", "with", "that", "this", "file",
         "files",
     ];
+    // Match on a shared stem, not an exact token.
+    //
+    // Requiring exact equality rejected genuine agreement on morphology
+    // alone. Measured 2026-08-20 on the platform suite's versioned_migrations
+    // paraphrase: the prompt says "versions" and "sqlite" while migrations.py
+    // contains "version" and "sqlite3", so the overlap computed as EMPTY and
+    // the only correct manifest was refused -- the request answered nothing.
+    //
+    // A shared 4+ character prefix is enough to establish that two words name
+    // the same subject, and is still far too strict to connect unrelated
+    // domains: "byzantine" shares no such prefix with "bounded" or "map",
+    // which is the OOV case this guard exists for.
     prompt
         .to_ascii_lowercase()
         .split(|c: char| !c.is_ascii_alphanumeric())
         .any(|word| {
-            word.len() >= 4
-                && !SCAFFOLDING.contains(&word)
-                && manifest_terms.contains(word)
+            if word.len() < 4 || SCAFFOLDING.contains(&word) {
+                return false;
+            }
+            manifest_terms.iter().any(|term| {
+                let shared = word
+                    .chars()
+                    .zip(term.chars())
+                    .take_while(|(left, right)| left == right)
+                    .count();
+                shared >= 4 && shared >= word.len().min(term.len()).saturating_sub(2)
+            })
         })
 }
 
@@ -6393,6 +6413,35 @@ mod tests {
     /// requiring every label rejected it and the chain fell through to
     /// no_answer. Measured 2026-08-20: the identical manifest is returned
     /// when the extractor emits only PYTHON + SCHEMA_MIGRATION.
+    /// Subject agreement must survive morphology.
+    ///
+    /// Exact-token matching rejected a real match on a suffix alone. Measured
+    /// 2026-08-20 on the platform suite's versioned_migrations paraphrase:
+    /// the prompt says "versions" and "sqlite", migrations.py contains
+    /// "version" and "sqlite3", and the overlap computed as EMPTY -- so the
+    /// only correct manifest was refused and the request answered nothing.
+    #[test]
+    fn subject_overlap_matches_a_shared_stem_not_an_exact_token() {
+        let migrations = br#"{"files":{"migrations.py":"import sqlite3\ndef migrate(db_path):\n    connection.execute(\"PRAGMA user_version\")\n"}}"#.to_vec();
+
+        assert!(prompt_shares_manifest_subject(
+            "Write Python database upgrade paths using schema versions so fresh and legacy SQLite databases reach the same structure.",
+            &migrations,
+        ));
+
+        // The OOV case this guard exists for must still be refused.
+        assert!(!prompt_shares_manifest_subject(
+            "Implement a Python distributed consensus protocol with Byzantine fault tolerance.",
+            &migrations,
+        ));
+
+        // Scaffolding alone is still not subject evidence.
+        assert!(!prompt_shares_manifest_subject(
+            "Write Python code using this file.",
+            &migrations,
+        ));
+    }
+
     #[test]
     fn an_over_labelled_prompt_still_finds_its_single_behaviour_manifest() {
         let migrations = br#"{"files":{"migrations.py":"import sqlite3\ndef migrate(db_path):\n    with sqlite3.connect(db_path) as connection:\n        connection.execute(\"PRAGMA user_version\")\n"}}"#.to_vec();
