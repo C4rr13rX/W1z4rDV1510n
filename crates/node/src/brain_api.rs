@@ -1850,6 +1850,38 @@ fn exact_manifest_subset_candidates(
 /// request retrieves only the component it most resembles. Pairing the
 /// prompt with the behaviour's canonical wording lets each component be
 /// found on its own terms while keeping the request's own text as context.
+/// Does this manifest actually implement the behaviour the subset names?
+///
+/// `programming_response_compatible` asks whether a manifest is ACCEPTABLE for
+/// a label set -- it passes anything that satisfies the language and does not
+/// contradict the behaviour. For per-component recall that is too weak:
+/// measured 2026-08-20, repository.py qualified for the SECURITY:AUTHORIZATION
+/// subset as well as its own, so the strongest overall motif match won every
+/// round and authorization.py never entered the pool.
+fn subset_behaviour_is_evidenced(subset: &[String], bytes: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return false;
+    };
+    let Some(files) = value.get("files").and_then(|files| files.as_object()) else {
+        return false;
+    };
+    let lowercase = files
+        .values()
+        .filter_map(|content| content.as_str())
+        .collect::<Vec<_>>()
+        .join("
+")
+        .to_ascii_lowercase();
+    subset
+        .iter()
+        .filter(|label| label.contains(':') && !label.contains(":LANGUAGE:"))
+        .all(|behaviour| {
+            programming_behavior_compatible(
+                std::slice::from_ref(behaviour), &lowercase,
+            )
+        })
+}
+
 fn behaviour_query_frame(subset: &[String], prompt: &str) -> String {
     let behaviour = subset
         .iter()
@@ -4059,6 +4091,13 @@ async fn h_brain_chat(
                         is_complete_file_manifest(candidate)
                             && !already.iter().any(|seen| seen == candidate)
                             && programming_response_compatible(&subset, candidate)
+                            // Require the behaviour this subset names, not
+                            // merely compatibility. programming_response_compatible
+                            // passes a manifest that satisfies the LANGUAGE and
+                            // does not contradict the behaviour, so repository.py
+                            // qualified for the authorization subset too and the
+                            // strongest overall motif match won every round.
+                            && subset_behaviour_is_evidenced(&subset, candidate)
                             // programming_response_compatible only checks that
                             // each REQUESTED language is present, not that
                             // foreign ones are absent, so a Python-only
