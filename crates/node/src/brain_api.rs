@@ -2899,6 +2899,60 @@ fn derived_feature_artifact_compatible(labels: &[String], bytes: &[u8]) -> bool 
 ///
 /// This deliberately compares against identifiers and file names rather than
 /// prose, since that is the only vocabulary a manifest carries.
+/// Subject agreement, given the labels the extractor derived from the prompt.
+///
+/// When a request carries a concrete behaviour label and the manifest
+/// satisfies that behaviour's own code cues, the behaviour IS the shared
+/// subject -- there is no need for the prompt and the code to share
+/// vocabulary. Measured 2026-08-20, requiring word overlap rejected two
+/// correct manifests over pure synonymy: "access-control / permissions / deny"
+/// against authorization.py's "authorized / principal / roles / admin", and
+/// "superusers / accounts / identity" against the same file. Both are exactly
+/// the request that manifest answers.
+///
+/// This does not weaken the out-of-vocabulary guard: a Byzantine-consensus
+/// prompt is labelled CONCURRENCY:BOUNDED_ASYNC, and bounded_map satisfies
+/// that cue, so the word-overlap test below still has to carry that case --
+/// which is why it is kept as the fallback rather than replaced.
+fn prompt_shares_manifest_subject_with_labels(
+    labels: &[String],
+    prompt: &str,
+    bytes: &[u8],
+) -> bool {
+    let behaviours: Vec<String> = labels
+        .iter()
+        .filter(|label| label.contains(':') && !label.contains(":LANGUAGE:"))
+        .cloned()
+        .collect();
+    if !behaviours.is_empty() && is_complete_file_manifest(bytes) {
+        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) {
+            if let Some(files) = value.get("files").and_then(|f| f.as_object()) {
+                let lowercase = files
+                    .values()
+                    .filter_map(|content| content.as_str())
+                    .collect::<Vec<_>>()
+                    .join("
+")
+                    .to_ascii_lowercase();
+                // Every named behaviour must be evidenced in the code. A
+                // manifest that satisfies the request's behaviours is on the
+                // request's subject by construction.
+                if behaviours
+                    .iter()
+                    .all(|behaviour| {
+                        programming_behavior_compatible(
+                            std::slice::from_ref(behaviour), &lowercase,
+                        )
+                    })
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    prompt_shares_manifest_subject(prompt, bytes)
+}
+
 fn prompt_shares_manifest_subject(prompt: &str, bytes: &[u8]) -> bool {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
         return false;
@@ -3764,7 +3818,9 @@ async fn h_brain_chat(
                         // which let an unseen request inherit one whose
                         // vocabulary it never mentions.
                         && (!is_complete_file_manifest(candidate)
-                            || prompt_shares_manifest_subject(prompt, candidate))
+                            || prompt_shares_manifest_subject_with_labels(
+                                labels, prompt, candidate,
+                            ))
                 },
             )
         })
@@ -4013,7 +4069,9 @@ async fn h_brain_chat(
                     // cues are code tokens like `asyncio.semaphore(`, which no
                     // natural-language prompt contains.)
                     prompt_derived_feature_artifact_compatible(labels, prompt, bytes)
-                        && prompt_shares_manifest_subject(prompt, bytes)
+                        && prompt_shares_manifest_subject_with_labels(
+                            labels, prompt, bytes,
+                        )
                 })
             {
                 if !feature_candidates.contains(candidate) {
@@ -4042,7 +4100,9 @@ async fn h_brain_chat(
         if labels.len() < 4 {
             feature_candidates.retain(|candidate| {
                 !is_complete_file_manifest(candidate)
-                    || prompt_shares_manifest_subject(prompt, candidate)
+                    || prompt_shares_manifest_subject_with_labels(
+                        labels, prompt, candidate,
+                    )
             });
         }
     }
