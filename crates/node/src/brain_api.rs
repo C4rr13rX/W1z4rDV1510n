@@ -1869,7 +1869,17 @@ fn behaviour_query_frame(subset: &[String], prompt: &str) -> String {
         .join(" ")
         .replace('_', " ")
         .to_ascii_lowercase();
-    format!("{prompt} {canonical}")
+    // Weight the behaviour so it can actually move char-motif ranking.
+    //
+    // Appending the canonical name once to a long request barely shifts the
+    // motif profile: measured 2026-08-20, "Build Python database transaction
+    // and access-control modules..." still resolved every subset to
+    // repository.py, while the shorter, explicit "atomic SQLite transfer
+    // transaction and default-deny authorization" surfaced BOTH manifests.
+    // The signal is there, it is simply outweighed by the rest of the
+    // sentence. Leading with the behaviour and repeating it gives the
+    // component's own terms comparable mass to the surrounding request.
+    format!("{canonical} {canonical} {prompt} {canonical}")
 }
 
 fn manifest_component_feature_pairs(labels: &[String]) -> Vec<Vec<String>> {
