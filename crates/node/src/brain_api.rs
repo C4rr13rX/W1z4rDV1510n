@@ -3168,6 +3168,49 @@ fn compatible_integrated_reply(
 /// A ranked language+behavior binding may hold a complete single-file source
 /// response rather than a JSON project manifest. Admit it only for exactly
 /// one requested language and only when the response is language-shaped.
+/// A bound method cannot answer a request for a standalone function.
+///
+/// `prompt_programming_response_compatible` only checks the identifier when
+/// the prompt literally says "function named"/"function called". A paraphrase
+/// that says "a Python batching function" gets no such check, so a corpus
+/// method wins on rank: measured 2026-08-20, python_enterprise's `batching`
+/// paraphrase returned `def chunk(self, size=0)` -- a class method -- where
+/// the suite calls `make_batches(items, size)`. Adding "function named" to the
+/// same prompt returns the correct definition, which is exactly the
+/// distinction being missed.
+///
+/// Only the FIRST parameter matters: `self`/`cls` means the definition is
+/// unusable without its class. A method that happens to appear later in a
+/// file is untouched.
+fn bound_method_answers_free_function(prompt: &str, bytes: &[u8]) -> bool {
+    let lowercase = prompt.to_ascii_lowercase();
+    let wants_free_function = lowercase.contains("function")
+        && !lowercase.contains("method")
+        && !lowercase.contains("class");
+    if !wants_free_function {
+        return false;
+    }
+    let source = String::from_utf8_lossy(bytes);
+    let Some(signature) = source
+        .lines()
+        .map(str::trim_start)
+        .find(|line| line.starts_with("def "))
+    else {
+        return false;
+    };
+    let Some(parameters) = signature
+        .split_once('(')
+        .map(|(_, tail)| tail)
+        .and_then(|tail| tail.split(')').next())
+    else {
+        return false;
+    };
+    matches!(
+        parameters.split(',').next().map(str::trim),
+        Some("self") | Some("cls")
+    )
+}
+
 fn single_language_ranked_source(labels: &[String], candidates: &[Vec<u8>]) -> Option<Vec<u8>> {
     (labels
         .iter()
@@ -4377,6 +4420,7 @@ async fn h_brain_chat(
                             && prompt_programming_response_compatible(
                                 labels, prompt, candidate,
                             )
+                            && !bound_method_answers_free_function(prompt, candidate)
                     },
                 )
             })
@@ -6734,6 +6778,37 @@ mod tests {
     /// and access-control modules" resolved EVERY subset to repository.py,
     /// and appending the single word "authorization" composed both files with
     /// the SAME three labels -- the gate is prompt text, not intent.
+    /// A class method cannot answer a request for a standalone function.
+    ///
+    /// prompt_programming_response_compatible only checks the identifier when
+    /// the prompt literally says "function named". A paraphrase saying "a
+    /// Python batching function" gets no check, so a corpus method won on
+    /// rank: measured 2026-08-20, python_enterprise's `batching` paraphrase
+    /// returned `def chunk(self, size=0)` where the suite calls
+    /// `make_batches(items, size)`. Adding "function named" to the same
+    /// prompt returned the correct definition.
+    #[test]
+    fn a_bound_method_cannot_answer_a_free_function_request() {
+        let method = b"def chunk(self, size=0):\n    return []\n".to_vec();
+        let function = b"def make_batches(items, size):\n    return []\n".to_vec();
+        let classmethod = b"def build(cls, size):\n    return []\n".to_vec();
+
+        let asks_function =
+            "Write a Python batching function that splits records into chunks.";
+        assert!(bound_method_answers_free_function(asks_function, &method));
+        assert!(bound_method_answers_free_function(asks_function, &classmethod));
+        assert!(!bound_method_answers_free_function(asks_function, &function));
+
+        // A request that wants a method or a class is untouched.
+        let asks_method = "Write a Python method that chunks records.";
+        assert!(!bound_method_answers_free_function(asks_method, &method));
+        let asks_class = "Write a Python class with a chunking method.";
+        assert!(!bound_method_answers_free_function(asks_class, &method));
+
+        // Source with no def at all is not a method.
+        assert!(!bound_method_answers_free_function(asks_function, b"x = 1"));
+    }
+
     #[test]
     fn a_component_query_names_its_own_behaviour() {
         let prompt = "Build Python database transaction and access-control modules.";
