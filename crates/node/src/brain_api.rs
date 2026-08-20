@@ -3692,6 +3692,17 @@ async fn h_brain_chat(
         .as_ref()
         .map(|(pool_id, labels)| brain.feature_route_pressure(*pool_id, labels))
         .unwrap_or_default();
+    // The char-motif manifest is also a candidate, not only a final answer.
+    //
+    // f2910ff contributed this per language+behaviour subset, which fixed
+    // multi-component composition. A SINGLE-behaviour request never enters
+    // that loop, so its manifest still reached no pool: measured 2026-08-20,
+    // "Write Python database upgrade paths using schema versions" produced
+    // labels [PYTHON, SCHEMA_MIGRATION], 3 candidates, and `no_answer` --
+    // while the same two labels from "a Python schema migration that is safe
+    // to run repeatedly" returned migrations.py through raw_motif_trained.
+    // The manifest was retrievable the whole time; it just was not in the
+    // pool that ranked_single_manifest and the composition search read.
     let mut feature_candidates = composition_features
         .as_ref()
         .map(|(pool_id, labels)| {
@@ -3726,6 +3737,13 @@ async fn h_brain_chat(
     for candidate in unweighted_feature_candidates {
         if !feature_candidates.contains(&candidate) {
             feature_candidates.push(candidate);
+        }
+    }
+    if let Some(candidate) = raw_semantically_validated.as_ref() {
+        if is_complete_file_manifest(candidate)
+            && !feature_candidates.contains(candidate)
+        {
+            feature_candidates.push(candidate.clone());
         }
     }
     let mut diagnostic_component_routes = Vec::<serde_json::Value>::new();
