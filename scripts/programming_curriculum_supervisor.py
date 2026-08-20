@@ -476,6 +476,15 @@ def ensure_live_last_good_guard(args: argparse.Namespace, runtime: Path,
     barrier and the topology observed immediately after that barrier.
     """
     existing = runtime / "brain" / "brain.last-good.json"
+    # A guard orphaned by a completed phase has to be retired BEFORE the
+    # existence check below, not inside ensure_last_good_guard(). Retiring it
+    # there takes the reuse branch, which skips the checkpoint barrier and
+    # publishes a guard with an empty checkpoint_proof -- which the restart
+    # path then refuses with "no checkpoint topology proof".
+    stale = read_json(existing)
+    if (stale.get("phase") != phase.name
+            and completed_phase_owns_guard(runtime, stale)):
+        accept_last_good_guard(runtime, stale.get("phase"))
     if existing.is_file():
         return ensure_last_good_guard(runtime, phase, row)
     checkpoint = endpoint_post_json(

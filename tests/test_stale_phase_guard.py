@@ -111,6 +111,48 @@ def test_same_phase_guard_ahead_of_the_row_still_refuses(tmp_path):
         raise AssertionError("a guard ahead of the row must still refuse")
 
 
+def test_retiring_a_stale_guard_still_takes_the_checkpoint_barrier(tmp_path):
+    """The replacement guard must carry a checkpoint proof.
+
+    Retiring the stale guard inside ensure_last_good_guard() left the live
+    path on its reuse branch, which skips the barrier and publishes
+    checkpoint_proof={}. The restart path then refuses that guard with
+    "last-good guard has no checkpoint topology proof", which is exactly how
+    the first attempt at this fix stalled the supervisor.
+    """
+    import argparse
+
+    runtime = build(tmp_path, guard_row=421477, durable_row=421477)
+    calls = []
+
+    def fake_post(endpoint, path, payload, timeout=0.0):
+        calls.append(path)
+        return {"ok": True, "tick": 99, "storage": "wbrain"}
+
+    def fake_json(endpoint, path, timeout=0.0):
+        calls.append(path)
+        return {"pool_count": 13, "total_neurons": 7}
+
+    original_post = sup.endpoint_post_json
+    original_json = sup.endpoint_json
+    sup.endpoint_post_json = fake_post
+    sup.endpoint_json = fake_json
+    try:
+        sup.ensure_live_last_good_guard(
+            argparse.Namespace(endpoint="http://127.0.0.1:18095"),
+            runtime, next_phase(), 0,
+        )
+    finally:
+        sup.endpoint_post_json = original_post
+        sup.endpoint_json = original_json
+
+    assert "/brain/checkpoint" in calls, "the barrier must run"
+    metadata = sup.read_json(runtime / "brain" / "brain.last-good.json")
+    assert metadata["phase"] == NEXT
+    assert metadata["checkpoint_proof"], "guard must carry a checkpoint proof"
+    assert metadata["checkpoint_proof"]["checkpoint"]["ok"] is True
+
+
 def test_completed_phase_owns_guard_requires_an_integer_row(tmp_path):
     runtime = build(tmp_path, guard_row=421477, durable_row=421477)
 
