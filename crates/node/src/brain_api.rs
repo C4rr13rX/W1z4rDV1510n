@@ -1954,6 +1954,27 @@ fn single_language_ranked_manifest(
     if behaviours.len() < 2 {
         return None;
     }
+    // Only fall back when composition genuinely cannot serve the request.
+    //
+    // If two or more candidate manifests each satisfy a different requested
+    // behaviour, the right answer is the composed project, not one of them.
+    // Answering with a single manifest here regressed cross_project's
+    // authorized_transfer paraphrase on 2026-08-20: it returned just
+    // repository.py where the request needs repository.py AND
+    // authorization.py.
+    let mut covered = std::collections::BTreeSet::new();
+    for candidate in candidates.iter().filter(|c| is_complete_file_manifest(c)) {
+        for behaviour in &behaviours {
+            let mut subset = language.clone();
+            subset.push((*behaviour).clone());
+            if prompt_programming_response_compatible(&subset, prompt, candidate) {
+                covered.insert((*behaviour).clone());
+            }
+        }
+    }
+    if covered.len() >= 2 {
+        return None;
+    }
     candidates
         .iter()
         .find(|candidate| {
