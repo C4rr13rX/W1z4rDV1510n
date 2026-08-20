@@ -1990,12 +1990,18 @@ fn single_language_ranked_manifest(
     // authorized_transfer paraphrase on 2026-08-20: it returned just
     // repository.py where the request needs repository.py AND
     // authorization.py.
+    // Count coverage by what each manifest DOES, not by whether the request
+    // happens to share its vocabulary. Using the prompt-subject check here
+    // meant "access-control modules" did not count authorization.py as
+    // covering SECURITY:AUTHORIZATION, coverage stayed at 1, and this fallback
+    // answered with repository.py alone -- even once both manifests were in
+    // the pool (component_routes 2, measured 2026-08-20).
     let mut covered = std::collections::BTreeSet::new();
     for candidate in candidates.iter().filter(|c| is_complete_file_manifest(c)) {
         for behaviour in &behaviours {
             let mut subset = language.clone();
             subset.push((*behaviour).clone());
-            if prompt_programming_response_compatible(&subset, prompt, candidate) {
+            if programming_response_compatible(&subset, candidate) {
                 covered.insert((*behaviour).clone());
             }
         }
