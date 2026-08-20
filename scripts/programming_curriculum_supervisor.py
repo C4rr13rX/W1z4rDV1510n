@@ -376,6 +376,28 @@ def release_worker_pause(runtime: Path, phase: Phase, token: str = "") -> None:
         acknowledgement.unlink(missing_ok=True)
 
 
+def completed_phase_owns_guard(runtime: Path, existing: dict) -> bool:
+    """True when a stale guard belongs to a phase that provably finished.
+
+    Only the owning phase's own durable progress can retire its guard: the
+    guard is the rollback point for that phase's accepted state, so a phase
+    still short of its planned rows must keep it. Requiring the recorded guard
+    row to have been reached durably means an interrupted phase -- the case the
+    guard exists for -- still refuses.
+    """
+    owner = existing.get("phase")
+    guard_row = existing.get("row")
+    if not isinstance(owner, str) or not owner:
+        return False
+    if not isinstance(guard_row, int):
+        return False
+    progress = read_json(runtime / f"{owner}.progress.json")
+    if not progress:
+        return False
+    durable = progress.get("durable_next_row")
+    return isinstance(durable, int) and durable >= guard_row
+
+
 def ensure_last_good_guard(runtime: Path, phase: Phase, row: int,
                            checkpoint_proof: dict | None = None) -> Path:
     """Preserve the authoritative accepted state until the next gate passes."""
@@ -390,13 +412,24 @@ def ensure_last_good_guard(runtime: Path, phase: Phase, row: int,
     if guard.exists():
         existing = read_json(metadata)
         if (existing.get("phase") != phase.name
+                and completed_phase_owns_guard(runtime, existing)):
+            # A phase that finished by forward harvest exits its loop without
+            # reaching accept_last_good_guard(), so its guard outlives it. The
+            # guard is only authoritative for the phase that created it, and
+            # that phase is provably complete, so retiring it here is what the
+            # accepting path would have done. Refusing instead strands every
+            # later phase behind a guard nothing will ever clear.
+            accept_last_good_guard(runtime, existing.get("phase"))
+            existing = {}
+        elif (existing.get("phase") != phase.name
                 or not isinstance(existing.get("row"), int)
                 or existing["row"] > row):
             raise RuntimeError(
                 "unresolved last-good snapshot guard exists: "
                 f"{existing or guard}"
             )
-        return guard
+        if existing:
+            return guard
     if not snapshot.exists():
         raise RuntimeError(f"cannot guard missing snapshot: {snapshot}")
     if snapshot.suffix == ".wbrain":
