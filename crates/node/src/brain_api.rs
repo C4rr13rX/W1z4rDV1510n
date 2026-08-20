@@ -42,6 +42,26 @@ pub const POOL_AUDIO: PoolId = 3;
 pub const POOL_ACTION: PoolId = 4;
 pub const POOL_TURN: PoolId = 5;
 
+/// Motif score a recall-derived route must clear when no intent label applies.
+///
+/// The labelled route already trusts 0.20. This sits deliberately higher: the
+/// labels are corroborating evidence, and without them the recall has to carry
+/// the decision alone. Measured 2026-08-20 over the trained corpus, novel
+/// phrasings of a trained unit score 0.496-0.555 against the right unit and
+/// 0.082-0.217 against the wrong ones, so 0.35 sits inside that gap.
+const UNLABELED_RECALL_MIN_SCORE: f32 = 0.35;
+
+/// Separation the winner must hold over the runner-up.
+///
+/// This is the half that decides an unknown. A prompt about something never
+/// trained still has a nearest neighbour, and that neighbour can clear a score
+/// floor on shared surface vocabulary alone. What it cannot do is stand well
+/// clear of every rival. Requiring real separation makes the route settle onto
+/// a known and leave an unknown alone, rather than answering whatever was
+/// closest. The labelled route uses 0.025 with labels to back it; unlabelled
+/// recall carries the whole burden, so it demands an order of magnitude more.
+const UNLABELED_RECALL_MIN_MARGIN: f32 = 0.15;
+
 // ---------------------------------------------------------------------
 // Shared state
 // ---------------------------------------------------------------------
@@ -3998,6 +4018,45 @@ async fn h_brain_chat(
             )
         })
         .map(|(bytes, _, _)| bytes);
+    // Recall-derived route for a request the label table cannot describe.
+    //
+    // Every motif route above is gated on `composition_features`, which needs
+    // at least one LANGUAGE and one BEHAVIOR label from the hand-written
+    // extractor in InstructionIntentEncoding. That table has no vocabulary
+    // outside the domains it was written for: measured 2026-08-20, "Write a
+    // Django REST APIView ..." produced ZERO labels (it does not even contain
+    // the substring "python"), and a three.js request produced only
+    // LANGUAGE:JAVASCRIPT -- one short of the gate. Composition therefore
+    // never started for any web-stack request, though the evidence was there
+    // the whole time.
+    //
+    // The motif route itself does not need the table. Scored against the
+    // trained corpus, novel phrasings separate cleanly on their own:
+    //
+    //   "Build a Django REST endpoint that evaluates ..."  0.507 / 0.217 / 0.160
+    //   "I need a three.js scene class with orbit controls" 0.555 / 0.177 / 0.137
+    //   "Give me a Vue keypad component for a calculator"   0.496 / 0.089 / 0.082
+    //
+    // -- the correct unit wins by 2-3x every time, well over the 0.20 floor
+    // the labelled route already trusts. So when the table yields nothing,
+    // fall back to what the fabric itself recalls, and require the margin to
+    // carry the decision: breadth of corroboration is the evidence, not a
+    // keyword. A weak or contested match still abstains.
+    let recall_derived_route = if composition_features.is_none() && !raw_is_exact {
+        brain.decode_best_binding_by_char_motifs_with_margin(
+            POOL_TEXT,
+            prompt.as_bytes(),
+            action_pool,
+            UNLABELED_RECALL_MIN_SCORE,
+            UNLABELED_RECALL_MIN_MARGIN,
+        )
+    } else {
+        None
+    };
+    let diagnostic_recall_derived = recall_derived_route
+        .as_ref()
+        .map(|(_, score, margin)| (*score, *margin));
+    let recall_derived_bytes = recall_derived_route.map(|(bytes, _, _)| bytes);
     let diagnostic_feature_route_pressure = composition_features
         .as_ref()
         .map(|(pool_id, labels)| brain.feature_route_pressure(*pool_id, labels))
@@ -4562,6 +4621,12 @@ async fn h_brain_chat(
     } else if chat_query_pools.len() > 1 && !programming_language_intent {
         answer_branch = "multi_pool_decode";
         brain.decode_best_trained_binding_multi(&chat_query_pools, action_pool)
+    } else if let Some(bytes) = recall_derived_bytes.clone() {
+        // Last resort, and only for a request no label described. Every route
+        // above had its chance; this one exists so a decisively recalled unit
+        // is not discarded merely because the intent table has no word for it.
+        answer_branch = "recall_derived";
+        Some(bytes)
     } else {
         answer_branch = "no_answer";
         None
@@ -4739,6 +4804,8 @@ async fn h_brain_chat(
             "fragment_composition_ready": diagnostic_fragment_composition_ready,
             "manifest_composition_ready": diagnostic_manifest_composition_ready,
             "answer_branch": answer_branch,
+            "recall_derived_score": diagnostic_recall_derived.map(|(score, _)| score),
+            "recall_derived_margin": diagnostic_recall_derived.map(|(_, margin)| margin),
             "raw_fallback_inhibited": programming_language_intent
                 && !raw_is_exact
                 && !raw_programming_compatible
