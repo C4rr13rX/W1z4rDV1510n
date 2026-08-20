@@ -2899,6 +2899,39 @@ fn derived_feature_artifact_compatible(labels: &[String], bytes: &[u8]) -> bool 
 ///
 /// This deliberately compares against identifiers and file names rather than
 /// prose, since that is the only vocabulary a manifest carries.
+/// Does the request itself name this behaviour, in ordinary words?
+///
+/// Behaviour labels are inferred from wording and are sometimes wrong, so a
+/// label may only stand in for subject agreement when the prompt corroborates
+/// it. These cues are natural-language terms, deliberately distinct from
+/// `programming_behavior_compatible`, whose cues are code tokens.
+fn prompt_names_behaviour(prompt: &str, behaviour: &str) -> bool {
+    let prompt = prompt.to_ascii_lowercase();
+    let cues: &[&str] = if behaviour.ends_with(":SECURITY:AUTHORIZATION") {
+        &["authoriz", "permission", "access control", "access-control",
+          "privilege", "superuser", "admin", "deny", "role", "owner"]
+    } else if behaviour.ends_with(":PERSISTENCE:ATOMIC_TRANSACTION") {
+        &["transaction", "atomic", "all-or-nothing", "all or nothing",
+          "roll back", "rollback", "transfer"]
+    } else if behaviour.ends_with(":PERSISTENCE:SCHEMA_MIGRATION") {
+        &["migrat", "schema", "upgrade", "version"]
+    } else if behaviour.ends_with(":OBSERVABILITY:CORRELATED_LOGGING") {
+        &["log", "correlat", "trace", "observab", "redact", "audit"]
+    } else if behaviour.ends_with(":API:IDEMPOTENT_COMMAND") {
+        &["idempot", "replay", "duplicate", "dedup", "retry", "command"]
+    } else if behaviour.ends_with(":CONCURRENCY:BOUNDED_ASYNC") {
+        &["concurren", "bounded", "semaphore", "parallel", "async",
+          "at a time", "rate limit"]
+    } else if behaviour.ends_with(":RESILIENCE:CIRCUIT_BREAKER") {
+        &["circuit", "breaker", "failure", "resilien", "trip"]
+    } else {
+        // Unknown behaviour: fall back to the vocabulary test rather than
+        // guessing that the request named it.
+        return false;
+    };
+    cues.iter().any(|cue| prompt.contains(cue))
+}
+
 /// Subject agreement, given the labels the extractor derived from the prompt.
 ///
 /// When a request carries a concrete behaviour label and the manifest
@@ -2937,14 +2970,23 @@ fn prompt_shares_manifest_subject_with_labels(
                 // Every named behaviour must be evidenced in the code. A
                 // manifest that satisfies the request's behaviours is on the
                 // request's subject by construction.
-                if behaviours
-                    .iter()
-                    .all(|behaviour| {
-                        programming_behavior_compatible(
-                            std::slice::from_ref(behaviour), &lowercase,
-                        )
-                    })
-                {
+                // The label alone is not enough: the extractor mislabels.
+                // "distributed consensus protocol with Byzantine fault
+                // tolerance" is labelled CONCURRENCY:BOUNDED_ASYNC, and
+                // bounded_map genuinely satisfies that cue -- so accepting a
+                // satisfied label by itself re-opened the OOV leak
+                // (python_enterprise oov 3/3 -> 2/3, measured 2026-08-20).
+                //
+                // Require the PROMPT to name the behaviour too. A request
+                // that says "authorization"/"permissions"/"access control"
+                // corroborates SECURITY:AUTHORIZATION in its own words, while
+                // a Byzantine-consensus prompt says nothing about bounded
+                // concurrency and is refused.
+                if behaviours.iter().all(|behaviour| {
+                    programming_behavior_compatible(
+                        std::slice::from_ref(behaviour), &lowercase,
+                    ) && prompt_names_behaviour(prompt, behaviour)
+                }) {
                     return true;
                 }
             }
@@ -6501,6 +6543,35 @@ mod tests {
     /// the prompt says "versions" and "sqlite", migrations.py contains
     /// "version" and "sqlite3", and the overlap computed as EMPTY -- so the
     /// only correct manifest was refused and the request answered nothing.
+    /// A satisfied label only counts when the prompt names the behaviour.
+    ///
+    /// Accepting a satisfied label alone re-opened the OOV leak: "distributed
+    /// consensus protocol with Byzantine fault tolerance" is labelled
+    /// CONCURRENCY:BOUNDED_ASYNC and bounded_map genuinely satisfies that cue,
+    /// so python_enterprise oov went 3/3 -> 2/3 on 2026-08-20.
+    #[test]
+    fn a_label_stands_in_for_subject_only_when_the_prompt_names_it() {
+        let authz = "instruction_intent:SECURITY:AUTHORIZATION";
+        let bounded = "instruction_intent:CONCURRENCY:BOUNDED_ASYNC";
+
+        // Synonyms of the behaviour count -- these are the measured failures.
+        assert!(prompt_names_behaviour(
+            "Build Python database transaction and access-control modules.", authz));
+        assert!(prompt_names_behaviour(
+            "Develop Python rules that let superusers change any object.", authz));
+
+        // The OOV prompt names nothing about bounded concurrency.
+        assert!(!prompt_names_behaviour(
+            "Implement a Python distributed consensus protocol with Byzantine fault tolerance.",
+            bounded));
+        // But a real bounded-concurrency request does.
+        assert!(prompt_names_behaviour(
+            "Write a Python helper that limits concurrency with a semaphore.", bounded));
+
+        // An unrecognised behaviour never short-circuits the vocabulary test.
+        assert!(!prompt_names_behaviour("anything at all", "intent:UNKNOWN:THING"));
+    }
+
     #[test]
     fn subject_overlap_matches_a_shared_stem_not_an_exact_token() {
         let migrations = br#"{"files":{"migrations.py":"import sqlite3\ndef migrate(db_path):\n    connection.execute(\"PRAGMA user_version\")\n"}}"#.to_vec();
