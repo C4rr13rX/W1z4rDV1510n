@@ -44,38 +44,34 @@ pub const POOL_TURN: PoolId = 5;
 
 /// Motif score a recall-derived route must clear when no intent label applies.
 ///
-/// The labelled route already trusts 0.20. This sits deliberately higher: the
-/// labels are corroborating evidence, and without them the recall has to carry
-/// the decision alone. Measured 2026-08-20 over the trained corpus, novel
-/// phrasings of a trained unit score 0.496-0.555 against the right unit and
-/// 0.082-0.217 against the wrong ones, so 0.35 sits inside that gap.
-const UNLABELED_RECALL_MIN_SCORE: f32 = 0.35;
+/// The labelled route trusts 0.20 because labels corroborate it. Without them
+/// the score carries the decision alone, so it has to be the whole safeguard.
+///
+/// Calibrated against what the brain itself reports, not an offline model of
+/// it. Measured 2026-08-20 through /brain/chat: a novel phrasing of a trained
+/// unit scored 0.561 and returned the right unit, while "Write a haiku about
+/// the ocean" -- nothing like anything trained -- still scored 0.373 against
+/// its nearest binding. A 0.35 floor admitted the haiku; 0.45 keeps the
+/// genuine recall with headroom on both sides.
+const UNLABELED_RECALL_MIN_SCORE: f32 = 0.45;
 
-/// Separation the winner must hold over the runner-up, per distinct unit.
+/// Separation over the runner-up. Deliberately near-inert on this route.
 ///
-/// Measured over the trained corpus, best-per-unit so paraphrases of one unit
-/// are not treated as each other's rivals:
+/// Margin looks like the principled gate for "settle onto a known, leave an
+/// unknown alone", and an offline model of the corpus supported that: scoring
+/// novel phrasings best-per-unit gave the correct unit 0.064-0.278 of
+/// separation while an untrained prompt separated by 0.002.
 ///
-///   novel phrasing                          score   margin  picks
-///   "Build a Django REST endpoint ..."       0.647   0.064   view     correct
-///   "I need a three.js scene class ..."      0.555   0.278   scene    correct
-///   "Give me a Vue keypad component ..."     0.496   0.138   keypad   correct
-///   "Make a Django model to store ..."       0.661   0.255   model    correct
-///   "Write a three.js surface mesh ..."      0.598   0.168   surface  correct
-///   "What is the capital of France?"         0.182   0.002   --       abstains
+/// The brain does not compute it that way. `runner_score` falls back to 0.0
+/// when the motif posting window yields a single surviving candidate, so
+/// `margin = score - 0.0 = score`. Measured through /brain/chat, every
+/// admitted route reported margin exactly equal to its score (0.5612/0.5612,
+/// 0.3733/0.3733). On this path margin carries no information the score does
+/// not already carry, so gating on it only double-counts one signal.
 ///
-/// The score floor is what actually separates a known from an unknown: 0.496
-/// worst correct against 0.182 for the untrained prompt. Margin is a weak
-/// tiebreak on top, not the primary gate -- a correct match can legitimately
-/// sit near a sibling unit (view at 0.064) because the corpus deliberately
-/// contains related components. An earlier 0.15 margin was calibrated from
-/// three examples and rejected two of five correct answers.
-///
-/// What margin still buys: the untrained prompt separates by 0.002, i.e. it
-/// has a nearest neighbour but no real preference among them. That is the
-/// signature of an unknown, and 0.03 excludes it without touching a genuine
-/// recall.
-const UNLABELED_RECALL_MIN_MARGIN: f32 = 0.03;
+/// Kept at a floor that rejects a true zero-evidence match without pretending
+/// to be an independent safeguard. The score floor above is the real gate.
+const UNLABELED_RECALL_MIN_MARGIN: f32 = 0.01;
 
 // ---------------------------------------------------------------------
 // Shared state
