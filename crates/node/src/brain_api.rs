@@ -1999,6 +1999,75 @@ fn manifest_component_feature_pairs(labels: &[String]) -> Vec<Vec<String>> {
         .collect()
 }
 
+/// Source extensions a recalled manifest may contain for a given request word.
+///
+/// Deliberately the same mapping `manifest_files_match_requested_languages`
+/// already applies to labelled routes, driven from the request text because
+/// the intent table cannot describe the requests this route serves.
+fn request_language_extensions(prompt: &str) -> Vec<&'static str> {
+    let lower = prompt.to_ascii_lowercase();
+    let mut allowed: Vec<&'static str> = Vec::new();
+    for (needle, extensions) in [
+        ("python", &[".py"][..]),
+        ("django", &[".py"][..]),
+        ("typescript", &[".ts", ".tsx"][..]),
+        ("javascript", &[".js", ".mjs", ".cjs", ".jsx"][..]),
+        ("node.js", &[".js", ".mjs", ".cjs"][..]),
+        ("nodejs", &[".js", ".mjs", ".cjs"][..]),
+        ("three.js", &[".js", ".mjs"][..]),
+        ("vue", &[".vue", ".js"][..]),
+        ("rust", &[".rs"][..]),
+        ("golang", &[".go"][..]),
+        ("java", &[".java"][..]),
+        ("c#", &[".cs"][..]),
+        ("c sharp", &[".cs"][..]),
+        ("csharp", &[".cs"][..]),
+    ] {
+        if lower.contains(needle) {
+            allowed.extend_from_slice(extensions);
+        }
+    }
+    allowed.sort_unstable();
+    allowed.dedup();
+    allowed
+}
+
+/// Whether a recalled answer is in a language the request could have meant.
+///
+/// A recall-derived answer carries no labels, so nothing checked that it was
+/// even the right language. Measured 2026-08-21, the multilanguage suite's
+/// JavaScript paraphrase -- "Create Node.js code computing the second power of
+/// a supplied number" -- was answered with the 8-file Django BACKEND manifest,
+/// so `executes` failed, the protected-route refresh failed, and the whole
+/// deferred queue stopped advancing behind it. Five other languages passed.
+///
+/// Only manifests are checked, and only when the request names a language: a
+/// bare source answer has no filenames to judge, and a request that names none
+/// imposes no constraint.
+fn recalled_answer_language_is_plausible(prompt: &str, bytes: &[u8]) -> bool {
+    let allowed = request_language_extensions(prompt);
+    if allowed.is_empty() {
+        return true;
+    }
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return true;
+    };
+    let Some(files) = value.get("files").and_then(|files| files.as_object()) else {
+        return true;
+    };
+    const KNOWN: [&str; 12] = [
+        ".py", ".ts", ".tsx", ".js", ".mjs", ".cjs", ".jsx", ".vue", ".rs", ".go",
+        ".java", ".cs",
+    ];
+    files.keys().all(|name| {
+        let lower = name.to_ascii_lowercase();
+        match KNOWN.iter().find(|ext| lower.ends_with(**ext)) {
+            Some(ext) => allowed.contains(ext),
+            None => true,
+        }
+    })
+}
+
 /// Whether a request states enough for unlabelled recall to be trusted at all.
 ///
 /// Dice similarity is a ratio, so a very short request can score highly on the
@@ -4083,13 +4152,17 @@ async fn h_brain_chat(
         && !raw_is_exact
         && request_carries_enough_evidence(prompt)
     {
-        brain.decode_best_binding_by_char_motifs_wide(
-            POOL_TEXT,
-            prompt.as_bytes(),
-            action_pool,
-            UNLABELED_RECALL_MIN_SCORE,
-            UNLABELED_RECALL_MIN_MARGIN,
-        )
+        brain
+            .decode_best_binding_by_char_motifs_wide(
+                POOL_TEXT,
+                prompt.as_bytes(),
+                action_pool,
+                UNLABELED_RECALL_MIN_SCORE,
+                UNLABELED_RECALL_MIN_MARGIN,
+            )
+            .filter(|(bytes, _, _)| {
+                recalled_answer_language_is_plausible(prompt, bytes)
+            })
     } else {
         None
     };
@@ -7282,5 +7355,49 @@ mod unlabeled_recall_gate_tests {
         assert!(!request_carries_enough_evidence("a, b, c"));
         assert!(!request_carries_enough_evidence(""));
         assert!(request_carries_enough_evidence("build a calculator app"));
+    }
+
+    /// A recalled manifest must be in a language the request could have meant.
+    ///
+    /// The multilanguage suite's JavaScript paraphrase was answered with the
+    /// Django backend manifest, failing `executes` and stalling the whole
+    /// deferred queue behind a failing protected-route refresh.
+    #[test]
+    fn a_python_manifest_cannot_answer_a_javascript_request() {
+        let django = br#"{"files": {"calculator/apps.py": "x", "calculator/views.py": "y"}}"#;
+        assert!(!super::recalled_answer_language_is_plausible(
+            "Create Node.js code computing the second power of a supplied number.",
+            django,
+        ));
+        assert!(super::recalled_answer_language_is_plausible(
+            "Build the Django backend for a scientific calculator.",
+            django,
+        ));
+    }
+
+    #[test]
+    fn a_javascript_manifest_answers_a_javascript_request() {
+        let three = br#"{"files": {"src/three/SceneHost.js": "x"}}"#;
+        assert!(super::recalled_answer_language_is_plausible(
+            "Create the 3D rendering layer with three.js.",
+            three,
+        ));
+        assert!(!super::recalled_answer_language_is_plausible(
+            "Write a Python function that sorts a list.",
+            three,
+        ));
+    }
+
+    /// Bare source and language-neutral requests stay unconstrained.
+    #[test]
+    fn non_manifest_and_unnamed_language_are_neutral() {
+        assert!(super::recalled_answer_language_is_plausible(
+            "Create Node.js code computing the second power.",
+            b"function square(n) { return n * n; }",
+        ));
+        assert!(super::recalled_answer_language_is_plausible(
+            "Build the server side for the calculator.",
+            br#"{"files": {"calculator/apps.py": "x"}}"#,
+        ));
     }
 }
