@@ -113,6 +113,15 @@ def curriculum_phases(corpus_root: Path, include_seed: bool = False) -> list[Pha
         # rather than being physically duplicated on disk.
         Phase("webstack-units", "programming_webstack_001",
               corpus_root / "webstack_units.jsonl", 60, repeats=4),
+        # The multi-file half of the same material. The router composes
+        # multi-file answers only from {"files": {...}} responses, and no
+        # corpus on the host contained one, so every composite request
+        # answered no_answer. Same unit sources as webstack-units, so a
+        # request naming one thing still returns one file: measured
+        # 2026-08-21, 1 file for "Write a Django AppConfig class", 20 for
+        # "Build a scientific calculator web application".
+        Phase("webstack-projects", "programming_webstack_projects_001",
+              corpus_root / "webstack_projects.jsonl", 12, repeats=4),
     ]
     if include_seed:
         phases[0:0] = [

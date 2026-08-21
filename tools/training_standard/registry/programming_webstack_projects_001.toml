@@ -1,0 +1,67 @@
+[script]
+id          = "programming_webstack_projects_001"
+category    = "code_generation"
+phase       = 33
+description = """
+Web-stack projects — the multi-file half of programming_webstack_001.
+
+The router composes multi-file answers only from responses shaped as
+{"files": {name: source}}. Measured 2026-08-21, no corpus on the host
+contained a single manifest row, so composition had nothing to merge and
+every composite request answered no_answer or returned one unrelated
+unit.
+
+Corpus: 4 projects x 3 phrasings = 12 episodes, built from the SAME unit
+sources as webstack_units.jsonl so the two cannot drift — django-backend
+(8 files), vue-frontend (5), threejs-viewport (5) and full-stack (20).
+Authored under CC0-1.0.
+
+The point is that the request selects the shape, not a mode flag. With
+both corpora trained together: "Write a Django AppConfig class" returns
+one 261-byte class, "Build the Django backend" returns 8 files, and
+"Build a scientific calculator web application" returns all 20. Adding
+this phase did not specialise the brain toward multi-file answers —
+single-unit recall stayed exact at 60/60.
+"""
+depends_on  = ["programming_webstack_001"]
+
+[[inputs]]
+kind = "corpus"
+path = "data/training/webstack_projects.jsonl"
+
+[[benchmarks]]
+label         = "django backend project"
+prompt        = "Build the Django backend for a scientific calculator with expression evaluation and surface sampling."
+must_include  = ["files", "calculator/models.py", "calculator/views.py", "calculator/evaluator.py"]
+forbidden     = ["TODO"]
+min_score     = 0.5
+
+[[benchmarks]]
+label         = "vue frontend project"
+prompt        = "Build the Vue frontend for a scientific calculator with a keypad and plot controls."
+must_include  = ["files", "src/main.js", "src/stores/calculator.js"]
+forbidden     = ["TODO"]
+min_score     = 0.5
+
+[[benchmarks]]
+label         = "threejs viewport project"
+prompt        = "Build the three.js 3D viewport that plots a surface from sampled z values."
+must_include  = ["files", "src/three/SceneHost.js", "src/three/buildSurfaceMesh.js"]
+forbidden     = ["TODO"]
+min_score     = 0.5
+
+[[benchmarks]]
+label         = "full stack project"
+prompt        = "Build a scientific calculator web application with a Django REST backend, a Vue frontend and three.js 3D charting."
+must_include  = ["files", "calculator/views.py", "src/main.js", "src/three/SceneHost.js"]
+forbidden     = ["TODO"]
+min_score     = 0.5
+
+[[regression_protects]]
+script_id = "programming_webstack_001"
+
+[[regression_protects]]
+script_id = "programming_literacy_python_001"
+
+[[regression_protects]]
+script_id = "code_gen_javascript_001"
