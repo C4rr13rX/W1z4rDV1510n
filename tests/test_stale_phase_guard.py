@@ -336,3 +336,64 @@ def test_a_missing_composite_route_is_still_pressure():
                        ranked_candidates=64, composite_keys=0,
                        labels=["a", "b"])
     assert sup.protected_route_pressure_reasons(report)
+
+
+def _corpus(root, name, rows):
+    path = root / name
+    path.write_text("".join(
+        json.dumps({"prompt": f"p{i}", "response": f"r{i}"}) + "\n"
+        for i in range(rows)), encoding="utf-8")
+    return path
+
+
+def test_an_extension_phase_counts_its_own_rows(tmp_path):
+    """Row counts are counted, never asserted.
+
+    Every phase in the hardcoded plan carries a hand-entered count that must
+    match its file exactly; the supervisor tracks durable progress against
+    it, so a stale number mistrains silently. Onboarding also required
+    editing the module and redeploying.
+    """
+    _corpus(tmp_path, "extra.jsonl", 7)
+    (tmp_path / sup.EXTENSION_PHASES_FILENAME).write_text(json.dumps({
+        "phases": [{"name": "extra", "script_id": "domain_extra_001",
+                    "corpus": "extra.jsonl", "repeats": 3}]
+    }), encoding="utf-8")
+
+    phases = sup.extension_phases(tmp_path)
+
+    assert len(phases) == 1
+    assert phases[0].name == "extra"
+    assert phases[0].rows == 7
+    assert phases[0].repeats == 3
+
+
+def test_extension_phases_join_the_authoritative_plan(tmp_path):
+    _corpus(tmp_path, "extra.jsonl", 4)
+    (tmp_path / sup.EXTENSION_PHASES_FILENAME).write_text(json.dumps({
+        "phases": [{"name": "extra", "script_id": "domain_extra_001",
+                    "corpus": "extra.jsonl"}]
+    }), encoding="utf-8")
+
+    names = [p.name for p in sup.curriculum_phases(tmp_path)]
+
+    assert names[-1] == "extra"
+    assert "csn-python-full" in names
+
+
+def test_an_incomplete_declaration_cannot_take_the_curriculum_down(tmp_path):
+    """A half-finished upload is skipped, not fatal."""
+    (tmp_path / sup.EXTENSION_PHASES_FILENAME).write_text(json.dumps({
+        "phases": [
+            {"name": "missing-file", "script_id": "x", "corpus": "absent.jsonl"},
+            {"name": "", "script_id": "x", "corpus": "absent.jsonl"},
+            {"script_id": "x", "corpus": "absent.jsonl"},
+            "not-a-dict",
+        ]
+    }), encoding="utf-8")
+
+    assert sup.extension_phases(tmp_path) == []
+
+
+def test_no_sidecar_means_no_extension_phases(tmp_path):
+    assert sup.extension_phases(tmp_path) == []

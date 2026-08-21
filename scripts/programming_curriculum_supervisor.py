@@ -130,7 +130,66 @@ def curriculum_phases(corpus_root: Path, include_seed: bool = False) -> list[Pha
             Phase("gsm8k-domain-safe", "reasoning_math_001",
                   corpus_root / "gsm8k.jsonl", 7_473),
         ]
+    phases.extend(extension_phases(corpus_root))
     return phases
+
+
+#: Corpora added after the authoritative plan above, declared as data.
+#:
+#: Every phase in that list carries a hand-entered row count that must match
+#: its file exactly, and the supervisor tracks durable progress against it. A
+#: wrong number silently mistrains. Onboarding a corpus also meant editing
+#: this module, so a new corpus could not be added without a code change and a
+#: redeploy -- and the manifest alone trains nothing, which cost a full cycle
+#: to discover on 2026-08-20.
+#:
+#: Extension phases are declared in this sidecar instead and their row counts
+#: are COUNTED from the file, never asserted.
+EXTENSION_PHASES_FILENAME = "curriculum_extensions.json"
+
+
+def extension_phases(corpus_root: Path) -> list[Phase]:
+    """Phases declared beside the corpora rather than in this module.
+
+    Each entry needs only `name`, `script_id` and `corpus`; `repeats` is
+    optional. A declaration whose corpus is missing or empty is skipped
+    rather than failing the run, so a half-finished upload cannot take the
+    curriculum down with it.
+    """
+    declared = read_json(corpus_root / EXTENSION_PHASES_FILENAME)
+    entries = declared.get("phases") if isinstance(declared, dict) else None
+    if not isinstance(entries, list):
+        return []
+    out: list[Phase] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "").strip()
+        script_id = str(entry.get("script_id") or "").strip()
+        corpus_name = str(entry.get("corpus") or "").strip()
+        if not name or not script_id or not corpus_name:
+            continue
+        corpus = corpus_root / corpus_name
+        rows = count_logical_rows(corpus)
+        if rows <= 0:
+            continue
+        repeats = entry.get("repeats")
+        repeats = int(repeats) if isinstance(repeats, int) and repeats > 0 else 1
+        out.append(Phase(name, script_id, corpus, rows, repeats=repeats))
+    return out
+
+
+def count_logical_rows(corpus: Path) -> int:
+    """Non-empty lines in a corpus, or 0 when it cannot be read.
+
+    Counted rather than declared: the supervisor tracks durable progress
+    against this number, so a stale hand-entered value mistrains silently.
+    """
+    try:
+        with corpus.open("r", encoding="utf-8") as handle:
+            return sum(1 for line in handle if line.strip())
+    except (FileNotFoundError, OSError, UnicodeDecodeError):
+        return 0
 
 
 def read_json(path: Path) -> dict:
