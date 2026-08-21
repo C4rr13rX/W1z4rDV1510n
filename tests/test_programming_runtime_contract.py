@@ -1638,13 +1638,18 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             self.assertEqual(skip_ranges, ["0:100", "120:200"])
 
     def test_continuous_canary_attributes_concurrent_topology_growth(self) -> None:
+        # Structural growth is attributed; the clock is not. `tick` was
+        # dropped from topology_delta on 2026-08-21 because four of its five
+        # callers use it to assert a READ-ONLY sentinel changed nothing, and
+        # tick advances from any concurrent training -- measured at 1,264 in
+        # 25 s with no sentinel running, while every structural field held
+        # steady. The growth this test is named for is unchanged.
         self.assertEqual(
             topology_delta(
                 {"tick": 10, "total_neurons": 20, "total_binding": 3},
                 {"tick": 14, "total_neurons": 25, "total_binding": 5},
             ),
             {
-                "tick": 4,
                 "pool_count": 0,
                 "total_neurons": 5,
                 "total_concepts": 0,
