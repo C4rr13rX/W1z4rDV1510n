@@ -2004,6 +2004,51 @@ fn manifest_component_feature_pairs(labels: &[String]) -> Vec<Vec<String>> {
 /// Deliberately the same mapping `manifest_files_match_requested_languages`
 /// already applies to labelled routes, driven from the request text because
 /// the intent table cannot describe the requests this route serves.
+/// Whether a manifest is far larger in scope than the request that found it.
+///
+/// A request naming ONE behaviour asks for one thing. Answering it with a
+/// whole project is the multi-file shape leaking into a single-unit request --
+/// the failure this guards is measured, not hypothetical: 2026-08-21, the
+/// multilanguage suite's JavaScript paraphrase ("Create Node.js code computing
+/// the second power of a supplied number", labels JAVASCRIPT + POWER_SELF:2)
+/// was answered with the 20-file, 23 KB full-stack calculator manifest. It is
+/// JavaScript-compatible, so every language check passed; it is simply not
+/// what was asked for. `executes` failed, the protected-route refresh failed
+/// every ~1.8 minutes, and the deferred queue never advanced behind it.
+///
+/// `request_prefers_composed_artifact` already draws this line at two
+/// behaviours for the composed route. This applies the same line to the
+/// single-manifest route, which reached the answer independently and was
+/// gated only on the words "function"/"method"/"snippet" appearing in the
+/// prompt -- wording the paraphrase deliberately avoids.
+///
+/// A small manifest is left alone: a learned two-file response to a
+/// single-behaviour request is a legitimate response contract. Only a project
+/// -sized answer is refused.
+fn single_behaviour_request_outgrown_by(labels: &[String], manifest: Option<&[u8]>) -> bool {
+    const PROJECT_SIZED_FILES: usize = 4;
+    let Some(bytes) = manifest else {
+        return false;
+    };
+    let behaviours = manifest_component_feature_pairs(labels)
+        .into_iter()
+        .map(|pair| pair[1].clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    if behaviours >= 2 {
+        return false;
+    }
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("files")
+                .and_then(|files| files.as_object())
+                .map(|files| files.len())
+        })
+        .is_some_and(|count| count >= PROJECT_SIZED_FILES)
+}
+
 fn request_language_extensions(prompt: &str) -> Vec<&'static str> {
     let lower = prompt.to_ascii_lowercase();
     let mut allowed: Vec<&'static str> = Vec::new();
@@ -4672,7 +4717,13 @@ async fn h_brain_chat(
         // source candidate for a request that asks independent subsystems to
         // work together. This ordering is invariant to later corpus rank.
         composed
-    } else if !explicitly_requests_source_unit && ranked_single_manifest.is_some() {
+    } else if !explicitly_requests_source_unit
+        && !single_behaviour_request_outgrown_by(
+            &diagnostic_intent_labels,
+            ranked_single_manifest.as_deref(),
+        )
+        && ranked_single_manifest.is_some()
+    {
         answer_branch = "ranked_single_manifest_early";
         // Preserve a learned project/file response contract unless the user
         // explicitly asks for one source unit. A popular plain source from
@@ -7385,6 +7436,33 @@ mod unlabeled_recall_gate_tests {
         assert!(!super::recalled_answer_language_is_plausible(
             "Write a Python function that sorts a list.",
             three,
+        ));
+    }
+
+    /// A single-behaviour request must not be answered with a whole project.
+    ///
+    /// The multilanguage JavaScript paraphrase (labels JAVASCRIPT +
+    /// POWER_SELF:2) was answered with the 20-file full-stack manifest. It is
+    /// JavaScript-compatible, so every language check passed; it is simply far
+    /// larger than what was asked for.
+    #[test]
+    fn one_behaviour_does_not_earn_a_project() {
+        let labels = vec![
+            "instruction_intent:LANGUAGE:JAVASCRIPT".to_string(),
+            "instruction_intent:POWER_SELF:2".to_string(),
+        ];
+        let project = br#"{"files": {"a.js": "x", "b.js": "x", "c.js": "x", "d.js": "x"}}"#;
+        assert!(super::single_behaviour_request_outgrown_by(&labels, Some(project)));
+
+        // A small learned manifest remains a legitimate response contract.
+        let pair = br#"{"files": {"a.js": "x", "b.js": "x"}}"#;
+        assert!(!super::single_behaviour_request_outgrown_by(&labels, Some(pair)));
+
+        // Nothing to judge.
+        assert!(!super::single_behaviour_request_outgrown_by(&labels, None));
+        assert!(!super::single_behaviour_request_outgrown_by(
+            &labels,
+            Some(b"function square(n) { return n * n; }"),
         ));
     }
 
