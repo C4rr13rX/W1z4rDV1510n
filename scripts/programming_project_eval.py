@@ -140,11 +140,27 @@ def request(endpoint: str, path: str, payload: dict) -> dict:
 
 
 def train(endpoint: str, repeats: int) -> None:
+    # Form each case as an atom-grounded binding.
+    #
+    # `/brain/observe` + `/brain/tick` cannot form a binding for a long
+    # response: measured 2026-08-21, recall via the observe path is exact
+    # below ~80 bytes and empty above it. Every case here is well over that,
+    # so none of them entered labelled retrieval -- they were reachable only
+    # by exact sequence match, which a paraphrase by definition cannot use.
+    #
+    # That is how native_enterprise's rust_atomic_ledger paraphrase came to
+    # return `orders.rs`: with the right manifest absent from the candidate
+    # pool, retrieval fell through to the "language plus ANY single
+    # behaviour" fallback. Training the same content through
+    # pretrain_binding took that suite from 4/5 to 5/5 with nothing else
+    # changed.
     for _ in range(repeats):
         for case in CASES:
-            request(endpoint, "/brain/observe", {"pool_id": 1, "frame": b64(case.prompt)})
-            request(endpoint, "/brain/observe", {"pool_id": 12, "frame": b64(case.prompt)})
-            request(endpoint, "/brain/observe", {"pool_id": 4, "frame": b64(case.response)})
+            request(endpoint, "/brain/pretrain_binding", {"frames": [
+                {"pool_id": 1, "frame": b64(case.prompt)},
+                {"pool_id": 12, "frame": b64(case.prompt)},
+                {"pool_id": 4, "frame": b64(case.response)},
+            ]})
             request(endpoint, "/brain/tick", {})
 
 

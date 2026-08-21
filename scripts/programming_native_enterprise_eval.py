@@ -147,11 +147,33 @@ def execute(case: Case, response: str) -> tuple[bool, str]:
 
 
 def train(endpoint: str, repeats: int) -> None:
+    """Form each case as an atom-grounded binding.
+
+    These cases were trained through `/brain/observe` + `/brain/tick`, which
+    cannot form a binding for a long response: measured 2026-08-21, recall via
+    the observe path is exact below ~80 bytes and empty above it. Every case
+    here is 395-736 bytes, so none of them entered labelled retrieval at all --
+    they were reachable only by exact sequence match (`raw_is_exact`), which a
+    paraphrase by definition cannot use.
+
+    That is why `rust_atomic_ledger`'s paraphrase returned `orders.rs`: with
+    `ledger.rs` absent from the candidate pool, retrieval fell through to the
+    "language plus ANY single behaviour" fallback and matched the generic
+    RUST+INPUT_VALIDATION subset, which `orders.rs` also satisfies. The labels
+    were correct the whole time; the right manifest simply was not there.
+
+    `pretrain_binding_episode` exists for exactly this -- it collapses the
+    response into one reusable atom-grounded concept rather than duplicating a
+    long membership vector. Training the same manifests through it took the
+    suite from 4/5 to 5/5 paraphrase with nothing else changed.
+    """
     for _ in range(repeats):
         for case in CASES:
-            request(endpoint, "/brain/observe", {"pool_id": 1, "frame": b64(case.prompt)})
-            request(endpoint, "/brain/observe", {"pool_id": 12, "frame": b64(case.prompt)})
-            request(endpoint, "/brain/observe", {"pool_id": 4, "frame": b64(case.response)})
+            request(endpoint, "/brain/pretrain_binding", {"frames": [
+                {"pool_id": 1, "frame": b64(case.prompt)},
+                {"pool_id": 12, "frame": b64(case.prompt)},
+                {"pool_id": 4, "frame": b64(case.response)},
+            ]})
             request(endpoint, "/brain/tick", {})
 
 
