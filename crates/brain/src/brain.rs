@@ -1019,6 +1019,15 @@ fn recurrence_posting_refresh_due(use_count: u64) -> bool {
 
 const MAX_ROUTED_BINDING_CANDIDATES: usize = 512;
 
+/// Rarest query motifs consulted when a route has other evidence to fall back
+/// on. A latency bound, not a correctness one.
+const NARROW_MOTIF_POSTING_LIMIT: usize = 8;
+
+/// Rarest query motifs consulted when the route has to carry the decision --
+/// a validator that may reject every closest match, or a last-resort recall
+/// whose only alternative is answering nothing.
+const WIDE_MOTIF_POSTING_LIMIT: usize = 32;
+
 /// Fraction of a decode that is one short block repeated end to end.
 ///
 /// This is the actual runaway-emergence signal. Destructive collapse can
@@ -5524,6 +5533,35 @@ impl Brain {
         )
     }
 
+    /// Motif recall over the wide sensory scope, without a validator.
+    ///
+    /// The narrow eight-motif budget is a latency bound for routes that have
+    /// other evidence to fall back on. A route that runs only as the last arm
+    /// before answering nothing does not: measured 2026-08-20, "Make a Django
+    /// model to store expressions and variables" scores 0.661 against the
+    /// right unit when every trained prompt is compared, but the eight rarest
+    /// motifs never put that binding in the candidate set, so the brain
+    /// returned nothing. Paying the wider scan is strictly better than
+    /// abstaining on evidence the fabric holds.
+    pub fn decode_best_binding_by_char_motifs_wide(
+        &self,
+        query_pool: PoolId,
+        query_frame: &[u8],
+        target_pool: PoolId,
+        min_score: f32,
+        min_margin: f32,
+    ) -> Option<(Vec<u8>, f32, f32)> {
+        self.decode_best_binding_by_char_motifs_inner(
+            query_pool,
+            query_frame,
+            target_pool,
+            min_score,
+            min_margin,
+            None,
+            WIDE_MOTIF_POSTING_LIMIT,
+        )
+    }
+
     fn decode_best_binding_by_char_motifs_with_margin_filtered(
         &self,
         query_pool: PoolId,
@@ -5532,6 +5570,32 @@ impl Brain {
         min_score: f32,
         min_margin: f32,
         validator: Option<&dyn Fn(&[u8]) -> bool>,
+    ) -> Option<(Vec<u8>, f32, f32)> {
+        let posting_limit = if validator.is_some() {
+            WIDE_MOTIF_POSTING_LIMIT
+        } else {
+            NARROW_MOTIF_POSTING_LIMIT
+        };
+        self.decode_best_binding_by_char_motifs_inner(
+            query_pool,
+            query_frame,
+            target_pool,
+            min_score,
+            min_margin,
+            validator,
+            posting_limit,
+        )
+    }
+
+    fn decode_best_binding_by_char_motifs_inner(
+        &self,
+        query_pool: PoolId,
+        query_frame: &[u8],
+        target_pool: PoolId,
+        min_score: f32,
+        min_margin: f32,
+        validator: Option<&dyn Fn(&[u8]) -> bool>,
+        posting_limit: usize,
     ) -> Option<(Vec<u8>, f32, f32)> {
         if query_pool == target_pool
             || query_pool == self.binding_pool_id
@@ -5558,11 +5622,6 @@ impl Brain {
             .collect();
         posting_lists.sort_unstable_by_key(|(motif, ids)| (ids.len(), *motif));
         let mut candidate_evidence = AHashMap::new();
-        // A validator can reject every superficially closest route, so give
-        // it a wider but still bounded sensory scope in which to find the
-        // first semantically compatible episode. Unfiltered latency retains
-        // the original eight rarest-motif budget.
-        let posting_limit = if validator.is_some() { 32 } else { 8 };
         for (_, ids) in posting_lists.into_iter().take(posting_limit) {
             add_binding_evidence(&mut candidate_evidence, ids);
         }

@@ -4054,7 +4054,7 @@ async fn h_brain_chat(
     // carry the decision: breadth of corroboration is the evidence, not a
     // keyword. A weak or contested match still abstains.
     let recall_derived_route = if composition_features.is_none() && !raw_is_exact {
-        brain.decode_best_binding_by_char_motifs_with_margin(
+        brain.decode_best_binding_by_char_motifs_wide(
             POOL_TEXT,
             prompt.as_bytes(),
             action_pool,
