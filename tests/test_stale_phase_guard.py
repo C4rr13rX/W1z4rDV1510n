@@ -200,3 +200,48 @@ def test_recovery_without_a_quarantine_restarts_instead_of_failing(tmp_path,
 
     assert sup.perform_automatic_recovery(args, next_phase(), runtime, status)
     assert calls == ["stop", "start"], "recovery must leave a live brain"
+
+
+def test_a_quarantine_with_no_guard_is_retired(tmp_path):
+    """A rollback target that does not exist cannot protect anything.
+
+    Observed three times on 2026-08-20/21: a quarantine formed with
+    last_good={} because no guard file existed, restore_canary_quarantine()
+    raised "quarantine lacks valid last-good phase/row", and the supervisor
+    sat in deferred_replay_recovery_failed relaunching the brain every few
+    seconds without training. Each time it needed the marker deleted by hand.
+    """
+    runtime = tmp_path / "runtime"
+    (runtime / "brain").mkdir(parents=True)
+    marker = sup.canary_quarantine_path(runtime)
+    marker.write_text(json.dumps({
+        "state": "deferred_replay_failed",
+        "phase": "csn-python-para5",
+        "candidate_row": 2028816,
+        "last_good": {},
+    }), encoding="utf-8")
+
+    result = sup.restore_canary_quarantine(runtime, finalize=False)
+
+    assert result["retired_unrestorable"] is True
+    assert not marker.exists(), "the unsatisfiable marker must be cleared"
+    sup.assert_training_not_quarantined(runtime)
+
+
+def test_a_quarantine_with_a_real_guard_is_never_retired(tmp_path):
+    """The safety property: a present guard keeps the normal restore path."""
+    runtime = tmp_path / "runtime"
+    (runtime / "brain").mkdir(parents=True)
+    guard = runtime / "brain" / "brain.last-good.wbrain"
+    guard.write_bytes(b"guard")
+    (runtime / "brain" / "brain.last-good.json").write_text(json.dumps({
+        "phase": "csn-python-para5", "row": 2028816, "guard": str(guard),
+    }), encoding="utf-8")
+
+    assert not sup.unrestorable_quarantine(
+        runtime, {"phase": "csn-python-para5"}, {"guard": str(guard)}
+    )
+    # Metadata alone is also enough to keep the guarded path.
+    assert not sup.unrestorable_quarantine(
+        runtime, {"phase": "csn-python-para5"}, {}
+    )

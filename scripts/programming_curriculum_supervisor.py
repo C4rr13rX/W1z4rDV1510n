@@ -542,6 +542,26 @@ def assert_training_not_quarantined(runtime: Path) -> None:
         )
 
 
+def unrestorable_quarantine(runtime: Path, quarantine: dict,
+                            last_good: dict) -> bool:
+    """True when no guarded snapshot the quarantine could roll back to exists.
+
+    Strict by design: this retires a rollback point, so it must fire only when
+    there is provably nothing to retire. Any guard file on disk, or recorded
+    metadata naming one that exists, keeps the normal restore path.
+    """
+    if not quarantine:
+        return False
+    brain_dir = runtime / "brain"
+    recorded = last_good.get("guard")
+    if isinstance(recorded, str) and recorded and Path(recorded).is_file():
+        return False
+    for suffix in (".wbrain", ".bin"):
+        if (brain_dir / f"brain.last-good{suffix}").is_file():
+            return False
+    return not (brain_dir / "brain.last-good.json").is_file()
+
+
 def restore_canary_quarantine(runtime: Path, finalize: bool = True) -> dict:
     """Restore the accepted snapshot and ledger after a stopped-node failure."""
     marker = canary_quarantine_path(runtime)
@@ -560,11 +580,36 @@ def restore_canary_quarantine(runtime: Path, finalize: bool = True) -> dict:
     last_good = quarantine.get("last_good") or read_json(
         runtime / "brain" / "brain.last-good.json"
     )
+    brain_dir = runtime / "brain"
+    if unrestorable_quarantine(runtime, quarantine, last_good):
+        # There is no guarded snapshot to roll back to, so this quarantine can
+        # never be satisfied. Raising leaves the supervisor in
+        # deferred_replay_recovery_failed forever, relaunching the brain every
+        # few seconds and never training -- observed three separate times on
+        # 2026-08-20/21, each needing the marker deleted by hand.
+        #
+        # Retiring it is the honest outcome and costs nothing that still
+        # exists: a rollback target that is absent cannot protect anything.
+        # The learned fabric is untouched -- brain.wbrain was 109 GB and still
+        # growing while this marker blocked every phase.
+        marker.unlink(missing_ok=True)
+        append_health_event(runtime, {
+            "kind": "unrestorable_quarantine_retired",
+            "phase": quarantine.get("phase"),
+            "candidate_row": quarantine.get("candidate_row"),
+            "passed": None,
+            "note": "no guarded snapshot exists; nothing to roll back to",
+            "updated_unix": time.time(),
+        })
+        return {
+            "phase": quarantine.get("phase"),
+            "row": quarantine.get("candidate_row"),
+            "retired_unrestorable": True,
+        }
     phase = str(last_good.get("phase") or quarantine.get("phase") or "")
     row = last_good.get("row")
     if not phase or not isinstance(row, int) or row < 0:
         raise RuntimeError(f"quarantine lacks valid last-good phase/row: {quarantine}")
-    brain_dir = runtime / "brain"
     snapshot = Path(last_good.get("snapshot") or brain_dir / "brain.bin")
     guard = Path(last_good.get("guard") or brain_dir / f"brain.last-good{snapshot.suffix}")
     if not guard.is_file():
