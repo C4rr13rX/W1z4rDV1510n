@@ -245,3 +245,29 @@ def test_a_quarantine_with_a_real_guard_is_never_retired(tmp_path):
     assert not sup.unrestorable_quarantine(
         runtime, {"phase": "csn-python-para5"}, {}
     )
+
+
+def test_a_retired_quarantine_skips_topology_verification():
+    """A retirement rolled nothing back, so there is no barrier to verify.
+
+    Measured 2026-08-21: verify_restored_topology() demanded a checkpoint
+    proof from the retirement result, which has none, so every retirement was
+    immediately followed by "last-good guard has no checkpoint topology
+    proof" -- 26 retirements in five minutes, the exact loop the retirement
+    exists to break.
+    """
+    sup.verify_restored_topology(
+        {"phase": "csn-python-para5", "row": 2028816,
+         "retired_unrestorable": True},
+        {"tick": 1, "pool_count": 13},
+    )
+
+
+def test_a_real_rollback_still_requires_its_barrier():
+    """The safety property: only a retirement skips verification."""
+    try:
+        sup.verify_restored_topology({"phase": "x", "row": 1}, {"tick": 1})
+    except RuntimeError as exc:
+        assert "checkpoint topology proof" in str(exc)
+    else:
+        raise AssertionError("a real rollback must still prove its barrier")

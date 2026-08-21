@@ -788,6 +788,14 @@ def completed_forward_harvest(runtime: Path, phase: Phase) -> dict | None:
 
 def verify_restored_topology(restored: dict, observed: dict) -> None:
     """Reject a rollback whose reopened topology is not its recorded barrier."""
+    if restored.get("retired_unrestorable"):
+        # Nothing was rolled back: the quarantine named no guarded snapshot, so
+        # it was retired rather than restored. There is no recorded barrier to
+        # compare a reopened topology against, and demanding one turns the
+        # retirement into the very loop it exists to break -- measured
+        # 2026-08-21, 26 retirements in five minutes, each immediately
+        # followed by "last-good guard has no checkpoint topology proof".
+        return
     expected = ((restored.get("checkpoint_proof") or {}).get("topology") or {})
     if not expected:
         raise RuntimeError(
