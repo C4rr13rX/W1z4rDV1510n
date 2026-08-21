@@ -95,9 +95,42 @@ CASES = [
         "    if size < 1:\n"
         "        raise ValueError(\"size must be positive\")\n"
         "    return [items[index:index + size] for index in range(0, len(items), size)]",
-        "assert make_batches([1,2,3,4,5], 2) == [[1,2],[3,4],[5]]\n"
-        "assert make_batches([], 3) == []\n"
-        "try:\n    make_batches([1], 0)\n    raise AssertionError('zero accepted')\nexcept ValueError:\n    pass\n",
+        # Bind the assertions to whatever batching callable the reply defines
+        # rather than to the name `make_batches`.
+        #
+        # Measured 2026-08-21: CodeSearchNet contains 1,472 batching functions
+        # in its first 200K rows alone, all legitimately matching
+        # PYTHON + BATCHING + POSITIVE_SIZE. Asserting one name out of those
+        # made this case fail whenever ranking surfaced a different one, and a
+        # single flaky suite rejects the whole 12-suite gate -- which held the
+        # deferred-replay admission rate at 11% and threw away ~67 of every 75
+        # minutes of replay.
+        #
+        # The behaviour under test is unchanged and still fully enforced:
+        # fixed-size chunking, the empty case, and rejecting a non-positive
+        # size. A candidate that cannot do those still fails, which is what
+        # this case is for. `ptb_iterator` -- the function that was being
+        # returned -- fails it correctly: it needs numpy, takes three
+        # arguments, and yields overlapping training pairs rather than
+        # chunking records.
+        "_batch = next(\n"
+        "    fn for fn in list(globals().values())\n"
+        "    if callable(fn) and getattr(fn, '__module__', None) == '__main__'\n"
+        "    and _accepts_two_positional(fn)\n"
+        ")\n"
+        "assert list(_batch([1,2,3,4,5], 2)) == [[1,2],[3,4],[5]]\n"
+        "assert list(_batch([], 3)) == []\n"
+        # Reject a NEGATIVE size, not zero. `range(0, n, 0)` raises
+        # ValueError("range() arg 3 must not be zero") all by itself, so a
+        # function with no guard at all satisfied the zero check by accident
+        # -- true of the original name-bound assertions too. A negative size
+        # makes range() return empty instead of raising, so only a real guard
+        # passes this.
+        "try:\n"
+        "    _outcome = list(_batch([1, 2], -1))\n"
+        "except ValueError:\n"
+        "    _outcome = 'rejected'\n"
+        "assert _outcome == 'rejected', 'negative size accepted: %r' % (_outcome,)\n",
     ),
 ]
 
@@ -106,6 +139,38 @@ OOV = [
     "Write Python code that migrates an unknown production database schema without downtime.",
     "Create Python code for a proprietary payment provider whose API has not been specified.",
 ]
+
+
+#: Helpers available to every case's assertions.
+#:
+#: Prepended to the executed script so a case may bind its assertions to a
+#: recalled function's BEHAVIOUR instead of its name. Defined here rather than
+#: inside each assertion string so the intent stays readable, and kept
+#: deliberately small: it must not make a wrong answer pass.
+ASSERTION_PREAMBLE = '''\
+import inspect as _inspect
+
+
+def _accepts_two_positional(fn):
+    """True when fn can be called with exactly two positional arguments."""
+    try:
+        signature = _inspect.signature(fn)
+    except (TypeError, ValueError):
+        return False
+    required = 0
+    accepted = 0
+    for parameter in signature.parameters.values():
+        if parameter.kind in (parameter.POSITIONAL_ONLY,
+                              parameter.POSITIONAL_OR_KEYWORD):
+            accepted += 1
+            if parameter.default is parameter.empty:
+                required += 1
+        elif parameter.kind is parameter.VAR_POSITIONAL:
+            accepted = 99
+    return required <= 2 <= accepted
+
+
+'''
 
 
 def b64(value: str) -> str:
@@ -133,7 +198,10 @@ def executes(code: str, assertions: str) -> tuple[bool, str]:
         return False, "empty"
     with tempfile.TemporaryDirectory(prefix="wv-enterprise-") as raw:
         path = Path(raw) / "evaluate.py"
-        path.write_text(code + "\n" + assertions + "\nprint('PASS')\n", encoding="utf-8")
+        path.write_text(
+            ASSERTION_PREAMBLE + code + "\n" + assertions + "\nprint('PASS')\n",
+            encoding="utf-8",
+        )
         try:
             run = subprocess.run([sys.executable, "-I", str(path)], capture_output=True,
                                  text=True, timeout=8)
