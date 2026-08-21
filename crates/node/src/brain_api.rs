@@ -1999,6 +1999,32 @@ fn manifest_component_feature_pairs(labels: &[String]) -> Vec<Vec<String>> {
         .collect()
 }
 
+/// Whether a request states enough for unlabelled recall to be trusted at all.
+///
+/// Dice similarity is a ratio, so a very short request can score highly on the
+/// strength of one familiar word. Measured 2026-08-21, the foundation gate's
+/// OOV probe `"zxqv compiler"` -- deliberate nonsense -- scored 0.455 against
+/// a trained Python AST visitor and was answered with 626 bytes of real
+/// source, dropping oov_honest to 2/3 and failing the whole completion gate.
+/// `"flurble database"` did the same. One recognisable word out of two is
+/// enough to carry a ratio, and not remotely enough to establish what was
+/// asked for.
+///
+/// Longer requests are not exposed to this: they have to corroborate across
+/// many motifs, which nonsense cannot do. The genuine novel phrasings that
+/// this route exists to serve run 7-11 words.
+///
+/// This is a property of the REQUEST, not a vocabulary list -- it adds no
+/// per-domain rules and generalises to any subject the brain is trained on.
+fn request_carries_enough_evidence(prompt: &str) -> bool {
+    const MIN_REQUEST_WORDS: usize = 4;
+    prompt
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .count()
+        >= MIN_REQUEST_WORDS
+}
+
 fn is_single_language_single_behavior(labels: &[String]) -> bool {
     let language_count = labels
         .iter()
@@ -4053,7 +4079,10 @@ async fn h_brain_chat(
     // fall back to what the fabric itself recalls, and require the margin to
     // carry the decision: breadth of corroboration is the evidence, not a
     // keyword. A weak or contested match still abstains.
-    let recall_derived_route = if composition_features.is_none() && !raw_is_exact {
+    let recall_derived_route = if composition_features.is_none()
+        && !raw_is_exact
+        && request_carries_enough_evidence(prompt)
+    {
         brain.decode_best_binding_by_char_motifs_wide(
             POOL_TEXT,
             prompt.as_bytes(),
@@ -7206,4 +7235,52 @@ pub fn default_node_brain_dir() -> PathBuf {
         return base.join("brain");
     }
     PathBuf::from("brain-data")
+}
+
+#[cfg(test)]
+mod unlabeled_recall_gate_tests {
+    use super::request_carries_enough_evidence;
+
+    /// The foundation gate's OOV probes must not reach unlabelled recall.
+    ///
+    /// Measured 2026-08-21: "zxqv compiler" scored 0.455 -- over the 0.45
+    /// floor -- and was answered with 626 bytes of a real Python AST visitor,
+    /// dropping oov_honest to 2/3 and failing the whole completion gate. One
+    /// recognisable word out of two carries a Dice ratio without establishing
+    /// anything about what was asked.
+    #[test]
+    fn short_nonsense_requests_are_refused_evidence() {
+        for prompt in ["zxqv compiler", "flurble database", "qqxz parser", "zxqv"] {
+            assert!(
+                !request_carries_enough_evidence(prompt),
+                "{prompt:?} must not reach unlabelled recall",
+            );
+        }
+    }
+
+    /// The phrasings this route exists to serve must still pass.
+    #[test]
+    fn genuine_requests_carry_evidence() {
+        for prompt in [
+            "Build the server side for the calculator.",
+            "I need a three.js scene class with orbit controls.",
+            "Make me a calculator web app that plots equations in 3D.",
+            "Give me a Vue keypad component for a calculator.",
+            "Write Django tests for the evaluate endpoint.",
+        ] {
+            assert!(
+                request_carries_enough_evidence(prompt),
+                "{prompt:?} must still reach unlabelled recall",
+            );
+        }
+    }
+
+    /// Punctuation and separators must not be counted as words.
+    #[test]
+    fn word_counting_ignores_separators() {
+        assert!(!request_carries_enough_evidence("three.js"));
+        assert!(!request_carries_enough_evidence("a, b, c"));
+        assert!(!request_carries_enough_evidence(""));
+        assert!(request_carries_enough_evidence("build a calculator app"));
+    }
 }
