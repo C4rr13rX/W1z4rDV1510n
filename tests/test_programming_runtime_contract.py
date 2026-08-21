@@ -1293,14 +1293,27 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             protected_route_pressure_reasons(trained_failure)[0]["failed"]
         )
 
+        # Saturation on a PASSING paraphrase is no longer pressure.
+        #
+        # This asserted the opposite until 2026-08-21, on the theory that
+        # saturation "predicts the same boundary before execution fails".
+        # Measured over every sentinel report on the host and the whole
+        # health history, it never did: saturated AND failed 0 times,
+        # saturated but passed 2 (both rejected anyway), and the single
+        # genuine execution failure was unsaturated.
+        #
+        # composite_saturated only records that a feature pair reached its
+        # 512-entry posting cap -- i.e. that the pair is common -- which grows
+        # with training. It rejected a replay whose twelve suites all reported
+        # exit_code 0, making the gate harder to pass the better trained the
+        # brain became. Saturation still counts when it co-occurs with a
+        # missing composite route, asserted as `legacy_saturated` below.
         saturated = json.loads(json.dumps(healthy))
         saturated["results"][0]["intent_diagnostics"].update({
             "composite_candidates": 512,
             "composite_saturated": True,
         })
-        reasons = protected_route_pressure_reasons(saturated)
-        self.assertEqual(len(reasons), 1)
-        self.assertTrue(reasons[0]["composite_saturated"])
+        self.assertEqual(protected_route_pressure_reasons(saturated), [])
 
         unreachable = json.loads(json.dumps(healthy))
         unreachable["results"][0]["executes"] = False

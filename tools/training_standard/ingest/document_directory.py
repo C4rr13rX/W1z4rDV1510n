@@ -1,0 +1,406 @@
+"""ingest/document_directory.py — turn a directory of mixed documents into a corpus.
+
+Point it at a folder of documents and it compiles what it finds into the
+JSONL the curriculum already consumes, through the same `RowWriter` contract
+every other ingest module uses: permissive-license validation, `source_hash`
+dedup, and a provenance manifest.
+
+Handles heterogeneous directories rather than one repo shape:
+
+  .md .markdown .rst .txt   prose -> the section that follows it
+  .py .js .ts .rs .go       a documented definition -> its source
+  .java .cs .rb .sh .sql
+  .json .jsonl              already-paired records, re-keyed to the contract
+  .csv .tsv                 a prompt-ish and response-ish column pair
+
+Pairing strategy, in the order it is attempted per file:
+
+  1. **Existing pairs.** JSON/JSONL/CSV records that already carry something
+     prompt-like and response-like are re-keyed, never re-derived. This is
+     the highest-fidelity source and is preferred wherever it exists.
+  2. **Documented definitions.** For source files, a function or class whose
+     docstring/leading comment states what it does becomes
+     `prompt = that description`, `response = the definition`.
+  3. **Heading sections.** For prose, a heading becomes the prompt and the
+     text under it the response.
+
+Anything that matches none of these is skipped and counted, not guessed at.
+A document the tool cannot honestly pair is a document it should not invent
+training data from.
+
+Quality gates mirror `markdown_book.py`: prompt 16-2000 chars, response
+30-8000 chars, and Python responses must parse. Everything is reported, so a
+run tells you what it took and what it left behind.
+
+CLI:
+    python -m tools.training_standard.ingest.document_directory \\
+        --src D:/docs/my_manuals \\
+        --out D:/w1z4rdv1510n-data/training/my_manuals.jsonl \\
+        --license cc0-1.0 \\
+        --label "my_manuals" \\
+        --script-id domain_my_manuals_001
+"""
+from __future__ import annotations
+
+import argparse
+import ast
+import csv
+import json
+import re
+import sys
+from pathlib import Path
+
+from tools.training_standard.row import Row, RowWriter, hash_source
+
+#: Extension -> the `ctx.lang` atom recorded for it.
+SOURCE_LANGUAGES = {
+    ".py": "python", ".js": "javascript", ".mjs": "javascript",
+    ".ts": "typescript", ".tsx": "typescript", ".jsx": "javascript",
+    ".rs": "rust", ".go": "go", ".java": "java", ".cs": "csharp",
+    ".rb": "ruby", ".sh": "bash", ".bash": "bash", ".sql": "sql",
+    ".c": "c", ".h": "c", ".cpp": "cpp", ".hpp": "cpp",
+}
+PROSE_SUFFIXES = {".md", ".markdown", ".rst", ".txt"}
+RECORD_SUFFIXES = {".json", ".jsonl", ".ndjson"}
+TABLE_SUFFIXES = {".csv", ".tsv"}
+
+#: Field names treated as already carrying a prompt or a response. Ordered:
+#: the first match wins, so the most explicit naming is preferred.
+PROMPT_KEYS = ("prompt", "question", "instruction", "input", "query",
+               "title", "request")
+RESPONSE_KEYS = ("response", "answer", "output", "completion", "content",
+                 "body", "text", "code")
+
+MIN_PROMPT, MAX_PROMPT = 16, 2000
+MIN_RESPONSE, MAX_RESPONSE = 30, 8000
+
+
+class Stats:
+    """What a run took and what it left behind."""
+
+    def __init__(self) -> None:
+        self.files_seen = 0
+        self.files_used = 0
+        self.rows = 0
+        self.skipped_unpairable = 0
+        self.skipped_too_short = 0
+        self.skipped_too_long = 0
+        self.skipped_bad_syntax = 0
+        self.skipped_duplicate = 0
+        self.unreadable: list[str] = []
+
+    def report(self) -> str:
+        return (
+            f"  files scanned      {self.files_seen}\n"
+            f"  files contributing {self.files_used}\n"
+            f"  rows written       {self.rows}\n"
+            f"  skipped: unpairable {self.skipped_unpairable}, "
+            f"too-short {self.skipped_too_short}, "
+            f"too-long {self.skipped_too_long}, "
+            f"bad-syntax {self.skipped_bad_syntax}, "
+            f"duplicate {self.skipped_duplicate}\n"
+            f"  unreadable         {len(self.unreadable)}"
+        )
+
+
+def read_text(path: Path) -> str | None:
+    """Decode a file, or None when it is not text we can use."""
+    for encoding in ("utf-8", "utf-8-sig", "latin-1"):
+        try:
+            return path.read_text(encoding=encoding)
+        except (UnicodeDecodeError, OSError):
+            continue
+    return None
+
+
+def first_present(record: dict, keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        for candidate in (key, key.upper(), key.title()):
+            value = record.get(candidate)
+            if isinstance(value, str) and value.strip():
+                return value
+    return None
+
+
+def pairs_from_records(text: str, path: Path) -> list[tuple[str, str, str]]:
+    """Re-key records that are already prompt/response shaped."""
+    rows: list[dict] = []
+    stripped = text.strip()
+    if not stripped:
+        return []
+    if path.suffix.lower() in {".jsonl", ".ndjson"}:
+        for line in stripped.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                rows.append(value)
+    else:
+        try:
+            value = json.loads(stripped)
+        except json.JSONDecodeError:
+            return []
+        if isinstance(value, dict):
+            rows = [value]
+        elif isinstance(value, list):
+            rows = [item for item in value if isinstance(item, dict)]
+    out = []
+    for record in rows:
+        prompt = first_present(record, PROMPT_KEYS)
+        response = first_present(record, RESPONSE_KEYS)
+        if prompt and response and prompt.strip() != response.strip():
+            out.append((prompt, response, "record"))
+    return out
+
+
+def pairs_from_table(text: str, path: Path) -> list[tuple[str, str, str]]:
+    """A prompt-ish and a response-ish column, when both are present."""
+    delimiter = "\t" if path.suffix.lower() == ".tsv" else ","
+    try:
+        reader = csv.DictReader(text.splitlines(), delimiter=delimiter)
+        records = list(reader)
+    except (csv.Error, UnicodeDecodeError):
+        return []
+    out = []
+    for record in records:
+        clean = {k: v for k, v in record.items() if isinstance(k, str) and v}
+        prompt = first_present(clean, PROMPT_KEYS)
+        response = first_present(clean, RESPONSE_KEYS)
+        if prompt and response and prompt.strip() != response.strip():
+            out.append((prompt, response, "table"))
+    return out
+
+
+def python_definitions(text: str) -> list[tuple[str, str, str]]:
+    """Documented top-level defs and classes, paired with their source.
+
+    A real directory contains files that do not fully parse -- a stray
+    editor artefact, a Python 2 module, a template with placeholders. One
+    bad definition should not discard every good one beside it, so a file
+    that fails to parse whole is retried a definition at a time.
+    """
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return _python_definitions_piecewise(text)
+    lines = text.splitlines()
+    out = []
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                 ast.ClassDef)):
+            continue
+        doc = ast.get_docstring(node)
+        if not doc:
+            continue
+        end = getattr(node, "end_lineno", None)
+        if end is None:
+            continue
+        source = "\n".join(lines[node.lineno - 1:end])
+        summary = " ".join(doc.strip().split())
+        out.append((f"{summary}", source, "definition"))
+    return out
+
+
+#: Start of a top-level Python definition, used only to salvage a file that
+#: does not parse as a whole.
+PY_DEFINITION_START = re.compile(
+    r"^(?:def|class|async\s+def)\s+\w+", re.MULTILINE
+)
+
+
+def _python_definitions_piecewise(text: str) -> list[tuple[str, str, str]]:
+    """Recover the definitions that DO parse from a file that does not.
+
+    Each candidate is parsed on its own, so anything returned is still real
+    Python -- the salvage never lowers the bar on what is emitted.
+    """
+    starts = [match.start() for match in PY_DEFINITION_START.finditer(text)]
+    if not starts:
+        return []
+    starts.append(len(text))
+    out = []
+    for index in range(len(starts) - 1):
+        chunk = text[starts[index]:starts[index + 1]].rstrip()
+        if not chunk:
+            continue
+        try:
+            tree = ast.parse(chunk)
+        except SyntaxError:
+            continue
+        for node in tree.body:
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                     ast.ClassDef)):
+                continue
+            doc = ast.get_docstring(node)
+            if not doc:
+                continue
+            out.append((" ".join(doc.strip().split()), chunk, "definition"))
+    return out
+
+
+#: A leading block comment or docstring above a definition, for the languages
+#: where a full parse is not available here.
+COMMENTED_DEFINITION = re.compile(
+    r"(?P<doc>(?:^[ \t]*(?://[^\n]*|\*[^\n]*|/\*\*?)[^\n]*\n){1,20})"
+    r"(?P<def>^[ \t]*(?:export\s+)?(?:public\s+|private\s+|async\s+|static\s+|"
+    r"pub\s+|func\s+|fn\s+|function\s+|class\s+|def\s+)[^\n]*\{?\s*$)",
+    re.MULTILINE,
+)
+
+
+def commented_definitions(text: str) -> list[tuple[str, str, str]]:
+    """Non-Python source: a comment block immediately above a definition."""
+    out = []
+    lines = text.splitlines()
+    for match in COMMENTED_DEFINITION.finditer(text):
+        doc = match.group("doc")
+        summary = " ".join(
+            re.sub(r"^[ \t]*(?://+|\*+|/\*+|\*/)", "", line).strip()
+            for line in doc.splitlines()
+        ).strip()
+        if not summary:
+            continue
+        start = text[:match.start("def")].count("\n")
+        # Take the definition plus a bounded body; brace matching is not
+        # attempted, because a wrong guess would emit truncated source.
+        body = "\n".join(lines[start:start + 40])
+        out.append((summary, body, "definition"))
+    return out
+
+
+HEADING = re.compile(r"^(#{1,6})\s+(?P<title>.+?)\s*$", re.MULTILINE)
+
+
+def prose_sections(text: str) -> list[tuple[str, str, str]]:
+    """A heading becomes the prompt, the text beneath it the response."""
+    matches = list(HEADING.finditer(text))
+    if not matches:
+        return []
+    out = []
+    for index, match in enumerate(matches):
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        body = text[start:end].strip()
+        title = match.group("title").strip()
+        if title and body:
+            out.append((title, body, "section"))
+    return out
+
+
+def extract(path: Path, text: str) -> list[tuple[str, str, str]]:
+    """Best available pairing for one document, most faithful first."""
+    suffix = path.suffix.lower()
+    if suffix in RECORD_SUFFIXES:
+        return pairs_from_records(text, path)
+    if suffix in TABLE_SUFFIXES:
+        return pairs_from_table(text, path)
+    if suffix == ".py":
+        return python_definitions(text)
+    if suffix in SOURCE_LANGUAGES:
+        return commented_definitions(text)
+    if suffix in PROSE_SUFFIXES:
+        return prose_sections(text)
+    return []
+
+
+def acceptable(prompt: str, response: str, lang: str,
+               stats: Stats) -> bool:
+    """Gate one candidate pair, counting exactly why it was refused."""
+    prompt, response = prompt.strip(), response.strip()
+    if len(prompt) < MIN_PROMPT or len(response) < MIN_RESPONSE:
+        stats.skipped_too_short += 1
+        return False
+    if len(prompt) > MAX_PROMPT or len(response) > MAX_RESPONSE:
+        stats.skipped_too_long += 1
+        return False
+    if lang == "python":
+        try:
+            ast.parse(response)
+        except SyntaxError:
+            stats.skipped_bad_syntax += 1
+            return False
+    return True
+
+
+def build(src: Path, out: Path, license_id: str, label: str,
+          script_id: str, intent: str) -> Stats:
+    stats = Stats()
+    writer = RowWriter(out, script_id=script_id, source=label)
+    try:
+        for path in sorted(src.rglob("*")):
+            if not path.is_file():
+                continue
+            suffix = path.suffix.lower()
+            if suffix not in (RECORD_SUFFIXES | TABLE_SUFFIXES
+                              | PROSE_SUFFIXES | set(SOURCE_LANGUAGES)):
+                continue
+            stats.files_seen += 1
+            text = read_text(path)
+            if text is None:
+                stats.unreadable.append(str(path))
+                continue
+            pairs = extract(path, text)
+            if not pairs:
+                stats.skipped_unpairable += 1
+                continue
+            relative = path.relative_to(src).as_posix()
+            lang = SOURCE_LANGUAGES.get(suffix, "text")
+            wrote_any = False
+            for prompt, response, kind in pairs:
+                if not acceptable(prompt, response, lang, stats):
+                    continue
+                row = Row(
+                    prompt=prompt.strip(),
+                    response=response.strip(),
+                    ctx={"lang": lang, "intent": intent, "source": label},
+                    license=license_id,
+                    source=f"{label}:{relative}#{kind}",
+                    source_hash=hash_source(f"{prompt}\n{response}"),
+                    script_id=script_id,
+                )
+                if writer.write(row):
+                    stats.rows += 1
+                    wrote_any = True
+                else:
+                    stats.skipped_duplicate += 1
+            if wrote_any:
+                stats.files_used += 1
+    finally:
+        writer.close()
+    return stats
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--src", type=Path, required=True,
+                        help="directory of documents to compile")
+    parser.add_argument("--out", type=Path, required=True,
+                        help="destination .jsonl")
+    parser.add_argument("--license", required=True,
+                        help="SPDX id; must be permissive")
+    parser.add_argument("--label", required=True,
+                        help="short provenance label, e.g. my_manuals")
+    parser.add_argument("--script-id", required=True)
+    parser.add_argument("--intent", default="implement")
+    args = parser.parse_args()
+
+    if not args.src.is_dir():
+        print(f"not a directory: {args.src}", file=sys.stderr)
+        return 2
+
+    stats = build(args.src, args.out, args.license, args.label,
+                  args.script_id, args.intent)
+    print(f"wrote {args.out}")
+    print(stats.report())
+    if stats.rows == 0:
+        print("\nno rows produced; nothing here was pairable", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

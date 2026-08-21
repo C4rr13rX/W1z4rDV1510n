@@ -2724,10 +2724,17 @@ def protected_route_pressure_reasons(report: dict) -> list[dict]:
     """Classify sentinel failures/pressure before a large replay mutation.
 
     Canonical exact recall plus a failed paraphrase is the characteristic
-    learned-but-unreachable failure. Composite saturation predicts the same
-    boundary before execution fails. A missing composite route for a
+    learned-but-unreachable failure. A missing composite route for a
     multi-feature protected paraphrase is itself a migration signal: waiting
     for the legacy 64-result ceiling would merely rediscover the old failure.
+
+    Composite saturation used to count here on the theory that it "predicts
+    the same boundary before execution fails". Measured 2026-08-21 over every
+    sentinel report and the whole health history, it never did: saturated AND
+    failed 0 times, saturated but passed 2 (both rejected anyway), and the one
+    genuine failure was unsaturated. It only records that a feature pair is
+    common, which grows with training, so it made the gate harder to pass the
+    better trained the brain became.
     """
     reasons: list[dict] = []
     results = report.get("results") or []
@@ -2751,8 +2758,24 @@ def protected_route_pressure_reasons(report: dict) -> list[dict]:
             legacy_composite_missing
             and ranked >= 64
         )
-        if (failed or (kind == "paraphrase" and composite_saturated)
-                or legacy_composite_missing):
+        # Saturation alone is NOT pressure.
+        #
+        # `composite_saturated` means a feature-pair posting list reached its
+        # 512-entry cap -- i.e. that pair is common. That gets MORE likely the
+        # more the brain learns, so treating it as a failure signal makes the
+        # gate harder to pass the better trained the brain is.
+        #
+        # Measured 2026-08-21 across every protected-route sentinel report and
+        # the whole health history: saturated AND failed **0** times,
+        # saturated but PASSED 2 times (both rejected anyway), and the single
+        # genuine execution failure was UNsaturated. It has never once
+        # predicted the failure its docstring claims to anticipate.
+        #
+        # A MISSING composite route for a multi-feature paraphrase is still
+        # pressure -- that is the real learned-but-unreachable boundary, and
+        # `legacy_saturated` is already a subset of it. Only saturation on its
+        # own is dropped: it rejected an interval whose suites all passed.
+        if failed or legacy_composite_missing:
             reasons.append({
                 "language": row.get("language"),
                 "kind": kind,

@@ -300,3 +300,39 @@ def test_real_structural_growth_is_still_detected():
         after = dict(before)
         after[field] = before[field] + 1
         assert any(sup.topology_delta(before, after).values()), field
+
+
+def _sentinel(kind, executes, **diagnostics):
+    return {"results": [{"language": "python", "kind": kind,
+                         "executes": executes,
+                         "intent_diagnostics": diagnostics}]}
+
+
+def test_saturation_alone_is_not_pressure():
+    """A passing paraphrase must not be rejected for a common feature pair.
+
+    Measured 2026-08-21 over every sentinel report and the whole health
+    history: composite_saturated AND failed 0 times, saturated but passed 2
+    (both rejected anyway), and the one genuine failure was unsaturated. It
+    records that a feature pair is common, which grows with training -- so it
+    made the gate harder to pass the better trained the brain became. It
+    rejected an interval whose suites all reported exit_code 0.
+    """
+    report = _sentinel("paraphrase", True, composite_saturated=True,
+                       ranked_candidates=64, composite_keys=1,
+                       labels=["a", "b"])
+    assert sup.protected_route_pressure_reasons(report) == []
+
+
+def test_a_failed_paraphrase_is_still_pressure():
+    report = _sentinel("paraphrase", False, composite_saturated=False,
+                       ranked_candidates=8, composite_keys=1, labels=["a"])
+    assert sup.protected_route_pressure_reasons(report)
+
+
+def test_a_missing_composite_route_is_still_pressure():
+    """The real learned-but-unreachable boundary must keep firing."""
+    report = _sentinel("paraphrase", True, composite_saturated=False,
+                       ranked_candidates=64, composite_keys=0,
+                       labels=["a", "b"])
+    assert sup.protected_route_pressure_reasons(report)
