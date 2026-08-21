@@ -1839,14 +1839,27 @@ def settle_brain_for_admission(args: argparse.Namespace, phase: Phase,
     return report
 
 
+#: Fields that describe learned STRUCTURE. `tick` is deliberately absent.
+#:
+#: Four of this function's five callers use it to assert that a read-only
+#: sentinel did not mutate the brain. `tick` is a clock, not structure: it
+#: advances whenever anything trains, and during deferred replay something
+#: always is. Measured 2026-08-21 with no sentinel running at all, tick moved
+#: 1,264 in 25 s while total_neurons, total_concepts, total_binding and
+#: total_terminals held exactly steady. Including it made those assertions
+#: fire on the concurrent replay's clock and reject the interval with
+#: "read-only sentinel mutated topology" -- one of six distinct failure modes
+#: seen in six hours, none repeating.
+TOPOLOGY_FIELDS = (
+    "pool_count", "total_neurons", "total_concepts",
+    "total_binding", "total_terminals",
+)
+
+
 def topology_delta(before: dict, after: dict) -> dict:
-    fields = (
-        "tick", "pool_count", "total_neurons", "total_concepts",
-        "total_binding", "total_terminals",
-    )
     return {
         field: int(after.get(field, 0)) - int(before.get(field, 0))
-        for field in fields
+        for field in TOPOLOGY_FIELDS
     }
 
 

@@ -271,3 +271,32 @@ def test_a_real_rollback_still_requires_its_barrier():
         assert "checkpoint topology proof" in str(exc)
     else:
         raise AssertionError("a real rollback must still prove its barrier")
+
+
+def test_a_read_only_sentinel_is_not_blamed_for_the_clock():
+    """`tick` is a clock, not learned structure.
+
+    Measured 2026-08-21 with no sentinel running at all: tick moved 1,264 in
+    25 s from the concurrent deferred replay while total_neurons,
+    total_concepts, total_binding and total_terminals held exactly steady.
+    Including tick in topology_delta made the read-only sentinel assertions
+    fire on that clock and reject the interval with "read-only sentinel
+    mutated topology".
+    """
+    before = {"tick": 1_300_928, "pool_count": 13, "total_neurons": 1_419_984,
+              "total_concepts": 1_419_114, "total_binding": 1_264_324,
+              "total_terminals": 116_302_548}
+    after = dict(before, tick=1_301_568)
+
+    assert not any(sup.topology_delta(before, after).values())
+
+
+def test_real_structural_growth_is_still_detected():
+    """The safety property: actual mutation must still be caught."""
+    before = {"tick": 1, "pool_count": 13, "total_neurons": 10,
+              "total_concepts": 9, "total_binding": 8, "total_terminals": 700}
+    for field in ("pool_count", "total_neurons", "total_concepts",
+                  "total_binding", "total_terminals"):
+        after = dict(before)
+        after[field] = before[field] + 1
+        assert any(sup.topology_delta(before, after).values()), field
