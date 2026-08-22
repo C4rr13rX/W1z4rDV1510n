@@ -324,6 +324,85 @@ LICENCE_SPDX = {
 }
 
 
+#: Longest line still eligible to be a body-size heading.
+#: Measured on the labelled segments, true headings run to a 28-character
+#: median; body paragraphs to 247. 80 sits well clear of both.
+MAX_TITLE_LENGTH = 80
+
+#: A section holding less prose than this is folded into the previous one.
+MIN_SECTION_BODY = 400
+
+#: Typographic quotation marks. A line carrying one is running text -- a pull
+#: quote or a cited sentence -- not a title.
+SMART_QUOTE = re.compile(r"[“”]")
+
+#: A closed-class word left dangling at the end of a line, which means the
+#: line was broken mid-phrase rather than written as a title. This is a
+#: grammatical property of English function words, not subject vocabulary --
+#: it says nothing about what any book is about.
+DANGLING_FUNCTION_WORD = re.compile(
+    r"\b(?:a|an|the|and|or|but|of|in|on|at|to|for|with|from|by|as|into|"
+    r"than|that|which|when|while|is|are|was|were|be|been|has|have|had|"
+    r"see|shown|including|such)\s*$",
+    re.IGNORECASE,
+)
+
+#: A cross-reference word left without its number, e.g. a line broken after
+#: "shown in Figure". A real caption or title carries the identifier
+#: ("Figure 1.3.6"); a dangling one means the line was cut.
+#: Requires something before the word: a line that IS just "Appendix" or
+#: "Summary" is a legitimate standalone heading, while "shown in Figure" is a
+#: sentence cut off before its number.
+DANGLING_CROSS_REFERENCE = re.compile(
+    r"\S+\s+(?:figure|fig|table|equation|eq|chapter|section|appendix|box|plate)"
+    r"\s*$",
+    re.IGNORECASE,
+)
+
+
+def is_title_shaped(line: str) -> bool:
+    """True when a body-size line reads like a section title.
+
+    Half of all headings in a LibreTexts book are set at the body type size,
+    so type size cannot find them and something else has to. A title is
+    short, does not run on into a sentence, and is not a fragment of quoted
+    speech -- the discriminators below are exactly those three properties.
+
+    Kept deliberately shape-based rather than vocabulary-based: nothing here
+    knows what a chapter is called, so it carries no per-publisher or
+    per-subject assumption.
+    """
+    text = line.strip()
+    if not text or len(text) > MAX_TITLE_LENGTH:
+        return False
+    # Ends mid-sentence: a body line that happened to be short.
+    if text.endswith((".", ",", ";", ":")):
+        return False
+    # Opens as a continuation of something quoted or parenthesised.
+    if text[:1] in "”’\")":
+        return False
+    # Carries quoted speech: a pull quote, not a heading.
+    if SMART_QUOTE.search(text):
+        return False
+    # Breaks off mid-phrase. A body line split before a figure reference
+    # ("shown in Figure", "including certain types of algae (Figure") is
+    # short and has no terminal punctuation, so only the dangling function
+    # word at the end distinguishes it from a title. A real heading does not
+    # end on a preposition, article, or conjunction.
+    if DANGLING_FUNCTION_WORD.search(text):
+        return False
+    if DANGLING_CROSS_REFERENCE.search(text):
+        return False
+    # An unclosed bracket means the line was cut, not titled.
+    if text.count("(") != text.count(")"):
+        return False
+    # Page furniture: a bare URL, or a line with no letters at all (a page
+    # number, a rule, a stray figure index).
+    if text.startswith(("http://", "https://")):
+        return False
+    return bool(re.search(r"[A-Za-z]", text))
+
+
 def page_is_commercial_safe(page_text: str) -> bool:
     """False when a single page declares NC/ND rights, or none at all.
 
@@ -565,30 +644,32 @@ def pairs_from_pdf(path: Path) -> list[tuple[str, str, str]]:
         body_size = max(sizes, key=sizes.get)
         threshold = body_size * PDF_HEADING_RATIO
 
-        out: list[tuple[str, str, str]] = []
+        sections: list[tuple[str, list[str]]] = []
         heading: str | None = None
         subject: str | None = None
         body: list[str] = []
 
-        def flush() -> None:
+        def close_section() -> None:
             if not heading or not body:
                 return
             prompt = heading
             if heading.strip().lower() in STRUCTURAL_HEADINGS and subject:
                 prompt = f"{subject}: {heading}"
-            prompt = normalise_pdf_text(prompt)
-            text = normalise_pdf_text(" ".join(body)).strip()
-            # A chapter longer than the response cap is SPLIT, not discarded.
-            # Measured 2026-08-22 on Open Data Structures, 19 sections ran
-            # past the cap and took 51% of the book's prose with them -- a
-            # 25,028-character "B-Trees" chapter was dropped whole.
-            for number, chunk in enumerate(split_long_body(text), start=1):
-                part = prompt if number == 1 else f"{prompt} (part {number})"
-                out.append((part, chunk, f"section:{licence}"))
+            sections.append((normalise_pdf_text(prompt), list(body)))
 
         for size, content in spans:
-            if size >= threshold and len(content) <= 200:
-                flush()
+            larger = size >= threshold and len(content) <= 200
+            # A heading set at BODY size. Measured against 1,473 labelled
+            # segments, 170 of 341 true headings share the body's type size
+            # exactly, so a size threshold alone found only 34% of them (F1
+            # 0.41 at every ratio from 1.02 to 1.5 -- the constant was never
+            # the problem). Their real signature is that they are short and
+            # shaped like a title.
+            same_size_title = (size >= body_size
+                               and is_title_shaped(content)
+                               and not TOC_ENTRY.search(content))
+            if larger or same_size_title:
+                close_section()
                 body = []
                 heading = content
                 if content.strip().lower() not in STRUCTURAL_HEADINGS:
@@ -597,7 +678,39 @@ def pairs_from_pdf(path: Path) -> list[tuple[str, str, str]]:
                 if content.startswith("This page titled"):
                     continue
                 body.append(content)
-        flush()
+        close_section()
+
+        # Fold a section with too little prose back into the one before it.
+        #
+        # Admitting body-size headings finds real sections ("The Tragedy of
+        # the Commons", "Environmental Justice") that the size rule missed
+        # entirely, but a two-column book also emits short body-size lines
+        # that look like titles. Left alone, ChemistryAtomsFirst2eOpenStax
+        # shattered into 9,443 sections with a 22-byte median body.
+        #
+        # Merging rather than DROPPING is the point: dropping thin sections
+        # tamed the count but cost that book 816k characters -- 34% of its
+        # prose. Folding them back keeps 93-97% of every book's text while
+        # still roughly doubling the number of correctly-titled sections.
+        merged: list[tuple[str, str]] = []
+        for prompt, parts in sections:
+            text = normalise_pdf_text(" ".join(parts)).strip()
+            if merged and len(text) < MIN_SECTION_BODY:
+                previous_prompt, previous_text = merged[-1]
+                merged[-1] = (previous_prompt,
+                              f"{previous_text} {prompt} {text}".strip())
+            else:
+                merged.append((prompt, text))
+
+        out: list[tuple[str, str, str]] = []
+        for prompt, text in merged:
+            # A chapter longer than the response cap is SPLIT, not discarded.
+            # Measured 2026-08-22 on Open Data Structures, 19 sections ran
+            # past the cap and took 51% of the book's prose with them -- a
+            # 25,028-character "B-Trees" chapter was dropped whole.
+            for number, chunk in enumerate(split_long_body(text), start=1):
+                part = prompt if number == 1 else f"{prompt} (part {number})"
+                out.append((part, chunk, f"section:{licence}"))
         return out
     finally:
         document.close()

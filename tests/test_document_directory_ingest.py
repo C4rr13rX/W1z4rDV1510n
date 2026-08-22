@@ -385,3 +385,46 @@ def test_regex_escapes_survived_the_source_file():
                     dd.NON_COMMERCIAL_HINT, dd.TOC_ENTRY):
         assert "\n" not in pattern.pattern
         assert "\b" not in pattern.pattern
+
+
+def test_a_body_size_line_can_still_be_a_heading():
+    """Half of all real headings share the body's type size.
+
+    Measured against 1,473 labelled textbook segments: 170 of 341 true
+    headings sit at exactly the body font size, alongside 213 body
+    paragraphs. A size threshold alone therefore found only 34% of headings
+    and scored F1 0.41 at EVERY ratio from 1.02 to 1.5 -- the constant was
+    never the problem, the signal was.
+    """
+    for title in ("The Tragedy of the Commons", "Environmental Justice",
+                  "1.4: Framework for Project Management", "Appendix",
+                  "Summary", "Chapter 4: Ecosystems"):
+        assert dd.is_title_shaped(title), title
+
+
+def test_a_broken_body_line_is_not_a_heading():
+    """Short body lines must not become section prompts.
+
+    A false heading is worse than a missed one: it fabricates a training
+    prompt for text that does not answer it. These are the shapes that
+    actually appeared when body-size headings were first admitted.
+    """
+    for line in ("shown in Figure",
+                 "as shown in Table",
+                 "including certain types of bacteria and algae (Figure",
+                 "The standards for these units are",
+                 "people.\u201d (Gifford Pinchot, 1913)",
+                 "https://chem.libretexts.org/@go/page/358665",
+                 "19"):
+        assert not dd.is_title_shaped(line), line
+
+
+def test_a_thin_section_merges_instead_of_being_dropped():
+    """Undersized sections fold backwards, so no prose is lost.
+
+    Dropping them tamed ChemistryAtomsFirst2eOpenStax's 9,443-section
+    shatter but cost 816k characters -- 34% of the book. Merging keeps
+    93-97% of every book's text while still roughly doubling the count of
+    correctly-titled sections.
+    """
+    assert dd.MIN_SECTION_BODY > dd.MIN_RESPONSE
