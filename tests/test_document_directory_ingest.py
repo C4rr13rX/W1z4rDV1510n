@@ -7,6 +7,8 @@ emits rows that satisfy the same contract every other ingest module does.
 """
 import json
 
+import pytest
+
 from tools.training_standard.ingest import document_directory as dd
 
 REQUIRED_FIELDS = {"prompt", "response", "ctx", "license", "source",
@@ -428,3 +430,65 @@ def test_a_thin_section_merges_instead_of_being_dropped():
     correctly-titled sections.
     """
     assert dd.MIN_SECTION_BODY > dd.MIN_RESPONSE
+
+
+def _long_prose(seed: str) -> str:
+    return (seed + " ") * 12
+
+
+def test_a_word_document_is_sectioned_by_its_own_heading_styles(tmp_path):
+    """A .docx names its headings, so nothing has to be inferred.
+
+    Rebuilding them as markdown headings and reusing `prose_sections` keeps
+    table-of-contents rejection and the response cap shared with every other
+    prose format instead of reimplemented per format.
+    """
+    docx = pytest.importorskip("docx")
+    document = docx.Document()
+    document.add_heading("Photosynthesis Overview", level=1)
+    document.add_paragraph(_long_prose(
+        "Photosynthesis converts light energy into stored chemical energy."))
+    path = tmp_path / "biology.docx"
+    document.save(path)
+    pairs = dd.pairs_from_docx(path)
+    assert pairs
+    assert any(prompt == "Photosynthesis Overview" for prompt, _b, _k in pairs)
+
+
+def test_a_workbook_pairs_its_question_and_answer_columns(tmp_path):
+    """Each sheet is handled on its own header row.
+
+    A workbook routinely holds unrelated tables, so a single header
+    assumption across the file would mis-key every sheet after the first.
+    """
+    openpyxl = pytest.importorskip("openpyxl")
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.append(["question", "answer"])
+    sheet.append(["What is photosynthesis?",
+                  _long_prose("It converts light energy into glucose.")])
+    path = tmp_path / "glossary.xlsx"
+    workbook.save(path)
+    pairs = dd.pairs_from_workbook(path)
+    assert pairs
+    assert pairs[0][0] == "What is photosynthesis?"
+
+
+def test_html_sections_ignore_script_and_navigation(tmp_path):
+    """Script, style and nav bodies are not teaching prose.
+
+    Left in place they are swept into whichever section preceded them, which
+    puts CSS and menu text into a response.
+    """
+    pytest.importorskip("bs4")
+    html = ("<html><head><style>p{color:red}</style></head><body>"
+            "<nav>Home About Contact</nav>"
+            "<h2>Cellular Respiration</h2><p>"
+            + _long_prose("Glucose is oxidised to release ATP.")
+            + "</p></body></html>")
+    pairs = dd.pairs_from_html(html, tmp_path / "notes.html")
+    assert pairs
+    prompt, body, _kind = pairs[0]
+    assert prompt == "Cellular Respiration"
+    assert "color:red" not in body
+    assert "About Contact" not in body

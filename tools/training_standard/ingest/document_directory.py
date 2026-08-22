@@ -64,6 +64,13 @@ PROSE_SUFFIXES = {".md", ".markdown", ".rst", ".txt"}
 RECORD_SUFFIXES = {".json", ".jsonl", ".ndjson"}
 TABLE_SUFFIXES = {".csv", ".tsv"}
 DOCUMENT_SUFFIXES = {".pdf"}
+#: Formats parsed from the path as binary, like PDF.
+WORD_SUFFIXES = {".docx"}
+WORKBOOK_SUFFIXES = {".xlsx", ".xlsm"}
+#: Decoded as text first, then parsed for structure.
+HTML_SUFFIXES = {".html", ".htm", ".xhtml"}
+#: Every format read as bytes rather than decoded as text.
+BINARY_SUFFIXES = DOCUMENT_SUFFIXES | WORD_SUFFIXES | WORKBOOK_SUFFIXES
 
 #: Heading detection for PDFs: a span this much larger than the page's most
 #: common (body) size opens a section. Measured over LibreTexts textbooks,
@@ -850,11 +857,108 @@ def prose_sections(text: str) -> list[tuple[str, str, str]]:
     return out
 
 
+def pairs_from_docx(path: Path) -> list[tuple[str, str, str]]:
+    """Sections from a Word document, using its own heading styles.
+
+    A .docx names its headings outright ("Heading 1"), so unlike a PDF there
+    is nothing to infer from type size. Rebuilt into markdown headings and
+    handed to `prose_sections`, so all downstream handling -- table-of-
+    contents rejection, the response cap, section splitting -- is shared with
+    every other prose format rather than reimplemented here.
+    """
+    try:
+        import docx  # python-docx
+    except ImportError:
+        return []
+    try:
+        document = docx.Document(str(path))
+    except Exception:
+        return []
+    lines: list[str] = []
+    for paragraph in document.paragraphs:
+        content = (paragraph.text or "").strip()
+        if not content:
+            continue
+        style = str(getattr(paragraph.style, "name", "") or "")
+        if style.lower().startswith("heading") or style.lower() == "title":
+            lines.append(f"## {content}")
+        else:
+            lines.append(content)
+    return prose_sections("\n\n".join(lines))
+
+
+def pairs_from_workbook(path: Path) -> list[tuple[str, str, str]]:
+    """Rows from a spreadsheet, one sheet at a time.
+
+    A sheet's header row names its columns, so the same prompt/response
+    column detection used for CSV applies once the sheet is rendered as
+    delimited text. Sheets are handled individually because a workbook
+    routinely holds unrelated tables with different headers.
+    """
+    try:
+        import openpyxl
+    except ImportError:
+        return []
+    try:
+        workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    except Exception:
+        return []
+    out: list[tuple[str, str, str]] = []
+    try:
+        for sheet in workbook.worksheets:
+            rows = []
+            for values in sheet.iter_rows(values_only=True):
+                cells = ["" if value is None else str(value).replace("\t", " ")
+                         for value in values]
+                if any(cell.strip() for cell in cells):
+                    rows.append("\t".join(cells))
+            if len(rows) < 2:
+                continue
+            out.extend(pairs_from_table("\n".join(rows),
+                                        path.with_suffix(".tsv")))
+    finally:
+        workbook.close()
+    return out
+
+
+def pairs_from_html(text: str, path: Path) -> list[tuple[str, str, str]]:
+    """Sections from HTML, keyed on its heading tags."""
+    try:
+        from bs4 import BeautifulSoup
+    except ImportError:
+        return []
+    try:
+        soup = BeautifulSoup(text, "html.parser")
+    except Exception:
+        return []
+    # Script and style bodies are not prose and would otherwise be swept into
+    # whichever section preceded them.
+    for tag in soup(["script", "style", "nav", "footer"]):
+        tag.decompose()
+    lines: list[str] = []
+    for element in soup.find_all(
+            ["h1", "h2", "h3", "h4", "h5", "h6", "p", "li"]):
+        content = " ".join((element.get_text() or "").split())
+        if not content:
+            continue
+        if element.name.startswith("h") and element.name[1:].isdigit():
+            lines.append(f"## {content}")
+        else:
+            lines.append(content)
+    return prose_sections("\n\n".join(lines))
+
+
 def extract(path: Path, text: str) -> list[tuple[str, str, str]]:
     """Best available pairing for one document, most faithful first."""
     suffix = path.suffix.lower()
     if suffix in DOCUMENT_SUFFIXES:
         return pairs_from_pdf(path)
+    if suffix in WORD_SUFFIXES:
+        return pairs_from_docx(path)
+    if suffix in WORKBOOK_SUFFIXES:
+        return pairs_from_workbook(path)
+    if suffix in HTML_SUFFIXES:
+        return pairs_from_html(text, path)
     if suffix in RECORD_SUFFIXES:
         # Layout segments are records, but each one is a FRAGMENT -- a heading,
         # a paragraph, a list item -- not a prompt/response pair. Re-keying
@@ -931,10 +1035,11 @@ def build(src: Path, out: Path, license_id: str, label: str,
                 continue
             suffix = path.suffix.lower()
             if suffix not in (RECORD_SUFFIXES | TABLE_SUFFIXES | PROSE_SUFFIXES
-                              | DOCUMENT_SUFFIXES | set(SOURCE_LANGUAGES)):
+                              | BINARY_SUFFIXES | HTML_SUFFIXES
+                              | set(SOURCE_LANGUAGES)):
                 continue
             stats.files_seen += 1
-            if suffix in DOCUMENT_SUFFIXES:
+            if suffix in BINARY_SUFFIXES:
                 # Binary: parsed from the path, never decoded as text.
                 text = ""
             else:
