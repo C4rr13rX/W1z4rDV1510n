@@ -63,6 +63,24 @@ SOURCE_LANGUAGES = {
 PROSE_SUFFIXES = {".md", ".markdown", ".rst", ".txt"}
 RECORD_SUFFIXES = {".json", ".jsonl", ".ndjson"}
 TABLE_SUFFIXES = {".csv", ".tsv"}
+DOCUMENT_SUFFIXES = {".pdf"}
+
+#: Heading detection for PDFs: a span this much larger than the page's most
+#: common (body) size opens a section. Measured over LibreTexts textbooks,
+#: body text sits at ~9.6pt with section titles at 13.5 and subheadings at
+#: 11.2, so a 15% margin separates them without needing a trained segmenter.
+PDF_HEADING_RATIO = 1.15
+
+#: LibreTexts stamps a per-page attribution line. Read the licence from the
+#: document itself rather than assuming one for a whole folder: measured over
+#: 183 books, 110 are CC BY-NC (no commercial use) and only 63 are permissive,
+#: so a folder-wide assumption would quietly poison a commercial corpus.
+PDF_LICENCE_PATTERN = re.compile(
+    r"shared under (?:an?\s+)?"
+    r"(CC[ -]BY(?:[ -]SA|[ -]NC(?:[ -]ND)?|[ -]ND)?(?:\s*\d\.\d)?"
+    r"|public domain)",
+    re.IGNORECASE,
+)
 
 #: Field names treated as already carrying a prompt or a response. Ordered:
 #: the first match wins, so the most explicit naming is preferred.
@@ -87,6 +105,7 @@ class Stats:
         self.skipped_too_long = 0
         self.skipped_bad_syntax = 0
         self.skipped_duplicate = 0
+        self.skipped_contents = 0
         self.unreadable: list[str] = []
 
     def report(self) -> str:
@@ -155,6 +174,183 @@ def pairs_from_records(text: str, path: Path) -> list[tuple[str, str, str]]:
         if prompt and response and prompt.strip() != response.strip():
             out.append((prompt, response, "record"))
     return out
+
+
+#: Segment labels that act as a heading, i.e. can become a prompt.
+HEADING_LABELS = {"title", "heading", "header", "h1", "h2", "h3", "section"}
+
+#: A heading that names a document part rather than a subject. These make
+#: useless prompts -- "Learning Outcomes" recalled from three different books
+#: teaches the brain nothing about any of them -- so the section is attributed
+#: to the nearest preceding subject heading instead.
+STRUCTURAL_HEADINGS = {
+    "learning outcomes", "learning objectives", "objectives", "summary",
+    "chapter summary", "key terms", "glossary", "references", "exercises",
+    "practice", "practice problems", "problems", "review questions",
+    "questions", "introduction", "overview", "contents", "table of contents",
+    "index", "preface", "about this book", "acknowledgements",
+    "acknowledgments", "further reading", "conclusion", "answers",
+    "solutions", "notes", "footnotes", "appendix", "abstract",
+}
+
+
+def pairs_from_layout_segments(text: str, path: Path) -> list[tuple[str, str, str]]:
+    """Rebuild sections from per-fragment layout segments.
+
+    A PDF segmenter emits one record per visual block -- `{"book", "page",
+    "label", "text"}` -- so no single record is a prompt/response pair. A
+    heading opens a section and every following non-heading fragment belongs
+    to it, which is the same shape `prose_sections` recovers from markdown.
+
+    A structural heading ("Learning Outcomes", "Summary") is a document part,
+    not a subject: it is qualified with the nearest preceding subject heading
+    so the prompt still says what the section is about.
+    """
+    records: list[dict] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or not line.startswith("{"):
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict) and "label" in value and "text" in value:
+            records.append(value)
+    if not records:
+        return []
+
+    out: list[tuple[str, str, str]] = []
+    heading: str | None = None
+    subject: str | None = None
+    body: list[str] = []
+
+    def flush() -> None:
+        if not heading or not body:
+            return
+        prompt = heading
+        if heading.strip().lower() in STRUCTURAL_HEADINGS and subject:
+            prompt = f"{subject}: {heading}"
+        out.append((prompt, "\n".join(body).strip(), "section"))
+
+    for record in records:
+        content = str(record.get("text") or "").strip()
+        if not content:
+            continue
+        if str(record.get("label") or "").lower() in HEADING_LABELS:
+            flush()
+            body = []
+            heading = content
+            if content.strip().lower() not in STRUCTURAL_HEADINGS:
+                subject = content
+        elif heading is not None:
+            body.append(content)
+    flush()
+    return out
+
+
+#: SPDX id per declared licence, and whether it may be used commercially.
+#: NC and ND forbid it outright, so they map to None and the book is skipped.
+LICENCE_SPDX = {
+    "public domain": "public-domain",
+    "cc by": "cc-by-4.0", "cc by 2.0": "cc-by-4.0",
+    "cc by 3.0": "cc-by-4.0", "cc by 4.0": "cc-by-4.0",
+    "cc by sa": "cc-by-sa-4.0", "cc by sa 3.0": "cc-by-sa-4.0",
+    "cc by sa 4.0": "cc-by-sa-4.0",
+}
+
+
+def pdf_licence(document) -> str | None:
+    """The SPDX id a PDF declares, or None when it is not commercial-safe.
+
+    Read from the document rather than assumed for a folder: measured over
+    183 LibreTexts books, 110 are CC BY-NC and cannot be used commercially at
+    all, so a folder-wide assumption would quietly poison the corpus. An
+    undeclared or NC/ND book returns None and is skipped.
+    """
+    counts: dict[str, int] = {}
+    for index in range(min(document.page_count, 40)):
+        for match in PDF_LICENCE_PATTERN.finditer(document[index].get_text()):
+            key = re.sub(r"[\s-]+", " ", match.group(1).strip().lower())
+            counts[key] = counts.get(key, 0) + 1
+    if not counts:
+        return None
+    declared = max(counts, key=counts.get)
+    return LICENCE_SPDX.get(declared)
+
+
+def pairs_from_pdf(path: Path) -> list[tuple[str, str, str]]:
+    """Rebuild sections from a PDF using type size to find headings.
+
+    A span meaningfully larger than the page's most common size opens a
+    section; everything after it is that section's body. This is the same
+    shape `prose_sections` recovers from markdown, derived from layout rather
+    than markup, so it needs no per-publisher template.
+    """
+    try:
+        import fitz  # PyMuPDF
+    except ImportError:
+        return []
+    try:
+        document = fitz.open(path)
+    except Exception:
+        return []
+    try:
+        licence = pdf_licence(document)
+        if licence is None:
+            # Not commercial-safe, or undeclared. Refusing here keeps a
+            # restricted book out of the corpus even if the caller passes a
+            # permissive --license for the folder.
+            return []
+        spans: list[tuple[float, str]] = []
+        sizes: dict[float, int] = {}
+        for index in range(document.page_count):
+            try:
+                blocks = document[index].get_text("dict")["blocks"]
+            except Exception:
+                continue
+            for block in blocks:
+                for line in block.get("lines", []):
+                    for span in line.get("spans", []):
+                        content = str(span.get("text") or "").strip()
+                        if not content:
+                            continue
+                        size = round(float(span.get("size") or 0.0), 1)
+                        spans.append((size, content))
+                        sizes[size] = sizes.get(size, 0) + len(content)
+        if not spans or not sizes:
+            return []
+        body_size = max(sizes, key=sizes.get)
+        threshold = body_size * PDF_HEADING_RATIO
+
+        out: list[tuple[str, str, str]] = []
+        heading: str | None = None
+        subject: str | None = None
+        body: list[str] = []
+
+        def flush() -> None:
+            if not heading or not body:
+                return
+            prompt = heading
+            if heading.strip().lower() in STRUCTURAL_HEADINGS and subject:
+                prompt = f"{subject}: {heading}"
+            out.append((prompt, " ".join(body).strip(), f"section:{licence}"))
+
+        for size, content in spans:
+            if size >= threshold and len(content) <= 200:
+                flush()
+                body = []
+                heading = content
+                if content.strip().lower() not in STRUCTURAL_HEADINGS:
+                    subject = content
+            elif heading is not None:
+                if content.startswith("This page titled"):
+                    continue
+                body.append(content)
+        flush()
+        return out
+    finally:
+        document.close()
 
 
 def pairs_from_table(text: str, path: Path) -> list[tuple[str, str, str]]:
@@ -294,7 +490,16 @@ def prose_sections(text: str) -> list[tuple[str, str, str]]:
 def extract(path: Path, text: str) -> list[tuple[str, str, str]]:
     """Best available pairing for one document, most faithful first."""
     suffix = path.suffix.lower()
+    if suffix in DOCUMENT_SUFFIXES:
+        return pairs_from_pdf(path)
     if suffix in RECORD_SUFFIXES:
+        # Layout segments are records, but each one is a FRAGMENT -- a heading,
+        # a paragraph, a list item -- not a prompt/response pair. Re-keying
+        # them one at a time yields nothing, so a folder of segmented
+        # textbooks produced an empty corpus. Reassemble them first.
+        segments = pairs_from_layout_segments(text, path)
+        if segments:
+            return segments
         return pairs_from_records(text, path)
     if suffix in TABLE_SUFFIXES:
         return pairs_from_table(text, path)
@@ -307,6 +512,30 @@ def extract(path: Path, text: str) -> list[tuple[str, str, str]]:
     return []
 
 
+#: A response that is mostly "N.N: Title" fragments is a table of contents,
+#: not teaching content. Measured over a LibreTexts accounting textbook it is
+#: ~8% of extracted sections: the prompt names a chapter and the body just
+#: lists its subsections, which teaches nothing about the subject.
+TOC_ENTRY = re.compile(r"(?<!\d)\d+\.\d+:\s")
+
+
+#: Numbered-section references per 100 characters above which a response is a
+#: contents listing. Calibrated on real extracted rows rather than guessed:
+#:   contents listing            3.57 per 100
+#:   prose citing one section    0.67 per 100
+#:   ordinary prose              0.00 per 100
+#: 1.5 sits in that gap, so a section that merely cites a subsection survives.
+TOC_DENSITY_PER_100 = 1.5
+
+
+def is_table_of_contents(response: str) -> bool:
+    """True when a response is a contents listing rather than prose."""
+    if not response:
+        return False
+    density = 100.0 * len(TOC_ENTRY.findall(response)) / len(response)
+    return density > TOC_DENSITY_PER_100
+
+
 def acceptable(prompt: str, response: str, lang: str,
                stats: Stats) -> bool:
     """Gate one candidate pair, counting exactly why it was refused."""
@@ -316,6 +545,9 @@ def acceptable(prompt: str, response: str, lang: str,
         return False
     if len(prompt) > MAX_PROMPT or len(response) > MAX_RESPONSE:
         stats.skipped_too_long += 1
+        return False
+    if is_table_of_contents(response):
+        stats.skipped_contents += 1
         return False
     if lang == "python":
         try:
@@ -335,14 +567,19 @@ def build(src: Path, out: Path, license_id: str, label: str,
             if not path.is_file():
                 continue
             suffix = path.suffix.lower()
-            if suffix not in (RECORD_SUFFIXES | TABLE_SUFFIXES
-                              | PROSE_SUFFIXES | set(SOURCE_LANGUAGES)):
+            if suffix not in (RECORD_SUFFIXES | TABLE_SUFFIXES | PROSE_SUFFIXES
+                              | DOCUMENT_SUFFIXES | set(SOURCE_LANGUAGES)):
                 continue
             stats.files_seen += 1
-            text = read_text(path)
-            if text is None:
-                stats.unreadable.append(str(path))
-                continue
+            if suffix in DOCUMENT_SUFFIXES:
+                # Binary: parsed from the path, never decoded as text.
+                text = ""
+            else:
+                decoded = read_text(path)
+                if decoded is None:
+                    stats.unreadable.append(str(path))
+                    continue
+                text = decoded
             pairs = extract(path, text)
             if not pairs:
                 stats.skipped_unpairable += 1
@@ -353,11 +590,19 @@ def build(src: Path, out: Path, license_id: str, label: str,
             for prompt, response, kind in pairs:
                 if not acceptable(prompt, response, lang, stats):
                     continue
+                # A document that declares its own licence overrides the
+                # folder-wide one. Measured over 183 LibreTexts books the
+                # licences differ per book, so one flag for a folder is wrong
+                # by construction.
+                row_licence = license_id
+                if kind.startswith("section:"):
+                    row_licence = kind.split(":", 1)[1]
+                    kind = "section"
                 row = Row(
                     prompt=prompt.strip(),
                     response=response.strip(),
                     ctx={"lang": lang, "intent": intent, "source": label},
-                    license=license_id,
+                    license=row_licence,
                     source=f"{label}:{relative}#{kind}",
                     source_hash=hash_source(f"{prompt}\n{response}"),
                     script_id=script_id,

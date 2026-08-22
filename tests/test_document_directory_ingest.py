@@ -138,3 +138,79 @@ def test_a_non_permissive_license_is_rejected(tmp_path):
         assert "gpl-3.0" in str(exc).lower()
     else:
         raise AssertionError("a copyleft licence must not be accepted")
+
+
+# --- textbook (PDF) ingestion -------------------------------------------------
+#
+# A folder of textbooks produced ZERO rows before 2026-08-22: layout segments
+# are per-fragment records, so re-keying them one at a time found no pair, and
+# PDFs were not read at all.
+
+def test_layout_segments_rebuild_sections(tmp_path):
+    """A heading segment opens a section; following fragments are its body."""
+    src = tmp_path / "docs"
+    src.mkdir()
+    (src / "book.ndjson").write_text("\n".join(json.dumps(s) for s in [
+        {"book": "X", "page": 1, "label": "title", "text": "Operating Ratios"},
+        {"book": "X", "page": 1, "label": "list",
+         "text": "Operating ratios measure how effectively a company is "
+                 "utilizing its assets over the accounting period."},
+    ]) + "\n", encoding="utf-8")
+
+    _, rows = compile_dir(tmp_path, src)
+
+    assert len(rows) == 1
+    assert rows[0]["prompt"] == "Operating Ratios"
+    assert "utilizing its assets" in rows[0]["response"]
+
+
+def test_a_structural_heading_is_qualified_by_its_subject(tmp_path):
+    """"Learning Outcomes" alone teaches nothing about any subject."""
+    src = tmp_path / "docs"
+    src.mkdir()
+    (src / "book.ndjson").write_text("\n".join(json.dumps(s) for s in [
+        {"book": "X", "page": 1, "label": "title", "text": "Operating Ratios"},
+        {"book": "X", "page": 1, "label": "list",
+         "text": "Operating ratios measure how effectively assets are used "
+                 "across a full accounting period by the business."},
+        {"book": "X", "page": 2, "label": "title", "text": "Learning Outcomes"},
+        {"book": "X", "page": 2, "label": "list",
+         "text": "Compute the average inventory turnover ratio and interpret "
+                 "the result for a retail business."},
+    ]) + "\n", encoding="utf-8")
+
+    _, rows = compile_dir(tmp_path, src)
+    prompts = {r["prompt"] for r in rows}
+
+    assert "Operating Ratios: Learning Outcomes" in prompts
+    assert "Learning Outcomes" not in prompts
+
+
+def test_a_contents_listing_is_not_teaching_content():
+    """Calibrated on real rows: ToC 3.57 per 100 chars, prose 0.00."""
+    assert dd.is_table_of_contents(
+        "9.1: Production Budget 9.2: Direct Materials Budget 9.3: Direct "
+        "Labor Budget 9.4: Manufacturing Overhead Budget 9.5: Ending Inventory"
+    )
+    assert not dd.is_table_of_contents(
+        "These are the managers involved in the day to day manufacturing "
+        "process. They determine the schedule and staffing."
+    )
+    # Prose that merely cites one subsection must survive.
+    assert not dd.is_table_of_contents(
+        "As shown in section 5.11: Strategy Development, accounting affects "
+        "how a company plans its direction and allocates its resources."
+    )
+
+
+def test_non_commercial_licences_are_never_permitted():
+    """110 of 183 LibreTexts books are CC BY-NC and cannot be used."""
+    from tools.training_standard.row import (
+        NON_COMMERCIAL_LICENSES, PERMISSIVE_LICENSES,
+    )
+    assert not (NON_COMMERCIAL_LICENSES & PERMISSIVE_LICENSES)
+    for licence in ("cc-by-nc", "cc-by-nc-4.0", "cc-by-nc-sa", "cc-by-nd"):
+        assert licence not in PERMISSIVE_LICENSES
+    # Commercial CC licences ARE permitted; attribution is carried by `source`.
+    for licence in ("cc-by-4.0", "cc-by-sa-4.0", "public-domain"):
+        assert licence in PERMISSIVE_LICENSES

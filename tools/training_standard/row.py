@@ -36,6 +36,27 @@ PERMISSIVE_LICENSES = frozenset({
     "zlib", "wtfpl", "mpl-2.0",  # MPL is weak-copyleft but permissive
                                  # for our distribution model (we ship
                                  # weights, not source).
+    # Creative Commons attribution licences. Commercial use IS permitted;
+    # the obligation is attribution, which `source` already records per row.
+    # Added 2026-08-22 for the LibreTexts textbooks: of 183 books, 45 are
+    # CC BY or public domain and 18 are CC BY-SA.
+    "cc-by-4.0", "cc-by-3.0", "cc-by-2.0", "cc-by",
+    # Share-alike. Commercially usable, but derivatives inherit the licence,
+    # so keep it distinguishable from plain CC BY rather than folding both
+    # into one id -- a downstream consumer has to be able to tell them apart.
+    "cc-by-sa-4.0", "cc-by-sa-3.0", "cc-by-sa",
+})
+
+#: Licences that forbid commercial use or derivatives outright. Never added to
+#: PERMISSIVE_LICENSES; listed so the distinction is greppable and so a future
+#: reader does not "helpfully" complete the CC family. Measured 2026-08-22,
+#: 110 of 183 LibreTexts books are NC -- the majority -- so this is the common
+#: case, not an edge case.
+NON_COMMERCIAL_LICENSES = frozenset({
+    "cc-by-nc", "cc-by-nc-4.0", "cc-by-nc-3.0",
+    "cc-by-nc-sa", "cc-by-nc-sa-4.0", "cc-by-nc-sa-3.0",
+    "cc-by-nc-nd", "cc-by-nc-nd-4.0", "cc-by-nc-nd-3.0",
+    "cc-by-nd", "cc-by-nd-4.0",
 })
 
 # Recognized intent tags — used in [ctx intent=...].  Open set; the

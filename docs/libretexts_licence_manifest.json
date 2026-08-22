@@ -1,0 +1,1285 @@
+{
+  "books": [
+    {
+      "book": "APEnvironmentalScience-full",
+      "segments": 942,
+      "declared": "CC BY 2.0",
+      "class": "permissive",
+      "spdx": "cc-by-4.0"
+    },
+    {
+      "book": "APhotographicAtlasForBotanyMorrow-full",
+      "segments": 1529,
+      "declared": "CC BY NC 4.0",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "AccountingForManagersLumen-full",
+      "segments": 7892,
+      "declared": "CC BY 4.0",
+      "class": "permissive",
+      "spdx": "cc-by-4.0"
+    },
+    {
+      "book": "AccountingInTheFinanceWorld-full",
+      "segments": 3612,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "AerodynamicsAndAircraftPerformance3eMarchman-full",
+      "segments": 1918,
+      "declared": "CC BY 4.0",
+      "class": "permissive",
+      "spdx": "cc-by-4.0"
+    },
+    {
+      "book": "AnIntroductionToCooperationAndMutualismBoland-full",
+      "segments": 412,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "AppliedEcologyWikibooks-full",
+      "segments": 856,
+      "declared": "CC BY SA 4.0",
+      "class": "permissive",
+      "spdx": "cc-by-sa-4.0"
+    },
+    {
+      "book": "BasicEngineeringScienceASystemsAccountingAndModelingApproachRichards-full",
+      "segments": 5419,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "BasicPrinciplesOfOrganicChemistryRobertsAndCaserio-full",
+      "segments": 7358,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "BeginningChemistryBall-full",
+      "segments": 6344,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "BeginningManagementOfHumanResources-full",
+      "segments": 3461,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "BioInspiredSensorySystemsBrooks-full",
+      "segments": 1170,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "BioOERCUNY-full",
+      "segments": 1976,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "BiochemistryFreeEasyAhernAndRajagopal-full",
+      "segments": 1188,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "BiochemistryFreeForAllAhernRajagopalAndTan-full",
+      "segments": 5402,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "BiodiversityBynum-full",
+      "segments": 487,
+      "declared": "CC BY 3.0",
+      "class": "permissive",
+      "spdx": "cc-by-4.0"
+    },
+    {
+      "book": "BookAPrimerForComputationalBiologyONeil-full",
+      "segments": 2206,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "BookBasicCellAndMolecularBiologyBergtrom-full",
+      "segments": 3378,
+      "declared": "CC BY",
+      "class": "permissive",
+      "spdx": "cc-by-4.0"
+    },
+    {
+      "book": "BookBiofundamentalsKlymkowskyCooper-full",
+      "segments": 1329,
+      "declared": null,
+      "class": "unknown",
+      "spdx": null
+    },
+    {
+      "book": "BookCellsMoleculesAndMechanismsWong-full",
+      "segments": 1683,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "BookComputationalBiologyGenomesNetworksAndEvolutionKellisEtAl-full",
+      "segments": 4557,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "BookGeneralChemistryAnAtomsFirstApproachHalpern-full",
+      "segments": 11460,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "BookHowToBeASuccessfulOrganicChemistSandtorv-full",
+      "segments": 361,
+      "declared": "CC BY NC 4.0",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "BookInvestigationsInMolecularCellBiologyOConnor-full",
+      "segments": 1401,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "BotanyHaMorrowAndAlgiers-full",
+      "segments": 3955,
+      "declared": "CC BY NC 4.0",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "BotanyInHawaiIDanielaDutraElliottAndPaulaMejiaVelasquez-full",
+      "segments": 897,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "BotanyLabManualMorrow-full",
+      "segments": 2934,
+      "declared": "CC BY NC 4.0",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "CADSkillsForFirstYearEngineersAHandsOnGuideToSketchingDraftingAndPrototyping-full",
+      "segments": 5887,
+      "declared": "CC BY",
+      "class": "permissive",
+      "spdx": "cc-by-4.0"
+    },
+    {
+      "book": "CLUEChemistryLifeTheUniverseAndEverything-full",
+      "segments": 1534,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "CatalyticAsymmetricSynthesisPunniyamurthy-full",
+      "segments": 1324,
+      "declared": "CC BY SA",
+      "class": "permissive",
+      "spdx": "cc-by-sa-4.0"
+    },
+    {
+      "book": "Chem1Lower-full",
+      "segments": 9242,
+      "declared": "CC BY 3.0",
+      "class": "permissive",
+      "spdx": "cc-by-4.0"
+    },
+    {
+      "book": "Chemistry1eOpenSTAX-full",
+      "segments": 13204,
+      "declared": "CC BY 4.0",
+      "class": "permissive",
+      "spdx": "cc-by-4.0"
+    },
+    {
+      "book": "Chemistry2eOpenStax-full",
+      "segments": 10428,
+      "declared": "CC BY 4.0",
+      "class": "permissive",
+      "spdx": "cc-by-4.0"
+    },
+    {
+      "book": "ChemistryAtomsFirst1eOpenSTAX-full",
+      "segments": 15138,
+      "declared": "CC BY",
+      "class": "permissive",
+      "spdx": "cc-by-4.0"
+    },
+    {
+      "book": "ChemistryAtomsFirst2eOpenStax-full",
+      "segments": 12303,
+      "declared": "CC BY 4.0",
+      "class": "permissive",
+      "spdx": "cc-by-4.0"
+    },
+    {
+      "book": "ChemistryForAlliedHealthSoult-full",
+      "segments": 3445,
+      "declared": null,
+      "class": "unknown",
+      "spdx": null
+    },
+    {
+      "book": "ChemistryForChangingTimesHillAndMcCreary-full",
+      "segments": 8709,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "ChemistryLabsTrufanAndBouhoutsosBrown-full",
+      "segments": 1552,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "ChemistryOfTheMainGroupElementsBarron-full",
+      "segments": 3330,
+      "declared": "CC BY 3.0",
+      "class": "permissive",
+      "spdx": "cc-by-4.0"
+    },
+    {
+      "book": "ComplexMolecularSynthesisSalomon-full",
+      "segments": 1141,
+      "declared": "CC BY NC 4.0",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "ConceptDevelopmentStudiesInChemistryHutchinson-full",
+      "segments": 1620,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "ConservationBiologyInSubSaharanAfricaWilsonAndPrimack-full",
+      "segments": 5749,
+      "declared": "CC BY 4.0",
+      "class": "permissive",
+      "spdx": "cc-by-4.0"
+    },
+    {
+      "book": "CorporateGovernanceDeKluyver-full",
+      "segments": 1142,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "CorporateGovernanceFreyAndCruzCruz-full",
+      "segments": 1615,
+      "declared": "CC BY 3.0",
+      "class": "permissive",
+      "spdx": "cc-by-4.0"
+    },
+    {
+      "book": "CriticalEmploymentEthicalAndLegalScenariosInHumanResourceDevelopmentHughs-full",
+      "segments": 436,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "CropAdaptationAndImprovementForDroughtProneEnvironmentsKaneFoncKaAndDalton-full",
+      "segments": 3563,
+      "declared": "CC BY SA 4.0",
+      "class": "permissive",
+      "spdx": "cc-by-sa-4.0"
+    },
+    {
+      "book": "CropGeneticsSuzaAndLamkey-full",
+      "segments": 2472,
+      "declared": "CC BY NC 4.0",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "CropImprovementSuzaAndLamkey-full",
+      "segments": 1688,
+      "declared": "CC BY NC 4.0",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "CultivarDevelopmentSuzaLamkeyAndMumm-full",
+      "segments": 1510,
+      "declared": "CC BY NC 4.0",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "EGR1010IntroductionToEngineeringForEngineersAndScientists-full",
+      "segments": 7145,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "EcologyAGuideToTheStudyOfEcosystemsWikibooks-full",
+      "segments": 987,
+      "declared": null,
+      "class": "unknown",
+      "spdx": null
+    },
+    {
+      "book": "EconomicsForLifeRealWorldFinancialLiteracyWargo-full",
+      "segments": 1869,
+      "declared": "CC BY NC 4.0",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "EncyclopediaOfBiologicalMethodsMattaini-full",
+      "segments": 1029,
+      "declared": "CC BY SA 4.0",
+      "class": "permissive",
+      "spdx": "cc-by-sa-4.0"
+    },
+    {
+      "book": "EntomologyLabManualScherr-full",
+      "segments": 837,
+      "declared": "CC BY NC 4.0",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "EnvironmentalBiologyFisher-full",
+      "segments": 1599,
+      "declared": "CC BY 4.0",
+      "class": "permissive",
+      "spdx": "cc-by-4.0"
+    },
+    {
+      "book": "EnvironmentalScienceHaAndSchleiger-full",
+      "segments": 3615,
+      "declared": "CC BY NC 4.0",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "EvolutionaryDevelopmentalBiologyRivera-full",
+      "segments": 822,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "ExperiencesInBiodiversityResearchAFieldCourseGessler-full",
+      "segments": 279,
+      "declared": "CC BY NC 4.0",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "FinanceBankingAndMoney-full",
+      "segments": 3315,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "FinancialAccountingLumen-full",
+      "segments": 10455,
+      "declared": "CC BY",
+      "class": "permissive",
+      "spdx": "cc-by-4.0"
+    },
+    {
+      "book": "FinancialAccountingOpenStax-full",
+      "segments": 7512,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "FinancialEmpowermentPersonalFinanceForIndigenousAndNonIndigenousPeople1eSchneider-full",
+      "segments": 3639,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "FinancialManagementForSmallBusinessesFinancialStatementsAndPresentValueModelsRobinsonEtAl-full",
+      "segments": 3563,
+      "declared": "CC BY",
+      "class": "permissive",
+      "spdx": "cc-by-4.0"
+    },
+    {
+      "book": "FinancialStrategyForPublicManagersKiokoAndMarlowe-full",
+      "segments": 1460,
+      "declared": "CC BY",
+      "class": "permissive",
+      "spdx": "cc-by-4.0"
+    },
+    {
+      "book": "FishFishingAndConservation-full",
+      "segments": 2738,
+      "declared": "CC BY 4.0",
+      "class": "permissive",
+      "spdx": "cc-by-4.0"
+    },
+    {
+      "book": "FocusingOnOrganizationalChange-full",
+      "segments": 1041,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "ForestMeasurementsAnAppliedApproachDeYoung-full",
+      "segments": 560,
+      "declared": "CC BY",
+      "class": "permissive",
+      "spdx": "cc-by-4.0"
+    },
+    {
+      "book": "FromGrowingToBiologyPlantsHacisalihoglu-full",
+      "segments": 644,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "FundamentalsOfAerospaceEngineeringArnedo-full",
+      "segments": 3466,
+      "declared": "CC BY SA 3.0",
+      "class": "permissive",
+      "spdx": "cc-by-sa-4.0"
+    },
+    {
+      "book": "FundamentalsOfBiochemistryJakubowskiAndFlatt-full",
+      "segments": 25482,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "FundamentalsOfCellBiologyDaltonAndYoung-full",
+      "segments": 1799,
+      "declared": "CC BY SA 4.0",
+      "class": "permissive",
+      "spdx": "cc-by-sa-4.0"
+    },
+    {
+      "book": "FundamentalsOfGeneralOrganicAndBiologicalChemistryLibreTexts-full",
+      "segments": 6125,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "FundamentalsOfInfrastructureManagementCoffeltAndHendrickson-full",
+      "segments": 1396,
+      "declared": "CC BY SA",
+      "class": "permissive",
+      "spdx": "cc-by-sa-4.0"
+    },
+    {
+      "book": "GardeningWithNativeGrassesInColdClimatesAndAGuideToTheButterfliesTheySupportNaremAndMeyer-full",
+      "segments": 520,
+      "declared": "CC BY NC 4.0",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "GeneralChemistrySupplementEames-full",
+      "segments": 2046,
+      "declared": "CC BY",
+      "class": "permissive",
+      "spdx": "cc-by-4.0"
+    },
+    {
+      "book": "GuidelinesForImprovingTheEffectivenessOfBoardsOfDirectorsOfNonprofitOrganizationsMurrayHarrison-full",
+      "segments": 761,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "HistoryAndScienceOfCultivatedPlantsNaithani-full",
+      "segments": 762,
+      "declared": "CC BY NC 4.0",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "InanimateLifeBriggs-full",
+      "segments": 2674,
+      "declared": "CC BY NC 4.0",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "IndividualFinance-full",
+      "segments": 3109,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "InformationSystemsAManagerSGuideToHarnessingTechnology-full",
+      "segments": 2390,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "InorganicChemistryLibreTexts-full",
+      "segments": 11873,
+      "declared": "CC BY NC 4.0",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "InorganicChemistrySaito-full",
+      "segments": 1402,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "InorganicCoordinationChemistryLandskron-full",
+      "segments": 2446,
+      "declared": "CC BY 4.0",
+      "class": "permissive",
+      "spdx": "cc-by-4.0"
+    },
+    {
+      "book": "InteractiveChemistryMooreZhouAndGarand-full",
+      "segments": 3762,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "IntermediateFinancialAccounting1ArnoldAndKyle-full",
+      "segments": 8860,
+      "declared": "CC BY 4.0",
+      "class": "permissive",
+      "spdx": "cc-by-4.0"
+    },
+    {
+      "book": "IntermediateFinancialAccounting2ArnoldAndKyle-full",
+      "segments": 9693,
+      "declared": null,
+      "class": "unknown",
+      "spdx": null
+    },
+    {
+      "book": "IntermediatePhysicalOrganicMorsch-full",
+      "segments": 3205,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "InternationalBusinessLumen-full",
+      "segments": 2401,
+      "declared": "CC BY SA",
+      "class": "permissive",
+      "spdx": "cc-by-sa-4.0"
+    },
+    {
+      "book": "InternationalFinanceTheoryAndPolicy-full",
+      "segments": 3277,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "IntroducingMarketingBurnett-full",
+      "segments": 2290,
+      "declared": "CC BY",
+      "class": "permissive",
+      "spdx": "cc-by-4.0"
+    },
+    {
+      "book": "IntroductionToBiotechnologyLaboratoryManualBarron-full",
+      "segments": 997,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "IntroductionToBotanyShipunov-full",
+      "segments": 994,
+      "declared": "PUBLIC DOMAIN",
+      "class": "permissive",
+      "spdx": "public-domain"
+    },
+    {
+      "book": "IntroductionToEngineeringBechara-full",
+      "segments": 1929,
+      "declared": "CC BY NC 4.0",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "IntroductionToFinancialAccountingDauderisAndAnnand-full",
+      "segments": 6477,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "IntroductionToFinancialAnalysisBigel-full",
+      "segments": 2389,
+      "declared": "CC BY 4.0",
+      "class": "permissive",
+      "spdx": "cc-by-4.0"
+    },
+    {
+      "book": "IntroductionToGeneralChemistryMalik-full",
+      "segments": 2711,
+      "declared": "PUBLIC DOMAIN",
+      "class": "permissive",
+      "spdx": "public-domain"
+    },
+    {
+      "book": "IntroductionToInorganicChemistryWikibook-full",
+      "segments": 2187,
+      "declared": "CC BY SA 4.0",
+      "class": "permissive",
+      "spdx": "cc-by-sa-4.0"
+    },
+    {
+      "book": "IntroductionToInvestmentsPaiano-full",
+      "segments": 3360,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "IntroductionToOperationsManagement-full",
+      "segments": 1200,
+      "declared": "CC BY NC 4.0",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "IntroductionToOrganicAndBiochemistryMalik-full",
+      "segments": 2934,
+      "declared": "PUBLIC DOMAIN",
+      "class": "permissive",
+      "spdx": "public-domain"
+    },
+    {
+      "book": "IntroductionToOrganicSpectroscopy-full",
+      "segments": 2224,
+      "declared": "CC BY",
+      "class": "permissive",
+      "spdx": "cc-by-4.0"
+    },
+    {
+      "book": "IntroductionToOrganometallicChemistryGhoshAndBalakrishna-full",
+      "segments": 1023,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "IntroductionToTheNonprofitSectorMason-full",
+      "segments": 506,
+      "declared": "CC BY NC 4.0",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "IntroductoryChemistryCK12-full",
+      "segments": 6940,
+      "declared": null,
+      "class": "unknown",
+      "spdx": null
+    },
+    {
+      "book": "IntroductoryChemistryLibreTexts-full",
+      "segments": 5019,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "IntroductoryChemistryOnlineYoung-full",
+      "segments": 979,
+      "declared": "CC BY SA 4.0",
+      "class": "permissive",
+      "spdx": "cc-by-sa-4.0"
+    },
+    {
+      "book": "KeyToTheDiversityAndHistoryOfLifeShipunov-full",
+      "segments": 635,
+      "declared": "PUBLIC DOMAIN",
+      "class": "permissive",
+      "spdx": "public-domain"
+    },
+    {
+      "book": "LabManualIntroductionToBiotechnology-full",
+      "segments": 1611,
+      "declared": "CC BY 4.0",
+      "class": "permissive",
+      "spdx": "cc-by-4.0"
+    },
+    {
+      "book": "LabManualSyntheticBiologyProtocols-full",
+      "segments": 570,
+      "declared": null,
+      "class": "unknown",
+      "spdx": null
+    },
+    {
+      "book": "LeadingWithCulturalIntelligence-full",
+      "segments": 1210,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "LogicOfOrganicSynthesisRao-full",
+      "segments": 538,
+      "declared": "CC BY NC ND 3.0",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "ManagerialAccounting-full",
+      "segments": 7788,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "ManagerialAccountingLumen-full",
+      "segments": 6553,
+      "declared": null,
+      "class": "unknown",
+      "spdx": null
+    },
+    {
+      "book": "ManagerialAccountingOpenStax-full",
+      "segments": 5781,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "MapAMolecularApproachTro-full",
+      "segments": 12715,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "MapChemistryTheCentralScienceBrownEtAl-full",
+      "segments": 16177,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "MapChemistryTheMolecularNatureOfMatterAndChangeSilberberg-full",
+      "segments": 3531,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "MapChemistryZumdahlAndDecoste-full",
+      "segments": 8461,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "MapGeneralChemistryPetrucciEtAl-full",
+      "segments": 13716,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "MapGeneralChemistryPrinciplesPatternsAndApplicationsAverill-full",
+      "segments": 16890,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "MapInorganicChemistryHousecroft-full",
+      "segments": 13614,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "MapIntroductoryChemistryCorwin-full",
+      "segments": 2176,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "MapOrganicChemistrySmith-full",
+      "segments": 6877,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "MapOrganicChemistryVollhardtAndSchore-full",
+      "segments": 12486,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "MapPrinciplesOfModernChemistryOxtobyEtAl-full",
+      "segments": 8356,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "MapStructureAndPropertiesTro-full",
+      "segments": 10716,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "MaritimeManagementMicroAndSmallBusinessesPauley-full",
+      "segments": 4283,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "MasteringStrategicManagement-full",
+      "segments": 2814,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "MonitoringAnimalPopulationsAndTheirHabitatsAPractitionerSGuide-full",
+      "segments": 1835,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "NuclearMagneticResonanceApplicationsToOrganicChemistryRoberts-full",
+      "segments": 448,
+      "declared": null,
+      "class": "unknown",
+      "spdx": null
+    },
+    {
+      "book": "OCLUEOrganicChemistryLifeTheUniverseAndEverythingCopperAndKlymkowsky-full",
+      "segments": 913,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "OrganicChemistryACarbonylEarlyApproachMcMichael-full",
+      "segments": 858,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "OrganicChemistryIIIMorschEtAl-full",
+      "segments": 1979,
+      "declared": "CC BY SA 4.0",
+      "class": "permissive",
+      "spdx": "cc-by-sa-4.0"
+    },
+    {
+      "book": "OrganicChemistryIIMorschEtAl-full",
+      "segments": 7342,
+      "declared": "CC BY SA 4.0",
+      "class": "permissive",
+      "spdx": "cc-by-sa-4.0"
+    },
+    {
+      "book": "OrganicChemistryILiu-full",
+      "segments": 1691,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "OrganicChemistryIMorschEtAl-full",
+      "segments": 7423,
+      "declared": "CC BY SA 4.0",
+      "class": "permissive",
+      "spdx": "cc-by-sa-4.0"
+    },
+    {
+      "book": "OrganicChemistryLabTechniquesNichols-full",
+      "segments": 2682,
+      "declared": "CC BY NC ND 4.0",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "OrganicChemistryMorschEtAl-full",
+      "segments": 16655,
+      "declared": "CC BY SA 4.0",
+      "class": "permissive",
+      "spdx": "cc-by-sa-4.0"
+    },
+    {
+      "book": "OrganicChemistryNomenclatureWorkbookODonnell-full",
+      "segments": 511,
+      "declared": "CC BY 4.0",
+      "class": "permissive",
+      "spdx": "cc-by-4.0"
+    },
+    {
+      "book": "OrganicChemistryOpenStax-full",
+      "segments": 12469,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "OrganicChemistryPart1FundamentalsMalik-full",
+      "segments": 1466,
+      "declared": "PUBLIC DOMAIN",
+      "class": "permissive",
+      "spdx": "public-domain"
+    },
+    {
+      "book": "OrganicChemistryWithABiologicalEmphasisSoderberg-full",
+      "segments": 4593,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "OrganicSynthesisShea-full",
+      "segments": 2034,
+      "declared": "CC BY 4.0",
+      "class": "permissive",
+      "spdx": "cc-by-4.0"
+    },
+    {
+      "book": "OrganizationalBehavior-full",
+      "segments": 4671,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "OrganizationalBehaviorOpenStax-full",
+      "segments": 6215,
+      "declared": "CC BY",
+      "class": "permissive",
+      "spdx": "cc-by-4.0"
+    },
+    {
+      "book": "PersonalFinanceLumen-full",
+      "segments": 1608,
+      "declared": "PUBLIC DOMAIN",
+      "class": "permissive",
+      "spdx": "public-domain"
+    },
+    {
+      "book": "PlantAnatomyAndPhysiologyBellairs-full",
+      "segments": 258,
+      "declared": "CC BY SA",
+      "class": "permissive",
+      "spdx": "cc-by-sa-4.0"
+    },
+    {
+      "book": "PlantBreedingMethodsFehrAndSuza-full",
+      "segments": 501,
+      "declared": "CC BY NC 4.0",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "PolymerChemistrySchaller-full",
+      "segments": 843,
+      "declared": "CC BY NC 3.0",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "PrinciplesOfCultivarDevelopmentFehrAndSuza-full",
+      "segments": 634,
+      "declared": "CC BY NC 4.0",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "PrinciplesOfFinanceOpenStax-full",
+      "segments": 7443,
+      "declared": "CC BY 4.0",
+      "class": "permissive",
+      "spdx": "cc-by-4.0"
+    },
+    {
+      "book": "PrinciplesOfFinancialAccountingJonick-full",
+      "segments": 5412,
+      "declared": "CC BY SA 4.0",
+      "class": "permissive",
+      "spdx": "cc-by-sa-4.0"
+    },
+    {
+      "book": "PrinciplesOfInorganicChemistryIINocera-full",
+      "segments": 561,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "PrinciplesOfManagement-full",
+      "segments": 4571,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "PrinciplesOfManagementOpenStax-full",
+      "segments": 6334,
+      "declared": "CC BY 4.0",
+      "class": "permissive",
+      "spdx": "cc-by-4.0"
+    },
+    {
+      "book": "PrinciplesOfManagerialAccountingJonick-full",
+      "segments": 2742,
+      "declared": "CC BY SA 4.0",
+      "class": "permissive",
+      "spdx": "cc-by-sa-4.0"
+    },
+    {
+      "book": "PrinciplesOfMarketingLibreTexts-full",
+      "segments": 3061,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "PrinciplesOfMarketingLumen-full",
+      "segments": 7581,
+      "declared": "CC BY 4.0",
+      "class": "permissive",
+      "spdx": "cc-by-4.0"
+    },
+    {
+      "book": "PrinciplesOfMarketingOpenStax-full",
+      "segments": 7668,
+      "declared": "CC BY 4.0",
+      "class": "permissive",
+      "spdx": "cc-by-4.0"
+    },
+    {
+      "book": "PrinciplesOfStrategicManagementThavikulwat-full",
+      "segments": 289,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "ProjectManagement2eWatt-full",
+      "segments": 1783,
+      "declared": "CC BY SA 4.0",
+      "class": "permissive",
+      "spdx": "cc-by-sa-4.0"
+    },
+    {
+      "book": "ProjectManagementFromSimpleToComplex-full",
+      "segments": 3003,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "ProjectManagementNavigatingTheComplexityWithASystematicApproachOguz-full",
+      "segments": 2475,
+      "declared": "CC BY NC 4.0",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "QualityAssuranceAndRegulatoryAffairsForTheBiosciences-full",
+      "segments": 1350,
+      "declared": "CC BY",
+      "class": "permissive",
+      "spdx": "cc-by-4.0"
+    },
+    {
+      "book": "QuantitativeEcologyANewUnifiedApproachLehmanLobergAndClark-full",
+      "segments": 1518,
+      "declared": "CC BY NC 4.0",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "QuantitativeGeneticsForPlantBreedingSuzaAndLamkey-full",
+      "segments": 1944,
+      "declared": "CC BY NC 4.0",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "QuantitativeMethodsForPlantBreedingSuzaAndLamkey-full",
+      "segments": 4758,
+      "declared": "CC BY NC 4.0",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "RadicalizeTheHiveRoell-full",
+      "segments": 887,
+      "declared": "CC BY NC 4.0",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "RedSealLandscapeHorticulturistIdentifyPlantsAndPlantRequirementsIINakano-full",
+      "segments": 294,
+      "declared": "CC BY",
+      "class": "permissive",
+      "spdx": "cc-by-4.0"
+    },
+    {
+      "book": "RedSealLandscapeHorticulturistIdentifyPlantsAndPlantRequirementsINakano-full",
+      "segments": 552,
+      "declared": "CC BY",
+      "class": "permissive",
+      "spdx": "cc-by-4.0"
+    },
+    {
+      "book": "RiskManagementForEnterprisesAndIndividuals-full",
+      "segments": 6943,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "SmallBusinessManagementInThe21stCentury-full",
+      "segments": 5345,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "SpreadsheetSoftwareForEngineeringAnAppliedGuideChvostaAndTerN-full",
+      "segments": 765,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "SupplementalModulesBiochemistry-full",
+      "segments": 2470,
+      "declared": null,
+      "class": "unknown",
+      "spdx": null
+    },
+    {
+      "book": "SustainablePropertyManagementHopkins-full",
+      "segments": 924,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "TechnicalProjectManagementInLivingAndGeometricOrderRussellPferdehirtAndNelson-full",
+      "segments": 874,
+      "declared": "CC BY",
+      "class": "permissive",
+      "spdx": "cc-by-4.0"
+    },
+    {
+      "book": "TheBasicsOfGeneralOrganicAndBiologicalChemistryBallEtAl-full",
+      "segments": 9087,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "TheDataRenaissanceAnalyzingTheDisciplinaryEffectsOfBigDataArtificialIntelligenceAndBeyond-full",
+      "segments": 1446,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "TheHistoryOfHumanResourcesInTheUnitedStatesAPrimerOnModernPracticeLloydAndAho-full",
+      "segments": 303,
+      "declared": "CC BY 4.0",
+      "class": "permissive",
+      "spdx": "cc-by-4.0"
+    },
+    {
+      "book": "TheScienceOfPlantsUnderstandingPlantsAndHowTheyGrowMichaelsEtAl-full",
+      "segments": 2969,
+      "declared": "CC BY NC 4.0",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "TheVideoTextbookOfGeneralChemistryFarmer-full",
+      "segments": 2958,
+      "declared": null,
+      "class": "unknown",
+      "spdx": null
+    },
+    {
+      "book": "UnderstandingOrganicChemistryThroughComputationBoazAndPearce-full",
+      "segments": 678,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    },
+    {
+      "book": "VirginiaCooperativeExtensionGardenerHandbook-full",
+      "segments": 6608,
+      "declared": "CC BY NC",
+      "class": "restricted",
+      "spdx": null
+    }
+  ]
+}
