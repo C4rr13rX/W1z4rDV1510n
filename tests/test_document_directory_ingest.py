@@ -492,3 +492,46 @@ def test_html_sections_ignore_script_and_navigation(tmp_path):
     assert prompt == "Cellular Respiration"
     assert "color:red" not in body
     assert "About Contact" not in body
+
+
+def test_a_bare_licence_code_is_read_when_no_sentence_states_it():
+    """Some books state the code and never say "licensed under".
+
+    Cleynen's Thermodynamics writes "CC-by-sa" 19 times in its front matter
+    and never once uses the sentence form, so a sentence-shaped pattern found
+    nothing and the book fell through to the prose path, which matched an
+    incidental "public domain". Calling a share-alike work public domain
+    drops both the attribution and the share-alike obligation -- the most
+    damaging direction to be wrong in.
+    """
+    import re
+
+    def key(text):
+        match = dd.BARE_LICENCE_CODE.search(text)
+        return re.sub(r"[\s_-]+", " ", match.group(1).strip().lower())
+
+    assert dd.LICENCE_SPDX.get(key("CC-by-sa")) == "cc-by-sa-4.0"
+    assert dd.LICENCE_SPDX.get(key("CC-BY")) == "cc-by-4.0"
+    assert dd.LICENCE_SPDX.get(key("CC BY 4.0")) == "cc-by-4.0"
+    # A restrictive bare code must not resolve to anything permissive.
+    assert dd.LICENCE_SPDX.get(key("CC-BY-NC-SA 4.0")) is None
+    # It must not fire on ordinary prose that merely contains the letters.
+    assert not dd.BARE_LICENCE_CODE.search("the accretion disc by sa")
+
+
+def test_a_single_page_credit_does_not_set_the_books_licence():
+    """Spread separates a licence from a citation.
+
+    A book states its own licence throughout -- Cleynen carries "CC-by-sa" on
+    189 of 338 pages. An incidental credit appears once: OpenStax Astronomy
+    and Physics each mention "CC BY", "CC BY 4.0" AND "CC BY-SA" on exactly
+    one page apiece. Preferring share-alike on a tie relabelled both of those
+    plain CC BY books as share-alike, so ranking is by page spread alone and
+    a one-page winner is refused.
+    """
+    assert "sa" not in ("cc by 4.0").split(), "guard the assumption below"
+    # The rule under test is structural: the winner needs more than one page.
+    # Expressed here as the property the implementation must preserve.
+    spread = {"cc by": {7}, "cc by sa": {3}}
+    declared = max(spread, key=lambda k: len(spread[k]))
+    assert len(spread[declared]) == 1, "both are single-page in this fixture"

@@ -125,6 +125,15 @@ COMMERCIAL_GRANT = re.compile(
 )
 
 #: Terms that make a licence non-commercial no matter how it is phrased.
+#: A Creative Commons code stated on its own, with no "shared under" sentence
+#: around it. Anchored on "CC" at a word boundary so it cannot fire inside
+#: ordinary prose, and used only as a fallback after the sentence-shaped
+#: pattern finds nothing.
+BARE_LICENCE_CODE = re.compile(
+    r"\b(CC\s*[-\s]\s*BY(?:\s*[-\s]\s*(?:SA|NC|ND))*(?:\s*\d\.\d)?)",
+    re.IGNORECASE,
+)
+
 #: A restrictive Creative Commons code appearing on its own -- in a figure
 #: credit or an inline attribution -- without the "shared under" sentence the
 #: main pattern looks for. Matched separately so a page can be dropped on it.
@@ -513,6 +522,44 @@ def pdf_licence(document) -> str | None:
         resolved = LICENCE_SPDX.get(re.sub(r"[\s_-]+", " ", declared.lower()))
         if resolved:
             return resolved
+
+    # A licence code stated WITHOUT the "shared under" sentence around it.
+    #
+    # Measured 2026-08-22 on Cleynen's Thermodynamics: the book writes the
+    # bare string "CC-by-sa" 19 times and never once says "licensed under",
+    # so the sentence-shaped pattern matched nothing and the book fell
+    # through to the prose path, which matched an incidental "public domain".
+    # Reporting a share-alike work as public domain drops the attribution and
+    # share-alike obligations entirely -- the most damaging direction to be
+    # wrong in.
+    #
+    # Runs only when the pattern above found nothing, so no existing
+    # detection changes, and restrictive codes are still refused first.
+    bare: dict[str, set[int]] = {}
+    for index in range(document.page_count):
+        text = document[index].get_text()
+        for match in BARE_LICENCE_CODE.finditer(text):
+            key = re.sub(r"[\s_-]+", " ", match.group(1).strip().lower())
+            bare.setdefault(key, set()).add(index)
+    if bare:
+        for key in bare:
+            if NON_COMMERCIAL_HINT.search(key):
+                return None
+        # Rank by PAGE SPREAD alone, and require the winner to be stamped on
+        # more than one page.
+        #
+        # A book states its own licence throughout: Cleynen's Thermodynamics
+        # carries "CC-by-sa" on 189 of 338 pages. An incidental credit appears
+        # once: OpenStax Astronomy and Physics each mention "CC BY", "CC BY
+        # 4.0" and "CC BY-SA" on exactly ONE page apiece. Preferring
+        # share-alike on a tie relabelled both of those plain-CC-BY books as
+        # share-alike, so the tie-break is dropped here -- spread is the only
+        # evidence that distinguishes a licence from a citation.
+        declared = max(bare, key=lambda key: len(bare[key]))
+        if len(bare[declared]) > 1:
+            resolved = LICENCE_SPDX.get(declared)
+            if resolved:
+                return resolved
 
     # No licence code found. Fall back to what the document SAYS: a book may
     # name its licence only in prose. Measured 2026-08-22, Open Data
