@@ -1972,9 +1972,17 @@ fn behaviour_query_frame(subset: &[String], prompt: &str) -> String {
     // the same share of the frame whatever the request's length.
     let prompt_words = prompt.split_whitespace().count();
     let canonical_words = canonical.split_whitespace().count().max(1);
-    // Target a third of the frame, the ratio the previous fixed 3x already
-    // produced for the short prompts it was tuned on.
-    let repeats = (prompt_words / (canonical_words * 2)).clamp(3, 12);
+    // Two behaviour words per three prompt words, floored at the previous
+    // fixed 3 and capped at 12.
+    //
+    // The floor keeps every short request behaving exactly as before. The
+    // ratio is set by the case that failed: observability's 18-word prompt
+    // needs 4 repetitions, one more than the old fixed weighting gave it,
+    // which is the value measured to restore component_recall from 0 to 2.
+    // A coarser divisor computed 3 for that prompt and would have shipped a
+    // change that fixed nothing.
+    let repeats =
+        ((prompt_words * 2) / (canonical_words * 3)).clamp(3, 12);
     let mut frame = String::with_capacity(
         canonical.len() * repeats + prompt.len() + repeats + 2,
     );
@@ -7124,17 +7132,35 @@ mod tests {
         let count = |frame: &str| frame.matches("correlated logging").count();
 
         let short = "Build Python audit logging.";
+        // The EXACT prompt that failed. Pinning it matters: a first attempt
+        // at this fix used a coarser divisor that computed 3 repetitions for
+        // this 18-word prompt -- byte-identical to the old fixed weighting,
+        // so it would have shipped and changed nothing. A test that only
+        // asserted "longer gets more" passed that version.
+        let failing = "Build a Python module emitting machine-readable audit \
+                       records carrying a request identifier while removing \
+                       credentials from nested data.";
         let long = "Build a Python module emitting machine-readable audit \
                     records carrying a request identifier while removing \
                     credentials from nested data and reporting every failure \
                     to the operator with a stable correlation identifier.";
 
         let short_frame = behaviour_query_frame(&subset, short);
+        let failing_frame = behaviour_query_frame(&subset, failing);
         let long_frame = behaviour_query_frame(&subset, long);
 
         // The request itself is always still present as context.
         assert!(short_frame.contains(short));
+        assert!(failing_frame.contains(failing));
         assert!(long_frame.contains(long));
+
+        // 4 repetitions is the measured threshold that restored
+        // component_recall from 0 to 2 for this prompt.
+        assert!(
+            count(&failing_frame) >= 4,
+            "the failing prompt must gain weight over the old fixed 3x, got {}",
+            count(&failing_frame),
+        );
 
         // A longer request earns proportionally more behaviour mass.
         assert!(
@@ -7144,7 +7170,7 @@ mod tests {
             count(&short_frame),
         );
         // Never fewer than the 3 the previous fixed weighting supplied.
-        assert!(count(&short_frame) >= 3, "frame was {short_frame:?}");
+        assert_eq!(count(&short_frame), 3, "frame was {short_frame:?}");
         // And bounded, so a very long request cannot drown the request out.
         assert!(count(&long_frame) <= 12, "frame was {long_frame:?}");
     }
