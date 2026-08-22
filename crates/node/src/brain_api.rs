@@ -1954,40 +1954,7 @@ fn behaviour_query_frame(subset: &[String], prompt: &str) -> String {
     // The signal is there, it is simply outweighed by the rest of the
     // sentence. Leading with the behaviour and repeating it gives the
     // component's own terms comparable mass to the surrounding request.
-    //
-    // A FIXED number of repetitions is not enough, because what it competes
-    // against is the length of the request. Measured 2026-08-22 on
-    // semantic_stress: inserting the single compound word "machine-readable"
-    // into observability's 20-word prompt emptied component_recall and the
-    // answer became an unrelated Azure SDK function. Neither "machine" nor
-    // "readable" alone did that -- only the compound, whose char motifs
-    // ("machi", "-read", "eadab") are absent from every manifest and so
-    // dilute the profile the ranking is computed over. Prepending the
-    // canonical name even ONCE more restored recall, which is what identifies
-    // the weight, rather than the vocabulary or the labels, as the cause.
-    //
-    // So repeat the behaviour in proportion to the prompt it must outweigh.
-    // A long or noisy request no longer buries the component's own terms, and
-    // a short one is unchanged in kind -- the behaviour simply keeps roughly
-    // the same share of the frame whatever the request's length.
-    let prompt_words = prompt.split_whitespace().count();
-    let canonical_words = canonical.split_whitespace().count().max(1);
-    // Target a third of the frame, the ratio the previous fixed 3x already
-    // produced for the short prompts it was tuned on.
-    let repeats = (prompt_words / (canonical_words * 2)).clamp(3, 12);
-    let mut frame = String::with_capacity(
-        canonical.len() * repeats + prompt.len() + repeats + 2,
-    );
-    // Lead with the behaviour, then the request, then the behaviour again, so
-    // the component's terms bracket the context rather than trailing it.
-    for _ in 0..repeats.saturating_sub(1) {
-        frame.push_str(&canonical);
-        frame.push(' ');
-    }
-    frame.push_str(prompt);
-    frame.push(' ');
-    frame.push_str(&canonical);
-    frame
+    format!("{canonical} {canonical} {prompt} {canonical}")
 }
 
 fn manifest_component_feature_pairs(labels: &[String]) -> Vec<Vec<String>> {
@@ -7107,46 +7074,6 @@ mod tests {
         // A language-only subset has no behaviour to name.
         let language_only = vec!["instruction_intent:LANGUAGE:PYTHON".to_string()];
         assert_eq!(behaviour_query_frame(&language_only, prompt), prompt);
-    }
-
-    #[test]
-    fn a_component_query_outweighs_the_length_of_its_request() {
-        // The behaviour has to compete with the request's own char motifs, so
-        // a fixed number of repetitions loses as the request grows. Measured
-        // 2026-08-22 on semantic_stress: adding the one compound word
-        // "machine-readable" to observability's prompt emptied
-        // component_recall entirely and the reply became an unrelated Azure
-        // SDK function -- while "machine" or "readable" alone were harmless.
-        let subset = vec![
-            "instruction_intent:LANGUAGE:PYTHON".to_string(),
-            "instruction_intent:OBSERVABILITY:CORRELATED_LOGGING".to_string(),
-        ];
-        let count = |frame: &str| frame.matches("correlated logging").count();
-
-        let short = "Build Python audit logging.";
-        let long = "Build a Python module emitting machine-readable audit \
-                    records carrying a request identifier while removing \
-                    credentials from nested data and reporting every failure \
-                    to the operator with a stable correlation identifier.";
-
-        let short_frame = behaviour_query_frame(&subset, short);
-        let long_frame = behaviour_query_frame(&subset, long);
-
-        // The request itself is always still present as context.
-        assert!(short_frame.contains(short));
-        assert!(long_frame.contains(long));
-
-        // A longer request earns proportionally more behaviour mass.
-        assert!(
-            count(&long_frame) > count(&short_frame),
-            "long frame repeated the behaviour {} times, short {}",
-            count(&long_frame),
-            count(&short_frame),
-        );
-        // Never fewer than the 3 the previous fixed weighting supplied.
-        assert!(count(&short_frame) >= 3, "frame was {short_frame:?}");
-        // And bounded, so a very long request cannot drown the request out.
-        assert!(count(&long_frame) <= 12, "frame was {long_frame:?}");
     }
 
     #[test]
