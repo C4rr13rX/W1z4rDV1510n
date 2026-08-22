@@ -214,3 +214,82 @@ def test_non_commercial_licences_are_never_permitted():
     # Commercial CC licences ARE permitted; attribution is carried by `source`.
     for licence in ("cc-by-4.0", "cc-by-sa-4.0", "public-domain"):
         assert licence in PERMISSIVE_LICENSES
+
+
+def test_a_wrapped_licence_stamp_is_still_read():
+    """PDF extraction wraps lines mid-licence.
+
+    Measured 2026-08-22 in FinancialAccountingOpenStax, the stamp extracts as
+    "shared under a CC\nBY-NC-SA 4.0". A space-only pattern missed it
+    entirely, so the book was refused for the WRONG reason -- no licence found
+    rather than a restricted one -- and the same wrap in a CC BY book would
+    have silently discarded usable material.
+    """
+    for text in ("shared under a CC\nBY-NC-SA 4.0 license",
+                 "shared under a CC BY 4.0 license",
+                 "shared under a CC\nBY-SA 4.0 license",
+                 "shared under a\nCC BY-NC 4.0 license"):
+        assert dd.PDF_LICENCE_PATTERN.search(text), text
+
+
+def test_openstax_licences_are_read_per_book_not_per_publisher():
+    """The document is the evidence, not the publisher's summary page.
+
+    OpenStax's licensing page states all their textbooks are CC BY-NC-SA.
+    Their own PDFs disagree: Chemistry 2e stamps CC BY 4.0 while Financial
+    Accounting stamps CC BY-NC-SA 4.0. Trusting the publisher would have
+    discarded usable books; trusting a folder-wide flag would have imported
+    restricted ones.
+    """
+    def resolve(stamp):
+        import re
+        match = dd.PDF_LICENCE_PATTERN.search(stamp)
+        if not match:
+            return None
+        key = re.sub(r"[\s_-]+", " ", match.group(1).strip().lower())
+        if "nc" in key.split() or "nd" in key.split():
+            return None
+        return dd.LICENCE_SPDX.get(key)
+
+    assert resolve("shared under a CC BY 4.0 license") == "cc-by-4.0"
+    assert resolve("shared under a CC\nBY-NC-SA 4.0 license") is None
+    assert resolve("shared under a CC BY-SA 4.0 license") == "cc-by-sa-4.0"
+    assert resolve("shared under a CC BY-ND 4.0 license") is None
+
+
+def test_pdf_typography_is_normalised():
+    """Ligatures and hyphenation are typesetting, not content.
+
+    Measured 2026-08-22 over two CS textbooks before the fix: 578 ligature
+    glyphs and 483 hyphen-split words. Left in, "first" is stored as "ﬁrst"
+    and "randomization" as "ran- domization", so recall fails on exactly the
+    words the section is about.
+    """
+    assert dd.normalise_pdf_text("the ﬁrst diﬃcult ﬂag") == "the first difficult flag"
+    assert dd.normalise_pdf_text("uses ran- domization to") == "uses randomization to"
+    assert dd.normalise_pdf_text("the tree\u2019s root") == "the tree's root"
+    # A genuine hyphenated compound must survive.
+    assert dd.normalise_pdf_text("a red-black tree") == "a red-black tree"
+
+
+def test_a_prose_only_licence_is_honoured():
+    """Open Data Structures never writes "CC BY"; it says so in prose.
+
+    A code-only pattern reported NO licence for a book that states
+    "Creative Commons Attribution license... including the right to make
+    commercial use of the work", and it was silently discarded.
+    """
+    assert dd.PROSE_LICENCE_HINTS[0][0].search(
+        "released under a Creative Commons Attribution license"
+    )
+    assert dd.COMMERCIAL_GRANT.search(
+        "the right to make commercial use of the work"
+    )
+    # A restriction still wins when no explicit grant is present.
+    assert dd.NON_COMMERCIAL_HINT.search("Attribution-NonCommercial 4.0")
+
+
+def test_discovered_structural_headings_are_qualified():
+    """Found empirically: 23 bare "Discussion and Exercises" prompts."""
+    assert "discussion and exercises" in dd.STRUCTURAL_HEADINGS
+    assert "chapter notes" in dd.STRUCTURAL_HEADINGS

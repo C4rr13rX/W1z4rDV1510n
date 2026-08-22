@@ -75,11 +75,45 @@ PDF_HEADING_RATIO = 1.15
 #: document itself rather than assuming one for a whole folder: measured over
 #: 183 books, 110 are CC BY-NC (no commercial use) and only 63 are permissive,
 #: so a folder-wide assumption would quietly poison a commercial corpus.
+#: `\s` rather than a literal space throughout: PDF text extraction wraps
+#: lines mid-licence. Measured 2026-08-22 in FinancialAccountingOpenStax the
+#: stamp extracts as "shared under a CC\nBY-NC-SA 4.0", which a space-only
+#: pattern misses entirely. That book was then refused for the WRONG reason --
+#: no licence found rather than a restricted one -- and the same wrap in a
+#: CC BY book would have silently discarded usable material.
 PDF_LICENCE_PATTERN = re.compile(
-    r"shared under (?:an?\s+)?"
-    r"(CC[ -]BY(?:[ -]SA|[ -]NC(?:[ -]ND)?|[ -]ND)?(?:\s*\d\.\d)?"
-    r"|public domain)",
+    r"(?:shared|licen[cs]ed|released|distributed|published|available)\s+under\s+"
+    r"(?:the\s+terms\s+of\s+)?(?:an?\s+|the\s+)?"
+    r"(CC\s*[-\s]\s*BY(?:\s*[-\s]\s*SA|\s*[-\s]\s*NC(?:\s*[-\s]\s*ND)?"
+    r"|\s*[-\s]\s*ND)?(?:\s*\d\.\d)?"
+    r"|Creative\s+Commons\s+Attribution(?:[-\s]+(?:Share\s*Alike|"
+    r"Non\s*-?\s*Commercial|No\s*Derivatives))*(?:\s*\d\.\d)?"
+    r"|public\s+domain)",
     re.IGNORECASE,
+)
+
+#: A licence named in prose rather than by code. Open Data Structures says
+#: "Creative Commons Attribution license, meaning that anyone is free to
+#: share... even commercially" and never writes "CC BY" at all, so a
+#: code-only pattern reported NO licence for a plainly usable book. The
+#: document is the evidence; the vocabulary it happens to use is not.
+PROSE_LICENCE_HINTS = (
+    (re.compile(r"creative\s+commons\s+attribution", re.I), "cc-by-4.0"),
+    (re.compile(r"public\s+domain", re.I), "public-domain"),
+)
+
+#: An explicit grant of commercial use, stated in prose. Open Data Structures
+#: says "including the right to make commercial use of the work" -- the
+#: document settling the question in its own words.
+COMMERCIAL_GRANT = re.compile(
+    r"commercial use of the work|even commercially"
+    r"|right to make commercial use",
+    re.IGNORECASE,
+)
+
+#: Terms that make a licence non-commercial no matter how it is phrased.
+NON_COMMERCIAL_HINT = re.compile(
+    r"non\s*-?\s*commercial|no\s*n?\s*-?\s*deriv|\bNC\b|\bND\b", re.I
 )
 
 #: Field names treated as already carrying a prompt or a response. Ordered:
@@ -191,6 +225,12 @@ STRUCTURAL_HEADINGS = {
     "index", "preface", "about this book", "acknowledgements",
     "acknowledgments", "further reading", "conclusion", "answers",
     "solutions", "notes", "footnotes", "appendix", "abstract",
+    # Found empirically in CS textbooks: "Discussion and Exercises"
+    # appeared as a prompt 23 times across two books, teaching nothing
+    # about any subject.
+    "discussion and exercises", "discussion", "exercises and problems",
+    "further study", "chapter notes", "bibliography", "credits",
+
 }
 
 
@@ -273,10 +313,68 @@ def pdf_licence(document) -> str | None:
         for match in PDF_LICENCE_PATTERN.finditer(document[index].get_text()):
             key = re.sub(r"[\s-]+", " ", match.group(1).strip().lower())
             counts[key] = counts.get(key, 0) + 1
-    if not counts:
-        return None
-    declared = max(counts, key=counts.get)
-    return LICENCE_SPDX.get(declared)
+    if counts:
+        declared = max(counts, key=counts.get)
+        if NON_COMMERCIAL_HINT.search(declared):
+            # Refused explicitly rather than by falling off the end of
+            # LICENCE_SPDX, so an unrecognised PERMISSIVE variant stays
+            # distinguishable from a genuinely restricted one.
+            return None
+        resolved = LICENCE_SPDX.get(re.sub(r"[\s_-]+", " ", declared.lower()))
+        if resolved:
+            return resolved
+
+    # No licence code found. Fall back to what the document SAYS: a book may
+    # name its licence only in prose. Measured 2026-08-22, Open Data
+    # Structures states "Creative Commons Attribution license, meaning that
+    # anyone is free to share... even commercially" and never writes "CC BY",
+    # so a code-only pattern reported no licence for a plainly usable book.
+    # 24 pages, not 8: Open Data Structures states its licence on page 10,
+    # inside the preface rather than on a copyright page. A window sized to
+    # one publisher's front matter silently discarded a usable book.
+    front = "\n".join(
+        document[index].get_text() for index in range(min(document.page_count, 24))
+    )
+    for pattern, spdx in PROSE_LICENCE_HINTS:
+        window = pattern.search(front)
+        if not window:
+            continue
+        nearby = front[max(0, window.start() - 200):window.end() + 600]
+        # An explicit commercial grant outranks a stray "non-commercial"
+        # nearby: a licence that spells out "the right to make commercial use
+        # of the work" has settled the question in the document's own words.
+        if COMMERCIAL_GRANT.search(nearby):
+            return spdx
+        if NON_COMMERCIAL_HINT.search(nearby):
+            return None
+        return spdx
+    return None
+
+
+#: Typographic ligatures a PDF encodes as single glyphs. Left alone, "first"
+#: extracts as "ﬁrst" and never matches a user who types it normally.
+#: Measured 2026-08-22 over two CS textbooks: 578 occurrences.
+LIGATURES = {
+    "ﬀ": "ff", "ﬁ": "fi", "ﬂ": "fl",
+    "ﬃ": "ffi", "ﬄ": "ffl", "ﬅ": "st", "ﬆ": "st",
+}
+
+#: A word split across a line break by hyphenation: "ran- domization".
+#: Measured 483 times over the same two books.
+HYPHEN_BREAK = re.compile(r"(\w)-\s+(\w)")
+
+
+def normalise_pdf_text(text: str) -> str:
+    """Undo the artefacts PDF extraction introduces.
+
+    Ligatures and hyphenation are typesetting decisions, not content. Carrying
+    them into the corpus teaches the brain spellings no reader would ever
+    type, so recall fails on the exact words the section is about.
+    """
+    for glyph, plain in LIGATURES.items():
+        text = text.replace(glyph, plain)
+    text = HYPHEN_BREAK.sub(r"\1\2", text)
+    return text.replace("’", "'").replace("‘", "'")
 
 
 def pairs_from_pdf(path: Path) -> list[tuple[str, str, str]]:
@@ -334,7 +432,9 @@ def pairs_from_pdf(path: Path) -> list[tuple[str, str, str]]:
             prompt = heading
             if heading.strip().lower() in STRUCTURAL_HEADINGS and subject:
                 prompt = f"{subject}: {heading}"
-            out.append((prompt, " ".join(body).strip(), f"section:{licence}"))
+            out.append((normalise_pdf_text(prompt),
+                        normalise_pdf_text(" ".join(body)).strip(),
+                        f"section:{licence}"))
 
         for size, content in spans:
             if size >= threshold and len(content) <= 200:
