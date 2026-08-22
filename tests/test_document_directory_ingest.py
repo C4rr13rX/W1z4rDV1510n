@@ -535,3 +535,58 @@ def test_a_single_page_credit_does_not_set_the_books_licence():
     spread = {"cc by": {7}, "cc by sa": {3}}
     declared = max(spread, key=lambda k: len(spread[k]))
     assert len(spread[declared]) == 1, "both are single-page in this fixture"
+
+
+def test_typesetting_whitespace_is_normalised():
+    """Invisible spaces make a word unrecallable.
+
+    Measured across the 15 OpenStax STEM books, 100,054 typesetting spaces
+    appeared -- 78,877 narrow no-break spaces alone -- because maths
+    typesetting uses them to tune spacing around operators. They sit inside
+    words and equations, so anyone typing the same text normally misses.
+    Zero-width marks are deleted rather than spaced: one sits INSIDE a word,
+    so replacing it with a space would split the word instead of repairing it.
+    """
+    spaced = "Y1\u202f=\u202f\u200b\u202fx\u202f+\u202f5"
+    assert dd.normalise_pdf_text(spaced) == "Y1 =  x + 5"
+    for codepoint in (0x202F, 0x2002, 0x2009, 0x2003, 0x200A, 0x00A0):
+        assert dd.TYPESETTING_SPACE.search(chr(codepoint)), hex(codepoint)
+    for codepoint in (0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF):
+        assert dd.ZERO_WIDTH.search(chr(codepoint)), hex(codepoint)
+    assert not dd.ZERO_WIDTH.search(" ")
+
+
+def test_a_displayed_equation_is_not_a_section_title():
+    """Maths books set equations on their own line at body size.
+
+    Shape alone admitted them: 274 prompts in the STEM corpus were bare
+    formulas. A prompt like "y = 2(3) - 1 = 5" answers no question a reader
+    would ask, and the prose beneath it is lost along with it.
+
+    Counting letters is not enough on its own -- a formula's letters are
+    single-character variables -- so the test also asks how many real WORDS
+    the line contains.
+    """
+    for formula in ("a \u2219 (b + c) = a \u2219 b + a \u2219 c",
+                    "a3 \u2212 b3 = (a \u2212 b)(a2 + ab + b2)",
+                    "y \u2212 y1 = m(x \u2212 x1)",
+                    "am \u00b7 an = am + n"):
+        assert not dd.is_title_shaped(formula), formula
+    # A real title that merely contains an operator must survive.
+    assert dd.is_title_shaped("The Equation E = mc2")
+    assert dd.is_title_shaped("Conservation of Energy")
+
+
+def test_a_sentence_tail_is_not_a_section_title():
+    """A two-column split leaves body text ending in real punctuation.
+
+    "jar. What property of addition describes this fact?" ends in a question
+    mark, so the dangling-function-word test cannot see it, but a title does
+    not open mid-clause in lowercase.
+    """
+    assert not dd.is_title_shaped(
+        "jar. What property of addition describes this fact?")
+    assert not dd.is_title_shaped("make get a total 11% return on his $20,000?")
+    # A question used as a genuine heading starts capitalised.
+    assert dd.is_title_shaped("What Is Photosynthesis?")
+    assert dd.is_title_shaped("absolute value equations")

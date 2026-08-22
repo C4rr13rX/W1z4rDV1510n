@@ -356,6 +356,21 @@ SMART_QUOTE = re.compile(r"[“”]")
 #: codepoint means nothing outside the font that rendered it.
 PRIVATE_USE_GLYPH = re.compile(r"[-]")
 
+#: Characters that make a line read as an equation rather than a title.
+#: Includes the typographic multiplication and minus signs a maths textbook
+#: sets ("a . (b + c)" uses U+2219, not an ASCII asterisk), which an
+#: ASCII-only set missed.
+OPERATOR_CHARACTERS = "=+*/^<>≤≥≠∙·×÷±−–—∣|√∑∏∫"
+
+#: Typesetting whitespace and zero-width marks. Maths typesetting uses these
+#: to tune spacing around operators, and they are invisible to a reader --
+#: so a word carrying one cannot be recalled by anyone typing it normally.
+#: Zero-width characters are deleted outright; the spaces become one space.
+TYPESETTING_SPACE = re.compile(
+    r"[  -   　]"
+)
+ZERO_WIDTH = re.compile(r"[​‌‍⁠﻿]")
+
 #: Punctuation left stranded at the start of a heading when a two-column
 #: layout splits a line, e.g. ": Deriving Moles from Grams".
 LEADING_PUNCTUATION = re.compile(r"^[\s,.;:)\]}]+")
@@ -423,6 +438,31 @@ def is_title_shaped(line: str) -> bool:
     # Page furniture: a bare URL, or a line with no letters at all (a page
     # number, a rule, a stray figure index).
     if text.startswith(("http://", "https://")):
+        return False
+    # A displayed equation is not a section title. Maths textbooks set them on
+    # their own line at body size, so shape alone admitted them: measured on
+    # the 15 OpenStax STEM books, 274 prompts were bare formulas like
+    # "a - b = a + (-b)" and "y = 2(3) - 1 = 5". A prompt like that answers no
+    # question a reader would ask, and the prose beneath it is lost with it.
+    #
+    # Judged by density rather than by any single symbol, so a legitimate
+    # title that happens to contain one ("The Equation E = mc2") survives
+    # while a line that is mostly operators does not.
+    operators = sum(character in OPERATOR_CHARACTERS for character in text)
+    letters = sum(character.isalpha() for character in text)
+    # A formula's letters are single-character variables, so counting letters
+    # alone still admitted "a . (b + c) = a . b + a . c". Judge by how many
+    # of the WORDS are real words: a title is made of them, an equation is
+    # not.
+    words = [word for word in re.split(r"\s+", text) if word]
+    wordish = sum(1 for word in words if len(re.sub(r"[^A-Za-z]", "", word)) >= 3)
+    if operators >= 2 and (letters <= max(4, len(text) // 4) or wordish <= 1):
+        return False
+    # A tail of a sentence the column split left behind. It ends in real
+    # terminal punctuation, so the dangling-word test cannot see it, but a
+    # title does not open mid-clause with a lowercase word after a full stop
+    # or ask a question that starts lowercase.
+    if text[:1].islower() and (text.endswith(("?", "!")) or ". " in text):
         return False
     return bool(re.search(r"[A-Za-z]", text))
 
@@ -617,6 +657,17 @@ def normalise_pdf_text(text: str) -> str:
     # U+F128 that no reader could ever type -- and that the brain would learn
     # as part of the heading.
     text = PRIVATE_USE_GLYPH.sub("", text)
+    # Typesetting spaces become ordinary ones. Measured 2026-08-22 across the
+    # 15 OpenStax STEM books, 100,054 of these appear -- 78,877 narrow
+    # no-break spaces alone -- because maths typesetting uses them to tune
+    # spacing around operators. They are invisible, no reader would ever type
+    # one, and they sit INSIDE words and equations, so every term carrying one
+    # is unrecallable by anyone typing the same text normally.
+    text = TYPESETTING_SPACE.sub(" ", text)
+    # Zero-width marks are deleted rather than spaced: they sit INSIDE a word
+    # ("Y1 = ​ x + 5"), so replacing one with a space would split the word
+    # instead of repairing it.
+    text = ZERO_WIDTH.sub("", text)
     return text.replace("’", "'").replace("‘", "'")
 
 
