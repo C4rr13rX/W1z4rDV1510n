@@ -1,0 +1,30 @@
+[script]
+id          = "domain_deduction_001"
+category    = "reasoning"
+phase       = 43
+description = """
+Deduction under explicit premises — 7,011 rows from ProofWriter
+(longface/ProofWriter, Apache 2.0).
+
+Each row states plain-English facts and rules, asks whether some claim
+follows, and accepts three answers: it follows, it is contradicted, or it
+is Unknown. `Unknown` is 23% of the corpus and is the point: nothing in
+the premises reaches the question, so the correct behaviour is to decline
+rather than guess.
+
+Textbooks state conclusions; this is the only onboarded corpus that shows
+one being REACHED, and the only one carrying labelled ground truth for
+what does NOT follow.
+"""
+depends_on  = []
+
+[[inputs]]
+kind = "corpus"
+path = "/srv/wizard/corpora/deduction_reasoning.jsonl"
+
+[[benchmarks]]
+label        = "deduction: decline outside the premises"
+prompt       = "Given only these statements: Fiona is nice. Gary is nice. Nice things are kind. Does it follow that: Gary is furry."
+must_include = ["unknown"]
+min_score    = 0.3
+expected_structure = "prose"

@@ -22,10 +22,12 @@ truth attached.
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import re
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -105,6 +107,40 @@ def as_text(value) -> str:
     return " ".join(text.split())
 
 
+def parquet_rows(dataset: str, split: str):
+    """Every row of a dataset, from its single parquet file.
+
+    Paging `/rows` 100 at a time is what the API offers, but it rate-limits:
+    a 16,449-row dataset truncated at offset 5,200 with a 0.1 s delay and at
+    2,900 with exponential backoff, silently yielding a third of the data and
+    calling it done. The same dataset is one 3 MB parquet download.
+
+    Yields nothing when parquet is unavailable, so the caller can fall back.
+    """
+    try:
+        import pyarrow.parquet as parquet
+    except ImportError:
+        return
+    try:
+        listing = fetch(f"{SERVER}/parquet?dataset={urllib.parse.quote(dataset)}")
+    except Exception:
+        return
+    urls = [f["url"] for f in listing.get("parquet_files", [])
+            if f.get("split") == split]
+    for url in urls:
+        try:
+            request = urllib.request.Request(
+                url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(request, timeout=600) as response:
+                payload = response.read()
+            table = parquet.read_table(io.BytesIO(payload))
+        except Exception as error:
+            print(f"  parquet read failed: {error}", flush=True)
+            return
+        for batch in table.to_pylist():
+            yield batch
+
+
 def deduction_pair(row: dict) -> tuple[str, str] | None:
     """A prompt/response pair for a ProofWriter-shaped row.
 
@@ -172,15 +208,67 @@ def main() -> int:
 
     written = skipped = 0
     writer = RowWriter(args.out, script_id=args.script_id, source=args.label)
+
+    def emit(record: dict, index: int) -> bool:
+        pair = (deduction_pair(record) if args.shape == "deduction"
+                else generic_pair(record, args.prompt_key, args.response_key))
+        if pair is None:
+            return False
+        prompt, response = pair
+        return writer.write(Row(
+            prompt=prompt,
+            response=response,
+            ctx={"lang": "text", "intent": args.intent, "source": args.label},
+            license=licence,
+            source=f"{args.label}:{args.dataset}#{index}",
+            source_hash=hash_source(f"{prompt}\n{response}"),
+            script_id=args.script_id,
+        ))
+
     try:
+        # One parquet download beats paging: the API rate-limits and silently
+        # truncated this dataset to a third of its rows twice.
+        scanned = 0
+        for index, record in enumerate(parquet_rows(args.dataset, args.split)):
+            if index >= args.limit:
+                break
+            scanned += 1
+            if emit(record, index):
+                written += 1
+            else:
+                skipped += 1
+        if scanned:
+            print(f"read {scanned:,} rows from parquet", flush=True)
+            print(f"wrote {args.out}\n  rows written {written}\n"
+                  f"  skipped {skipped}")
+            return 0
+        print("parquet unavailable; falling back to paged rows", flush=True)
+
         for offset in range(0, args.limit, PAGE):
             url = (f"{SERVER}/rows?dataset={urllib.parse.quote(args.dataset)}"
                    f"&config={args.config}&split={args.split}"
                    f"&offset={offset}&length={PAGE}")
-            try:
-                page = fetch(url)
-            except Exception as error:
-                print(f"  stopped at offset {offset}: {error}", flush=True)
+            # The datasets-server rate-limits: a flat 0.1 s delay ran into
+            # HTTP 429 at offset 5,200 and silently truncated a 16k dataset to
+            # 5k. Back off and retry rather than treating a throttle as the
+            # end of the data.
+            page = None
+            for attempt in range(5):
+                try:
+                    page = fetch(url)
+                    break
+                except urllib.error.HTTPError as error:
+                    if error.code != 429:
+                        print(f"  stopped at offset {offset}: {error}",
+                              flush=True)
+                        break
+                    time.sleep(2 ** attempt)
+                except Exception as error:
+                    print(f"  stopped at offset {offset}: {error}", flush=True)
+                    break
+            if page is None:
+                print(f"  giving up at offset {offset} after retries",
+                      flush=True)
                 break
             rows = page.get("rows") or []
             if not rows:
@@ -210,7 +298,7 @@ def main() -> int:
                     skipped += 1
             if offset and offset % 2000 == 0:
                 print(f"  {offset} rows scanned, written={written}", flush=True)
-            time.sleep(0.1)
+            time.sleep(0.35)
     finally:
         writer.close()
 
