@@ -377,6 +377,37 @@ def normalise_pdf_text(text: str) -> str:
     return text.replace("’", "'").replace("‘", "'")
 
 
+def split_long_body(text: str) -> list[str]:
+    """Break an over-long section at sentence boundaries.
+
+    A chapter that exceeds the response cap used to be discarded whole, which
+    cost 51% of Open Data Structures' prose -- including a 25,028-character
+    B-Trees chapter. Splitting keeps the material and each part still reads as
+    continuous prose, because the break lands between sentences rather than
+    mid-word.
+    """
+    if len(text) <= MAX_RESPONSE:
+        return [text] if text else []
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    chunks: list[str] = []
+    current: list[str] = []
+    length = 0
+    for sentence in sentences:
+        # A single sentence longer than the cap cannot be placed; emitting it
+        # would fail the gate anyway, so it is dropped with the rest of the
+        # oversize run rather than silently truncated mid-thought.
+        if len(sentence) > MAX_RESPONSE:
+            continue
+        if length + len(sentence) + 1 > MAX_RESPONSE and current:
+            chunks.append(" ".join(current))
+            current, length = [], 0
+        current.append(sentence)
+        length += len(sentence) + 1
+    if current:
+        chunks.append(" ".join(current))
+    return [chunk for chunk in chunks if len(chunk) >= MIN_RESPONSE]
+
+
 def pairs_from_pdf(path: Path) -> list[tuple[str, str, str]]:
     """Rebuild sections from a PDF using type size to find headings.
 
@@ -409,13 +440,24 @@ def pairs_from_pdf(path: Path) -> list[tuple[str, str, str]]:
                 continue
             for block in blocks:
                 for line in block.get("lines", []):
-                    for span in line.get("spans", []):
-                        content = str(span.get("text") or "").strip()
-                        if not content:
-                            continue
-                        size = round(float(span.get("size") or 0.0), 1)
-                        spans.append((size, content))
-                        sizes[size] = sizes.get(size, 0) + len(content)
+                    # Join a line's spans before judging it. A ligature gets
+                    # its own span, so "SEList: A Space-Efficient Linked List"
+                    # arrives as four spans split at the "ffi" -- judged
+                    # separately, the 2-char ligature span fails the heading
+                    # test and the heading became "cient Linked List".
+                    parts = [str(span.get("text") or "")
+                             for span in line.get("spans", [])]
+                    content = normalise_pdf_text("".join(parts)).strip()
+                    if not content:
+                        continue
+                    span_sizes = [round(float(span.get("size") or 0.0), 1)
+                                  for span in line.get("spans", [])
+                                  if str(span.get("text") or "").strip()]
+                    if not span_sizes:
+                        continue
+                    size = max(span_sizes)
+                    spans.append((size, content))
+                    sizes[size] = sizes.get(size, 0) + len(content)
         if not spans or not sizes:
             return []
         body_size = max(sizes, key=sizes.get)
@@ -432,9 +474,15 @@ def pairs_from_pdf(path: Path) -> list[tuple[str, str, str]]:
             prompt = heading
             if heading.strip().lower() in STRUCTURAL_HEADINGS and subject:
                 prompt = f"{subject}: {heading}"
-            out.append((normalise_pdf_text(prompt),
-                        normalise_pdf_text(" ".join(body)).strip(),
-                        f"section:{licence}"))
+            prompt = normalise_pdf_text(prompt)
+            text = normalise_pdf_text(" ".join(body)).strip()
+            # A chapter longer than the response cap is SPLIT, not discarded.
+            # Measured 2026-08-22 on Open Data Structures, 19 sections ran
+            # past the cap and took 51% of the book's prose with them -- a
+            # 25,028-character "B-Trees" chapter was dropped whole.
+            for number, chunk in enumerate(split_long_body(text), start=1):
+                part = prompt if number == 1 else f"{prompt} (part {number})"
+                out.append((part, chunk, f"section:{licence}"))
 
         for size, content in spans:
             if size >= threshold and len(content) <= 200:

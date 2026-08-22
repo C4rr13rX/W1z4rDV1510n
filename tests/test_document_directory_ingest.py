@@ -293,3 +293,39 @@ def test_discovered_structural_headings_are_qualified():
     """Found empirically: 23 bare "Discussion and Exercises" prompts."""
     assert "discussion and exercises" in dd.STRUCTURAL_HEADINGS
     assert "chapter notes" in dd.STRUCTURAL_HEADINGS
+
+
+def test_an_oversized_section_is_split_not_discarded():
+    """A chapter past the cap used to be thrown away whole.
+
+    Measured 2026-08-22 on Open Data Structures: 19 sections ran past the
+    response cap and took 51% of the book's prose with them, including a
+    25,028-character B-Trees chapter. Splitting recovered it -- 76 rows and
+    ~221K characters became 152 rows and 726K.
+    """
+    sentence = "This sentence explains one idea about the data structure. "
+    long_body = sentence * 400  # ~23K chars, well past the cap
+    chunks = dd.split_long_body(long_body)
+
+    assert len(chunks) > 1
+    assert all(len(chunk) <= dd.MAX_RESPONSE for chunk in chunks)
+    assert all(len(chunk) >= dd.MIN_RESPONSE for chunk in chunks)
+    # Splitting must not lose most of the material.
+    assert sum(len(c) for c in chunks) > 0.9 * len(long_body.strip())
+    # A body already within the cap is returned untouched.
+    assert dd.split_long_body("short body text that fits") == [
+        "short body text that fits"
+    ]
+
+
+def test_a_ligature_does_not_truncate_a_heading():
+    """A ligature gets its own PDF span, splitting the heading line.
+
+    "SEList: A Space-Efficient Linked List" arrives as four spans broken at
+    the "ffi". Judged span-by-span, the 2-character ligature span failed the
+    heading test and the heading became "cient Linked List".
+    """
+    joined = dd.normalise_pdf_text("".join(
+        ["SEList: A Space-E", "\ufb03", "cient Linked List"]
+    ))
+    assert joined == "SEList: A Space-Efficient Linked List"
