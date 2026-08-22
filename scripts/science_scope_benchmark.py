@@ -43,26 +43,32 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 TRAINED = [
     ("What is the SI unit of force?", ("newton",)),
     ("What does the first law of thermodynamics state?",
-     ("energy", "conserv")),
-    ("What is the speed of light in a vacuum?", ("3.00", "3 x 10", "299,792",
-                                                 "2.998")),
-    ("What is entropy a measure of?", ("disorder", "randomness",
-                                       "unavailab")),
+     ("energy", "conserv|constant|neither created")),
+    ("What is the speed of light in a vacuum?",
+     ("3.00|3 x 10|299,792|2.998",)),
+    ("What is entropy a measure of?", ("disorder|randomness|unavailab",)),
     ("What is a light-year a measure of?", ("distance",)),
-    ("What holds electrons in an atom?", ("electrostatic", "coulomb",
-                                          "electric", "nucleus", "attract")),
+    ("What holds electrons in an atom?",
+     ("electrostatic|coulomb|electric|attract",)),
 ]
 
 #: Never stated in the corpus, but inside the boundary its material sets.
+#: Each pairs a required VERDICT with a required SUBJECT term, so a passage
+#: that is merely on-topic cannot pass. The verdict alternatives are spelled
+#: out because a fabric may answer "it does not" rather than "no".
 SCOPED = [
-    ("Is a neutron star made of atoms?", ("no", "neutron")),
-    ("Does a galaxy obey the conservation of energy?", ("yes", "does",
-                                                        "conserv")),
-    ("Can entropy decrease in an isolated system?", ("no", "cannot",
-                                                     "never")),
-    ("Is heat a form of energy transfer?", ("yes", "transfer", "energy")),
-    ("Do photons have mass at rest?", ("no", "zero", "massless")),
-    ("Is absolute zero reachable in practice?", ("no", "cannot", "unattain")),
+    ("Is a neutron star made of atoms?",
+     ("no|not|neutron star is not|collapsed", "neutron")),
+    ("Does a galaxy obey the conservation of energy?",
+     ("yes|it does|obeys|applies", "energy")),
+    ("Can entropy decrease in an isolated system?",
+     ("no|cannot|never|does not", "entropy")),
+    ("Is heat a form of energy transfer?",
+     ("yes|it is|is a form|transfer", "heat")),
+    ("Do photons have mass at rest?",
+     ("no|zero|massless|do not", "photon")),
+    ("Is absolute zero reachable in practice?",
+     ("no|cannot|never|unattain", "absolute zero|zero")),
 ]
 
 #: Outside the corpus entirely. Honest refusal is the correct behaviour.
@@ -82,9 +88,44 @@ def request(endpoint: str, path: str, payload: dict) -> dict:
         return json.loads(response.read())
 
 
+#: Filler a retrieved passage can be made of. A reply that is mostly this is
+#: not an answer however many topic words it happens to contain.
+FILLER = re.compile(r"^[\s.…\-_]*$")
+
+
 def answered(reply: str, accepted: tuple[str, ...]) -> bool:
-    lowered = re.sub(r"\s+", " ", reply).lower()
-    return any(term.lower() in lowered for term in accepted)
+    """True when the reply actually answers, not merely mentions the topic.
+
+    A first version used `any(term in reply)` and scored 3 of 6 scoped
+    questions correct on replies that answered none of them: "Does a galaxy
+    obey the conservation of energy?" matched a row of dots (the word
+    "conserv" appeared nowhere -- "does" did), and "Is a neutron star made of
+    atoms?" matched a passage about SGR 1806-20 that never addressed the
+    question. Rewarding topical retrieval is worse than scoring zero, because
+    it reports progress that has not happened.
+
+    So: the reply must be prose, and it must contain EVERY required term.
+    Alternatives are still expressible -- a tuple member may hold a "|" to
+    mean "any of these" -- which keeps "3.00 | 2.998 | 299,792" working for a
+    constant that has several written forms.
+    """
+    lowered = re.sub(r"\s+", " ", reply).strip().lower()
+    if not lowered or FILLER.match(lowered):
+        return False
+    # A reply with almost no letters is a figure caption or a dot leader.
+    if sum(character.isalpha() for character in lowered) < 12:
+        return False
+    for term in accepted:
+        options = [option.strip().lower() for option in term.split("|")]
+        # Match on WORD boundaries. Substring matching let the off-topic
+        # passage "a neutron star known as SGR 1806-20" satisfy the verdict
+        # "no", because "no" sits inside "known" -- so a paragraph that never
+        # answered the question scored as a correct negative answer.
+        if not any(re.search(rf"(?<![a-z]){re.escape(option)}(?![a-z])",
+                             lowered)
+                   for option in options):
+            return False
+    return True
 
 
 def main() -> int:
