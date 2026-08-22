@@ -1,0 +1,27 @@
+[script]
+id          = "domain_nanotech_001"
+category    = "reasoning"
+phase       = 42
+description = """
+Nanotechnology from the peer-reviewed literature — 1,163 article
+title/abstract pairs from the Beilstein Journal of Nanotechnology.
+
+Nanotechnology has no commercially usable textbook: DOAB exposes no
+machine-readable CC URLs for the subject, and the one result that did was
+BY-NC-ND. PubMed Central states each article's licence as an attribute
+(`license="CC BY"`) — the publisher's own declaration — which is checked
+per article before any text is kept, with an unknown licence refused
+rather than assumed. All 1,163 rows verified CC BY, 0 refused.
+"""
+depends_on  = []
+
+[[inputs]]
+kind = "corpus"
+path = "/srv/wizard/corpora/nanotech_articles.jsonl"
+
+[[benchmarks]]
+label        = "explain: nanoparticle"
+prompt       = "What are nanoparticles used for?"
+must_include = ["nano"]
+min_score    = 0.3
+expected_structure = "prose"

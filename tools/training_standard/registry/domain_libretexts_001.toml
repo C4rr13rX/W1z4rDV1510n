@@ -1,0 +1,29 @@
+[script]
+id          = "domain_libretexts_001"
+category    = "reasoning"
+phase       = 40
+description = """
+LibreTexts open textbooks — 63 books, 20,043 section pairs.
+
+Accounting, biology, chemistry, engineering and business, compiled from
+the PDFs themselves rather than from a pre-segmented dump. Each row is a
+section heading paired with the prose beneath it.
+
+Licensing is judged PER PAGE, not per book: LibreTexts titles are remixes
+that carry different licences on different pages, so 927 pages (3.7%)
+declaring CC BY-NC/ND or no licence at all are dropped while the rest of
+the book is kept. Result: 38 CC BY, 20 CC BY-SA, 5 public domain, and
+zero restricted pages admitted.
+"""
+depends_on  = []
+
+[[inputs]]
+kind = "corpus"
+path = "/srv/wizard/corpora/libretexts_textbooks.jsonl"
+
+[[benchmarks]]
+label        = "explain: photosynthesis"
+prompt       = "What is photosynthesis?"
+must_include = ["light", "energy"]
+min_score    = 0.3
+expected_structure = "prose"

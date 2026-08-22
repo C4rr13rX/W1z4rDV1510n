@@ -1,0 +1,33 @@
+[script]
+id          = "domain_stem_001"
+category    = "reasoning"
+phase       = 41
+description = """
+Commercially usable STEM textbooks — 15 books, 16,150 pages, 9,718
+section pairs.
+
+OpenStax Astronomy, College Physics, Physics, the AP Physics Collection,
+Statistics (x3), Precalculus and the full algebra ladder, plus Cleynen's
+Thermodynamics.
+
+Every title was licence-checked twice — against the OpenStax CMS API's own
+`license_name` field and against the stamp inside the PDF — because
+OpenStax first editions are CC BY while second editions are CC BY-NC-SA.
+Calculus and University Physics have no commercially usable edition and
+are therefore absent.
+
+Supplies the physics, cosmology, thermodynamics, statistics and algebra
+coverage the science-scope benchmark measures.
+"""
+depends_on  = []
+
+[[inputs]]
+kind = "corpus"
+path = "/srv/wizard/corpora/stem_textbooks.jsonl"
+
+[[benchmarks]]
+label        = "explain: entropy"
+prompt       = "What is entropy a measure of?"
+must_include = ["disorder"]
+min_score    = 0.3
+expected_structure = "prose"
