@@ -329,3 +329,59 @@ def test_a_ligature_does_not_truncate_a_heading():
         ["SEList: A Space-E", "\ufb03", "cient Linked List"]
     ))
     assert joined == "SEList: A Space-Efficient Linked List"
+
+
+def test_a_page_declaring_restrictive_rights_is_not_commercial_safe():
+    """NC/ND pages are dropped however the page happens to word it.
+
+    Measured across the 63 staged LibreTexts books, three wordings each
+    escaped a sentence-shaped licence pattern and put non-commercial content
+    into a corpus sold as commercial-safe:
+
+      * "is licensed CC BY-NC-SA 4.0"  -- no "under"
+      * "(CC BY-NC-SA 3.0; Anonymous)" -- a figure credit, no verb at all
+      * "creativecommons.org/licenses/by-nc-sa/3.0/us/" -- a bare URL
+
+    Together these accounted for 30 leaked pages in OrganicChemistryMorschEtAl
+    alone.
+    """
+    for text in (
+        "shared under a CC BY-NC 4.0 license and was authored by",
+        "This figure is licensed CC BY-NC-SA 4.0. Originally from",
+        "The relative potential energy of atomic orbitals. (CC BY-NC; Lower)",
+        "revision=1, http://creativecommons.org/licenses/by-nc-sa/3.0/us/)",
+        "figure source http://creativecommons.org/licenses/by-nc- sa/3.0/us/",
+        "shared under a not declared license and was authored, remixed",
+    ):
+        assert not dd.page_is_commercial_safe(text), text
+
+
+def test_permissive_and_ordinary_pages_stay_commercial_safe():
+    """The page filter must not eat the book.
+
+    A surname ("Ndiaye"), a subject-matter mention ("noncommercial
+    fisheries"), and an ordinary body page carry no licence at all. An
+    earlier audit pattern matched the bare letters ND and NC and flagged 27
+    such pages, which would have discarded good prose.
+    """
+    for text in (
+        "shared under a CC BY-SA 4.0 license and was authored by",
+        "Figure 3 is licensed CC BY 4.0",
+        "described in detail by Ndiaye et al. (2019) for these genotypes",
+        "Subsistence fisheries are local, noncommercial fisheries",
+        "The mole is the SI unit for amount of substance.",
+    ):
+        assert dd.page_is_commercial_safe(text), text
+
+
+def test_regex_escapes_survived_the_source_file():
+    """A corrupted escape makes a detector match nothing, silently.
+
+    `\n` written as a literal newline (and `\b` as a backspace) has broken a
+    pattern in this file before: it still compiles, still runs, and quietly
+    stops matching. Assert on the compiled pattern, not on behaviour.
+    """
+    for pattern in (dd.BARE_RESTRICTIVE_CODE, dd.PDF_LICENCE_PATTERN,
+                    dd.NON_COMMERCIAL_HINT, dd.TOC_ENTRY):
+        assert "\n" not in pattern.pattern
+        assert "\b" not in pattern.pattern

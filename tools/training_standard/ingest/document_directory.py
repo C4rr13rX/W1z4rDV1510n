@@ -88,7 +88,13 @@ PDF_LICENCE_PATTERN = re.compile(
     r"|\s*[-\s]\s*ND)?(?:\s*\d\.\d)?"
     r"|Creative\s+Commons\s+Attribution(?:[-\s]+(?:Share\s*Alike|"
     r"Non\s*-?\s*Commercial|No\s*Derivatives))*(?:\s*\d\.\d)?"
-    r"|public\s+domain)",
+    r"|public\s+domain"
+    # "shared under a not declared license" is LibreTexts' own wording for a
+    # page whose rights were never established. It has to be matchable so it
+    # can disqualify a book -- while it was unmatched, 69 such pages in
+    # IntroductionToOrganicSpectroscopy were invisible and 5 stray CC BY pages
+    # decided the whole book.
+    r"|not\s+declared)",
     re.IGNORECASE,
 )
 
@@ -112,6 +118,24 @@ COMMERCIAL_GRANT = re.compile(
 )
 
 #: Terms that make a licence non-commercial no matter how it is phrased.
+#: A restrictive Creative Commons code appearing on its own -- in a figure
+#: credit or an inline attribution -- without the "shared under" sentence the
+#: main pattern looks for. Matched separately so a page can be dropped on it.
+BARE_RESTRICTIVE_CODE = re.compile(
+    r"CC\s*[-\s]\s*BY(?:\s*[-\s]\s*(?:SA|NC|ND))*\s*[-\s]\s*(?:NC|ND)"
+    r"(?:\s*[-\s]\s*(?:SA|NC|ND))*"
+    r"|Creative\s+Commons[^.\n]{0,40}?(?:Non\s*-?\s*Commercial|No\s*Derivatives)"
+    # A licence URL, which carries no CC-code text at all. Measured across the
+    # 63 books, 11 pages cited only
+    # "creativecommons.org/licenses/by-nc-sa/3.0/us/" -- a complete and
+    # unambiguous restrictive declaration that every text-shaped pattern above
+    # misses. The optional space absorbs a PDF line break inside the path
+    # ("by-nc- sa"), seen in OrganicChemistry.
+    r"|creativecommons\.org/licenses/by(?:-\s?(?:sa|nc|nd))*-\s?(?:nc|nd)"
+    r"(?:-\s?(?:sa|nc|nd))*",
+    re.IGNORECASE,
+)
+
 NON_COMMERCIAL_HINT = re.compile(
     r"non\s*-?\s*commercial|no\s*n?\s*-?\s*deriv|\bNC\b|\bND\b", re.I
 )
@@ -300,6 +324,36 @@ LICENCE_SPDX = {
 }
 
 
+def page_is_commercial_safe(page_text: str) -> bool:
+    """False when a single page declares NC/ND rights, or none at all.
+
+    LibreTexts books are remixes: OrganicChemistryMorschEtAl carries 377
+    share-alike pages and 6 CC BY-NC ones. Judging the BOOK forced a bad
+    trade -- import the 6 restricted pages, or discard 1,722 good ones.
+    Judging the PAGE keeps the licence guarantee exact and costs only the
+    pages that actually violate it.
+
+    A page with no licence text at all is safe: most pages are body text and
+    carry no stamp. Only an explicit restrictive or undeclared statement
+    disqualifies one.
+    """
+    for match in PDF_LICENCE_PATTERN.finditer(page_text):
+        key = re.sub(r"[\s-]+", " ", match.group(1).strip().lower())
+        if "not declared" in key or NON_COMMERCIAL_HINT.search(key):
+            return False
+    # A bare restrictive code, with no "shared/licensed under" lead-in, still
+    # binds the page. Measured on OrganicChemistryMorschEtAl, 30 pages escaped
+    # the sentence-shaped pattern through two wordings it cannot see:
+    # "is licensed CC BY-NC-SA 4.0" (no "under") and the parenthetical figure
+    # credit "(CC BY-NC-SA 3.0; Anonymous)" (no verb at all).
+    #
+    # A figure credit strictly binds only that figure, but extracted page text
+    # gives no way to separate the figure from the prose around it, so the
+    # page is dropped whole. Over-dropping costs a page; under-dropping puts
+    # non-commercial content in a corpus sold as commercial-safe.
+    return not BARE_RESTRICTIVE_CODE.search(page_text)
+
+
 def pdf_licence(document) -> str | None:
     """The SPDX id a PDF declares, or None when it is not commercial-safe.
 
@@ -308,13 +362,55 @@ def pdf_licence(document) -> str | None:
     all, so a folder-wide assumption would quietly poison the corpus. An
     undeclared or NC/ND book returns None and is skipped.
     """
-    counts: dict[str, int] = {}
-    for index in range(min(document.page_count, 40)):
+    # Scan the whole book, not a front-matter window. LibreTexts stamps its
+    # licence per page, and AerodynamicsAndAircraftPerformance carries its two
+    # "CC BY 4.0" stamps past page 40 -- a 40-page window found nothing and the
+    # book fell through to the prose path, which matched an incidental
+    # "public domain" and mislabelled it.
+    # Tally DISTINCT PAGES, not raw hits. A book stamps its own licence across
+    # many pages; a figure credit repeats several times on one page. Measured
+    # on ProjectManagement2eWatt: the book's real "CC BY-SA 4.0" appears on 19
+    # separate pages, while a borrowed figure's "Creative Commons Attribution
+    # 3.0" appears 5 times on a SINGLE page. Counting raw hits let that one
+    # credit outvote the book and relabel a share-alike work as plain CC BY --
+    # under-restrictive, the one direction that actually causes harm.
+    pages: dict[str, set[int]] = {}
+    for index in range(document.page_count):
         for match in PDF_LICENCE_PATTERN.finditer(document[index].get_text()):
             key = re.sub(r"[\s-]+", " ", match.group(1).strip().lower())
-            counts[key] = counts.get(key, 0) + 1
-    if counts:
-        declared = max(counts, key=counts.get)
+            pages.setdefault(key, set()).add(index)
+    if pages:
+        # Take the MOST RESTRICTIVE licence present, not the most common one.
+        #
+        # LibreTexts books are remixes and routinely carry different licences
+        # on different pages. Majority vote is unsound for them: CADSkills has
+        # 50 CC BY pages but also 29 CC BY-NC ones, and a vote admitted the
+        # whole book -- including the NC chapters -- as commercial-safe.
+        # Restrictiveness is the only defensible reading, because the corpus
+        # ingests every page, not the winning one.
+        #
+        # A page whose licence was never declared is disqualifying for the same
+        # reason: unestablished rights are not permissive ones. Requiring more
+        # than one such page keeps a single stray "not declared" boilerplate
+        # line from rejecting an otherwise cleanly licensed book.
+        # Restricted and undeclared pages are DROPPED by the reader (see
+        # `page_is_commercial_safe`), so their presence no longer condemns the
+        # book. What must still hold is that something permissive is actually
+        # declared -- a book with no usable licence anywhere is refused below.
+        permissive = [key for key in pages
+                      if "not declared" not in key
+                      and not NON_COMMERCIAL_HINT.search(key)]
+        if not permissive:
+            return None
+        pages = {key: hit for key, hit in pages.items() if key in permissive}
+        # Share-alike outranks plain attribution: both are commercial-safe, but
+        # mislabelling SA as BY understates the obligation the corpus inherits.
+        declared = max(
+            pages,
+            key=lambda key: ("sa" in key.split()
+                             or "share" in key.replace("-", " "),
+                             len(pages[key])),
+        )
         if NON_COMMERCIAL_HINT.search(declared):
             # Refused explicitly rather than by falling off the end of
             # LICENCE_SPDX, so an unrecognised PERMISSIVE variant stays
@@ -435,7 +531,13 @@ def pairs_from_pdf(path: Path) -> list[tuple[str, str, str]]:
         sizes: dict[float, int] = {}
         for index in range(document.page_count):
             try:
-                blocks = document[index].get_text("dict")["blocks"]
+                page = document[index]
+                # Drop a page whose own stamp is NC/ND or undeclared. This is
+                # what lets a mixed-licence remix be ingested at all without
+                # ever importing a byte the licence does not cover.
+                if not page_is_commercial_safe(page.get_text()):
+                    continue
+                blocks = page.get_text("dict")["blocks"]
             except Exception:
                 continue
             for block in blocks:
