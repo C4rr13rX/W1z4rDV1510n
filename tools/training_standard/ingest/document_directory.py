@@ -343,6 +343,14 @@ MIN_SECTION_BODY = 400
 #: quote or a cited sentence -- not a title.
 SMART_QUOTE = re.compile(r"[“”]")
 
+#: Unicode private use area. Icon fonts draw callout markers here, so the
+#: codepoint means nothing outside the font that rendered it.
+PRIVATE_USE_GLYPH = re.compile(r"[-]")
+
+#: Punctuation left stranded at the start of a heading when a two-column
+#: layout splits a line, e.g. ": Deriving Moles from Grams".
+LEADING_PUNCTUATION = re.compile(r"^[\s,.;:)\]}]+")
+
 #: A closed-class word left dangling at the end of a line, which means the
 #: line was broken mid-phrase rather than written as a title. This is a
 #: grammatical property of English function words, not subject vocabulary --
@@ -556,6 +564,12 @@ def normalise_pdf_text(text: str) -> str:
     for glyph, plain in LIGATURES.items():
         text = text.replace(glyph, plain)
     text = HYPHEN_BREAK.sub(r"\1\2", text)
+    # Icon-font characters land in the Unicode private use area, where they
+    # carry no meaning outside the font that drew them. OpenStax textbooks
+    # prefix callouts with them, so 5.3% of prompts began with a glyph like
+    # U+F128 that no reader could ever type -- and that the brain would learn
+    # as part of the heading.
+    text = PRIVATE_USE_GLYPH.sub("", text)
     return text.replace("’", "'").replace("‘", "'")
 
 
@@ -662,7 +676,11 @@ def pairs_from_pdf(path: Path) -> list[tuple[str, str, str]]:
             prompt = heading
             if heading.strip().lower() in STRUCTURAL_HEADINGS and subject:
                 prompt = f"{subject}: {heading}"
-            sections.append((normalise_pdf_text(prompt), list(body)))
+            # Strip punctuation stranded at the front by a column split, so
+            # the prompt reads as the title it was: ": Deriving Moles from
+            # Grams" becomes "Deriving Moles from Grams".
+            cleaned = LEADING_PUNCTUATION.sub("", normalise_pdf_text(prompt))
+            sections.append((cleaned.strip() or prompt.strip(), list(body)))
 
         for size, content in spans:
             larger = size >= threshold and len(content) <= 200
