@@ -5621,23 +5621,6 @@ impl Brain {
             .filter(|(_, ids)| !ids.is_empty())
             .collect();
         posting_lists.sort_unstable_by_key(|(motif, ids)| (ids.len(), *motif));
-        // How rare each motif is, measured from the fabric's own postings.
-        //
-        // This is the discrimination the search already computes and then
-        // throws away. Selecting candidates keeps the rarest motifs -- so the
-        // route knows "eta"/"tal" (from "metal") are informative and " th"
-        // is not -- but the score below counted every shared motif equally,
-        // which is why a question and the section that answers it scored 0.18
-        // while sharing exactly the words that matter.
-        //
-        // Weighting by 1/postings is Bayesian, not a stop list: a motif that
-        // appears everywhere carries no evidence about WHICH binding is
-        // meant, and one that appears in a handful carries a great deal.
-        // Nothing here knows any vocabulary.
-        let motif_weight: AHashMap<[u8; 3], f32> = posting_lists
-            .iter()
-            .map(|(motif, ids)| (*motif, 1.0 / (1.0 + ids.len() as f32).ln()))
-            .collect();
         let mut candidate_evidence = AHashMap::new();
         for (_, ids) in posting_lists.into_iter().take(posting_limit) {
             add_binding_evidence(&mut candidate_evidence, ids);
@@ -5703,31 +5686,19 @@ impl Brain {
             if learned_motifs.is_empty() {
                 continue;
             }
-            // Score by EVIDENCE, not by count.
+            // Unweighted Dice over shared motifs.
             //
-            // A motif the fabric has seen in three bindings says far more
-            // about which binding is meant than one it has seen in five
-            // hundred. Unweighted Dice gave both the same vote, so a
-            // question and the section answering it shared "met/eta/tal"
-            // and "woo/ood" -- the whole point -- and still scored 0.18,
-            // because those few decisive motifs were outvoted by dozens of
-            // shared fragments of "the", "and", "ing".
-            //
-            // A motif the query carries that the fabric has never indexed
-            // gets the full weight of a singleton: unseen is maximally
-            // discriminative, not weightless.
-            let weight_of = |motif: &[u8; 3]| -> f32 {
-                motif_weight.get(motif).copied().unwrap_or(1.0 / 2.0_f32.ln())
-            };
-            let shared: f32 = query_motifs
-                .intersection(&learned_motifs)
-                .map(|motif| weight_of(motif))
-                .sum();
-            let query_mass: f32 = query_motifs.iter().map(|m| weight_of(m)).sum();
-            let learned_mass: f32 =
-                learned_motifs.iter().map(|m| weight_of(m)).sum();
-            let total = query_mass + learned_mass;
-            let score = if total > 0.0 { (2.0 * shared) / total } else { 0.0 };
+            // Weighting each motif by 1/ln(postings) -- rarity taken from the
+            // fabric's own index -- sharpened contested margins 37x, but
+            // collapsed the exact matches it was meant to help: "the first
+            // law of thermodynamics" fell from 1.0 to 0.084, because
+            // weighting the denominator penalises the short keys that match
+            // perfectly. The structural fixes around this (reachable branch,
+            // duplicates are not rivals, margin scaled by certainty) are what
+            // unblocked recall; the metric itself was never the problem.
+            let overlap = query_motifs.intersection(&learned_motifs).count() as f32;
+            let score =
+                (2.0 * overlap) / (query_motifs.len() + learned_motifs.len()) as f32;
             if score < min_score {
                 continue;
             }
