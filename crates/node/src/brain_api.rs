@@ -4214,6 +4214,29 @@ async fn h_brain_chat(
     let diagnostic_recall_derived = recall_derived_route
         .as_ref()
         .map(|(_, score, margin)| (*score, *margin));
+    // What the route WOULD have scored when it declined.
+    //
+    // Reporting the score only on success made every abstention look
+    // identical: "What is entropy a measure of?" and a genuinely unanswerable
+    // request both read `below_threshold` with no number, so there was
+    // nothing to tune against without reproducing the Dice calculation by
+    // hand outside the process. Measured that way, the short-question
+    // abstentions sit at 0.42-0.44 against a 0.45 floor -- a fact the
+    // diagnostics should have surfaced directly.
+    //
+    // Costs a second decode only on the path that already answered nothing.
+    let diagnostic_recall_derived_best = if recall_derived_route.is_none()
+        && composition_features.is_none()
+        && !raw_is_exact
+    {
+        brain
+            .decode_best_binding_by_char_motifs_wide(
+                POOL_TEXT, prompt.as_bytes(), action_pool, 0.0, 0.0,
+            )
+            .map(|(_, score, margin)| (score, margin))
+    } else {
+        None
+    };
     // Why the route did or did not run, so a silent None is never ambiguous.
     let diagnostic_recall_derived_state = if raw_is_exact {
         "skipped_exact"
@@ -4981,6 +5004,11 @@ async fn h_brain_chat(
             "recall_derived_state": diagnostic_recall_derived_state,
             "recall_derived_score": diagnostic_recall_derived.map(|(score, _)| score),
             "recall_derived_margin": diagnostic_recall_derived.map(|(_, margin)| margin),
+            // The score the route rejected, so an abstention is measurable.
+            "recall_derived_best_score":
+                diagnostic_recall_derived_best.map(|(score, _)| score),
+            "recall_derived_best_margin":
+                diagnostic_recall_derived_best.map(|(_, margin)| margin),
             "raw_fallback_inhibited": programming_language_intent
                 && !raw_is_exact
                 && !raw_programming_compatible
