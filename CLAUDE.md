@@ -47,6 +47,35 @@ cp target/release/w1z4rdv1510n-node.exe bin/w1z4rd_node.exe
 - `SENSOR` — local AI/streaming mode, wallet optional (set in `node_config.json`)
 - `PRODUCTION` — full Web3 mode, wallet required
 
+## Read before changing the brain
+
+Read the guide for the area first. These document facts that are cheap to
+verify and expensive to assume, and each records what has already been tried.
+
+| Area | Guide |
+|---|---|
+| Recall, routing, similarity scoring, `/brain/chat` answer branches | `docs/RECALL_PATH_FIELD_GUIDE.md` |
+| Curricula, corpora, benchmarks, genetic search | `docs/BRAIN_CONFIGURATION_FIELD_GUIDE.md` |
+| Fabric internals: atoms, concepts, pools, bindings | `ARCHITECTURE.md` |
+| Host operations, deployment, supervisor | `docs/PROGRAMMING_BRAIN_OPERATIONS.md` |
+
+Verify, do not assume:
+
+- **An atom is a byte, not a word.** `ARCHITECTURE.md` lines 27, 190, 281.
+  Confirm with `/stats`: `total_neurons` minus `total_concepts` is the atom
+  count — measured 879 across 2.55M neurons.
+- **The answer branch is an `if/else` chain.** An earlier arm that matches
+  and returns `None` ends it. Read `intent_diagnostics.answer_branch` rather
+  than inferring which route ran.
+- **A live curriculum trains underneath any measurement.** Sample repeatedly;
+  one probe is not verification.
+- **Onboarding a corpus requires a registry `.toml`.** Without it the driver
+  exits 2 on `unknown script` and the supervisor retry-loops, stopping ALL
+  training. `scripts/onboard_corpus.py` writes it; deploy it with the corpus.
+- **Files written over SSM land `root:root`.** The supervisor runs as
+  `ec2-user` and dies with `Permission denied` on anything it must write.
+  `chown ec2-user:ec2-user` after any host-side write.
+
 ## Important Notes
 - Always commit and push after any code changes
 - Kill old processes before deploying new binary (port conflicts cause silent API thread death)
