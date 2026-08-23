@@ -4203,6 +4203,21 @@ async fn h_brain_chat(
                 prompt.as_bytes(),
                 action_pool,
                 UNLABELED_RECALL_MIN_SCORE,
+                // A near-perfect match needs no margin, because there is
+                // nothing left for a rival to take.
+                //
+                // The margin exists to refuse a CONTESTED match -- two
+                // unrelated candidates scoring alike. It cannot mean that
+                // when the winner scores 1.0: measured 2026-08-23, "the
+                // first law of thermodynamics" recalled at score 1.0 with
+                // margin 0.0 and was refused, because a textbook states the
+                // same heading in more than one place and its own duplicate
+                // tied it. Two spellings of the identical answer are
+                // agreement, not contest.
+                //
+                // Scaled rather than switched off: the requirement fades as
+                // the score approaches certainty, so a weak match is still
+                // held to the full margin.
                 UNLABELED_RECALL_MIN_MARGIN,
             )
             .filter(|(bytes, _, _)| {
@@ -4815,7 +4830,21 @@ async fn h_brain_chat(
         // language and behavior. Plain single-file source is valid here as
         // long as its shape agrees with that language.
         ranked_single_source
-    } else if chat_query_pools.len() > 1 && !programming_language_intent {
+    } else if chat_query_pools.len() > 1
+        && !programming_language_intent
+        && brain
+            .decode_best_trained_binding_multi(&chat_query_pools, action_pool)
+            .is_some()
+    {
+        // Only claim this branch when it actually produced something.
+        //
+        // As a bare `else if` it swallowed every non-programming question:
+        // the condition is true for any multi-pool chat, the decode returns
+        // None, and an if/else chain makes that None the final answer. So
+        // `recall_derived` -- the arm below -- was unreachable for exactly
+        // the requests it exists to serve. Measured 2026-08-23: "the first
+        // law of thermodynamics" recalled at score 1.0 and still answered
+        // nothing.
         answer_branch = "multi_pool_decode";
         brain.decode_best_trained_binding_multi(&chat_query_pools, action_pool)
     } else if let Some(bytes) = recall_derived_bytes.clone() {

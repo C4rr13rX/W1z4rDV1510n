@@ -5621,6 +5621,23 @@ impl Brain {
             .filter(|(_, ids)| !ids.is_empty())
             .collect();
         posting_lists.sort_unstable_by_key(|(motif, ids)| (ids.len(), *motif));
+        // How rare each motif is, measured from the fabric's own postings.
+        //
+        // This is the discrimination the search already computes and then
+        // throws away. Selecting candidates keeps the rarest motifs -- so the
+        // route knows "eta"/"tal" (from "metal") are informative and " th"
+        // is not -- but the score below counted every shared motif equally,
+        // which is why a question and the section that answers it scored 0.18
+        // while sharing exactly the words that matter.
+        //
+        // Weighting by 1/postings is Bayesian, not a stop list: a motif that
+        // appears everywhere carries no evidence about WHICH binding is
+        // meant, and one that appears in a handful carries a great deal.
+        // Nothing here knows any vocabulary.
+        let motif_weight: AHashMap<[u8; 3], f32> = posting_lists
+            .iter()
+            .map(|(motif, ids)| (*motif, 1.0 / (1.0 + ids.len() as f32).ln()))
+            .collect();
         let mut candidate_evidence = AHashMap::new();
         for (_, ids) in posting_lists.into_iter().take(posting_limit) {
             add_binding_evidence(&mut candidate_evidence, ids);
@@ -5686,8 +5703,31 @@ impl Brain {
             if learned_motifs.is_empty() {
                 continue;
             }
-            let overlap = query_motifs.intersection(&learned_motifs).count() as f32;
-            let score = (2.0 * overlap) / (query_motifs.len() + learned_motifs.len()) as f32;
+            // Score by EVIDENCE, not by count.
+            //
+            // A motif the fabric has seen in three bindings says far more
+            // about which binding is meant than one it has seen in five
+            // hundred. Unweighted Dice gave both the same vote, so a
+            // question and the section answering it shared "met/eta/tal"
+            // and "woo/ood" -- the whole point -- and still scored 0.18,
+            // because those few decisive motifs were outvoted by dozens of
+            // shared fragments of "the", "and", "ing".
+            //
+            // A motif the query carries that the fabric has never indexed
+            // gets the full weight of a singleton: unseen is maximally
+            // discriminative, not weightless.
+            let weight_of = |motif: &[u8; 3]| -> f32 {
+                motif_weight.get(motif).copied().unwrap_or(1.0 / 2.0_f32.ln())
+            };
+            let shared: f32 = query_motifs
+                .intersection(&learned_motifs)
+                .map(|motif| weight_of(motif))
+                .sum();
+            let query_mass: f32 = query_motifs.iter().map(|m| weight_of(m)).sum();
+            let learned_mass: f32 =
+                learned_motifs.iter().map(|m| weight_of(m)).sum();
+            let total = query_mass + learned_mass;
+            let score = if total > 0.0 { (2.0 * shared) / total } else { 0.0 };
             if score < min_score {
                 continue;
             }
@@ -5751,7 +5791,33 @@ impl Brain {
             }
         }
         let runner_score = if selected == 0 {
-            ranked.get(1).map(|candidate| candidate.1).unwrap_or(0.0)
+            // A candidate carrying the SAME answer is not a rival.
+            //
+            // The margin exists to refuse a contested match -- two different
+            // answers scoring alike, where picking either is a guess. A
+            // textbook states the same section in several places, so the
+            // winner's own duplicate sat at rank 2 with an identical score
+            // and drove the margin to 0. Measured 2026-08-23: "the first law
+            // of thermodynamics" scored 1.0 and "What does the first law of
+            // thermodynamics state?" scored 0.789, both refused for want of
+            // separation from themselves.
+            //
+            // Comparing the decoded bytes settles it without a threshold:
+            // agreement between duplicates is evidence FOR an answer, and
+            // only a genuinely different answer can contest it.
+            // `ranked` can be empty here -- the surrounding code reaches this
+            // point before establishing that a winner exists, which is why
+            // the original used `.get(1)`. Indexing [0] directly panicked the
+            // whole chat path.
+            match ranked.first() {
+                Some((winner_bytes, _, _)) => ranked
+                    .iter()
+                    .skip(1)
+                    .find(|candidate| &candidate.0 != winner_bytes)
+                    .map(|candidate| candidate.1)
+                    .unwrap_or(0.0),
+                None => 0.0,
+            }
         } else {
             let selected_labels = &label_sets[selected];
             ranked
@@ -5767,7 +5833,21 @@ impl Brain {
         };
         let (bytes, score, _) = ranked.into_iter().nth(selected)?;
         let margin = score - runner_score;
-        (margin >= min_margin).then_some((bytes, score, margin))
+        // Require less separation as the winner approaches certainty.
+        //
+        // The margin refuses a CONTESTED match -- two unrelated candidates
+        // scoring alike, where picking either is a guess. That reasoning does
+        // not hold at the top of the range: measured 2026-08-23, "the first
+        // law of thermodynamics" scored 1.0 with margin 0.0 and was refused,
+        // because a textbook prints the same heading in more than one place
+        // and the answer's own duplicate tied it. Two spellings of one answer
+        // are agreement, not contest.
+        //
+        // Scaled by (1 - score) rather than switched off above a cutoff, so a
+        // weak match still faces the full requirement and there is no edge to
+        // sit exactly on.
+        let required_margin = min_margin * (1.0 - score).max(0.0);
+        (margin >= required_margin).then_some((bytes, score, margin))
     }
 
     fn best_binding_match_atom_tier(&self, query_pool: PoolId) -> BindingMatch {
