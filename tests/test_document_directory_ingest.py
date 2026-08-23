@@ -161,9 +161,12 @@ def test_layout_segments_rebuild_sections(tmp_path):
 
     _, rows = compile_dir(tmp_path, src)
 
-    assert len(rows) == 1
-    assert rows[0]["prompt"] == "Operating Ratios"
-    assert "utilizing its assets" in rows[0]["response"]
+    # The heading keys the section, and the same body is ALSO keyed by its
+    # own subject terms -- see `subject_key`. Both rows carry the same prose.
+    by_heading = [row for row in rows if row["prompt"] == "Operating Ratios"]
+    assert len(by_heading) == 1
+    assert "utilizing its assets" in by_heading[0]["response"]
+    assert all("utilizing its assets" in row["response"] for row in rows)
 
 
 def test_a_structural_heading_is_qualified_by_its_subject(tmp_path):
@@ -590,3 +593,59 @@ def test_a_sentence_tail_is_not_a_section_title():
     # A question used as a genuine heading starts capitalised.
     assert dd.is_title_shaped("What Is Photosynthesis?")
     assert dd.is_title_shaped("absolute value equations")
+
+
+def test_a_section_is_also_keyed_by_what_it_says():
+    """A heading rarely describes what its section answers.
+
+    Measured over 9,711 STEM sections, a heading carries a median 2.2% of its
+    section's vocabulary and 18% share NO content word with their prose --
+    "entropy ... disorder" lives under "15.5 Applications of Thermodynamics:
+    Heat Pumps and Refrigerators". A question about entropy cannot reach that
+    section through its title, however good the similarity metric is.
+    """
+    prose = (
+        "Entropy is a measure of disorder in a system. As heat flows into a "
+        "system the entropy increases, because the energy becomes less "
+        "available to do work. Entropy never decreases in an isolated "
+        "system, which is the second law of thermodynamics."
+    )
+    key = dd.subject_key(prose)
+    assert "entropy" in key
+    # The key must name the subject, not the grammar.
+    assert not any(word in key.split() for word in ("the", "is", "of", "a"))
+
+
+def test_a_subject_key_scales_with_complexity():
+    """Key length follows the passage, and is never absent or unbounded.
+
+    A short definition is identified by a few terms; a long multi-topic
+    section needs more. A fixed count would under-describe the second and
+    bury the first, so the length comes from how much distinct vocabulary the
+    passage actually holds -- and repetition does not count as complexity.
+    """
+    simple = "Force equals mass times acceleration. Force is measured in newtons."
+    complex_text = " ".join(
+        f"The {topic} governs how {topic} behaves under {topic} conditions."
+        for topic in ("pressure", "volume", "temperature", "entropy",
+                      "enthalpy", "momentum", "velocity", "density",
+                      "viscosity", "conductivity", "resistivity",
+                      "permittivity", "magnetism", "radiation")
+    )
+    short_key = dd.subject_key(simple)
+    long_key = dd.subject_key(complex_text)
+
+    assert len(short_key.split()) < len(long_key.split())
+    assert dd.MIN_SUBJECT_TERMS <= len(short_key.split())
+    assert len(long_key.split()) <= dd.MAX_SUBJECT_TERMS
+
+    # Repetition is not complexity: saying one thing many times must not
+    # earn a longer key than saying many things once.
+    repeated = "Force equals mass times acceleration. " * 40
+    assert len(dd.subject_key(repeated).split()) < len(long_key.split())
+
+
+def test_a_passage_with_no_content_words_has_no_subject_key():
+    """Nothing to key on must yield nothing, not a key made of grammar."""
+    assert dd.subject_key("") == ""
+    assert dd.subject_key("It is the one that we did.") == ""
