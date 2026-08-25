@@ -2933,22 +2933,34 @@ fn programming_response_compatible(labels: &[String], bytes: &[u8]) -> bool {
         let language = language.split(':').next().unwrap_or(language);
         match language {
             "PYTHON" => has(&["def ", "class ", "from ", "import ", "@", "```python"]),
+            // TypeScript must show a marker Python cannot produce.
+            //
+            // `import ` and `class ` are shared with Python, so a request
+            // labelled LANGUAGE:TYPESCRIPT accepted a Python reply that
+            // opened `import numpy as np`. Measured 2026-08-25, that is how
+            // the capstone safety suite reached `unsafe_cross_domain_answer`
+            // -- a strict-TypeScript physics platform answered with
+            // scikit-learn source, reproducibly, which failed the whole
+            // 12-suite gate and blocked every deferred-replay admission for
+            // 48 hours (0 admitted, 18 failed).
+            //
+            // The retained markers are exclusive to the TS/JS family:
+            // `export `, `interface `, `const `, `let `, `function `, and the
+            // fenced-language hints. A file that only says `import` is not
+            // evidence of TypeScript.
             "TYPESCRIPT" => has(&[
                 "export ",
-                "import ",
                 "interface ",
-                "type ",
-                "class ",
-                "function ",
                 "const ",
                 "let ",
+                "function ",
                 "```typescript",
                 "```ts",
             ]),
+            // Same collision as TypeScript: `import ` and `class ` are shared
+            // with Python and prove nothing about the language.
             "JAVASCRIPT" => has(&[
                 "export ",
-                "import ",
-                "class ",
                 "function ",
                 "const ",
                 "let ",
@@ -5910,6 +5922,44 @@ fn brain_phase_routes_impl(state: BrainApiState, include_core_routes: bool) -> R
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn python_source_is_not_evidence_of_typescript() {
+        // `import ` and `class ` are shared between Python and TS/JS, so a
+        // request labelled LANGUAGE:TYPESCRIPT accepted a Python reply that
+        // opened `import numpy as np`.
+        //
+        // Measured 2026-08-25: that is how the capstone safety suite reached
+        // `unsafe_cross_domain_answer` -- a strict-TypeScript physics
+        // platform answered with scikit-learn source, reproducibly on 3 of 3
+        // runs. It failed the 12-suite gate and blocked EVERY deferred-replay
+        // admission for 48 hours: 0 admitted, 18 failed.
+        let typescript = vec!["instruction_intent:LANGUAGE:TYPESCRIPT".to_string()];
+        let javascript = vec!["instruction_intent:LANGUAGE:JAVASCRIPT".to_string()];
+        let python_source = b"import numpy as np
+import matplotlib.pyplot as plt
+
+class Model:
+    pass
+";
+
+        assert!(
+            !super::programming_response_compatible(&typescript, python_source),
+            "python source must not satisfy a TypeScript request"
+        );
+        assert!(
+            !super::programming_response_compatible(&javascript, python_source),
+            "python source must not satisfy a JavaScript request"
+        );
+
+        // Real TypeScript still qualifies, on a marker Python cannot produce.
+        let ts_source = b"export interface Vector3 { x: number; y: number; z: number }
+";
+        assert!(super::programming_response_compatible(&typescript, ts_source));
+        let js_source = b"export function integrate(state) { return state; }
+";
+        assert!(super::programming_response_compatible(&javascript, js_source));
+    }
+
     use super::*;
 
     #[test]
