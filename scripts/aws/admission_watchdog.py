@@ -180,6 +180,30 @@ else:
 # that as a stall is a false alarm, and one nearly sent me chasing a
 # non-problem.
 out["gating"] = running("programming_.*[.]py --endpoint")
+# Is the supervisor itself working? Between a worker finishing and its gate
+# starting, `settle_brain_for_admission` serialises every neuron and writes a
+# durable checkpoint -- no worker, no gate, tick frozen, for minutes. That is
+# a legitimate phase, and reading it as a stall raised a false alarm on a
+# perfectly healthy run (measured 2026-08-26 at row 1,895,671).
+#
+# CPU is what separates settling from wedged: the real 1h49m deadlock burned
+# 0 CPU seconds, while a settle pegs the supervisor.
+out["supervisor_busy"] = False
+try:
+    pids = subprocess.run(
+        ["pgrep", "-f", "programming_curriculum_supervisor.py"],
+        capture_output=True, text=True, timeout=30).stdout.split()
+    if pids:
+        def cpu_ticks(pid):
+            with open(f"/proc/{pid}/stat") as handle:
+                fields = handle.read().split()
+            return int(fields[13]) + int(fields[14])
+        before = sum(cpu_ticks(pid) for pid in pids)
+        time.sleep(5)
+        after = sum(cpu_ticks(pid) for pid in pids)
+        out["supervisor_busy"] = after > before
+except Exception:
+    pass
 
 # --- brain -----------------------------------------------------------------
 # Three tries before calling the brain down. A single 15-second timeout
@@ -283,8 +307,13 @@ def faults(now: dict, baseline_deferred: int) -> list[str]:
     # A frozen tick is only a fault when nothing legitimately froze it.
     if (now.get("tick_delta") == 0
             and not now.get("gating")
-            and not now.get("worker")):
-        found.append("not_training: no worker, no gate, and the tick is frozen")
+            and not now.get("worker")
+            # A settle/checkpoint between a worker and its gate has no worker
+            # and no gate either, but the supervisor is pegged doing it. Only
+            # an idle supervisor with nothing running is actually stalled.
+            and not now.get("supervisor_busy")):
+        found.append("not_training: no worker, no gate, idle supervisor, "
+                     "and the tick is frozen")
 
     if now.get("deferred", 0) > baseline_deferred:
         found.append(
@@ -310,7 +339,8 @@ def faults(now: dict, baseline_deferred: int) -> list[str]:
     # here the tick moves every poll.
     if (now.get("progress_age", 0) > 10 * 60
             and not now.get("tick_delta")
-            and not now.get("gating")):
+            and not now.get("gating")
+            and not now.get("supervisor_busy")):
         found.append(
             f"supervisor_wedged: no replay progress for "
             f"{now['progress_age']}s and the tick is frozen -- "
