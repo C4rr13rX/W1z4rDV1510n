@@ -149,6 +149,16 @@ def running(pattern):
         return False
 
 out["worker"] = running("drive_corpora_brain")
+# A live process is not the same as a working one. Measured 2026-08-26, the
+# supervisor sat in state `deferred_replay_training` for 1h49m having burned
+# 0 CPU seconds, mid-interval at 92% -- deadlocked, not training. The status
+# file was the tell: it had not been rewritten in 6,500 seconds while the
+# unit reported active and a worker PID existed.
+try:
+    out["service_log_age"] = round(
+        time.time() - os.path.getmtime(R + "/curriculum-service.stderr.log"))
+except OSError:
+    out["service_log_age"] = -1
 # A gate legitimately freezes the tick: it settles the brain first. Treating
 # that as a stall is a false alarm, and one nearly sent me chasing a
 # non-problem.
@@ -260,6 +270,20 @@ def faults(now: dict, baseline_deferred: int) -> list[str]:
 
     if 0 <= now.get("mem_free_gb", -1) < 4:
         found.append(f"memory_low: {now['mem_free_gb']}GB available")
+
+    # A training state that stops writing its status is deadlocked.
+    #
+    # `status_stale` below deliberately EXEMPTS the training states, because
+    # they legitimately run long. That exemption hid a real deadlock for
+    # 1h49m: state `deferred_replay_training`, unit active, a worker PID
+    # present, 0 CPU consumed, and the status file 6,500 s old. An interval
+    # measures ~161 min end to end but writes progress throughout, so 45
+    # minutes of total silence is never healthy.
+    if (now.get("status_age", 0) > 45 * 60
+            and not now.get("gating")):
+        found.append(
+            f"supervisor_wedged: state {now.get('state')!r} but no status "
+            f"written for {now['status_age']}s -- process alive, not working")
 
     if now.get("status_age", 0) > 3600 and now.get("state") not in (
             "deferred_replay_training", "continuous_canary", "running"):
