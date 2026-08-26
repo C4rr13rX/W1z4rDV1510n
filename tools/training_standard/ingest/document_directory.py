@@ -451,7 +451,17 @@ def subject_key(text: str) -> str:
     # that does not.
     span = max(MIN_SUBJECT_TERMS,
                min(MAX_SUBJECT_TERMS, int(len(counts) ** 0.5)))
-    ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    # Break frequency ties toward the LONGER word.
+    #
+    # Most terms in a passage appear once, so an alphabetical tie-break chose
+    # arbitrarily and produced keys made of a discipline's common vocabulary:
+    # "population sample data mean random simple" describes any statistics
+    # section, scored 0.431 against the 0.45 recall floor, and failed the
+    # continuous canary. A longer word is the more specific one -- "microbio-
+    # logist" over "group", "hypotheses" over "mean" -- which is the property
+    # that makes a key reachable.
+    ranked = sorted(counts.items(),
+                    key=lambda item: (-item[1], -len(item[0]), item[0]))
     return " ".join(word for word, _ in ranked[:span])
 
 
