@@ -159,6 +159,23 @@ try:
         time.time() - os.path.getmtime(R + "/curriculum-service.stderr.log"))
 except OSError:
     out["service_log_age"] = -1
+# The replay's own progress file is the heartbeat. Measured 2026-08-26 while
+# training ran at 936 rows/45s: the status file was 2,905 s old and the
+# service log 2,909 s, because the supervisor writes those only at state
+# TRANSITIONS -- but the progress file was 0 s old. Watching the status file
+# raised a false alarm on a perfectly healthy run.
+import glob as _glob
+progress = _glob.glob(R + "/deferred-replay-*.progress.json")
+if progress:
+    newest = max(progress, key=os.path.getmtime)
+    out["progress_age"] = round(time.time() - os.path.getmtime(newest))
+    try:
+        out["progress_row"] = json.load(open(newest)).get("ram_next_row")
+    except Exception:
+        out["progress_row"] = None
+else:
+    out["progress_age"] = -1
+    out["progress_row"] = None
 # A gate legitimately freezes the tick: it settles the brain first. Treating
 # that as a stall is a false alarm, and one nearly sent me chasing a
 # non-problem.
@@ -271,19 +288,24 @@ def faults(now: dict, baseline_deferred: int) -> list[str]:
     if 0 <= now.get("mem_free_gb", -1) < 4:
         found.append(f"memory_low: {now['mem_free_gb']}GB available")
 
-    # A training state that stops writing its status is deadlocked.
+    # A wedge is a stalled HEARTBEAT, not a stale status file.
     #
-    # `status_stale` below deliberately EXEMPTS the training states, because
-    # they legitimately run long. That exemption hid a real deadlock for
-    # 1h49m: state `deferred_replay_training`, unit active, a worker PID
-    # present, 0 CPU consumed, and the status file 6,500 s old. An interval
-    # measures ~161 min end to end but writes progress throughout, so 45
-    # minutes of total silence is never healthy.
-    if (now.get("status_age", 0) > 45 * 60
+    # The supervisor writes its status only at state transitions, so during a
+    # long replay that file is legitimately tens of minutes old -- measured
+    # 2026-08-26, 2,905 s old while training ran at 936 rows/45 s. Alarming
+    # on it was a false positive on a healthy run.
+    #
+    # What a working replay writes continuously is its own progress file. A
+    # deadlock shows as that file going stale AND the tick frozen: during the
+    # real 1h49m wedge the tick sat at 2,712,230 and nothing advanced, while
+    # here the tick moves every poll.
+    if (now.get("progress_age", 0) > 10 * 60
+            and not now.get("tick_delta")
             and not now.get("gating")):
         found.append(
-            f"supervisor_wedged: state {now.get('state')!r} but no status "
-            f"written for {now['status_age']}s -- process alive, not working")
+            f"supervisor_wedged: no replay progress for "
+            f"{now['progress_age']}s and the tick is frozen -- "
+            f"process alive, not working")
 
     if now.get("status_age", 0) > 3600 and now.get("state") not in (
             "deferred_replay_training", "continuous_canary", "running"):
