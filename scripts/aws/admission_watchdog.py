@@ -38,13 +38,26 @@ SP = pathlib.Path(__file__).resolve().parent
 PROBE = SP / "_watchdog_probe.sh"
 
 #: How long the queue may go without a single admission before that is a
-#: fault. One interval measured ~161 minutes end to end, so three hours is
-#: one missed interval and four is unambiguous.
-ADMISSION_SILENCE_LIMIT = 4 * 3600
+#: fault.
+#:
+#: One interval measures ~161 minutes end to end, so this cannot be tighter
+#: than that without firing on a healthy run. 3h20m is one interval plus a
+#: 20-minute margin -- the earliest point at which a missed admission is
+#: provable rather than suspected.
+#:
+#: A FAILED gate does not wait for this: `deferred_replay_failed` is a
+#: verdict, not silence, and is reported the moment it appears. This limit
+#: only catches the case where no verdict arrives at all.
+ADMISSION_SILENCE_LIMIT = 200 * 60
 
-#: How often to look. Cheap -- one SSM call -- and frequent enough that a
-#: stall is caught within minutes of becoming provable rather than overnight.
-POLL_SECONDS = 600
+#: How often to look.
+#:
+#: A hard fault -- dead supervisor, dead brain, frozen tick with nothing
+#: running -- is true the moment it happens, so the only thing standing
+#: between it and the alert is this interval. Ninety seconds costs one cheap
+#: SSM call per poll and bounds the wasted billing at a minute and a half
+#: rather than ten.
+POLL_SECONDS = 90
 
 #: Total watch window. Re-armed by the agent when it fires.
 DEADLINE_SECONDS = 20 * 3600
@@ -52,7 +65,7 @@ DEADLINE_SECONDS = 20 * 3600
 PROBE_BODY = r"""
 R=/srv/wizard/runtime/programming-integrated-20260713
 python3 - <<'PY'
-import json, os, time, collections, subprocess
+import json, os, re, time, collections, subprocess
 
 R = "/srv/wizard/runtime/programming-integrated-20260713"
 out = {}
@@ -94,6 +107,37 @@ resolved_times = [row.get("updated_unix") or 0
                   for row in state.values() if row["status"] == "resolved"]
 out["last_admission_age"] = (round(time.time() - max(resolved_times))
                              if resolved_times else -1)
+
+# A FAILED verdict is the loudest possible signal and must not wait for the
+# silence threshold: `deferred_replay_failed` is exactly what repeated 18
+# times over 48 hours while the instance billed and admitted nothing. Report
+# any that landed since the running binary was built, with the failing suite
+# names, so the agent starts from the cause instead of rediscovering it.
+try:
+    binary_built = os.path.getmtime(
+        "/srv/wizard/project/target/release/w1z4rd_brain_server")
+except OSError:
+    binary_built = 0
+recent_failures = []
+try:
+    for line in open(R + "/curriculum-health.jsonl", encoding="utf-8"):
+        if '"deferred_replay_failed"' not in line:
+            continue
+        event = json.loads(line)
+        if (event.get("updated_unix") or 0) < binary_built:
+            continue
+        error = str(event.get("error") or "")
+        suites = re.findall(
+            r"'name':\s*'([^']+)'[^}]*?'passed':\s*False", error)
+        recent_failures.append({
+            "at": round(time.time() - (event.get("updated_unix") or 0)),
+            "phase": event.get("phase"),
+            "suites": suites[:4],
+        })
+except Exception:
+    pass
+out["failed_since_deploy"] = len(recent_failures)
+out["last_failure"] = recent_failures[-1] if recent_failures else None
 
 # --- is anything actually running? -----------------------------------------
 def running(pattern):
@@ -183,6 +227,16 @@ def faults(now: dict, baseline_deferred: int) -> list[str]:
 
     if not now.get("brain_up"):
         found.append("brain_down: /health is not answering")
+
+    # A failed verdict is not silence -- act on it now, not in 3h20m.
+    failures = now.get("failed_since_deploy") or 0
+    if failures:
+        last = now.get("last_failure") or {}
+        suites = ", ".join(last.get("suites") or []) or "unnamed"
+        found.append(
+            f"gate_failing: {failures} deferred_replay_failed since deploy; "
+            f"latest {last.get('at')}s ago on {last.get('phase')} "
+            f"-- failing suites: {suites}")
 
     age = now.get("last_admission_age", -1)
     if age > ADMISSION_SILENCE_LIMIT:
