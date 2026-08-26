@@ -5572,7 +5572,26 @@ impl Brain {
         validator: Option<&dyn Fn(&[u8]) -> bool>,
     ) -> Option<(Vec<u8>, f32, f32)> {
         let posting_limit = if validator.is_some() {
-            WIDE_MOTIF_POSTING_LIMIT
+            // Scale the consulted postings with the query's own size.
+            //
+            // A fixed 32 covers a short request's motifs almost completely
+            // and a long one barely at all, so the same component request
+            // reaches its manifest or does not depending on how wordy the
+            // surrounding sentence is. Measured 2026-08-26 on cross_project's
+            // bounded_audit_pipeline: the PYTHON+SECRET_REDACTION subset
+            // returned observability.py for the paraphrase and NOTHING for
+            // the canonical -- identical labels, identical behaviour prefix
+            // -- and deleting the single word "JSON" from the canonical
+            // recovered it. The manifest was never scored, because it was
+            // not reachable through the 32 postings that survived.
+            //
+            // A validator can reject every closest match, so this route has
+            // to look further than one whose alternative is another route.
+            // Half the query's motifs, floored at the old 32 so no short
+            // request loses reach, and capped so a very long request cannot
+            // walk the whole index.
+            let motif_count = normalized_char_motifs(query_frame).len();
+            (motif_count / 2).clamp(WIDE_MOTIF_POSTING_LIMIT, 128)
         } else {
             NARROW_MOTIF_POSTING_LIMIT
         };

@@ -2171,10 +2171,36 @@ fn single_language_ranked_manifest(
     {
         return None;
     }
-    // Prefer a manifest that satisfies every label.
+    // Prefer a manifest that satisfies every label AND is about what was
+    // asked.
+    //
+    // Satisfying the labels is not the same as answering the request, because
+    // the extractor infers labels from wording and can be wrong about the
+    // subject entirely. Measured 2026-08-26: a request for a "CPU-first
+    // multiscale physical-world platform ... SI-units physics kernel" was
+    // labelled TYPESCRIPT + POWER_SELF:2 + ENTERPRISE:BATCHING, and
+    // `orders.ts` -- an order-management manifest -- satisfied those labels
+    // and was returned on 3 of 3 runs. That is the `unsafe_cross_domain_
+    // answer` the capstone safety suite exists to catch, and it failed the
+    // whole 12-suite gate.
+    //
+    // The subject guard is the one the composition routes already apply; the
+    // fallback arm below was given it first, but this arm runs BEFORE that
+    // one and had none.
+    // The subject guard applies only when a BEHAVIOUR was requested. A
+    // language-only request ("Build Java code.") names no subject to share,
+    // so requiring one would refuse the single manifest in that language --
+    // which is the selection this arm exists to make.
+    let names_behaviour = labels
+        .iter()
+        .any(|label| label.contains(':') && !label.contains(":LANGUAGE:"));
     if let Some(candidate) = candidates.iter().find(|candidate| {
         is_complete_file_manifest(candidate)
             && prompt_programming_response_compatible(labels, prompt, candidate)
+            && (!names_behaviour
+                || prompt_shares_manifest_subject_with_labels(
+                    labels, prompt, candidate,
+                ))
     }) {
         return Some(candidate.clone());
     }
@@ -2238,6 +2264,29 @@ fn single_language_ranked_manifest(
         .iter()
         .find(|candidate| {
             is_complete_file_manifest(candidate)
+                // Satisfying one behaviour is not enough; it must also be
+                // about what was asked.
+                //
+                // `prompt_programming_response_compatible` waives nearly
+                // every check for a complete manifest, so this fallback
+                // answered a request for a "CPU-first multiscale
+                // physical-world platform ... SI-units physics kernel"
+                // with `orders.ts`, an order-management manifest that
+                // happens to satisfy one label. Measured 2026-08-26, 3 of 3
+                // runs, and it is exactly the `unsafe_cross_domain_answer`
+                // the capstone safety suite exists to catch.
+                //
+                // The subject guard is the same one the composition routes
+                // already apply -- see
+                // `prompt_shares_manifest_subject_with_labels`. Requiring it
+                // here closes the last door a cross-domain manifest could
+                // walk through, without touching the over-labelling case
+                // this fallback was built for: migrations.py still answers a
+                // migration request, because the request's own words name
+                // what it does.
+                && prompt_shares_manifest_subject_with_labels(
+                    labels, prompt, candidate,
+                )
                 && behaviours.iter().any(|behaviour| {
                     let mut subset = language.clone();
                     subset.push((*behaviour).clone());
@@ -3295,10 +3344,26 @@ fn prompt_shares_manifest_subject(prompt: &str, bytes: &[u8]) -> bool {
 
     // A request term counts only if it is substantive: short words and the
     // scaffolding every programming prompt shares carry no subject evidence.
-    const SCAFFOLDING: [&str; 16] = [
+    // Words that carry no subject: request scaffolding, and the vocabulary
+    // of the languages themselves.
+    //
+    // A language keyword proves only that both texts are in that language.
+    // Measured 2026-08-26, a request for a "CPU-first multiscale
+    // physical-world platform ... SI-units physics kernel" shared exactly two
+    // stems with an order-management manifest -- `strict`/`string` and
+    // `typed`/`type` -- and that was enough to call them the same subject.
+    // The capstone safety suite reported `unsafe_cross_domain_answer` on 3 of
+    // 3 runs and failed the gate.
+    const SCAFFOLDING: [&str; 42] = [
         "python", "typescript", "rust", "java", "code", "write", "implement",
         "create", "build", "function", "using", "with", "that", "this", "file",
         "files",
+        // Language and type-system vocabulary. Shared by every manifest in a
+        // language, so shared by two texts that have nothing else in common.
+        "string", "number", "boolean", "object", "array", "type", "types",
+        "typed", "interface", "class", "const", "export", "import", "return",
+        "void", "null", "undefined", "true", "false", "async", "await",
+        "public", "private", "static", "readonly", "strict",
     ];
     // Match on a shared stem, not an exact token.
     //
@@ -3326,6 +3391,7 @@ fn prompt_shares_manifest_subject(prompt: &str, bytes: &[u8]) -> bool {
                     .take_while(|(left, right)| left == right)
                     .count();
                 shared >= 4 && shared >= word.len().min(term.len()).saturating_sub(2)
+
             })
         })
 }
@@ -6278,7 +6344,14 @@ class Model:
 
     #[test]
     fn single_language_ranked_manifest_beats_raw_similarity_fallback() {
-        let manifest = br#"{"files":{"service.js":"module.exports = 1;\n"}}"#.to_vec();
+        // A manifest must share the request's SUBJECT, not merely its labels
+        // -- a request for a physics platform was answered with `orders.ts`
+        // on 3 of 3 runs because the extractor labelled it BATCHING and the
+        // order manifest satisfied that label. So the fixture names what it
+        // does, as a real recalled manifest does; `module.exports = 1;`
+        // shares no word with any request and was only ever passing because
+        // nothing checked.
+        let manifest = br#"{"files":{"outbox.js":"exports.publishOutbox = function publishOutbox(outbox) { return outbox.pending; };\n"}}"#.to_vec();
         let labels = vec![
             "intent:LANGUAGE:JAVASCRIPT".to_string(),
             "intent:INTEGRATION:TRANSACTIONAL_OUTBOX".to_string(),
