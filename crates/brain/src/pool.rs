@@ -824,7 +824,48 @@ impl AtomEncoding for InstructionIntentEncoding {
         {
             emit("ENTERPRISE:SECRET_REDACTION");
         }
-        if text.contains("batch") || text.contains("chunk") {
+        // "chunk" alone does not mean batching.
+        //
+        // Measured 2026-08-26: the capstone request asks for "hierarchical
+        // refine and coarsen chunking" -- spatial subdivision of a physics
+        // domain, nothing to do with processing records in batches -- and
+        // this substring labelled it ENTERPRISE:BATCHING. An
+        // order-management manifest then satisfied that label and was
+        // returned as the answer, which the capstone safety suite reports as
+        // `unsafe_cross_domain_answer`. It was the only failing suite in the
+        // 12-suite gate.
+        //
+        // Batching is about groups of ITEMS, so require the word to appear
+        // near one. "batch" keeps its own meaning; "chunk" needs the
+        // corroboration, because it is equally at home in geometry, storage
+        // and streaming.
+        // The corroborating word has to be near "chunk", not anywhere in the
+        // request. Measured 2026-08-26, scanning the whole text still
+        // labelled the capstone prompt BATCHING: it says "hierarchical refine
+        // and coarsen chunking" in one clause and "worker array transfer
+        // budgets" in another, and `array` matched from across the sentence.
+        let chunks_items = text
+            .match_indices("chunk")
+            .any(|(start, _)| {
+                // Walk to a character boundary: slicing a &str mid-codepoint
+                // panics, and a request may contain any UTF-8.
+                let mut from = start.saturating_sub(40);
+                while from > 0 && !text.is_char_boundary(from) {
+                    from -= 1;
+                }
+                let mut to = (start + 60).min(text.len());
+                while to < text.len() && !text.is_char_boundary(to) {
+                    to += 1;
+                }
+                let window = &text[from..to];
+                window.contains("item")
+                    || window.contains("record")
+                    || window.contains("row")
+                    || window.contains("list")
+                    || window.contains("collection")
+                    || window.contains("size")
+            });
+        if text.contains("batch") || chunks_items {
             emit("ENTERPRISE:BATCHING");
         }
         if (text.contains("positive") && text.contains("size"))
