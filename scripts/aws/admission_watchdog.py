@@ -182,14 +182,23 @@ else:
 out["gating"] = running("programming_.*[.]py --endpoint")
 
 # --- brain -----------------------------------------------------------------
-try:
-    health = subprocess.run(
-        ["curl", "-fsS", "--max-time", "15",
-         "http://127.0.0.1:18095/health"],
-        capture_output=True, text=True, timeout=30)
-    out["brain_up"] = health.returncode == 0
-except Exception:
-    out["brain_up"] = False
+# Three tries before calling the brain down. A single 15-second timeout
+# fired twice on a brain that was up the whole time -- it was busy, not
+# gone -- and each false alarm costs the watchdog credibility, which is
+# how the original stall went unnoticed for two days.
+out["brain_up"] = False
+for _attempt in range(3):
+    try:
+        health = subprocess.run(
+            ["curl", "-fsS", "--max-time", "20",
+             "http://127.0.0.1:18095/health"],
+            capture_output=True, text=True, timeout=40)
+        if health.returncode == 0:
+            out["brain_up"] = True
+            break
+    except Exception:
+        pass
+    time.sleep(5)
 
 def tick():
     try:
@@ -331,6 +340,7 @@ def main() -> int:
           f"last_admission={base.get('last_admission_age')}s ago", flush=True)
 
     deadline = time.monotonic() + DEADLINE_SECONDS
+    pending: list[str] = []
     while time.monotonic() < deadline:
         time.sleep(POLL_SECONDS)
         now = probe()
@@ -339,6 +349,21 @@ def main() -> int:
 
         problems = faults(now, baseline_deferred)
         stamp = time.strftime("%H:%M:%S")
+
+        # A fault must survive a second look before it wakes anyone.
+        #
+        # Every false alarm so far came from trusting one sample: a momentary
+        # /health timeout, and a ledger read that predated three admissions
+        # already on disk. Both cleared on the very next poll. Requiring the
+        # SAME fault twice in a row costs 90 seconds of detection delay and
+        # removes the class of alarm that makes a watchdog ignorable.
+        confirmed = sorted(set(problems) & set(pending))
+        pending = problems
+        if problems and not confirmed:
+            print(f"  {stamp} unconfirmed, re-checking: {problems[0][:70]}",
+                  flush=True)
+            continue
+        problems = confirmed
         if problems:
             print(f"\n{stamp} CURRICULUM FAULT -- paid compute is not "
                   f"producing admissions")
