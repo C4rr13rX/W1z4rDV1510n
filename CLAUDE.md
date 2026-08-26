@@ -59,6 +59,14 @@ verify and expensive to assume, and each records what has already been tried.
 | Fabric internals: atoms, concepts, pools, bindings | `ARCHITECTURE.md` |
 | Host operations, deployment, supervisor | `docs/PROGRAMMING_BRAIN_OPERATIONS.md` |
 
+**Never report training as working without checking that it CONVERTS.**
+A healthy-looking curriculum that admits nothing has cost real money twice:
+the supervisor says `active`, the brain answers `/health`, the tick advances,
+and 0 intervals are admitted (measured: 0 admitted / 18 failed over 48 h).
+Run `python scripts/aws/admission_watchdog.py` in the background — it exits 2
+with the named fault, which re-invokes the agent. The measurement is the
+`resolved` count rising, not that a process is alive.
+
 Verify, do not assume:
 
 - **An atom is a byte, not a word.** `ARCHITECTURE.md` lines 27, 190, 281.
