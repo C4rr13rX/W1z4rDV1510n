@@ -1440,6 +1440,84 @@ impl Brain {
     pub fn fabric_mut(&mut self) -> &mut Fabric {
         &mut self.fabric
     }
+    /// Sizes of the Brain-level maps that live outside every pool.
+    ///
+    /// Per-pool accounting reported 425 resident neurons, 0 store-cached
+    /// neurons and empty concept indices while RSS sat at 8.63 GB growing
+    /// ~1 GB/h in 119 mmap'd blocks of 80-282 MB. None of the per-pool
+    /// structures could explain that, so the Brain-level maps -- which no
+    /// eviction path touches -- are what is left to measure.
+    ///
+    /// `lifetime_recurrences` is the prime suspect: one entry per distinct
+    /// moment ever observed, keyed by a `MomentFingerprint` that owns three
+    /// `Vec`s, and only ever cleared wholesale.
+    pub fn global_index_sizes(&self) -> serde_json::Value {
+        fn fp_bytes(fp: &MomentFingerprint) -> usize {
+            std::mem::size_of::<MomentFingerprint>()
+                + fp.pairs.len() * std::mem::size_of::<(PoolId, NeuronId)>()
+                + fp.ordered_per_pool.iter().map(|(_, v)| {
+                    std::mem::size_of::<(PoolId, Vec<NeuronId>)>()
+                        + v.len() * std::mem::size_of::<NeuronId>()
+                }).sum::<usize>()
+                + fp.members_per_pool.iter().map(|(_, v)| {
+                    std::mem::size_of::<(PoolId, Vec<NeuronId>)>()
+                        + v.len() * std::mem::size_of::<NeuronId>()
+                }).sum::<usize>()
+        }
+        let lifetime: usize = self.lifetime_recurrences.keys()
+            .map(|k| fp_bytes(k) + std::mem::size_of::<u32>()).sum();
+        let recurrences: usize = self.binding_recurrences.keys()
+            .map(|k| fp_bytes(k) + std::mem::size_of::<u32>()).sum();
+        let promoted: usize = self.promoted_fingerprints.keys()
+            .map(|k| fp_bytes(k) + std::mem::size_of::<NeuronId>()).sum();
+        let tentative: usize = self.tentative_promoted.keys()
+            .map(|k| fp_bytes(k) + std::mem::size_of::<NeuronId>()).sum();
+        let history: usize = self.moment_history.iter().map(fp_bytes).sum();
+        let seq_index: usize = self.binding_sequence_index.iter()
+            .map(|((_, _, k), v)| {
+                std::mem::size_of::<(PoolId, PoolId, Vec<NeuronId>)>()
+                    + k.len() * std::mem::size_of::<NeuronId>()
+                    + std::mem::size_of::<Vec<NeuronId>>()
+                    + v.len() * std::mem::size_of::<NeuronId>()
+            }).sum();
+        let feat_index: usize = self.binding_feature_atom_index.iter()
+            .map(|(_, v)| {
+                std::mem::size_of::<(PoolId, NeuronId)>()
+                    + std::mem::size_of::<Vec<NeuronId>>()
+                    + v.len() * std::mem::size_of::<NeuronId>()
+            }).sum();
+        let motif_index: usize = self.binding_motif_index.iter()
+            .map(|(_, v)| {
+                std::mem::size_of::<(PoolId, [u8; 3])>()
+                    + std::mem::size_of::<Vec<NeuronId>>()
+                    + v.len() * std::mem::size_of::<NeuronId>()
+            }).sum();
+        serde_json::json!({
+            "bytes": {
+                "lifetime_recurrences":       lifetime,
+                "binding_recurrences":        recurrences,
+                "promoted_fingerprints":      promoted,
+                "tentative_promoted":         tentative,
+                "moment_history":             history,
+                "binding_sequence_index":     seq_index,
+                "binding_feature_atom_index": feat_index,
+                "binding_motif_index":        motif_index,
+            },
+            "entries": {
+                "lifetime_recurrences":       self.lifetime_recurrences.len(),
+                "binding_recurrences":        self.binding_recurrences.len(),
+                "promoted_fingerprints":      self.promoted_fingerprints.len(),
+                "tentative_promoted":         self.tentative_promoted.len(),
+                "moment_history":             self.moment_history.len(),
+                "binding_sequence_index":     self.binding_sequence_index.len(),
+                "binding_feature_atom_index": self.binding_feature_atom_index.len(),
+                "binding_motif_index":        self.binding_motif_index.len(),
+            },
+            "total_bytes": lifetime + recurrences + promoted + tentative
+                + history + seq_index + feat_index + motif_index,
+        })
+    }
+
     pub fn binding_pool_id(&self) -> PoolId {
         self.binding_pool_id
     }

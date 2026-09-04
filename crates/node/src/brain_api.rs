@@ -5617,6 +5617,8 @@ async fn h_memory_residency(State(s): State<BrainApiState>) -> Json<serde_json::
         "side_structure_bytes_total": total,
         "by_structure": agg,
         "pools": pools,
+        // Brain-level maps: outside every pool, touched by no eviction path.
+        "global_indexes": b.global_index_sizes(),
     }))
 }
 
