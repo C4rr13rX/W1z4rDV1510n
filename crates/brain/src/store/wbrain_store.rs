@@ -785,6 +785,18 @@ impl WbrainNeuronStore {
     /// neuron slot. Measured 2026-09-04 the brain reached 8.7 GB RSS within
     /// 5.5 minutes of launch while every pool held ~400 resident neurons and
     /// the store cache held 0 -- so the baseline is load-time, not learned.
+    /// Size of this pool's serialized metadata blob.
+    ///
+    /// `Pool::from_wbrain_store` bincode-deserializes this whole record at
+    /// startup, and it carries `concept_multiset_to_id`,
+    /// `concept_sequence_to_id` and `sequences` -- the per-concept maps.
+    /// Measured 2026-09-04 the brain allocated 8.6 GB in its first 47 seconds
+    /// at ~1.4 GB/s and then plateaued flat, so the cost is here at load, not
+    /// in a runtime leak.
+    pub fn pool_metadata_len(&self) -> usize {
+        self.pool_metadata.read().len()
+    }
+
     pub fn ram_footprint(&self) -> (usize, usize, usize, usize) {
         let labels = self.labels.read();
         let label_bytes: usize = labels

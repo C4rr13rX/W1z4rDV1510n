@@ -2826,6 +2826,11 @@ impl Pool {
 
     /// (label_bytes, label_entries, offset_bytes, offset_entries) for the
     /// .wbrain store's eagerly-loaded per-slot tables.
+    /// Serialized size of this pool's metadata record on disk.
+    pub fn wbrain_metadata_len(&self) -> usize {
+        self.wbrain_store.as_ref().map_or(0, |s| s.pool_metadata_len())
+    }
+
     pub fn wbrain_ram_footprint(&self) -> (usize, usize, usize, usize) {
         self.wbrain_store
             .as_ref()

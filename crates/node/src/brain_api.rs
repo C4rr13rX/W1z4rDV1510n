@@ -5604,6 +5604,7 @@ async fn h_memory_residency(State(s): State<BrainApiState>) -> Json<serde_json::
             "store_label_entries":      pool.wbrain_ram_footprint().1,
             "store_offset_bytes":       pool.wbrain_ram_footprint().2,
             "store_offset_entries":     pool.wbrain_ram_footprint().3,
+            "pool_metadata_bytes":      pool.wbrain_metadata_len(),
             "concept_sequence_index":   sb.concept_sequence_index,
             "concept_multiset_index":   sb.concept_multiset_index,
             "label_index":              sb.label_index,
