@@ -1708,6 +1708,19 @@ impl Brain {
         let stage = std::time::Instant::now();
         self.fabric.advance_tick();
         profile.advance_tick_ns = stage.elapsed().as_nanos() as u64;
+        // The overlay spill must live HERE too, not only in
+        // `Brain::advance_tick`.
+        //
+        // This function advances `self.fabric` directly, so a brain driven
+        // entirely through /pretrain_bindings -- which is exactly what
+        // deferred replay does -- never executes `Brain::advance_tick` and
+        // therefore never reached the size trigger. Measured 2026-09-04 over
+        // 45 unattended minutes: overlay entries climbed 73,821 -> 261,918,
+        // straight past the 250,000 limit, with 0 flushes, 0 errors and no
+        // `overlay flush failed` warning logged, while RSS rose 9.34 -> 10.45
+        // GB. Same shape as the deadlock this trigger was added to fix: the
+        // reclaim existed but sat on a path the workload never took.
+        self.flush_overlay_if_oversized();
         (Some(id), profile)
     }
 

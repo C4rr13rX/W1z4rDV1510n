@@ -1374,6 +1374,58 @@ mod tests {
     /// pretrain-bindings timeout killed the worker before the boundary, and
     /// the flush that would have freed the memory never ran. The brain could
     /// only free this at a checkpoint it could no longer reach.
+    /// The spill must fire on the PRETRAIN path, which is the only path
+    /// deferred replay uses.
+    ///
+    /// `pretrain_binding_episode_profiled` advances `self.fabric` directly
+    /// rather than calling `Brain::advance_tick`, so a brain driven entirely
+    /// through /pretrain_bindings never executed the size trigger. Measured
+    /// 2026-09-04 over 45 unattended minutes on the live brain: overlay
+    /// entries climbed 73,821 -> 261,918, straight past the 250,000 limit,
+    /// with 0 flushes, 0 errors, and no warning logged, while RSS rose
+    /// 9.34 -> 10.45 GB on a 15.6 GB host with no swap.
+    #[test]
+    fn overlay_drains_when_driven_only_through_pretrain() {
+        let path = tmpfile("overlay-pretrain-flush");
+        let mut brain = Brain::new(BrainConfig::default());
+        brain.create_pool(
+            PoolConfig::defaults("bytes", 3),
+            Box::new(BytePassthroughEncoding {
+                prefix: "byte".into(),
+            }),
+        );
+        brain.create_pool(
+            PoolConfig::defaults("more", 4),
+            Box::new(BytePassthroughEncoding {
+                prefix: "more".into(),
+            }),
+        );
+        brain.attach_wbrain(&path).unwrap();
+        brain.set_overlay_flush_entry_limit(8);
+
+        // Drive ONLY through the pretrain entry point -- never observe(),
+        // never Brain::advance_tick(), never sleep/checkpoint. This is the
+        // deferred-replay workload.
+        for i in 0..400_u32 {
+            let a = format!("pre-a-{i}");
+            let b = format!("pre-b-{i}");
+            let frames = vec![
+                (3 as PoolId, a.as_bytes().to_vec()),
+                (4 as PoolId, b.as_bytes().to_vec()),
+            ];
+            let _ = brain.pretrain_binding_episode_profiled(&frames);
+        }
+
+        let (flushes, errors, _) = brain.overlay_flush_stats();
+        assert_eq!(errors, 0, "spills must not error");
+        assert!(
+            flushes > 0,
+            "overlay never spilled on the pretrain path -- replay would grow              unbounded to OOM exactly as measured on the live brain"
+        );
+
+        std::fs::remove_file(path).ok();
+    }
+
     #[test]
     fn overlay_drains_on_size_without_reaching_a_row_boundary() {
         let path = tmpfile("overlay-size-flush");
