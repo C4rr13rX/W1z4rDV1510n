@@ -5594,6 +5594,12 @@ async fn h_memory_residency(State(s): State<BrainApiState>) -> Json<serde_json::
             "bytes_total":              sum,
             "resident_neurons":         pool.resident_len(),
             "logical_neurons":          pool.neurons_len(),
+            // The .wbrain store keeps its OWN full-Neuron cache, separate
+            // from the pool's resident map and invisible to the tier
+            // orchestrator. `get()` inserts a clone on every read miss.
+            "store_cached_neurons":     pool.wbrain_cached_neurons(),
+            "store_page_ins":           pool.wbrain_page_ins(),
+            "store_page_outs":          pool.wbrain_page_outs(),
             "concept_sequence_index":   sb.concept_sequence_index,
             "concept_multiset_index":   sb.concept_multiset_index,
             "label_index":              sb.label_index,

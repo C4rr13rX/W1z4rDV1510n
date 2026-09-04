@@ -2805,6 +2805,25 @@ impl Pool {
         self.neurons.resident_len()
     }
 
+    /// Size of the .wbrain store's own neuron cache for this pool.
+    ///
+    /// This is a SECOND resident copy path: `WbrainNeuronStore::get` inserts
+    /// a full `Neuron` clone on every read miss, and the tier orchestrator
+    /// neither sees nor evicts it. Measured 2026-09-03: pools reported 319
+    /// resident neurons with every concept index empty, while RSS sat at
+    /// 8.34 GB and grew 16.8 MB/min.
+    pub fn wbrain_cached_neurons(&self) -> usize {
+        self.wbrain_store.as_ref().map_or(0, |s| s.resident_count())
+    }
+
+    pub fn wbrain_page_ins(&self) -> u64 {
+        self.wbrain_store.as_ref().map_or(0, |s| s.page_ins())
+    }
+
+    pub fn wbrain_page_outs(&self) -> u64 {
+        self.wbrain_store.as_ref().map_or(0, |s| s.page_outs())
+    }
+
     /// Approximate bytes held by the per-pool side structures that scale with
     /// the LOGICAL neuron count and survive eviction.
     ///
