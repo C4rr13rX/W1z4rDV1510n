@@ -158,7 +158,7 @@ common=(
   # baseline within 47 s of launch, so an 8 GB free-memory floor left it only
   # 7.26 GB -- less than it needs to exist. Deferred replay yielded four
   # times in a row at 6.7-6.8 GB available, each recycle correctly returning
-  # ~14.6 GB, and every interval died with `worker exited -15` before
+  # ~14.6 GB, and every interval died with "worker exited -15" before
   # completing. The guard was working perfectly and training still made no
   # progress.
   #

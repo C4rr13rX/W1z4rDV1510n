@@ -1,0 +1,5 @@
+# Shell scripts run on Linux hosts. A CRLF here makes bash read
+# `pipefail` as the option name and the service exit 2 on every start --
+# measured 2026-09-04, 113 systemd restarts before it was caught. Editing
+# these from Windows silently rewrites every line ending, so pin them.
+*.sh text eol=lf
