@@ -5627,6 +5627,14 @@ async fn h_memory_residency(State(s): State<BrainApiState>) -> Json<serde_json::
         // Whether the size-triggered spill is actually firing. Without this
         // an overlay that sails past its limit is indistinguishable from one
         // whose spill errors on every attempt.
+        // Outbound gossip queue. `drain_motif_gossip` has NO caller in this
+        // node, so every promoted binding pushes a GossipMotif (cloning a
+        // BrainId String and the fingerprint Vec) onto a queue nothing
+        // empties. Measured 2026-09-04: +43,398 bytes of RSS per new neuron,
+        // 1,440 of every 1,458 new neurons being bindings, at 486/min --
+        // which is the whole ~20 MB/min climb.
+        "pending_motif_count": b.pending_motif_count(),
+        "eem_fact_count":      b.eem_fact_count(),
         "overlay_flushes":     b.overlay_flush_stats().0,
         "overlay_flush_errors": b.overlay_flush_stats().1,
         "overlay_flush_limit":  b.overlay_flush_stats().2,
