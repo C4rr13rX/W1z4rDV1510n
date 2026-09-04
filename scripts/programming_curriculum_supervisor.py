@@ -1101,6 +1101,30 @@ def start_runtime_node(runtime: Path, executable: Path, endpoint: str,
         # Promotion remains atom-grounded but is deferred to the end of the
         # moment, avoiding repeated intermediate graph maintenance.
         "W1Z4RD_DEFER_PROMOTION": "1",
+        # Bound glibc's per-thread arenas.
+        #
+        # The brain runs 5 threads (1 main + 4 tokio workers) but glibc
+        # creates an arena per contending thread, each reserving 64 MB of
+        # address space and returning freed pages to the OS only under narrow
+        # conditions. Measured 2026-09-04 with MALLOC_ARENA_MAX unset: 29
+        # 64MB-aligned anon mappings holding 1.57 GB, and a 4-minute diff
+        # showed +91 MB spread across 73 mappings with 5 brand-new arenas
+        # appearing -- growth with no owning data structure, which is why
+        # every structural candidate measured near zero (resident neurons
+        # 425/4.55M, store cache 0, concept indices 0.000 GB, pool metadata
+        # 0.000 GB) against 9+ GB resident.
+        #
+        # 2 arenas is the standard mitigation for an allocation-heavy service
+        # on few threads: it costs some cross-thread malloc contention and
+        # stops the address space fanning out into arenas that never shrink.
+        "MALLOC_ARENA_MAX": "2",
+        # Return freed top-of-heap memory to the OS at a 64 MB threshold
+        # rather than glibc's dynamic default, which ratchets upward and
+        # effectively stops trimming under a sustained allocation pattern.
+        "MALLOC_TRIM_THRESHOLD_": str(64 * 1024 * 1024),
+        # Allocations at or above 16 MB go straight to mmap, so they are
+        # unmapped exactly on free instead of fragmenting an arena.
+        "MALLOC_MMAP_THRESHOLD_": str(16 * 1024 * 1024),
     })
     if deployment.is_file():
         env["W1Z4RD_BRAIN_DEPLOYMENT"] = str(deployment)
