@@ -28,6 +28,7 @@ from scripts.programming_brain_eval import (
     OOV,
     TODDLER,
 )
+import scripts.programming_curriculum_supervisor as sup
 from scripts.programming_curriculum_supervisor import (
     AdmissionInfrastructureError,
     CanaryInfrastructureError,
@@ -51,6 +52,8 @@ from scripts.programming_curriculum_supervisor import (
     latest_passing_canary_row,
     disk_floor_breached,
     memory_floor_breached,
+    replay_memory_floor_breached,
+    run_deferred_replay_worker,
     matching_runtime_node_pids,
     recycle_settled_runtime_node,
     mark_phase_forward_harvested,
@@ -286,6 +289,67 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         start = source.index('foundation = evaluate("foundation"')
         end = source.index("for passed_key, total_key", start)
         self.assertIn('"--details"', source[start:end])
+
+    def test_deferred_replay_yields_the_host_before_it_ooms(self) -> None:
+        """Deferred replay must obey the memory floor the corpus path obeys.
+
+        The corpus-phase loop guards its worker with `memory_floor_breached`,
+        but deferred replay ran a whole 131,072-row interval through one
+        blocking `subprocess.run`, so no check could execute while the brain
+        grew. Measured 2026-09-04: RSS climbed ~20 MB/min on a 15.6 GB host
+        with no swap until the kernel killed the brain at anon-rss
+        15,450,400 kB. The 8 GB floor never fired because it was not on this
+        path.
+        """
+        gib = 1024 * 1024 * 1024
+        self.assertFalse(replay_memory_floor_breached(0.0, 1 * gib))
+        self.assertFalse(replay_memory_floor_breached(8.0, 9 * gib))
+        self.assertTrue(replay_memory_floor_breached(8.0, 5 * gib))
+
+        args = SimpleNamespace(poll_seconds=0.0, min_free_memory_gb=8.0)
+        phase = SimpleNamespace(name="p")
+        event = {"start_row": 0, "end_row": 10, "interval_id": "iv"}
+
+        # A worker that finishes on its own is returned untouched: a healthy
+        # interval must never settle or recycle the brain.
+        done = SimpleNamespace(returncode=0, poll=lambda: 0)
+        with patch.object(sup, "subprocess") as proc, \
+                patch.object(sup, "settle_brain_for_admission") as settle, \
+                patch.object(sup, "recycle_settled_runtime_node") as recycle:
+            proc.Popen.return_value = done
+            out = run_deferred_replay_worker(
+                args, phase, Path("."), event, Path("s.json"), "iv",
+                None, None, build_command=lambda *a: [],
+            )
+        self.assertIs(out, done)
+        settle.assert_not_called()
+        recycle.assert_not_called()
+
+        # Under sustained pressure the worker stops, the brain settles and the
+        # node is recycled -- the recycle is what actually returns
+        # allocator-retained pages (measured 13.12 GB -> 8.66 GB RSS).
+        running = SimpleNamespace(returncode=None, poll=lambda: None)
+        events: list = []
+        with patch.object(sup, "subprocess") as proc, \
+                patch.object(sup, "psutil") as ps, \
+                patch.object(sup, "stop_worker_process") as stop, \
+                patch.object(sup, "publish"), \
+                patch.object(sup, "append_health_event",
+                             lambda _runtime, e: events.append(e)), \
+                patch.object(sup, "settle_brain_for_admission") as settle, \
+                patch.object(sup, "recycle_settled_runtime_node") as recycle:
+            proc.Popen.return_value = running
+            ps.virtual_memory.return_value = SimpleNamespace(available=2 * gib)
+            ps.Error = RuntimeError
+            run_deferred_replay_worker(
+                args, phase, Path("."), event, Path("s.json"), "iv",
+                None, None, build_command=lambda *a: [],
+            )
+        stop.assert_called_once()
+        settle.assert_called_once()
+        recycle.assert_called_once()
+        self.assertEqual(events[0]["kind"], "deferred_replay_resource_yield")
+        self.assertTrue(events[0]["passed"])
 
     def test_memory_floor_requires_forward_durable_progress(self) -> None:
         gib = 1024 * 1024 * 1024

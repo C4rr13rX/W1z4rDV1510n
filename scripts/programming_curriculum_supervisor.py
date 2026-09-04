@@ -383,6 +383,103 @@ def disk_floor_breached(min_free_disk_gb: float, runtime: Path,
     return free_bytes < floor_bytes
 
 
+def replay_memory_floor_breached(min_free_memory_gb: float,
+                                 available_bytes: int | None = None) -> bool:
+    """Host memory floor for the DEFERRED REPLAY worker.
+
+    The corpus-phase loop already guards its worker with
+    `memory_floor_breached`, but deferred replay ran a whole interval through
+    a single blocking `subprocess.run`, so no check could execute while the
+    brain grew. Measured 2026-09-04: replay held the brain for a 131,072-row
+    interval while RSS climbed ~20 MB/min; the host has 15.6 GB and no swap,
+    and the kernel killed the brain at anon-rss 15,450,400 kB. The 8 GB floor
+    never fired because it was not on this path.
+
+    Deliberately simpler than `memory_floor_breached`: the replay worker
+    publishes no row-level durable offset to compare, so there is no
+    `durable_row == ram_row` condition here. The worker is stopped only
+    between polls and its interval is left unmarked, so the next pass
+    replays that interval from its own recorded boundary.
+    """
+    if min_free_memory_gb <= 0:
+        return False
+    if available_bytes is None:
+        available_bytes = int(psutil.virtual_memory().available)
+    return available_bytes < int(min_free_memory_gb * 1024 * 1024 * 1024)
+
+
+def run_deferred_replay_worker(args: argparse.Namespace, phase: Phase,
+                               runtime: Path, event: dict, status_path: Path,
+                               interval_id: str, stdout, stderr,
+                               build_command=None):
+    """Run one deferred-replay interval, yielding the host before it OOMs.
+
+    Replaces a blocking `subprocess.run`. Polls the worker; if host memory
+    stays under the floor for three consecutive polls, stops the worker,
+    settles the brain (`/brain/sleep` + `/brain/checkpoint`) and recycles the
+    node process -- which is what actually returns allocator-retained pages,
+    measured 13.12 GB -> 8.66 GB RSS across one restart.
+
+    Returns an object exposing `.returncode`, matching the previous contract.
+    """
+    poll_seconds = max(1.0, float(getattr(args, "poll_seconds", 2.0)))
+    floor_gb = max(0.0, float(getattr(args, "min_free_memory_gb", 0.0)))
+    build = build_command or deferred_replay_command
+    worker = subprocess.Popen(
+        build(args, phase, runtime, event),
+        cwd=ROOT,
+        stdout=stdout,
+        stderr=stderr,
+    )
+    streak = 0
+    while True:
+        code = worker.poll()
+        if code is not None:
+            return worker
+        if replay_memory_floor_breached(floor_gb):
+            streak += 1
+        else:
+            streak = 0
+        if streak >= 3:
+            available_before = int(psutil.virtual_memory().available)
+            stop_worker_process(worker)
+            publish(status_path, {
+                "state": "deferred_replay_resource_yield",
+                "phase": phase.name,
+                "interval_id": interval_id,
+                "available_bytes_before": available_before,
+                "minimum_free_memory_gb": floor_gb,
+                "updated_unix": time.time(),
+            })
+            recycled: dict = {}
+            error = ""
+            try:
+                settle_brain_for_admission(
+                    args, phase, runtime, int(event["end_row"])
+                )
+                recycled = recycle_settled_runtime_node(
+                    args, runtime, phase, int(event["end_row"]), status_path
+                )
+            except (RuntimeError, OSError, psutil.Error) as exc:
+                # Never convert host pressure into a semantic failure: the
+                # interval stays unmarked and a later pass retries it.
+                error = str(exc)
+            available_after = int(psutil.virtual_memory().available)
+            append_health_event(runtime, {
+                "kind": "deferred_replay_resource_yield",
+                "passed": not error,
+                "phase": phase.name,
+                "interval_id": interval_id,
+                "available_bytes_before": available_before,
+                "available_bytes_after": available_after,
+                "minimum_free_memory_gb": floor_gb,
+                "recycled": recycled,
+                "error": error,
+            })
+            return worker
+        time.sleep(poll_seconds)
+
+
 def stop_worker_process(worker: subprocess.Popen, timeout: float = 30.0) -> None:
     """Stop a corpus worker at its already-published WAL-durable boundary."""
     if worker.poll() is not None:
@@ -3348,14 +3445,9 @@ def run_deferred_replays(args: argparse.Namespace, runtime: Path,
         try:
             with stdout_path.open("a", encoding="utf-8") as stdout, \
                     stderr_path.open("a", encoding="utf-8") as stderr:
-                worker = subprocess.run(
-                    deferred_replay_command(
-                        args, phase, runtime, event
-                    ),
-                    cwd=ROOT,
-                    stdout=stdout,
-                    stderr=stderr,
-                    check=False,
+                worker = run_deferred_replay_worker(
+                    args, phase, runtime, event, status_path,
+                    interval_id, stdout, stderr,
                 )
             if worker.returncode != 0:
                 raise RuntimeError(
