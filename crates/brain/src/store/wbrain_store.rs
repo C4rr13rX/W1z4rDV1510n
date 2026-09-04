@@ -1347,6 +1347,104 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
+    /// The Brain-level overlay must drain on SIZE, not only at a row boundary.
+    ///
+    /// `lifetime_recurrences`, `tentative_promoted`, `promoted_fingerprints`
+    /// and the binding indexes live outside every pool, so no eviction path
+    /// reclaims them. They used to be cleared only by
+    /// `flush_binding_posting_overlay` via `serialize_all_neurons_for_idle`,
+    /// reachable only from the /brain/sleep and /brain/checkpoint handlers --
+    /// which the supervisor calls only after the corpus worker stops at an
+    /// exact guarded boundary 131,072 rows away.
+    ///
+    /// Measured 2026-09-04 that deadlocked: the overlay grew ~0.7 GB/h
+    /// against 15.6 GB with no swap, pretrain slowed, the 300 s
+    /// pretrain-bindings timeout killed the worker before the boundary, and
+    /// the flush that would have freed the memory never ran. The brain could
+    /// only free this at a checkpoint it could no longer reach.
+    #[test]
+    fn overlay_drains_on_size_without_reaching_a_row_boundary() {
+        let path = tmpfile("overlay-size-flush");
+        let mut brain = Brain::new(BrainConfig::default());
+        // Two pools: the overlay is built from CROSS-POOL moments, so a
+        // single-pool brain produces no fingerprints at all and would pass
+        // this test vacuously.
+        brain.create_pool(
+            PoolConfig::defaults("bytes", 3),
+            Box::new(BytePassthroughEncoding {
+                prefix: "byte".into(),
+            }),
+        );
+        brain.create_pool(
+            PoolConfig::defaults("more", 4),
+            Box::new(BytePassthroughEncoding {
+                prefix: "more".into(),
+            }),
+        );
+        brain.attach_wbrain(&path).unwrap();
+
+        // A limit low enough to be crossed by ordinary observation.
+        brain.set_overlay_flush_entry_limit(8);
+
+        // Never call sleep/checkpoint/serialize_all_neurons_for_idle: this is
+        // exactly the state a worker is in between guarded boundaries.
+        for i in 0..400_u32 {
+            let frame = format!("overlay-{i}");
+            brain.observe(3, frame.as_bytes());
+            brain.observe(4, frame.as_bytes());
+            brain.advance_tick();
+        }
+
+        let (flushes, errors, limit) = brain.overlay_flush_stats();
+        assert_eq!(limit, 8, "limit must be the one we set");
+        assert_eq!(errors, 0, "spills must not error");
+        assert!(
+            flushes > 0,
+            "overlay never spilled without a row boundary -- the deadlock is back"
+        );
+
+        // And the overlay is actually bounded afterwards, not merely written.
+        let sizes = brain.global_index_sizes();
+        let entries = sizes["entries"].as_object().unwrap();
+        // Exactly the maps flush_binding_posting_overlay clears. The
+        // sliding-window maps (binding_recurrences, moment_history) are
+        // deliberately excluded: they self-evict via pop_front and were never
+        // the leak -- counting them would make the trigger re-fire forever.
+        let live: u64 = [
+            "lifetime_recurrences",
+            "tentative_promoted",
+            "promoted_fingerprints",
+            "binding_sequence_index",
+            "binding_feature_atom_index",
+            "binding_motif_index",
+        ]
+        .iter()
+        .map(|k| entries[*k].as_u64().unwrap_or(0))
+        .sum();
+        assert!(
+            live < limit as u64,
+            "a spill must drain the overlay below the limit, not just write it              out: {live} entries still held after {flushes} spills"
+        );
+
+        // A zero limit disables the behaviour for callers that want the old
+        // boundary-only semantics.
+        brain.set_overlay_flush_entry_limit(0);
+        let before = brain.overlay_flush_stats().0;
+        for i in 0..50_u32 {
+            let frame = format!("disabled-{i}");
+            brain.observe(3, frame.as_bytes());
+            brain.observe(4, frame.as_bytes());
+            brain.advance_tick();
+        }
+        assert_eq!(
+            brain.overlay_flush_stats().0,
+            before,
+            "limit 0 must disable automatic spilling"
+        );
+
+        std::fs::remove_file(path).ok();
+    }
+
     #[test]
     fn whole_brain_reopens_without_deserializing_neuron_bodies() {
         let path = tmpfile("brain-reopen");

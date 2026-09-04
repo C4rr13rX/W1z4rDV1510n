@@ -758,6 +758,11 @@ pub struct Brain {
     /// accumulate in `binding_recurrences`, so this is the fallback
     /// signal for promotion under sparse schedules.
     lifetime_recurrences: AHashMap<MomentFingerprint, u32>,
+    /// Overlay entries tolerated before `advance_tick` spills to disk.
+    /// See `flush_overlay_if_oversized`.
+    overlay_flush_entry_limit: usize,
+    overlay_flushes: u64,
+    overlay_flush_errors: u64,
     /// "Tentative" tier promotion — bindings that have a neuron in
     /// the binding pool but no EEM fact yet.  Visible to /chat
     /// retrieval (Stage 7 binding-pool routing reads ALL binding-pool
@@ -1111,6 +1116,12 @@ fn rank_bounded_binding_evidence(
     ranked.into_iter().map(|(id, _)| id).collect()
 }
 
+/// Overlay entries retained before `advance_tick` spills them to the on-disk
+/// posting index. At the measured ~20 KB per entry this caps the overlay at a
+/// few hundred MB, well inside the headroom of a 15.6 GB no-swap host, while
+/// staying large enough that spills stay rare during normal training.
+const DEFAULT_OVERLAY_FLUSH_ENTRY_LIMIT: usize = 20_000;
+
 impl Brain {
     /// Construct a fresh brain with no sensor pools yet.  The binding
     /// pool is auto-created at pool_id = `binding_pool_config.id`.
@@ -1135,6 +1146,9 @@ impl Brain {
             moment_history: VecDeque::with_capacity(window),
             binding_recurrences: AHashMap::new(),
             lifetime_recurrences: AHashMap::new(),
+            overlay_flush_entry_limit: DEFAULT_OVERLAY_FLUSH_ENTRY_LIMIT,
+            overlay_flushes: 0,
+            overlay_flush_errors: 0,
             tentative_promoted: AHashMap::new(),
             promoted_fingerprints: AHashMap::new(),
             tentative_binding_count_total: 0,
@@ -1810,6 +1824,77 @@ impl Brain {
         if let Some(fp) = fingerprint {
             self.register_fingerprint(fp);
         }
+
+        self.flush_overlay_if_oversized();
+    }
+
+    /// Spill the Brain-level overlay to its on-disk posting index once it
+    /// grows past `overlay_flush_entry_limit`.
+    ///
+    /// The overlay (`lifetime_recurrences`, `tentative_promoted`,
+    /// `promoted_fingerprints` and the four binding indexes) lives outside
+    /// every pool, so no eviction path can reclaim it. Before this it was
+    /// cleared ONLY by `flush_binding_posting_overlay` via
+    /// `serialize_all_neurons_for_idle`, reachable only from the
+    /// `/brain/sleep` and `/brain/checkpoint` handlers -- which the
+    /// supervisor calls only after the corpus worker stops at an exact
+    /// guarded boundary (`--checkpoint-rows 131072`).
+    ///
+    /// That is a deadlock, measured 2026-09-04: the overlay grew ~0.7 GB/h
+    /// against 15.6 GB with no swap, pretrain slowed as RAM filled, the 300 s
+    /// `pretrain-bindings` timeout killed the worker at ~row 101568, and the
+    /// boundary that would have freed the memory was never reached. The brain
+    /// could only free this at a checkpoint it could no longer get to, so it
+    /// looked healthy -- ticks advancing, /health answering -- while admitting
+    /// nothing.
+    ///
+    /// Flushing on SIZE decouples reclaiming memory from reaching a row
+    /// boundary. The spill is the same operation the boundary performs, and
+    /// `flush_binding_posting_overlay` already no-ops when the overlay is
+    /// empty, so this only ever does work that was going to happen anyway --
+    /// just sooner, and bounded.
+    fn flush_overlay_if_oversized(&mut self) {
+        let limit = self.overlay_flush_entry_limit;
+        if limit == 0 || self.wbrain_file.is_none() {
+            return;
+        }
+        let entries = self
+            .lifetime_recurrences
+            .len()
+            .saturating_add(self.tentative_promoted.len())
+            .saturating_add(self.promoted_fingerprints.len())
+            .saturating_add(self.binding_sequence_index.len())
+            .saturating_add(self.binding_feature_atom_index.len())
+            .saturating_add(self.binding_feature_pair_index.len())
+            .saturating_add(self.binding_motif_index.len());
+        if entries < limit {
+            return;
+        }
+        match self.flush_binding_posting_overlay() {
+            Ok(()) => {
+                self.overlay_flushes += 1;
+            }
+            Err(error) => {
+                // A failed spill must not wedge training: the overlay stays
+                // in RAM and the next tick past the limit retries. Losing the
+                // flush is a memory problem; losing the tick is a data one.
+                self.overlay_flush_errors += 1;
+                tracing::warn!("overlay flush failed: {}", error);
+            }
+        }
+    }
+
+    /// Overlay entries retained before an automatic spill. 0 disables.
+    pub fn set_overlay_flush_entry_limit(&mut self, limit: usize) {
+        self.overlay_flush_entry_limit = limit;
+    }
+
+    pub fn overlay_flush_stats(&self) -> (u64, u64, usize) {
+        (
+            self.overlay_flushes,
+            self.overlay_flush_errors,
+            self.overlay_flush_entry_limit,
+        )
     }
 
     fn execute_feedback_loops(&mut self) {
@@ -8879,6 +8964,9 @@ impl Brain {
             fabric,
             config,
             wbrain_file: None,
+            overlay_flush_entry_limit: DEFAULT_OVERLAY_FLUSH_ENTRY_LIMIT,
+            overlay_flushes: 0,
+            overlay_flush_errors: 0,
             binding_pool_id: snap.binding_pool_id,
             moment_history,
             binding_recurrences,
@@ -9020,6 +9108,9 @@ impl Brain {
             fabric,
             config: metadata.config,
             wbrain_file: Some(file),
+            overlay_flush_entry_limit: DEFAULT_OVERLAY_FLUSH_ENTRY_LIMIT,
+            overlay_flushes: 0,
+            overlay_flush_errors: 0,
             binding_pool_id: metadata.binding_pool_id,
             moment_history: metadata
                 .moment_history
