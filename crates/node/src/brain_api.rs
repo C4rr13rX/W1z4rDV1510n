@@ -5624,6 +5624,12 @@ async fn h_memory_residency(State(s): State<BrainApiState>) -> Json<serde_json::
         "pools": pools,
         // Brain-level maps: outside every pool, touched by no eviction path.
         "global_indexes": b.global_index_sizes(),
+        // Whether the size-triggered spill is actually firing. Without this
+        // an overlay that sails past its limit is indistinguishable from one
+        // whose spill errors on every attempt.
+        "overlay_flushes":     b.overlay_flush_stats().0,
+        "overlay_flush_errors": b.overlay_flush_stats().1,
+        "overlay_flush_limit":  b.overlay_flush_stats().2,
     }))
 }
 
