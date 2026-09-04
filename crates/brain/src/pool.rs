@@ -164,14 +164,31 @@ impl NeuronSlots {
                 // AHashMap iteration order is arbitrary but stable between
                 // mutations; combined with the caller's advancing cursor this
                 // gives every resident a turn without sorting 4.6M ids.
+                //
+                // Single pass, not `.cycle().skip(start)`: skip() would walk
+                // `start` entries before yielding anything, and `start` runs
+                // up to the resident count (~350k/pool), so the scan would pay
+                // a full extra traversal every pass to save nothing.
+                let want = limit.min(n);
                 let start = start % n;
-                residents
-                    .keys()
-                    .copied()
-                    .cycle()
-                    .skip(start)
-                    .take(limit.min(n))
-                    .collect()
+                let mut out = Vec::with_capacity(want);
+                for (i, id) in residents.keys().copied().enumerate() {
+                    if i >= start && out.len() < want {
+                        out.push(id);
+                    } else if out.len() >= want {
+                        break;
+                    }
+                }
+                // Wrap: the tail of the map was shorter than the window.
+                if out.len() < want {
+                    for id in residents.keys().copied() {
+                        if out.len() >= want {
+                            break;
+                        }
+                        out.push(id);
+                    }
+                }
+                out
             }
         }
     }
