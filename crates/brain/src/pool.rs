@@ -2824,6 +2824,14 @@ impl Pool {
         self.wbrain_store.as_ref().map_or(0, |s| s.page_outs())
     }
 
+    /// (label_bytes, label_entries, offset_bytes, offset_entries) for the
+    /// .wbrain store's eagerly-loaded per-slot tables.
+    pub fn wbrain_ram_footprint(&self) -> (usize, usize, usize, usize) {
+        self.wbrain_store
+            .as_ref()
+            .map_or((0, 0, 0, 0), |s| s.ram_footprint())
+    }
+
     /// Approximate bytes held by the per-pool side structures that scale with
     /// the LOGICAL neuron count and survive eviction.
     ///

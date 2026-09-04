@@ -778,6 +778,25 @@ impl WbrainNeuronStore {
         self.working_set.read().len()
     }
 
+    /// Bytes held by this store's eagerly-loaded, per-slot RAM structures.
+    ///
+    /// `from_manifest` loads the whole label map and a dense
+    /// `Vec<Option<u64>>` offsets table at startup, one entry per logical
+    /// neuron slot. Measured 2026-09-04 the brain reached 8.7 GB RSS within
+    /// 5.5 minutes of launch while every pool held ~400 resident neurons and
+    /// the store cache held 0 -- so the baseline is load-time, not learned.
+    pub fn ram_footprint(&self) -> (usize, usize, usize, usize) {
+        let labels = self.labels.read();
+        let label_bytes: usize = labels
+            .keys()
+            .map(|k| std::mem::size_of::<String>() + k.len()
+                 + std::mem::size_of::<NeuronId>())
+            .sum();
+        let offsets = self.offsets.read();
+        let offset_bytes = offsets.len() * std::mem::size_of::<Option<u64>>();
+        (label_bytes, labels.len(), offset_bytes, offsets.len())
+    }
+
     pub fn known_count(&self) -> usize {
         if self.slot_table.read().is_some() {
             self.known_count.load(Ordering::Acquire) as usize
