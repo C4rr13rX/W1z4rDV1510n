@@ -53,3 +53,34 @@ must use the resident accessors.
 command line contains `--node-bin .../w1z4rd_brain_server`. That probe
 reports ~23 MB RSS and looks like a non-hydrating brain. Use
 `pgrep -f "release/w1z4rd_brain_server$"`.
+
+## /stats on the brain server is NOT brain_api's h_stats
+
+`crates/node/src/bin/brain_server.rs` includes `brain_api.rs` via
+`#[path]`, but mounts only
+`brain_api::brain_phase_routes_without_core(...)` and then registers its
+own `/stats` from a **typed** `StatsResponse` struct (line ~519).
+
+Consequences, both measured 2026-09-03 at the cost of three rebuild
+cycles:
+
+- Fields added to `brain_api::h_stats` never reach the wire. `/stats`
+  kept returning its original nine keys through three confirmed clean
+  builds and restarts, with the new symbols verifiably present in the
+  binary.
+- Extra keys in a `json!` there are unreachable anyway — the response is
+  a fixed struct.
+
+`/tier_orchestrator` and `/memory_residency` work because they are
+**phase** routes, which `without_core` does mount. Add new diagnostics as
+phase routes in `brain_api.rs`; only edit `brain_server.rs` when the
+field genuinely belongs on core `/stats`, and then edit the struct.
+
+Two probe traps that produce confident wrong answers:
+
+- `strings -a <binary> | grep -c <json_key>` is **not** proof a build
+  lacks a field. It reported 0 for `skipped_atom` on a binary that was
+  serving `skipped_atom` over HTTP at that moment. Ask the endpoint.
+- Cargo hard-links from its cache (link count 2). A rebuild that
+  "Finished in 0.30s" and leaves the timestamp unchanged did not relink.
+  `touch` the sources to force it, and check `ls -la` for a new mtime.
