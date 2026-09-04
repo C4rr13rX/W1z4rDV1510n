@@ -37,6 +37,22 @@ const SEQUENCE_RECURRENCE_KEY: u8 = 2;
 /// [`Neuron`]. A body is present only while that exact neuron participates in
 /// inference, training, or bounded maintenance. Dense, legacy brains still
 /// occupy every slot and retain their historical behavior.
+/// Per-pool memory that survives neuron eviction, broken out by structure.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SideStructureBytes {
+    pub concept_sequence_index: usize,
+    pub concept_multiset_index: usize,
+    pub label_index: usize,
+    pub sequence_ledger: usize,
+    pub evicted_set: usize,
+    pub cold_offsets: usize,
+    pub concept_sequence_entries: usize,
+    pub concept_multiset_entries: usize,
+    pub label_entries: usize,
+    pub sequence_entries: usize,
+    pub evicted_entries: usize,
+}
+
 #[derive(Clone)]
 enum NeuronSlots {
     Dense {
@@ -2787,6 +2803,53 @@ impl Pool {
     /// the logical slot count including everything asleep on disk).
     pub fn resident_len(&self) -> usize {
         self.neurons.resident_len()
+    }
+
+    /// Approximate bytes held by the per-pool side structures that scale with
+    /// the LOGICAL neuron count and survive eviction.
+    ///
+    /// Sleeping a neuron frees its body but leaves its entry in the concept
+    /// indices, the sequence ledger and the per-slot vectors. With millions of
+    /// concepts asleep on disk those residuals, not the neurons, are what
+    /// keeps RAM occupied -- so they have to be measurable before anything can
+    /// be done about them.
+    pub fn side_structure_bytes(&self) -> SideStructureBytes {
+        let id = std::mem::size_of::<NeuronId>();
+        let vec_hdr = std::mem::size_of::<Vec<NeuronId>>();
+        // AHashMap overhead per entry is roughly the key+value plus control
+        // bytes; close enough to attribute GBs to a structure.
+        let seq: usize = self
+            .concept_sequence_to_id
+            .keys()
+            .map(|k| vec_hdr + k.len() * id + id)
+            .sum();
+        let multiset: usize = self
+            .concept_multiset_to_id
+            .keys()
+            .map(|k| vec_hdr + k.len() * id + id)
+            .sum();
+        let labels: usize = self
+            .label_to_id
+            .keys()
+            .map(|k| std::mem::size_of::<String>() + k.len() + id)
+            .sum();
+        let sequences = self.sequences.len()
+            * (std::mem::size_of::<SequenceFingerprint>() + std::mem::size_of::<u32>());
+        let evicted = self.evicted.len() * id;
+        let cold_offsets = self.cold_offsets.len() * (id + std::mem::size_of::<u64>());
+        SideStructureBytes {
+            concept_sequence_index: seq,
+            concept_multiset_index: multiset,
+            label_index: labels,
+            sequence_ledger: sequences,
+            evicted_set: evicted,
+            cold_offsets,
+            concept_sequence_entries: self.concept_sequence_to_id.len(),
+            concept_multiset_entries: self.concept_multiset_to_id.len(),
+            label_entries: self.label_to_id.len(),
+            sequence_entries: self.sequences.len(),
+            evicted_entries: self.evicted.len(),
+        }
     }
 
     /// Snapshot the pool's observable signals for ControlMode evaluation.

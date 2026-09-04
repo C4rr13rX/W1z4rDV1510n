@@ -645,9 +645,43 @@ async fn h_stats(State(s): State<BrainApiState>) -> Json<serde_json::Value> {
     let (binding_posting_overlay, binding_posting_generations) = b.binding_posting_residency();
     let (fingerprint_state_overlay, fingerprint_state_generations) =
         b.fingerprint_state_residency();
+    // Where RAM actually sits once the neurons are asleep. Sleeping a neuron
+    // frees its body but leaves its entry in the concept indices, the label
+    // map, the sequence ledger and the evicted set -- so with millions of
+    // concepts on disk those residuals, not the neurons, are the working set.
+    let mut side = serde_json::Map::new();
+    let mut side_total: usize = 0;
+    for pid in b.fabric().pool_ids() {
+        if let Some(pool) = b.fabric().pool(pid) {
+            let sb = pool.read().side_structure_bytes();
+            let total = sb.concept_sequence_index
+                + sb.concept_multiset_index
+                + sb.label_index
+                + sb.sequence_ledger
+                + sb.evicted_set
+                + sb.cold_offsets;
+            side_total += total;
+            side.insert(pid.to_string(), json!({
+                "bytes_total":              total,
+                "concept_sequence_index":   sb.concept_sequence_index,
+                "concept_multiset_index":   sb.concept_multiset_index,
+                "label_index":              sb.label_index,
+                "sequence_ledger":          sb.sequence_ledger,
+                "evicted_set":              sb.evicted_set,
+                "cold_offsets":             sb.cold_offsets,
+                "concept_sequence_entries": sb.concept_sequence_entries,
+                "concept_multiset_entries": sb.concept_multiset_entries,
+                "label_entries":            sb.label_entries,
+                "sequence_entries":         sb.sequence_entries,
+                "evicted_entries":          sb.evicted_entries,
+            }));
+        }
+    }
     Json(json!({
         "tick":            st.tick,
         "pool_count":      st.pool_count,
+        "side_structure_bytes_total": side_total,
+        "side_structures":           side,
         "total_neurons":   st.total_neurons,
         "total_concepts":  st.total_concepts,
         "total_binding":   st.total_binding,
