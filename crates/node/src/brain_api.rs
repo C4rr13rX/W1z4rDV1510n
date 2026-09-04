@@ -645,43 +645,9 @@ async fn h_stats(State(s): State<BrainApiState>) -> Json<serde_json::Value> {
     let (binding_posting_overlay, binding_posting_generations) = b.binding_posting_residency();
     let (fingerprint_state_overlay, fingerprint_state_generations) =
         b.fingerprint_state_residency();
-    // Where RAM actually sits once the neurons are asleep. Sleeping a neuron
-    // frees its body but leaves its entry in the concept indices, the label
-    // map, the sequence ledger and the evicted set -- so with millions of
-    // concepts on disk those residuals, not the neurons, are the working set.
-    let mut side = serde_json::Map::new();
-    let mut side_total: usize = 0;
-    for pid in b.fabric().pool_ids() {
-        if let Some(pool) = b.fabric().pool(pid) {
-            let sb = pool.read().side_structure_bytes();
-            let total = sb.concept_sequence_index
-                + sb.concept_multiset_index
-                + sb.label_index
-                + sb.sequence_ledger
-                + sb.evicted_set
-                + sb.cold_offsets;
-            side_total += total;
-            side.insert(pid.to_string(), json!({
-                "bytes_total":              total,
-                "concept_sequence_index":   sb.concept_sequence_index,
-                "concept_multiset_index":   sb.concept_multiset_index,
-                "label_index":              sb.label_index,
-                "sequence_ledger":          sb.sequence_ledger,
-                "evicted_set":              sb.evicted_set,
-                "cold_offsets":             sb.cold_offsets,
-                "concept_sequence_entries": sb.concept_sequence_entries,
-                "concept_multiset_entries": sb.concept_multiset_entries,
-                "label_entries":            sb.label_entries,
-                "sequence_entries":         sb.sequence_entries,
-                "evicted_entries":          sb.evicted_entries,
-            }));
-        }
-    }
     Json(json!({
         "tick":            st.tick,
         "pool_count":      st.pool_count,
-        "side_structure_bytes_total": side_total,
-        "side_structures":           side,
         "total_neurons":   st.total_neurons,
         "total_concepts":  st.total_concepts,
         "total_binding":   st.total_binding,
@@ -5583,6 +5549,71 @@ async fn h_observe_profile(State(s): State<BrainApiState>) -> Json<serde_json::V
     }))
 }
 
+/// Where RAM sits once the neurons are asleep.
+///
+/// Eviction frees a neuron's body but leaves its entry in the concept
+/// indices, the label map, the sequence ledger, the evicted set and
+/// cold_offsets. Those are keyed by the LOGICAL concept count, so on a brain
+/// whose concepts are almost all on disk they -- not the neurons -- are the
+/// resident working set. Measured before adding this: 4,556,665 concepts
+/// against 908 atoms, the orchestrator finding 99.6% atoms because the
+/// concepts really were asleep, and RSS still 8.7 GB with RssAnon 8.7 GB
+/// spread across many mid-size arenas.
+///
+/// This is a separate route rather than a field on /stats because the
+/// standalone brain_server binary serves /stats from its own typed
+/// StatsResponse and mounts brain_api's phase routes WITHOUT the core ones --
+/// so extra fields added to h_stats never reach the wire.
+async fn h_memory_residency(State(s): State<BrainApiState>) -> Json<serde_json::Value> {
+    let b = s.brain.lock().await;
+    let mut pools = serde_json::Map::new();
+    let mut total: usize = 0;
+    let mut agg = std::collections::BTreeMap::<&str, usize>::new();
+    for pid in b.fabric().pool_ids() {
+        let Some(pool) = b.fabric().pool(pid) else { continue };
+        let pool = pool.read();
+        let sb = pool.side_structure_bytes();
+        let sum = sb.concept_sequence_index
+            + sb.concept_multiset_index
+            + sb.label_index
+            + sb.sequence_ledger
+            + sb.evicted_set
+            + sb.cold_offsets;
+        total += sum;
+        for (k, v) in [
+            ("concept_sequence_index", sb.concept_sequence_index),
+            ("concept_multiset_index", sb.concept_multiset_index),
+            ("label_index",            sb.label_index),
+            ("sequence_ledger",        sb.sequence_ledger),
+            ("evicted_set",            sb.evicted_set),
+            ("cold_offsets",           sb.cold_offsets),
+        ] {
+            *agg.entry(k).or_default() += v;
+        }
+        pools.insert(pid.to_string(), json!({
+            "bytes_total":              sum,
+            "resident_neurons":         pool.resident_len(),
+            "logical_neurons":          pool.neurons_len(),
+            "concept_sequence_index":   sb.concept_sequence_index,
+            "concept_multiset_index":   sb.concept_multiset_index,
+            "label_index":              sb.label_index,
+            "sequence_ledger":          sb.sequence_ledger,
+            "evicted_set":              sb.evicted_set,
+            "cold_offsets":             sb.cold_offsets,
+            "concept_sequence_entries": sb.concept_sequence_entries,
+            "concept_multiset_entries": sb.concept_multiset_entries,
+            "label_entries":            sb.label_entries,
+            "sequence_entries":         sb.sequence_entries,
+            "evicted_entries":          sb.evicted_entries,
+        }));
+    }
+    Json(json!({
+        "side_structure_bytes_total": total,
+        "by_structure": agg,
+        "pools": pools,
+    }))
+}
+
 async fn h_tier_orchestrator(State(s): State<BrainApiState>) -> Json<serde_json::Value> {
     let brain = s.brain.lock().await;
     let snap = brain.fabric().tier_orchestrator_stats();
@@ -6012,6 +6043,7 @@ fn brain_phase_routes_impl(state: BrainApiState, include_core_routes: bool) -> R
         .route("/observe_profile", get(h_observe_profile))
         .route("/http_profile", get(h_http_profile))
         .route("/tier_orchestrator", get(h_tier_orchestrator))
+        .route("/memory_residency", get(h_memory_residency))
         .route(
             "/tier_orchestrator/params",
             post(h_tier_orchestrator_params),
