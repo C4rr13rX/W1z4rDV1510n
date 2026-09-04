@@ -151,7 +151,21 @@ common=(
   --gate-rows 131072
   --canary-rows 16384
   --max-live-lock-seconds 8
-  --min-free-memory-gb 8
+  # 3 GB, not 8. The floor must sit BELOW the brain's working peak or the
+  # guard trips before any interval can finish.
+  #
+  # Measured 2026-09-04 on this 15.26 GB host: the brain reaches an 8.6 GB
+  # baseline within 47 s of launch, so an 8 GB free-memory floor left it only
+  # 7.26 GB -- less than it needs to exist. Deferred replay yielded four
+  # times in a row at 6.7-6.8 GB available, each recycle correctly returning
+  # ~14.6 GB, and every interval died with `worker exited -15` before
+  # completing. The guard was working perfectly and training still made no
+  # progress.
+  #
+  # 3 GB leaves the brain ~12.2 GB (3.6 GB of working headroom above its
+  # baseline) while staying 3 GB clear of the OOM point -- the kernel killed
+  # the brain at anon-rss 15,450,400 kB.
+  --min-free-memory-gb 3
   --min-free-disk-gb 8
   --max-restarts 10
 )
