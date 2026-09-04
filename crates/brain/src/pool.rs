@@ -125,6 +125,75 @@ impl NeuronSlots {
         }
     }
 
+    /// Up to `limit` resident neuron ids, starting from the `start`-th
+    /// resident (not the `start`-th logical slot).
+    ///
+    /// The tier orchestrator used to walk logical indices and call
+    /// [`Self::get`], which works on `Dense` but is near-useless on
+    /// `Paged`: `len()` is the LOGICAL slot count (measured 4.6M) while
+    /// `get()` only resolves the RAM-resident map. The walk therefore
+    /// missed on almost every index, and the handful of hits were the
+    /// pinned byte-atoms -- measured 2026-09-03 as 130,831 of 131,806
+    /// scanned (99.26%) rejected as atoms, with the score, newborn and
+    /// already-evicted filters rejecting exactly zero. Eviction could not
+    /// find the concepts it was supposed to be considering.
+    fn resident_window(&self, start: usize, limit: usize) -> Vec<NeuronId> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        match self {
+            Self::Dense { slots, .. } => {
+                let n = slots.len();
+                if n == 0 {
+                    return Vec::new();
+                }
+                let mut out = Vec::with_capacity(limit.min(n));
+                for k in 0..n.min(limit) {
+                    let idx = (start + k) % n;
+                    if slots[idx].is_some() {
+                        out.push(idx as NeuronId);
+                    }
+                }
+                out
+            }
+            Self::Paged { residents, .. } => {
+                let n = residents.len();
+                if n == 0 {
+                    return Vec::new();
+                }
+                // AHashMap iteration order is arbitrary but stable between
+                // mutations; combined with the caller's advancing cursor this
+                // gives every resident a turn without sorting 4.6M ids.
+                let start = start % n;
+                residents
+                    .keys()
+                    .copied()
+                    .cycle()
+                    .skip(start)
+                    .take(limit.min(n))
+                    .collect()
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn residents_insert_for_test(&mut self, id: NeuronId, n: Neuron) {
+        match self {
+            Self::Paged { residents, .. } => {
+                residents.insert(id, Box::new(n));
+            }
+            Self::Dense { .. } => panic!("dense variant has no resident map"),
+        }
+    }
+
+    /// Number of neurons actually held in RAM.
+    fn resident_len(&self) -> usize {
+        match self {
+            Self::Dense { slots, .. } => slots.iter().filter(|s| s.is_some()).count(),
+            Self::Paged { residents, .. } => residents.len(),
+        }
+    }
+
     fn get_mut(&mut self, index: usize) -> Option<&mut Neuron> {
         match self {
             Self::Dense { slots, .. } => slots.get_mut(index)?.as_deref_mut(),
@@ -2688,6 +2757,21 @@ impl Pool {
         self.neurons.get(idx)
     }
 
+    /// Up to `limit` RAM-resident neuron ids beginning at the `start`-th
+    /// resident. The tier orchestrator scans these instead of logical slot
+    /// indices -- on a `.wbrain` (paged) pool the logical space is orders of
+    /// magnitude larger than the resident set, so an index walk almost never
+    /// lands on a resident concept.
+    pub fn resident_window(&self, start: usize, limit: usize) -> Vec<NeuronId> {
+        self.neurons.resident_window(start, limit)
+    }
+
+    /// Count of neurons currently held in RAM (vs. `neurons_len`, which is
+    /// the logical slot count including everything asleep on disk).
+    pub fn resident_len(&self) -> usize {
+        self.neurons.resident_len()
+    }
+
     /// Snapshot the pool's observable signals for ControlMode evaluation.
     /// Normalised so signals are roughly in [0, 1] and ControlModes can
     /// compose without each signal having its own scale calibration.
@@ -4501,5 +4585,55 @@ mod resident_slot_tests {
 
         // Declined cleanly: no concept was appended for the sleeping run.
         assert_eq!(pool.neurons.len(), 64);
+    }
+
+    /// A paged pool's LOGICAL length is not its RESIDENT length, and the
+    /// tier orchestrator must scan the latter.
+    ///
+    /// The orchestrator walked logical indices and called `neuron_at`, which
+    /// on `Paged` resolves only the resident map. With 4.6M logical slots and
+    /// a small resident set, essentially every probe missed; measured
+    /// 2026-09-03, 99.26% of "scanned" neurons were the pinned byte-atoms and
+    /// the score/newborn/evicted filters rejected exactly zero. Eviction
+    /// never saw a sleeping concept, so RAM grew without bound.
+    #[test]
+    fn resident_window_walks_ram_not_the_logical_slot_space() {
+        // 1,000 logical slots, only 3 of them resident.
+        let mut slots = NeuronSlots::sleeping(1_000, 900);
+        for id in [10u32, 500, 900] {
+            let n = Neuron::new_atom(
+                id,
+                format!("atom-{id}"),
+                NeuronKind::Excitatory,
+                0,
+            );
+            slots.residents_insert_for_test(id, n);
+        }
+
+        assert_eq!(slots.len(), 1_000, "logical length is the slot count");
+        assert_eq!(slots.resident_len(), 3, "only three neurons are in RAM");
+
+        // A generous window returns every resident and nothing else -- no
+        // dependence on where those ids sit in the logical space.
+        let mut got = slots.resident_window(0, 64);
+        got.sort_unstable();
+        assert_eq!(got, vec![10, 500, 900]);
+
+        // Every returned id resolves; the old index walk could not say this.
+        for id in &got {
+            assert!(slots.get(*id as usize).is_some(), "id {id} must resolve");
+        }
+
+        // The window is bounded, and the cursor rotates coverage rather than
+        // restarting at the same resident every pass.
+        assert_eq!(slots.resident_window(0, 2).len(), 2);
+        let a = slots.resident_window(0, 1);
+        let b = slots.resident_window(1, 1);
+        assert_ne!(a, b, "an advancing cursor must reach different residents");
+
+        // An empty resident set yields nothing instead of spinning.
+        let empty = NeuronSlots::sleeping(1_000, 900);
+        assert!(empty.resident_window(0, 64).is_empty());
+        assert_eq!(empty.resident_len(), 0);
     }
 }

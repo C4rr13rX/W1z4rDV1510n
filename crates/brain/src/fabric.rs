@@ -380,8 +380,7 @@ impl Fabric {
             // measure pressure, score, pick evict set.
             let candidates: Vec<(NeuronId, f32)> = {
                 let p = pool_arc.read();
-                let n_total = p.neurons_len();
-                if n_total == 0 {
+                if p.neurons_len() == 0 {
                     continue;
                 }
                 // No-cold-tier short-circuit: if the pool has neither
@@ -392,8 +391,10 @@ impl Fabric {
                 // skip the scan entirely.  When the brain attaches
                 // cold tiers later, the next pass picks it up.
                 if !p.has_storage_tier() {
+                    stats.pools_no_tier.fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
+                stats.pools_visited.fetch_add(1, Ordering::Relaxed);
                 // Whichever signal is more urgent wins: the pool's own
                 // terminal budget, or the machine running out of RAM.
                 let pressure = TierOrchestrator::pressure_factor(
@@ -430,25 +431,43 @@ impl Fabric {
                 // during normal training while leaving the orchestrator
                 // fully responsive once RAM actually fills up.
                 if pressure >= 4.0 && params.target_terminals_per_pool > 0 {
+                    stats.pools_underbudget.fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
+                // Scan the RAM-RESIDENT set, not the logical slot space.
+                //
+                // `neurons_len()` on a paged (.wbrain) pool is the LOGICAL
+                // count -- every neuron ever learned, almost all asleep on
+                // disk -- while `neuron_at()` resolves only the resident map.
+                // Walking logical indices therefore missed on nearly every
+                // probe, and the few hits were the pinned byte-atoms that the
+                // very next line always skips. Measured 2026-09-03 over 512
+                // passes: 130,831 of 131,806 "scanned" were atoms (99.26%),
+                // while the score, newborn and already-evicted filters
+                // rejected zero. Eviction was not being too conservative --
+                // it never got to look at a single sleeping concept.
+                let resident_total = p.resident_len();
+                if resident_total == 0 {
+                    continue;
+                }
+                let budget = effective_scan.min(resident_total);
                 let start = self.orchestrator.lock().advance_cursor(
                     pid,
-                    effective_scan.min(n_total),
-                    n_total,
+                    budget,
+                    resident_total,
                 );
                 let mut chosen: Vec<(NeuronId, f32)> = Vec::new();
-                let budget = effective_scan.min(n_total);
                 let mut scanned: u64 = 0;
-                for k in 0..budget {
-                    let idx = (start + k) % n_total;
-                    let Some(n) = p.neuron_at(idx) else { continue };
+                for nid in p.resident_window(start, budget) {
+                    let Some(n) = p.neuron_at(nid as usize) else { continue };
                     scanned += 1;
                     // Filters (mirror Brain::run_eviction_pass policy):
                     if n.is_atom() {
+                        stats.skipped_atom.fetch_add(1, Ordering::Relaxed);
                         continue;
                     }
                     if p.is_evicted(n.id) {
+                        stats.skipped_evicted.fetch_add(1, Ordering::Relaxed);
                         continue;
                     }
                     // Newborn protection — give freshly created concepts
@@ -456,6 +475,7 @@ impl Fabric {
                     // salience.  Without this the orchestrator can throw
                     // a concept away on the same tick it was born.
                     if current_tick.saturating_sub(n.born_tick) < effective_min_age {
+                        stats.skipped_newborn.fetch_add(1, Ordering::Relaxed);
                         continue;
                     }
                     // Pin candidate: members.is_empty() && !is_atom() means
@@ -476,6 +496,8 @@ impl Fabric {
                         if chosen.len() >= effective_max_evict {
                             break;
                         }
+                    } else {
+                        stats.skipped_score.fetch_add(1, Ordering::Relaxed);
                     }
                 }
                 stats.neurons_scanned.fetch_add(scanned, Ordering::Relaxed);

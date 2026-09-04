@@ -226,6 +226,21 @@ pub struct OrchestratorStats {
     pub page_in_errors:    AtomicU64,
     pub last_pressure_x1k: AtomicU64,  // pressure_factor * 1000, last pass
     pub total_ns:          AtomicU64,
+    // Why a scanned neuron was NOT evicted.
+    //
+    // Measured 2026-09-04 on the production brain: 228,714 scanned per
+    // minute against 938 evicted -- 0.41% -- while the fabric sat 30x over
+    // its terminal budget and RSS climbed 1,770 MB/h. The aggregate counters
+    // above cannot say whether the score, a filter, or the scan window is
+    // responsible, so tuning any of them is guesswork. These name the
+    // rejecting step.
+    pub skipped_atom:      AtomicU64,
+    pub skipped_evicted:   AtomicU64,
+    pub skipped_newborn:   AtomicU64,
+    pub skipped_score:     AtomicU64,
+    pub pools_visited:     AtomicU64,
+    pub pools_no_tier:     AtomicU64,
+    pub pools_underbudget: AtomicU64,
 }
 
 impl OrchestratorStats {
@@ -239,6 +254,13 @@ impl OrchestratorStats {
             page_in_errors:    self.page_in_errors.load(Ordering::Relaxed),
             last_pressure:     (self.last_pressure_x1k.load(Ordering::Relaxed) as f32) / 1000.0,
             total_ns:          self.total_ns.load(Ordering::Relaxed),
+            skipped_atom:      self.skipped_atom.load(Ordering::Relaxed),
+            skipped_evicted:   self.skipped_evicted.load(Ordering::Relaxed),
+            skipped_newborn:   self.skipped_newborn.load(Ordering::Relaxed),
+            skipped_score:     self.skipped_score.load(Ordering::Relaxed),
+            pools_visited:     self.pools_visited.load(Ordering::Relaxed),
+            pools_no_tier:     self.pools_no_tier.load(Ordering::Relaxed),
+            pools_underbudget: self.pools_underbudget.load(Ordering::Relaxed),
         }
     }
 }
@@ -253,6 +275,13 @@ pub struct OrchestratorStatsSnapshot {
     pub page_in_errors:   u64,
     pub last_pressure:    f32,
     pub total_ns:         u64,
+    pub skipped_atom:      u64,
+    pub skipped_evicted:   u64,
+    pub skipped_newborn:   u64,
+    pub skipped_score:     u64,
+    pub pools_visited:     u64,
+    pub pools_no_tier:     u64,
+    pub pools_underbudget: u64,
 }
 
 /// Neurons one pass may still page in while under the politeness floor.

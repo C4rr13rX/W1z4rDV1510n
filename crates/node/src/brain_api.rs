@@ -5565,6 +5565,17 @@ async fn h_tier_orchestrator(State(s): State<BrainApiState>) -> Json<serde_json:
         "evict_errors":       snap.evict_errors,
         "page_in_errors":     snap.page_in_errors,
         "last_pressure":      snap.last_pressure,
+        // Why scanned neurons were not evicted. Without these, a 0.41%
+        // eviction rate is indistinguishable from a filter rejecting
+        // everything, a score that never qualifies, and a scan window that
+        // never reaches the fabric -- and all three have different fixes.
+        "skipped_atom":       snap.skipped_atom,
+        "skipped_evicted":    snap.skipped_evicted,
+        "skipped_newborn":    snap.skipped_newborn,
+        "skipped_score":      snap.skipped_score,
+        "pools_visited":      snap.pools_visited,
+        "pools_no_tier":      snap.pools_no_tier,
+        "pools_underbudget":  snap.pools_underbudget,
         "total_us":           snap.total_ns / 1_000,
         "total_ms":           snap.total_ns / 1_000_000,
         "mean_per_pass_us":   mean_per_pass_ns / 1_000,
