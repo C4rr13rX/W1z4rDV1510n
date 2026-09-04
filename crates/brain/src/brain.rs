@@ -1117,10 +1117,18 @@ fn rank_bounded_binding_evidence(
 }
 
 /// Overlay entries retained before `advance_tick` spills them to the on-disk
-/// posting index. At the measured ~20 KB per entry this caps the overlay at a
-/// few hundred MB, well inside the headroom of a 15.6 GB no-swap host, while
-/// staying large enough that spills stay rare during normal training.
-const DEFAULT_OVERLAY_FLUSH_ENTRY_LIMIT: usize = 20_000;
+/// posting index.
+///
+/// Measured on the live brain 2026-09-04: **2,333 bytes per entry** (0.1211 GB
+/// across 55,745 entries), not the ~20 KB first assumed. 250,000 entries
+/// therefore caps the overlay near 0.6 GB -- comfortable on a 15.6 GB no-swap
+/// host, and high enough that spills stay occasional rather than firing every
+/// few minutes as a 20,000 cap did (~47 MB, far tighter than intended).
+///
+/// A spill is not free: it rebuilds the on-disk posting index for every
+/// retained entry, so an over-tight limit trades RAM for steady write
+/// amplification on the training path.
+const DEFAULT_OVERLAY_FLUSH_ENTRY_LIMIT: usize = 250_000;
 
 impl Brain {
     /// Construct a fresh brain with no sensor pools yet.  The binding
