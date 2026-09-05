@@ -128,6 +128,62 @@ Where a task genuinely is about exact boundary behaviour, specify the
 comparison in the prompt over integers or `decimal`, so the contract and the
 verdict agree on what "equal" means.
 
+### An assertion that ends on a resetting event observes nothing before it
+
+The undiscriminating direction has a shape that is easy to write and hard to
+see. `frontend_state_ux_accessibility-0009` scores a modal focus trap, where
+`Escape` closes the dialog, returns focus to the opener, and makes every
+later key a no-op. The obvious way to test the no-op half was one sequence
+covering everything:
+
+```python
+run_dialog(fields, ['Tab', 'Escape', 'Tab', 'Escape'], 'open_btn')
+```
+
+A dialog that keeps handling keys after closing moves focus to `save` on the
+third key — and then the fourth key, `Escape`, sets focus back to the opener.
+The final state is identical to the correct one. The assertion that existed
+specifically to check "later keys are ignored" could not observe a
+implementation that ignored none of them.
+
+This is not a mutation-choosing problem; it is the validator measuring less
+than it appears to. **A sequence whose last event overwrites the state being
+asserted on cannot witness the events before it.** End such a sequence on an
+event that *reads* the state rather than one that resets it — here,
+`['Escape', 'Tab']`, where a processed `Tab` leaves focus visibly inside a
+closed dialog.
+
+### Derive a fixture the rest of the validator already pins
+
+The same family's `-0007` expected a debounced stream with `max_wait=250` to
+invoke at `450`. Four assertions earlier, the same validator pins the rule
+that decides it: a call arriving exactly when the timer fires opens a new
+burst *measured from that call*. Applying that rule to the stream gives `500`
+— `450` would require the second burst to begin at a call the first burst had
+already absorbed and already delivered as its payload.
+
+Both numbers look equally plausible written down. Only one is implied by the
+validator's own other assertions, and an implementation that got the rule
+right would have been scored as a debouncing failure. **Where a fixture is
+determined by a rule stated elsewhere in the same validator, compute it from
+that rule rather than reading it off the scenario** — and if the two
+assertions disagree, the validator is inconsistent with itself, which no
+candidate can resolve.
+
+### The prompt is the specification, and the table is the second opinion
+
+`-0008` scores CLDR plural selection. Its Arabic fixture expected `101` to be
+`one` and `102` to be `two`, which is the `n % 100` rule that genuinely
+governs `few` and `many` in that language — but Arabic `one` is `n = 1`
+exactly, as the prompt said. The fixture and the prompt disagreed, and the
+fixture was wrong.
+
+A fixture table is easy to fill in by pattern from the rows above it. When it
+contradicts the prompt, **the prompt wins**: it is what the candidate is
+given, so a disagreement is unpassable by construction rather than difficult.
+The three cases here were caught only by writing the reference — which is the
+argument for writing it in the same change as the tasks, never after.
+
 ## Outcome attribution
 
 The contract admits `1000/1000` "with no skipped, manually waived,

@@ -3109,6 +3109,650 @@ def best_wheel(filenames, supported_tags):
 '''
 
 
+REFERENCES["frontend_state_ux_accessibility-0001"] = r'''
+_HEX = "0123456789abcdefABCDEF"
+
+#: The threshold table is keyed on (level, large_text) so an unknown level
+#: and an unknown pairing are the same lookup failure.
+_THRESHOLDS = {
+    ("AA", False): 4.5,
+    ("AA", True): 3.0,
+    ("AAA", False): 7.0,
+    ("AAA", True): 4.5,
+}
+
+
+def _channels(colour):
+    if not isinstance(colour, str) or not colour.startswith("#"):
+        raise ValueError(f"not a hex colour: {colour!r}")
+    digits = colour[1:]
+    if len(digits) == 3:
+        digits = "".join(digit * 2 for digit in digits)
+    if len(digits) != 6 or any(digit not in _HEX for digit in digits):
+        raise ValueError(f"not a hex colour: {colour!r}")
+    return [int(digits[index:index + 2], 16) / 255 for index in (0, 2, 4)]
+
+
+def _luminance(colour):
+    linear = [
+        channel / 12.92 if channel <= 0.03928
+        else ((channel + 0.055) / 1.055) ** 2.4
+        for channel in _channels(colour)
+    ]
+    red, green, blue = linear
+    return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+
+
+def contrast_ratio(foreground, background):
+    first = _luminance(foreground)
+    second = _luminance(background)
+    lighter, darker = max(first, second), min(first, second)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def meets_wcag(foreground, background, level, large_text):
+    try:
+        threshold = _THRESHOLDS[(level, bool(large_text))]
+    except (KeyError, TypeError):
+        raise ValueError(f"unknown conformance level {level!r}") from None
+    return contrast_ratio(foreground, background) >= threshold
+'''
+
+
+REFERENCES["frontend_state_ux_accessibility-0002"] = r'''
+_ALWAYS_FOCUSABLE = {"button", "select", "textarea"}
+
+
+def _focusable_by_default(element):
+    tag = element.get("tag")
+    if tag in _ALWAYS_FOCUSABLE:
+        return True
+    if tag == "input":
+        return element.get("type") != "hidden"
+    if tag == "a":
+        return bool(element.get("href"))
+    return False
+
+
+def focus_order(elements):
+    sequential = []
+    document = []
+    for position, element in enumerate(elements):
+        if element.get("disabled") or element.get("hidden"):
+            continue
+        tabindex = element.get("tabindex")
+        if tabindex is None:
+            if _focusable_by_default(element):
+                document.append(element["id"])
+        elif tabindex > 0:
+            sequential.append((tabindex, position, element["id"]))
+        elif tabindex == 0:
+            document.append(element["id"])
+        # A negative tabindex is reachable only programmatically.
+    sequential.sort(key=lambda entry: (entry[0], entry[1]))
+    return [entry[2] for entry in sequential] + document
+'''
+
+
+REFERENCES["frontend_state_ux_accessibility-0003"] = r'''
+import re
+
+_CONTENT_TAGS = {
+    "button", "a", "label", "legend", "summary", "td", "th",
+    "h1", "h2", "h3", "h4", "h5", "h6",
+}
+
+
+def _collapse(text):
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _name(tree, element_id, allow_content):
+    node = tree[element_id]
+
+    label = node.get("aria_label")
+    if label is not None and _collapse(label):
+        return _collapse(label)
+
+    # An empty alt names the image as decorative on purpose, so the key being
+    # present ends the computation even though the name is "".
+    if node.get("tag") == "img" and "alt" in node:
+        return _collapse(node["alt"])
+
+    if allow_content or node.get("tag") in _CONTENT_TAGS:
+        parts = []
+        own = _collapse(node.get("text", ""))
+        if own:
+            parts.append(own)
+        for child_id in node.get("children") or ():
+            if child_id not in tree:
+                continue
+            child = _name(tree, child_id, True)
+            if child:
+                parts.append(child)
+        joined = " ".join(parts)
+        if joined:
+            return joined
+
+    title = node.get("title")
+    if title is not None and _collapse(title):
+        return _collapse(title)
+    return ""
+
+
+def accessible_name(tree, element_id):
+    node = tree[element_id]
+    for reference in node.get("labelledby") or ():
+        # Referenced nodes contribute content whatever their tag, and their
+        # own labelledby is not followed, so a cycle cannot recur.
+        parts = [
+            _name(tree, item, True)
+            for item in node["labelledby"] if item in tree
+        ]
+        joined = _collapse(" ".join(part for part in parts if part))
+        if joined:
+            return joined
+        break
+    return _name(tree, element_id, False)
+'''
+
+
+REFERENCES["frontend_state_ux_accessibility-0004"] = r'''
+def reconcile(events):
+    base = {}
+    order = []
+    writes = {}
+    issued = set()
+
+    for event in events:
+        kind = event.get("type")
+        if kind == "optimistic":
+            identifier = event["id"]
+            if identifier in issued:
+                raise ValueError(f"duplicate optimistic id {identifier!r}")
+            issued.add(identifier)
+            writes[identifier] = (event["key"], event["value"])
+            order.append(identifier)
+        elif kind in ("ack", "reject"):
+            identifier = event["id"]
+            if identifier not in writes:
+                raise KeyError(f"no write is pending for {identifier!r}")
+            key, value = writes.pop(identifier)
+            order.remove(identifier)
+            if kind == "ack":
+                base[key] = value
+        elif kind == "server":
+            base[event["key"]] = event["value"]
+        else:
+            raise ValueError(f"unknown event type {kind!r}")
+
+    # The visible state is always the confirmed base replayed under the
+    # still-pending writes, so a rejection falls back to whatever the server
+    # last said rather than to a value captured before the write.
+    state = dict(base)
+    for identifier in order:
+        key, value = writes[identifier]
+        state[key] = value
+    return {"state": state, "pending": list(order)}
+'''
+
+
+REFERENCES["frontend_state_ux_accessibility-0005"] = r'''
+import bisect
+
+
+class VirtualList:
+    def __init__(self, heights):
+        heights = list(heights)
+        if any(height < 0 for height in heights):
+            raise ValueError("heights must be non-negative")
+        self._heights = heights
+        offsets = [0]
+        running = 0
+        for height in heights:
+            running += height
+            offsets.append(running)
+        self._offsets = offsets
+
+    def total_height(self):
+        return self._offsets[-1]
+
+    def offset_of(self, index):
+        if index < 0 or index > len(self._heights):
+            raise IndexError(f"row {index} is outside the list")
+        return self._offsets[index]
+
+    def _visible(self, index, scroll_top, bottom):
+        top = self._offsets[index]
+        foot = self._offsets[index + 1]
+        if foot == top:
+            return scroll_top <= top < bottom
+        return top < bottom and foot > scroll_top
+
+    def window(self, scroll_top, viewport_height, overscan):
+        if scroll_top < 0:
+            raise ValueError("scroll_top must not be negative")
+        if viewport_height <= 0:
+            raise ValueError("viewport_height must be positive")
+        if overscan < 0:
+            raise ValueError("overscan must not be negative")
+
+        offsets = self._offsets
+        count = len(self._heights)
+        bottom = scroll_top + viewport_height
+        nothing = (count, count, offsets[-1])
+        if count == 0:
+            return nothing
+
+        # Binary search, not a scan: the straddling row is the last one whose
+        # top is at or above scroll_top.
+        start = bisect.bisect_right(offsets, scroll_top, 0, count) - 1
+        if start < 0:
+            start = 0
+        if offsets[start] == scroll_top:
+            # Zero-height rows share their neighbour's offset; the first of
+            # them is the one the viewport actually starts on.
+            start = bisect.bisect_left(offsets, scroll_top, 0, start + 1)
+        end = min(count, bisect.bisect_left(offsets, bottom, 0, count + 1))
+
+        if start >= end or not self._visible(start, scroll_top, bottom):
+            return nothing
+        start = max(0, start - overscan)
+        end = min(count, end + overscan)
+        return (start, end, offsets[start])
+'''
+
+
+REFERENCES["frontend_state_ux_accessibility-0006"] = r'''
+COALESCE_MS = 1000
+
+
+class EditHistory:
+    def __init__(self, initial_text, limit):
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
+        self._baseline = initial_text
+        self._limit = limit
+        self._steps = []
+        self._index = 0
+        # An apply straight after an undo or a redo is a new step: the user
+        # moved through history, so the typing burst is over.
+        self._moved = False
+
+    def current(self):
+        if self._index == 0:
+            return self._baseline
+        return self._steps[self._index - 1][0]
+
+    def can_undo(self):
+        return self._index > 0
+
+    def can_redo(self):
+        return self._index < len(self._steps)
+
+    def apply(self, text, timestamp_ms):
+        del self._steps[self._index:]
+        coalescing = (
+            self._index > 0
+            and not self._moved
+            and timestamp_ms - self._steps[self._index - 1][1] <= COALESCE_MS
+        )
+        if coalescing:
+            self._steps[self._index - 1] = [text, timestamp_ms]
+        else:
+            self._steps.append([text, timestamp_ms])
+            if len(self._steps) > self._limit:
+                self._baseline = self._steps.pop(0)[0]
+            self._index = len(self._steps)
+        self._moved = False
+        return self.current()
+
+    def undo(self):
+        if self._index > 0:
+            self._index -= 1
+        self._moved = True
+        return self.current()
+
+    def redo(self):
+        if self._index < len(self._steps):
+            self._index += 1
+        self._moved = True
+        return self.current()
+'''
+
+
+REFERENCES["frontend_state_ux_accessibility-0007"] = r'''
+def debounce(events, wait, max_wait=None):
+    if wait <= 0:
+        raise ValueError("wait must be positive")
+    if max_wait is not None and max_wait < wait:
+        raise ValueError("max_wait must not be shorter than wait")
+
+    previous = None
+    for time_ms, _payload in events:
+        if previous is not None and time_ms < previous:
+            raise ValueError("events must be in non-decreasing time order")
+        previous = time_ms
+
+    invocations = []
+    deadline = None
+    cap = None
+    payload = None
+
+    for time_ms, item in events:
+        if deadline is not None and time_ms >= deadline:
+            # The timer fires first; this call opens a new burst.
+            invocations.append((deadline, payload))
+            deadline = cap = None
+        if deadline is None and max_wait is not None:
+            cap = time_ms + max_wait
+        deadline = time_ms + wait
+        if cap is not None and cap < deadline:
+            deadline = cap
+        payload = item
+
+    if deadline is not None:
+        invocations.append((deadline, payload))
+    return invocations
+'''
+
+
+REFERENCES["frontend_state_ux_accessibility-0008"] = r'''
+import re
+
+_SUPPORTED = {"en", "ru", "pl", "ar"}
+
+
+def _language(locale):
+    if not isinstance(locale, str):
+        raise ValueError(f"not a locale: {locale!r}")
+    primary = re.split(r"[-_]", locale)[0].lower()
+    if primary not in _SUPPORTED:
+        raise ValueError(f"unsupported locale {locale!r}")
+    return primary
+
+
+def _whole_number(n):
+    if isinstance(n, bool) or not isinstance(n, int) or n < 0:
+        raise ValueError(f"n must be a non-negative integer, got {n!r}")
+    return n
+
+
+def plural_category(locale, n):
+    language = _language(locale)
+    n = _whole_number(n)
+    tens, hundreds = n % 10, n % 100
+
+    if language == "en":
+        return "one" if n == 1 else "other"
+    if language == "ru":
+        if tens == 1 and hundreds != 11:
+            return "one"
+        if tens in (2, 3, 4) and hundreds not in (12, 13, 14):
+            return "few"
+        return "many"
+    if language == "pl":
+        if n == 1:
+            return "one"
+        if tens in (2, 3, 4) and hundreds not in (12, 13, 14):
+            return "few"
+        return "many"
+    if n == 0:
+        return "zero"
+    if n == 1:
+        return "one"
+    if n == 2:
+        return "two"
+    if 3 <= hundreds <= 10:
+        return "few"
+    if 11 <= hundreds <= 99:
+        return "many"
+    return "other"
+
+
+def select_message(locale, n, forms):
+    category = plural_category(locale, n)
+    if category in forms:
+        chosen = forms[category]
+    elif "other" in forms:
+        chosen = forms["other"]
+    else:
+        raise KeyError(
+            f"no {category!r} form and no 'other' fallback for n={n}")
+    return chosen.replace("{n}", str(n))
+'''
+
+
+REFERENCES["frontend_state_ux_accessibility-0009"] = r'''
+_KEYS = ("Tab", "Shift+Tab", "Escape")
+
+
+def run_dialog(focusables, keys, opener):
+    order = list(focusables)
+    if len(set(order)) != len(order):
+        raise ValueError("focusable ids must be unique")
+    for key in keys:
+        if key not in _KEYS:
+            raise ValueError(f"unhandled key {key!r}")
+
+    is_open = True
+    index = 0
+    focus = order[0] if order else "dialog"
+
+    for key in keys:
+        if not is_open:
+            continue
+        if key == "Escape":
+            is_open = False
+            focus = opener
+        elif not order:
+            continue
+        elif key == "Tab":
+            index = (index + 1) % len(order)
+            focus = order[index]
+        else:
+            index = (index - 1) % len(order)
+            focus = order[index]
+
+    return {"focus": focus, "open": is_open}
+'''
+
+
+REFERENCES["frontend_state_ux_accessibility-0010"] = r'''
+import re
+
+
+class FormState:
+    def __init__(self, fields, initial):
+        self._rules = {name: dict(rule) for name, rule in fields.items()}
+        self._initial = dict(initial)
+        self._values = dict(initial)
+        self._touched = set()
+
+    def _known(self, name):
+        if name not in self._rules:
+            raise KeyError(f"no such field: {name!r}")
+
+    def change(self, name, value):
+        self._known(name)
+        self._values[name] = value
+
+    def blur(self, name):
+        self._known(name)
+        self._touched.add(name)
+
+    def submit(self):
+        self._touched = set(self._rules)
+        return self.errors()
+
+    def reset(self):
+        self._values = dict(self._initial)
+        self._touched = set()
+
+    def values(self):
+        return dict(self._values)
+
+    def touched(self):
+        return set(self._touched)
+
+    def dirty(self):
+        return {
+            name for name, value in self._values.items()
+            if value != self._initial.get(name)
+        }
+
+    def _message(self, name):
+        rule = self._rules[name]
+        value = self._values.get(name, "")
+        if rule.get("required") and not value.strip():
+            return "required"
+        minimum = rule.get("min_length")
+        if minimum is not None and len(value) < minimum:
+            return "min_length"
+        pattern = rule.get("pattern")
+        if pattern is not None and not re.fullmatch(pattern, value):
+            return "pattern"
+        return None
+
+    def errors(self):
+        found = {}
+        for name in self._rules:
+            if name not in self._touched:
+                continue
+            message = self._message(name)
+            if message is not None:
+                found[name] = message
+        return found
+'''
+
+
+REFERENCES["frontend_state_ux_accessibility-0011"] = r'''
+_UNRESERVED = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+
+
+def _quote(text):
+    out = []
+    for byte in text.encode("utf-8"):
+        char = chr(byte)
+        out.append(char if char in _UNRESERVED else f"%{byte:02X}")
+    return "".join(out)
+
+
+def _unquote(text):
+    raw = bytearray()
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "%":
+            pair = text[index + 1:index + 3]
+            if len(pair) != 2:
+                raise ValueError(f"truncated escape in {text!r}")
+            raw.append(int(pair, 16))
+            index += 3
+        else:
+            # '+' is a literal plus here: the form-encoding rule that turns
+            # it into a space does not apply to a percent-encoded query.
+            raw.extend(char.encode("utf-8"))
+            index += 1
+    return raw.decode("utf-8")
+
+
+def _same_keys(state, defaults):
+    if set(state) != set(defaults):
+        raise KeyError(
+            f"state keys {sorted(state)} are not the default keys "
+            f"{sorted(defaults)}")
+
+
+def encode_state(state, defaults):
+    _same_keys(state, defaults)
+    parts = []
+    for key in sorted(state):
+        value = state[key]
+        default = defaults[key]
+        if value == default:
+            continue
+        name = _quote(key)
+        if isinstance(default, list):
+            if not value:
+                parts.append(name)
+            else:
+                parts.extend(f"{name}={_quote(item)}" for item in value)
+        elif isinstance(default, bool):
+            parts.append(f"{name}={'true' if value else 'false'}")
+        elif isinstance(default, int):
+            parts.append(f"{name}={value}")
+        else:
+            parts.append(f"{name}={_quote(value)}")
+    return "&".join(parts)
+
+
+def decode_state(query, defaults):
+    state = {
+        key: (list(value) if isinstance(value, list) else value)
+        for key, value in defaults.items()
+    }
+    replaced = set()
+    for entry in query.split("&"):
+        if not entry:
+            continue
+        raw_key, separator, raw_value = entry.partition("=")
+        key = _unquote(raw_key)
+        if key not in defaults:
+            continue
+        default = defaults[key]
+        value = _unquote(raw_value)
+        if isinstance(default, list):
+            if key not in replaced:
+                replaced.add(key)
+                state[key] = []
+            if separator:
+                state[key].append(value)
+        elif isinstance(default, bool):
+            if value not in ("true", "false"):
+                raise ValueError(f"{key}={value!r} is not a boolean")
+            state[key] = value == "true"
+        elif isinstance(default, int):
+            state[key] = int(value)
+        else:
+            state[key] = value
+    return state
+'''
+
+
+REFERENCES["frontend_state_ux_accessibility-0012"] = r'''
+def _bounds(items, indices, to_index):
+    for index in indices:
+        if index < 0 or index >= len(items):
+            raise IndexError(f"row {index} is outside the list")
+    if to_index < 0 or to_index > len(items):
+        raise IndexError(f"insertion point {to_index} is outside the list")
+
+
+def move_item(items, from_index, to_index):
+    _bounds(items, (from_index,), to_index)
+    rest = list(items)
+    row = rest.pop(from_index)
+    # Removing the row shifts everything after it, so an insertion point past
+    # the row lands one place earlier than the original index suggests --
+    # which is why dragging a row one place down is a no-op.
+    position = to_index - (1 if from_index < to_index else 0)
+    rest.insert(position, row)
+    return rest
+
+
+def move_selection(items, selected, to_index):
+    _bounds(items, selected, to_index)
+    chosen = sorted(set(selected))
+    block = [items[index] for index in chosen]
+    taken = set(chosen)
+    rest = [row for index, row in enumerate(items) if index not in taken]
+    position = to_index - sum(1 for index in chosen if index < to_index)
+    return rest[:position] + block + rest[position:]
+'''
+
+
 MUTATIONS: dict[str, tuple[str, str]] = {
     # Sign the payload alone, so the header can be rewritten after signing
     # and the token still verifies -- the alg-confusion family.
@@ -3581,5 +4225,78 @@ MUTATIONS: dict[str, tuple[str, str]] = {
     "cicd_containers_packaging_platform-0008": (
         "        candidate = (min(ranks), -build_number, filename)",
         "        candidate = (min(ranks), build_number, filename)",
+    ),
+    # Give large text at AAA the AA large-text threshold, so a 3.03 ratio
+    # reports conformance at the level that actually needs 4.5.
+    "frontend_state_ux_accessibility-0001": (
+        '    ("AAA", True): 4.5,',
+        '    ("AAA", True): 3.0,',
+    ),
+    # Make a negative tabindex a tab stop, putting a roving-tabindex element
+    # that should only be reachable programmatically into the Tab sequence.
+    "frontend_state_ux_accessibility-0002": (
+        "        elif tabindex == 0:",
+        "        else:",
+    ),
+    # Require alt to be non-empty rather than present, so an intentionally
+    # decorative image falls through and announces its title instead.
+    "frontend_state_ux_accessibility-0003": (
+        '    if node.get("tag") == "img" and "alt" in node:',
+        '    if node.get("tag") == "img" and node.get("alt"):',
+    ),
+    # Replay the pending writes newest-first, so an older optimistic write
+    # wins over the one the user made after it.
+    "frontend_state_ux_accessibility-0004": (
+        "    for identifier in order:",
+        "    for identifier in reversed(order):",
+    ),
+    # Stop backing up over rows that share the straddling row's offset, so a
+    # zero-height row sitting exactly at the viewport top is never rendered.
+    "frontend_state_ux_accessibility-0005": (
+        "        if offsets[start] == scroll_top:",
+        "        if False:",
+    ),
+    # Coalesce across a history move: the edit a user makes after undoing
+    # merges into the step it was supposed to follow, losing that step.
+    "frontend_state_ux_accessibility-0006": (
+        "            and not self._moved\n",
+        "",
+    ),
+    # Measure the cap from the newest call rather than the burst's first, so
+    # max_wait never bounds anything and a steady stream never settles.
+    "frontend_state_ux_accessibility-0007": (
+        "        if deadline is None and max_wait is not None:",
+        "        if max_wait is not None:",
+    ),
+    # Treat Arabic 'one' as an n % 100 test, matching 'few' and 'many' -- the
+    # guess that makes 101 announce a singular noun.
+    "frontend_state_ux_accessibility-0008": (
+        "    if n == 1:\n        return \"one\"\n    if n == 2:",
+        "    if hundreds == 1:\n        return \"one\"\n    if n == 2:",
+    ),
+    # Keep handling keys after the dialog closed, so Escape restores focus to
+    # the opener and a later Tab drags it back inside the closed dialog.
+    "frontend_state_ux_accessibility-0009": (
+        "        if not is_open:\n            continue\n",
+        "",
+    ),
+    # Match the pattern anywhere in the value instead of against the whole of
+    # it, so a valid address with junk in front of it validates.
+    "frontend_state_ux_accessibility-0010": (
+        "        if pattern is not None and not re.fullmatch(pattern, value):",
+        "        if pattern is not None and not re.search(pattern, value):",
+    ),
+    # Decode '+' as a space, the form-encoding rule that does not apply to a
+    # percent-encoded query, corrupting every value containing a plus.
+    "frontend_state_ux_accessibility-0011": (
+        '            raw.extend(char.encode("utf-8"))',
+        '            raw.extend(b" " if char == "+" else char.encode("utf-8"))',
+    ),
+    # Insert at the raw target index without accounting for the row already
+    # removed, so dragging a row one place down swaps it instead of doing
+    # nothing.
+    "frontend_state_ux_accessibility-0012": (
+        "    position = to_index - (1 if from_index < to_index else 0)",
+        "    position = to_index",
     ),
 }
