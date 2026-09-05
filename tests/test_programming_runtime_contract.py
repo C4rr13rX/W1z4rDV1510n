@@ -7,6 +7,8 @@ import argparse
 import hashlib
 import importlib
 import os
+import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -2129,6 +2131,42 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         )
         self.assertIn('"/brain/pretrain_bindings"', source)
         self.assertNotIn('"/brain/pretrain/batch"', source)
+
+    def test_gate_suites_that_can_be_rolled_back_are_protected_routes(self) -> None:
+        """Every suite the completion gate demands must be re-seedable.
+
+        A rollback restores the last-good guard wholesale, discarding anything
+        trained after it was published -- including bindings the completion
+        gate then requires. The gate only ever invokes its suites with
+        `--no-train`, so nothing re-establishes them, and the loop closes on
+        itself: the gate rejects, the rejection rolls back, the rollback
+        discards the binding, and the next gate rejects identically.
+
+        Measured 2026-09-05 on a brain passing 11 of 12 enterprise suites,
+        typescript's `optimistic_store` paraphrase went 2/3 -> 3/3 on re-seed
+        and back to 2/3 after the next rollback, twice. Protected-route suites
+        are re-seeded inside the live guard, so a refresh becomes the accepted
+        base instead of an unadmitted mutation waiting to be discarded.
+        """
+        source = (ROOT / "scripts/programming_curriculum_supervisor.py").read_text(
+            encoding="utf-8"
+        )
+        gate_body = source.split("def run_completion_gate", 1)[1].split(
+            "\ndef ", 1)[0]
+        demanded = set(re.findall(r"scripts/(programming_[a-z_]+)\.py",
+                                  gate_body))
+        # brain_eval is the foundation probe and integrated_retention is a
+        # harness over other suites; neither owns a re-seedable route.
+        demanded -= {"programming_brain_eval", "programming_integrated_retention"}
+        protected = {
+            pathlib.Path(script).stem
+            for script in sup.PROTECTED_ROUTE_SUITES.values()
+        }
+        self.assertTrue(
+            demanded <= protected,
+            f"completion gate demands suites with no protected route, so a "
+            f"rollback strands them: {sorted(demanded - protected)}",
+        )
 
     def test_long_response_suites_bind_through_pretrain_binding(self) -> None:
         """A suite whose responses exceed the observe ceiling must not use it.

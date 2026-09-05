@@ -3139,16 +3139,32 @@ def protected_route_pressure_reasons(report: dict) -> list[dict]:
     return reasons
 
 
+#: The suites whose routes are part of the accepted base, not of a candidate.
+#:
+#: A rollback restores the guard wholesale, so anything trained after the guard
+#: was published is discarded -- including the bindings the completion gate
+#: then demands. `typescript` is here because that loop was observed closing on
+#: itself: the gate rejects an interval, the rejection rolls back, the rollback
+#: discards the binding, and the next gate rejects for the identical reason.
+#: Measured 2026-09-05 on a brain passing 11 of 12 enterprise suites,
+#: `optimistic_store` paraphrase went 2/3 -> 3/3 on re-seed and back to 2/3
+#: after the next rollback, twice.
+#:
+#: These are re-seeded inside the live guard, so a refresh becomes the accepted
+#: base rather than an unadmitted mutation waiting to be thrown away.
+PROTECTED_ROUTE_SUITES = {
+    "multilanguage": "scripts/programming_multilanguage_eval.py",
+    "python": "scripts/programming_code_eval.py",
+    "typescript": "scripts/programming_typescript_enterprise.py",
+}
+
+
 def run_protected_route_sentinel(args: argparse.Namespace, runtime: Path,
                                  output: Path, *, repeats: int | None,
                                  suite: str = "multilanguage") -> dict:
     """Run the protected route suite with explicit mutation semantics."""
     output.unlink(missing_ok=True)
-    script = (
-        "scripts/programming_multilanguage_eval.py"
-        if suite == "multilanguage"
-        else "scripts/programming_code_eval.py"
-    )
+    script = PROTECTED_ROUTE_SUITES[suite]
     command = [sys.executable, script, "--endpoint", args.endpoint,
                "--output", str(output)]
     if suite == "python":
@@ -3200,6 +3216,9 @@ def guarded_protected_route_preflight(
     python_training_path = runtime / f"{phase.name}.protected-python-route-refresh.json"
     post_path = runtime / f"{phase.name}.protected-route-post-refresh.json"
     python_post_path = runtime / f"{phase.name}.protected-python-route-post-refresh.json"
+    typescript_probe_path = runtime / f"{phase.name}.protected-typescript-route-preflight.json"
+    typescript_training_path = runtime / f"{phase.name}.protected-typescript-route-refresh.json"
+    typescript_post_path = runtime / f"{phase.name}.protected-typescript-route-post-refresh.json"
     report_path = runtime / f"{phase.name}.protected-route-admission.json"
     try:
         probe = run_protected_route_sentinel(
@@ -3207,6 +3226,10 @@ def guarded_protected_route_preflight(
         )
         python_probe = run_protected_route_sentinel(
             args, runtime, python_probe_path, repeats=None, suite="python"
+        )
+        typescript_probe = run_protected_route_sentinel(
+            args, runtime, typescript_probe_path, repeats=None,
+            suite="typescript",
         )
         after_probe = endpoint_json(
             args.endpoint, "/brain/stats", timeout=120.0
@@ -3219,6 +3242,7 @@ def guarded_protected_route_preflight(
             )
         reasons = protected_route_pressure_reasons(probe)
         reasons.extend(protected_route_pressure_reasons(python_probe))
+        reasons.extend(protected_route_pressure_reasons(typescript_probe))
         if not reasons:
             certificate = {
                 "version": PROTECTED_ROUTE_CERTIFICATE_VERSION,
@@ -3248,11 +3272,17 @@ def guarded_protected_route_preflight(
             args, runtime, python_training_path,
             repeats=PROTECTED_ROUTE_REFRESH_REPEATS, suite="python",
         )
+        typescript_training = run_protected_route_sentinel(
+            args, runtime, typescript_training_path,
+            repeats=PROTECTED_ROUTE_REFRESH_REPEATS, suite="typescript",
+        )
         if (training.get("exit_code") != 0
-                or python_training.get("exit_code") != 0):
+                or python_training.get("exit_code") != 0
+                or typescript_training.get("exit_code") != 0):
             raise RuntimeError(
                 "protected route refresh failed execution: "
-                f"multilanguage={training} python={python_training}"
+                f"multilanguage={training} python={python_training} "
+                f"typescript={typescript_training}"
             )
         publish(status_path, {
             "state": "protected_route_refresh_benchmarking",
@@ -3270,6 +3300,10 @@ def guarded_protected_route_preflight(
         python_post = run_protected_route_sentinel(
             args, runtime, python_post_path, repeats=None, suite="python"
         )
+        typescript_post = run_protected_route_sentinel(
+            args, runtime, typescript_post_path, repeats=None,
+            suite="typescript",
+        )
         post_after = endpoint_json(
             args.endpoint, "/brain/stats", timeout=120.0
         )
@@ -3281,11 +3315,15 @@ def guarded_protected_route_preflight(
             )
         post_reasons = protected_route_pressure_reasons(post)
         post_reasons.extend(protected_route_pressure_reasons(python_post))
+        post_reasons.extend(protected_route_pressure_reasons(typescript_post))
         if (post.get("exit_code") != 0
-                or python_post.get("exit_code") != 0 or post_reasons):
+                or python_post.get("exit_code") != 0
+                or typescript_post.get("exit_code") != 0 or post_reasons):
             raise RuntimeError(
                 "protected route refresh did not remove predicted pressure: "
-                f"exit={post.get('exit_code')} reasons={post_reasons}"
+                f"exit={post.get('exit_code')} "
+                f"typescript_exit={typescript_post.get('exit_code')} "
+                f"reasons={post_reasons}"
             )
         after = endpoint_json(args.endpoint, "/brain/stats", timeout=120.0)
         admission = {
@@ -3296,7 +3334,9 @@ def guarded_protected_route_preflight(
             "tick": after.get("tick"), "pressure_reasons": reasons,
             "presentations_per_route": PROTECTED_ROUTE_REFRESH_REPEATS,
             "training": training, "python_training": python_training,
+            "typescript_training": typescript_training,
             "post_refresh": post, "python_post_refresh": python_post,
+            "typescript_post_refresh": typescript_post,
             "completion": completion,
             "updated_unix": time.time(),
         }
