@@ -136,15 +136,20 @@ def train(endpoint: str, repeats: int) -> None:
     # entered labelled retrieval and all were reachable only by exact sequence
     # match -- which a paraphrase by definition cannot use.
     #
-    # That is why `optimistic_store` passed `trained` 3/3 and still failed its
-    # paraphrase. Measured from the gate artifacts: it passed on 2026-09-01
-    # 22:37, then failed every typescript gate from 2026-09-03 10:13 to
-    # 2026-09-04 18:32 -- 8 rejected intervals, each one recorded as
-    # `trained 3/3, paraphrase 2/3`. It took over as the blocking suite from
-    # `composition`, which had rejected the intervals before it.
+    # HARDENING, NOT A DIAGNOSED FIX. An earlier revision of this comment
+    # blamed the observe path for the `optimistic_store` rejections of
+    # 2026-09-03/04 (`trained 3/3, paraphrase 2/3`, 8 intervals). Measured
+    # 2026-09-05 against the recovered brain, the suite scores
+    # `trained 3/3, paraphrase 3/3, oov 3/3` on those SAME observe-path
+    # bindings, with no re-seed. So the training path did not cause those
+    # rejections -- the brain did. They fall inside the window when WAL
+    # corruption had left it empty (0.08 GB resident, ~0.01 confidence), and
+    # they stopped when it was restored.
     #
-    # The three sibling suites were converted for this exact reason in
-    # 4e790fb; this one was missed and kept the defect.
+    # Keep pretrain_binding regardless: it is the path the three sibling
+    # suites were moved to in 4e790fb, and it does not depend on a response
+    # being short enough for the observe path to bind. Do not cite it as the
+    # repair for a specific gate rejection without re-measuring first.
     for _ in range(repeats):
         for case in CASES:
             request(endpoint, "/brain/pretrain_binding", {"frames": [

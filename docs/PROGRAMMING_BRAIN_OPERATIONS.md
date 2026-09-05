@@ -220,16 +220,29 @@ recall via the observe path is exact below ~80 bytes and empty above it. A
 suite whose responses exceed that trains rows nothing can retrieve, then fails
 its own paraphrase check while reporting `trained` at full marks.
 
-That signature — **`trained` perfect, `paraphrase` empty** — means the
-training path, not the capability. `programming_typescript_enterprise.py`
-carried it after its three siblings were converted in 4e790fb: responses of
-379 B, 560 B and 799 B, `optimistic_store` recorded `trained 3/3,
-paraphrase 2/3` on every gate from 2026-09-03 10:13 to 2026-09-04 18:32, and
-8 intervals were rejected for it. Train through `/brain/pretrain_binding`.
+That signature — **`trained` perfect, `paraphrase` empty** — is *consistent
+with* a training-path problem, but it does not prove one. It is also what a
+degraded brain produces, and telling those apart requires re-measuring, not
+reasoning.
 
-Changing the suite is not enough on its own: the supervisor only ever invokes
-these suites with `--no-train`, so the bindings must be re-seeded once through
-the new path before the gate can pass.
+Worked example, 2026-09-05. `programming_typescript_enterprise.py` still
+trained through the observe path with responses of 379 B, 560 B and 799 B, and
+`optimistic_store` recorded `trained 3/3, paraphrase 2/3` on every gate from
+2026-09-03 10:13 to 2026-09-04 18:32 — 8 intervals rejected. The training path
+was the obvious culprit and the wrong one: run against the recovered brain,
+those same observe-path bindings score `trained 3/3, paraphrase 3/3, oov 3/3`
+with no re-seed. The rejections sat inside the window when WAL corruption had
+left the brain empty, and they stopped when it was restored.
+
+**Re-measure a suite against the current brain before repairing it.** A gate
+artifact records what was true of the brain that ran it. Attributing an old
+rejection to a code path, then "fixing" that path, produces a change that
+cannot be shown to have done anything — and buries the real cause.
+
+Two facts worth keeping anyway: `/brain/pretrain_binding` does not depend on a
+response being short enough for the observe path to bind, and the supervisor
+only ever invokes these suites with `--no-train`, so any change to how a suite
+trains needs a one-off re-seed before a gate can see it.
 
 Measured after the re-seed on 2026-09-05, `--no-train` on the live brain:
 
