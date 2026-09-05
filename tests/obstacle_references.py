@@ -645,6 +645,659 @@ def parse_content_type(header):
 '''
 
 
+REFERENCES["validation_parsing_serialization-0007"] = r'''
+def _is_number(text):
+    return bool(text) and all(character in "0123456789" for character in text)
+
+
+def parse_range(header, length):
+    if not isinstance(header, str):
+        raise ValueError("header must be a string")
+    if not isinstance(length, int) or length < 0:
+        raise ValueError("length must be a non-negative integer")
+    unit, separator, spec = header.partition("=")
+    if not separator or unit.strip().lower() != "bytes":
+        raise ValueError("only the bytes unit is supported")
+
+    ranges = []
+    for raw in spec.split(","):
+        piece = raw.strip()
+        if not piece:
+            raise ValueError("empty range spec")
+        first, dash, last = piece.partition("-")
+        if not dash:
+            raise ValueError("a range spec needs a dash")
+        first = first.strip()
+        last = last.strip()
+        if not first:
+            if not _is_number(last):
+                raise ValueError("malformed suffix range")
+            suffix = int(last)
+            if suffix == 0:
+                continue
+            start = max(0, length - suffix)
+            end = length - 1
+        else:
+            if not _is_number(first):
+                raise ValueError("malformed first-byte position")
+            start = int(first)
+            if not last:
+                end = length - 1
+            else:
+                if not _is_number(last):
+                    raise ValueError("malformed last-byte position")
+                end = int(last)
+                if end < start:
+                    raise ValueError("last-byte position precedes the first")
+            if end > length - 1:
+                end = length - 1
+        if length == 0 or start > length - 1:
+            continue
+        ranges.append((start, end))
+    if not ranges:
+        raise ValueError("no range in the header is satisfiable")
+    return ranges
+'''
+
+
+REFERENCES["validation_parsing_serialization-0008"] = r'''
+_HEX = "0123456789abcdefABCDEF"
+
+
+def _unquote(text):
+    out = bytearray()
+    index = 0
+    length = len(text)
+    while index < length:
+        character = text[index]
+        if character == "+":
+            out.append(0x20)
+            index += 1
+            continue
+        if character == "%":
+            token = text[index + 1:index + 3]
+            if len(token) != 2 or token[0] not in _HEX or token[1] not in _HEX:
+                raise ValueError("malformed percent escape")
+            out.append(int(token, 16))
+            index += 3
+            continue
+        out.extend(character.encode("utf-8"))
+        index += 1
+    try:
+        return out.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("percent escapes did not form valid UTF-8") from exc
+
+
+def parse_query(text):
+    if not isinstance(text, str):
+        raise ValueError("query must be a string")
+    if text.startswith("?"):
+        text = text[1:]
+    pairs = []
+    for segment in text.split("&"):
+        if not segment:
+            continue
+        name, _, value = segment.partition("=")
+        pairs.append((_unquote(name), _unquote(value)))
+    return pairs
+'''
+
+
+REFERENCES["validation_parsing_serialization-0009"] = r'''
+def decode_utf8(data):
+    if not isinstance(data, (bytes, bytearray)):
+        raise ValueError("data must be a bytes object")
+    out = []
+    index = 0
+    length = len(data)
+    while index < length:
+        byte = data[index]
+        if byte < 0x80:
+            out.append(chr(byte))
+            index += 1
+            continue
+        if byte < 0xc2:
+            raise ValueError("continuation byte or overlong lead byte")
+        if byte < 0xe0:
+            width = 2
+            code = byte & 0x1f
+        elif byte < 0xf0:
+            width = 3
+            code = byte & 0x0f
+        elif byte < 0xf5:
+            width = 4
+            code = byte & 0x07
+        else:
+            raise ValueError("lead byte above the Unicode range")
+        if index + width > length:
+            raise ValueError("truncated sequence")
+        for offset in range(1, width):
+            follow = data[index + offset]
+            if follow & 0xc0 != 0x80:
+                raise ValueError("malformed continuation byte")
+            code = (code << 6) | (follow & 0x3f)
+        if width == 3 and code < 0x800:
+            raise ValueError("overlong encoding")
+        if width == 4 and code < 0x10000:
+            raise ValueError("overlong encoding")
+        if 0xd800 <= code <= 0xdfff:
+            raise ValueError("surrogate code point")
+        if code > 0x10ffff:
+            raise ValueError("code point above U+10FFFF")
+        out.append(chr(code))
+        index += width
+    return "".join(out)
+'''
+
+
+REFERENCES["validation_parsing_serialization-0010"] = r'''
+import re
+
+_URI = re.compile(
+    r"^(?:(?P<scheme>[^:/?#]+):)?"
+    r"(?://(?P<authority>[^/?#]*))?"
+    r"(?P<path>[^?#]*)"
+    r"(?:\?(?P<query>[^#]*))?"
+    r"(?:#(?P<fragment>.*))?$"
+)
+
+
+def _split(text):
+    match = _URI.match(text)
+    if match is None:
+        raise ValueError("not a URI reference")
+    return match.groupdict()
+
+
+def _remove_dot_segments(path):
+    out = []
+    while path:
+        if path.startswith("../"):
+            path = path[3:]
+        elif path.startswith("./"):
+            path = path[2:]
+        elif path.startswith("/./"):
+            path = "/" + path[3:]
+        elif path == "/.":
+            path = "/"
+        elif path.startswith("/../"):
+            path = "/" + path[4:]
+            if out:
+                out.pop()
+        elif path == "/..":
+            path = "/"
+            if out:
+                out.pop()
+        elif path in (".", ".."):
+            path = ""
+        else:
+            index = path.find("/", 1) if path.startswith("/") else path.find("/")
+            if index < 0:
+                out.append(path)
+                path = ""
+            else:
+                out.append(path[:index])
+                path = path[index:]
+    return "".join(out)
+
+
+def _merge(base, reference_path):
+    if base["authority"] is not None and not base["path"]:
+        return "/" + reference_path
+    base_path = base["path"]
+    index = base_path.rfind("/")
+    if index < 0:
+        return reference_path
+    return base_path[:index + 1] + reference_path
+
+
+def _recompose(parts):
+    text = ""
+    if parts["scheme"] is not None:
+        text += parts["scheme"] + ":"
+    if parts["authority"] is not None:
+        text += "//" + parts["authority"]
+    text += parts["path"]
+    if parts["query"] is not None:
+        text += "?" + parts["query"]
+    if parts["fragment"] is not None:
+        text += "#" + parts["fragment"]
+    return text
+
+
+def resolve_uri(base, reference):
+    if not isinstance(base, str) or not isinstance(reference, str):
+        raise ValueError("base and reference must be strings")
+    base_parts = _split(base)
+    if base_parts["scheme"] is None:
+        raise ValueError("the base URI must carry a scheme")
+    ref = _split(reference)
+
+    target = {
+        "scheme": None,
+        "authority": None,
+        "path": "",
+        "query": None,
+        "fragment": ref["fragment"],
+    }
+    if ref["scheme"] is not None:
+        target["scheme"] = ref["scheme"]
+        target["authority"] = ref["authority"]
+        target["path"] = _remove_dot_segments(ref["path"])
+        target["query"] = ref["query"]
+        return _recompose(target)
+
+    target["scheme"] = base_parts["scheme"]
+    if ref["authority"] is not None:
+        target["authority"] = ref["authority"]
+        target["path"] = _remove_dot_segments(ref["path"])
+        target["query"] = ref["query"]
+        return _recompose(target)
+
+    target["authority"] = base_parts["authority"]
+    if ref["path"] == "":
+        target["path"] = base_parts["path"]
+        target["query"] = (
+            ref["query"] if ref["query"] is not None else base_parts["query"]
+        )
+        return _recompose(target)
+
+    if ref["path"].startswith("/"):
+        target["path"] = _remove_dot_segments(ref["path"])
+    else:
+        target["path"] = _remove_dot_segments(_merge(base_parts, ref["path"]))
+    target["query"] = ref["query"]
+    return _recompose(target)
+'''
+
+
+REFERENCES["validation_parsing_serialization-0011"] = r'''
+_HEX_DIGITS = b"0123456789abcdefABCDEF"
+
+
+def decode_chunked(data):
+    if not isinstance(data, (bytes, bytearray)):
+        raise ValueError("data must be a bytes object")
+    data = bytes(data)
+    body = bytearray()
+    index = 0
+    while True:
+        end = data.find(b"\r\n", index)
+        if end < 0:
+            raise ValueError("chunk size line is not terminated")
+        line = data[index:end]
+        index = end + 2
+        size_text = line.split(b";", 1)[0].strip()
+        if not size_text:
+            raise ValueError("missing chunk size")
+        if any(byte not in _HEX_DIGITS for byte in size_text):
+            raise ValueError("chunk size is not hexadecimal")
+        size = int(size_text, 16)
+        if size == 0:
+            break
+        if index + size > len(data):
+            raise ValueError("chunk data is truncated")
+        body.extend(data[index:index + size])
+        index += size
+        if data[index:index + 2] != b"\r\n":
+            raise ValueError("chunk data is not followed by CRLF")
+        index += 2
+
+    trailers = {}
+    while True:
+        end = data.find(b"\r\n", index)
+        if end < 0:
+            raise ValueError("trailer section is not terminated")
+        line = data[index:end]
+        index = end + 2
+        if not line:
+            break
+        name, separator, value = line.partition(b":")
+        if not separator:
+            raise ValueError("malformed trailer field")
+        trailers[name.decode("ascii").strip().lower()] = (
+            value.decode("ascii").strip()
+        )
+    return bytes(body), trailers
+'''
+
+
+REFERENCES["validation_parsing_serialization-0012"] = r'''
+_HEX = "0123456789abcdefABCDEF"
+
+
+def normalize_ipv6(text):
+    if not isinstance(text, str):
+        raise ValueError("address must be a string")
+    work = text.strip()
+    if not work:
+        raise ValueError("empty address")
+
+    mapped = False
+    dotted_text = ""
+    if "." in work:
+        head, separator, dotted = work.rpartition(":")
+        if not separator:
+            raise ValueError("a dotted quad must follow a colon")
+        octets = dotted.split(".")
+        if len(octets) != 4:
+            raise ValueError("malformed embedded IPv4 address")
+        numbers = []
+        for octet in octets:
+            if not octet or any(character not in "0123456789" for character in octet):
+                raise ValueError("malformed IPv4 octet")
+            if len(octet) > 1 and octet[0] == "0":
+                raise ValueError("an IPv4 octet may not carry a leading zero")
+            number = int(octet)
+            if number > 255:
+                raise ValueError("IPv4 octet out of range")
+            numbers.append(number)
+        dotted_text = "%d.%d.%d.%d" % tuple(numbers)
+        work = "%s:%x:%x" % (
+            head,
+            (numbers[0] << 8) | numbers[1],
+            (numbers[2] << 8) | numbers[3],
+        )
+        mapped = True
+
+    if work.count("::") > 1:
+        raise ValueError("an address may compress only one run")
+    if "::" in work:
+        left, _, right = work.partition("::")
+        left_parts = left.split(":") if left else []
+        right_parts = right.split(":") if right else []
+        if any(part == "" for part in left_parts + right_parts):
+            raise ValueError("malformed group separator")
+        missing = 8 - (len(left_parts) + len(right_parts))
+        if missing < 1:
+            raise ValueError("a compressed run must cover a zero group")
+        groups = left_parts + ["0"] * missing + right_parts
+    else:
+        groups = work.split(":")
+        if len(groups) != 8:
+            raise ValueError("an uncompressed address needs eight groups")
+
+    values = []
+    for part in groups:
+        if not 1 <= len(part) <= 4:
+            raise ValueError("a group is one to four hexadecimal digits")
+        if any(character not in _HEX for character in part):
+            raise ValueError("a group is one to four hexadecimal digits")
+        values.append(int(part, 16))
+
+    scan = 6 if mapped else 8
+    best_start = -1
+    best_length = 0
+    index = 0
+    while index < scan:
+        if values[index]:
+            index += 1
+            continue
+        run = index
+        while run < scan and values[run] == 0:
+            run += 1
+        if run - index > best_length:
+            best_start = index
+            best_length = run - index
+        index = run
+    if best_length < 2:
+        best_start = -1
+        best_length = 0
+
+    if mapped:
+        rendered = ["%x" % value for value in values[:6]] + [dotted_text]
+    else:
+        rendered = ["%x" % value for value in values]
+    if best_start < 0:
+        return ":".join(rendered)
+    return (
+        ":".join(rendered[:best_start])
+        + "::"
+        + ":".join(rendered[best_start + best_length:])
+    )
+'''
+
+
+REFERENCES["validation_parsing_serialization-0013"] = r'''
+_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+
+#: Padding length -> how many whole bytes the block carries. Every other
+#: padding length is unreachable for a base32 encoder.
+_KEEP = {0: 5, 1: 4, 3: 3, 4: 2, 6: 1}
+
+
+def decode_base32(text):
+    if not isinstance(text, str):
+        raise ValueError("input must be a string")
+    if len(text) % 8 != 0:
+        raise ValueError("length is not a multiple of eight")
+
+    out = bytearray()
+    for offset in range(0, len(text), 8):
+        block = text[offset:offset + 8]
+        stripped = block.rstrip("=")
+        pad = len(block) - len(stripped)
+        if "=" in stripped:
+            raise ValueError("padding appears before the end of a block")
+        if pad and offset + 8 != len(text):
+            raise ValueError("padding appears before the final block")
+        if pad not in _KEEP:
+            raise ValueError("invalid padding length")
+
+        bits = 0
+        width = 0
+        for character in stripped:
+            index = _ALPHABET.find(character)
+            if index < 0:
+                raise ValueError("character outside the base32 alphabet")
+            bits = (bits << 5) | index
+            width += 5
+
+        keep = _KEEP[pad]
+        leftover = width - keep * 8
+        if leftover and bits & ((1 << leftover) - 1):
+            raise ValueError("non-canonical trailing bits")
+        out.extend((bits >> leftover).to_bytes(keep, "big"))
+    return bytes(out)
+'''
+
+
+REFERENCES["validation_parsing_serialization-0014"] = r'''
+_WHITESPACE = " \t\n\r"
+_DIGITS = "0123456789"
+_HEX = "0123456789abcdefABCDEF"
+_ESCAPES = {
+    '"': '"', "\\": "\\", "/": "/", "b": "\b",
+    "f": "\f", "n": "\n", "r": "\r", "t": "\t",
+}
+
+
+class _Scanner:
+    def __init__(self, text):
+        self.text = text
+        self.index = 0
+
+    def fail(self, message):
+        raise ValueError("%s at position %d" % (message, self.index))
+
+    def peek(self):
+        if self.index >= len(self.text):
+            return ""
+        return self.text[self.index]
+
+    def at_digit(self):
+        character = self.peek()
+        return character != "" and character in _DIGITS
+
+    def skip_whitespace(self):
+        while self.index < len(self.text) and self.text[self.index] in _WHITESPACE:
+            self.index += 1
+
+    def expect(self, character):
+        if self.peek() != character:
+            self.fail("expected %r" % character)
+        self.index += 1
+
+    def parse_value(self):
+        character = self.peek()
+        if character == "{":
+            return self.parse_object()
+        if character == "[":
+            return self.parse_array()
+        if character == '"':
+            return self.parse_string()
+        if self.text.startswith("true", self.index):
+            self.index += 4
+            return True
+        if self.text.startswith("false", self.index):
+            self.index += 5
+            return False
+        if self.text.startswith("null", self.index):
+            self.index += 4
+            return None
+        if character == "-" or self.at_digit():
+            return self.parse_number()
+        self.fail("expected a value")
+
+    def parse_object(self):
+        self.expect("{")
+        result = {}
+        self.skip_whitespace()
+        if self.peek() == "}":
+            self.index += 1
+            return result
+        while True:
+            self.skip_whitespace()
+            if self.peek() != '"':
+                self.fail("an object key must be a string")
+            key = self.parse_string()
+            self.skip_whitespace()
+            self.expect(":")
+            self.skip_whitespace()
+            result[key] = self.parse_value()
+            self.skip_whitespace()
+            character = self.peek()
+            if character == ",":
+                self.index += 1
+                continue
+            if character == "}":
+                self.index += 1
+                return result
+            self.fail("expected a comma or a closing brace")
+
+    def parse_array(self):
+        self.expect("[")
+        result = []
+        self.skip_whitespace()
+        if self.peek() == "]":
+            self.index += 1
+            return result
+        while True:
+            self.skip_whitespace()
+            result.append(self.parse_value())
+            self.skip_whitespace()
+            character = self.peek()
+            if character == ",":
+                self.index += 1
+                continue
+            if character == "]":
+                self.index += 1
+                return result
+            self.fail("expected a comma or a closing bracket")
+
+    def read_hex4(self):
+        token = self.text[self.index:self.index + 4]
+        if len(token) != 4 or any(character not in _HEX for character in token):
+            self.fail("malformed unicode escape")
+        self.index += 4
+        return int(token, 16)
+
+    def parse_string(self):
+        self.expect('"')
+        chunks = []
+        while True:
+            if self.index >= len(self.text):
+                self.fail("unterminated string")
+            character = self.text[self.index]
+            if character == '"':
+                self.index += 1
+                return "".join(chunks)
+            if character == "\\":
+                self.index += 1
+                code = self.peek()
+                if code in _ESCAPES:
+                    chunks.append(_ESCAPES[code])
+                    self.index += 1
+                    continue
+                if code != "u":
+                    self.fail("unknown escape")
+                self.index += 1
+                first = self.read_hex4()
+                if 0xdc00 <= first <= 0xdfff:
+                    self.fail("unpaired low surrogate")
+                if 0xd800 <= first <= 0xdbff:
+                    if not self.text.startswith("\\u", self.index):
+                        self.fail("unpaired high surrogate")
+                    self.index += 2
+                    second = self.read_hex4()
+                    if not 0xdc00 <= second <= 0xdfff:
+                        self.fail("high surrogate without a low surrogate")
+                    first = 0x10000 + ((first - 0xd800) << 10) + (second - 0xdc00)
+                chunks.append(chr(first))
+                continue
+            if ord(character) < 0x20:
+                self.fail("unescaped control character")
+            chunks.append(character)
+            self.index += 1
+
+    def parse_number(self):
+        start = self.index
+        if self.peek() == "-":
+            self.index += 1
+        if not self.at_digit():
+            self.fail("a number needs at least one digit")
+        if self.peek() == "0":
+            self.index += 1
+        else:
+            while self.at_digit():
+                self.index += 1
+        is_float = False
+        if self.peek() == ".":
+            is_float = True
+            self.index += 1
+            if not self.at_digit():
+                self.fail("a fraction needs a digit")
+            while self.at_digit():
+                self.index += 1
+        if self.peek() in ("e", "E"):
+            is_float = True
+            self.index += 1
+            if self.peek() in ("+", "-"):
+                self.index += 1
+            if not self.at_digit():
+                self.fail("an exponent needs a digit")
+            while self.at_digit():
+                self.index += 1
+        token = self.text[start:self.index]
+        return float(token) if is_float else int(token)
+
+
+def parse_json(text):
+    if not isinstance(text, str):
+        raise ValueError("input must be a string")
+    scanner = _Scanner(text)
+    scanner.skip_whitespace()
+    if scanner.index >= len(text):
+        raise ValueError("the document holds no value")
+    value = scanner.parse_value()
+    scanner.skip_whitespace()
+    if scanner.index != len(text):
+        raise ValueError("trailing content after the top-level value")
+    return value
+'''
+
+
 #: Minimal edits that must turn a passing candidate into a failing one. Each
 #: is a (find, replace) pair applied to the reference source; the mutation is
 #: chosen to break the behaviour contract rather than the syntax, so a
@@ -4563,6 +5216,933 @@ def dispatch(registry, event, payload):
 '''
 
 
+REFERENCES["validation_parsing_serialization-0007"] = r'''
+def _split(uri):
+    fragment = None
+    if "#" in uri:
+        uri, fragment = uri.split("#", 1)
+    query = None
+    if "?" in uri:
+        uri, query = uri.split("?", 1)
+    scheme = None
+    for index, char in enumerate(uri):
+        if char == ":":
+            candidate = uri[:index]
+            if candidate and candidate[0].isalpha() and all(
+                    part.isalnum() or part in "+-." for part in candidate):
+                scheme = candidate
+                uri = uri[index + 1:]
+            break
+        if char in "/?#":
+            break
+    authority = None
+    if uri.startswith("//"):
+        rest = uri[2:]
+        cut = rest.find("/")
+        if cut == -1:
+            cut = len(rest)
+        authority = rest[:cut]
+        uri = rest[cut:]
+    return scheme, authority, uri, query, fragment
+
+
+def _remove_dot_segments(path):
+    output = []
+    while path:
+        if path.startswith("../"):
+            path = path[3:]
+        elif path.startswith("./"):
+            path = path[2:]
+        elif path.startswith("/./"):
+            path = "/" + path[3:]
+        elif path == "/.":
+            path = "/"
+        elif path.startswith("/../"):
+            path = "/" + path[4:]
+            if output:
+                output.pop()
+        elif path == "/..":
+            path = "/"
+            if output:
+                output.pop()
+        elif path in (".", ".."):
+            path = ""
+        else:
+            end = path.find("/", 1) if path.startswith("/") else path.find("/")
+            if end == -1:
+                end = len(path)
+            output.append(path[:end])
+            path = path[end:]
+    return "".join(output)
+
+
+def _merge(authority, base_path, reference_path):
+    if authority is not None and not base_path:
+        return "/" + reference_path
+    cut = base_path.rfind("/")
+    if cut == -1:
+        return reference_path
+    return base_path[:cut + 1] + reference_path
+
+
+def resolve_uri(base, reference):
+    b_scheme, b_authority, b_path, b_query, _ = _split(base)
+    if b_scheme is None:
+        raise ValueError("the base URI has no scheme")
+    r_scheme, r_authority, r_path, r_query, r_fragment = _split(reference)
+    if r_scheme is not None:
+        scheme, authority = r_scheme, r_authority
+        path, query = _remove_dot_segments(r_path), r_query
+    elif r_authority is not None:
+        scheme, authority = b_scheme, r_authority
+        path, query = _remove_dot_segments(r_path), r_query
+    elif r_path == "":
+        scheme, authority = b_scheme, b_authority
+        path = b_path
+        query = r_query if r_query is not None else b_query
+    elif r_path.startswith("/"):
+        scheme, authority = b_scheme, b_authority
+        path, query = _remove_dot_segments(r_path), r_query
+    else:
+        scheme, authority = b_scheme, b_authority
+        path = _remove_dot_segments(_merge(b_authority, b_path, r_path))
+        query = r_query
+    result = scheme + ":"
+    if authority is not None:
+        result += "//" + authority
+    result += path
+    if query is not None:
+        result += "?" + query
+    if r_fragment is not None:
+        result += "#" + r_fragment
+    return result
+'''
+
+
+REFERENCES["validation_parsing_serialization-0008"] = r'''
+_UNRESERVED = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+)
+_HEX_DIGITS = "0123456789ABCDEF"
+
+
+def encode_component(text):
+    out = []
+    for byte in text.encode("utf-8"):
+        char = chr(byte)
+        if char in _UNRESERVED:
+            out.append(char)
+        else:
+            out.append("%" + _HEX_DIGITS[byte >> 4] + _HEX_DIGITS[byte & 0xF])
+    return "".join(out)
+
+
+def _unquote(text):
+    raw = bytearray()
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "+":
+            raw.append(0x20)
+            index += 1
+        elif char == "%":
+            group = text[index + 1:index + 3]
+            if len(group) != 2 or any(
+                    digit not in "0123456789abcdefABCDEF" for digit in group):
+                raise ValueError(f"malformed percent-escape at {index}")
+            raw.append(int(group, 16))
+            index += 3
+        else:
+            raw.extend(char.encode("utf-8"))
+            index += 1
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError("the decoded bytes are not UTF-8") from error
+
+
+def decode_form(query):
+    pairs = []
+    for chunk in query.split("&"):
+        if not chunk:
+            continue
+        name, _, value = chunk.partition("=")
+        pairs.append((_unquote(name), _unquote(value)))
+    return pairs
+'''
+
+
+REFERENCES["validation_parsing_serialization-0009"] = r'''
+_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+_VALUES = {char: index for index, char in enumerate(_ALPHABET)}
+_CHARS_KEPT = {1: 2, 2: 4, 3: 5, 4: 7, 5: 8}
+_REACHABLE_PADDING = {0, 1, 3, 4, 6}
+
+
+def b32encode(data):
+    out = []
+    for start in range(0, len(data), 5):
+        block = data[start:start + 5]
+        bits = int.from_bytes(block + b"\x00" * (5 - len(block)), "big")
+        chars = [_ALPHABET[(bits >> shift) & 0x1F]
+                 for shift in range(35, -1, -5)]
+        keep = _CHARS_KEPT[len(block)]
+        out.append("".join(chars[:keep]) + "=" * (8 - keep))
+    return "".join(out)
+
+
+def b32decode(text):
+    if len(text) % 8:
+        raise ValueError("a base32 string is a multiple of eight characters")
+    out = bytearray()
+    for start in range(0, len(text), 8):
+        block = text[start:start + 8]
+        body = block.rstrip("=")
+        padding = len(block) - len(body)
+        if padding and start + 8 != len(text):
+            raise ValueError("padding may only end the final group")
+        if padding not in _REACHABLE_PADDING:
+            raise ValueError(f"{padding} padding characters cannot occur")
+        bits = 0
+        for char in body:
+            if char not in _VALUES:
+                raise ValueError(f"{char!r} is not a base32 character")
+            bits = (bits << 5) | _VALUES[char]
+        whole = len(body) * 5 // 8
+        spare = len(body) * 5 - whole * 8
+        if bits & ((1 << spare) - 1):
+            raise ValueError("the bits after the last whole byte are not zero")
+        out.extend((bits >> spare).to_bytes(whole, "big"))
+    return bytes(out)
+'''
+
+
+REFERENCES["validation_parsing_serialization-0010"] = r'''
+def _argument(major, value):
+    head = major << 5
+    if value < 24:
+        return bytes([head | value])
+    if value < 0x100:
+        return bytes([head | 24, value])
+    if value < 0x10000:
+        return bytes([head | 25]) + value.to_bytes(2, "big")
+    if value < 0x100000000:
+        return bytes([head | 26]) + value.to_bytes(4, "big")
+    if value < 0x10000000000000000:
+        return bytes([head | 27]) + value.to_bytes(8, "big")
+    raise ValueError("the argument does not fit in eight bytes")
+
+
+def cbor_encode(value):
+    if value is None:
+        return b"\xf6"
+    if value is True:
+        return b"\xf5"
+    if value is False:
+        return b"\xf4"
+    if isinstance(value, int):
+        if 0 <= value < 0x10000000000000000:
+            return _argument(0, value)
+        if -0x10000000000000000 <= value < 0:
+            return _argument(1, -1 - value)
+        raise ValueError("the integer is outside the 64-bit CBOR range")
+    if isinstance(value, bytes):
+        return _argument(2, len(value)) + value
+    if isinstance(value, str):
+        encoded = value.encode("utf-8")
+        return _argument(3, len(encoded)) + encoded
+    if isinstance(value, list):
+        return _argument(4, len(value)) + b"".join(
+            cbor_encode(item) for item in value)
+    if isinstance(value, dict):
+        entries = sorted(
+            ((cbor_encode(key), cbor_encode(item))
+             for key, item in value.items()),
+            key=lambda pair: pair[0],
+        )
+        return _argument(5, len(entries)) + b"".join(
+            key + item for key, item in entries)
+    raise ValueError(f"{type(value).__name__} has no deterministic encoding")
+'''
+
+
+REFERENCES["validation_parsing_serialization-0011"] = r'''
+def _escape(token):
+    return token.replace("~", "~0").replace("/", "~1")
+
+
+def _is_number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _matches(kind, value):
+    if kind == "null":
+        return value is None
+    if kind == "boolean":
+        return isinstance(value, bool)
+    if kind == "object":
+        return isinstance(value, dict)
+    if kind == "array":
+        return isinstance(value, list)
+    if kind == "string":
+        return isinstance(value, str)
+    if kind == "number":
+        return _is_number(value)
+    if kind == "integer":
+        return _is_number(value) and float(value).is_integer()
+    raise ValueError(f"unknown type {kind!r}")
+
+
+def _equal(left, right):
+    if isinstance(left, bool) != isinstance(right, bool):
+        return False
+    if isinstance(left, bool):
+        return left is right
+    if _is_number(left) and _is_number(right):
+        return left == right
+    if isinstance(left, list) and isinstance(right, list):
+        return len(left) == len(right) and all(
+            _equal(one, other) for one, other in zip(left, right))
+    if isinstance(left, dict) and isinstance(right, dict):
+        return left.keys() == right.keys() and all(
+            _equal(left[key], right[key]) for key in left)
+    if type(left) is not type(right):
+        return False
+    return left == right
+
+
+def validate(schema, instance, path=""):
+    errors = []
+    if "type" in schema:
+        kinds = schema["type"]
+        if isinstance(kinds, str):
+            kinds = [kinds]
+        if not any(_matches(kind, instance) for kind in kinds):
+            return [{"path": path, "keyword": "type"}]
+    if "enum" in schema and not any(
+            _equal(instance, option) for option in schema["enum"]):
+        errors.append({"path": path, "keyword": "enum"})
+    if _is_number(instance):
+        if "minimum" in schema and instance < schema["minimum"]:
+            errors.append({"path": path, "keyword": "minimum"})
+        if "exclusiveMaximum" in schema \
+                and instance >= schema["exclusiveMaximum"]:
+            errors.append({"path": path, "keyword": "exclusiveMaximum"})
+    if isinstance(instance, str):
+        if "maxLength" in schema and len(instance) > schema["maxLength"]:
+            errors.append({"path": path, "keyword": "maxLength"})
+    if isinstance(instance, dict):
+        for name in schema.get("required", []):
+            if name not in instance:
+                errors.append({"path": path, "keyword": "required"})
+                break
+        properties = schema.get("properties", {})
+        for name, member in instance.items():
+            child = f"{path}/{_escape(name)}"
+            if name in properties:
+                errors.extend(validate(properties[name], member, child))
+            elif schema.get("additionalProperties", True) is False:
+                errors.append(
+                    {"path": child, "keyword": "additionalProperties"})
+    if isinstance(instance, list):
+        if schema.get("uniqueItems") is True:
+            for outer in range(len(instance)):
+                if any(_equal(instance[outer], instance[inner])
+                       for inner in range(outer)):
+                    errors.append({"path": path, "keyword": "uniqueItems"})
+                    break
+        if "items" in schema:
+            for index, item in enumerate(instance):
+                errors.extend(
+                    validate(schema["items"], item, f"{path}/{index}"))
+    return sorted(errors, key=lambda error: (error["path"], error["keyword"]))
+'''
+
+
+REFERENCES["validation_parsing_serialization-0012"] = r'''
+_LOWER = "abcdefghijklmnopqrstuvwxyz"
+_DIGITS = "0123456789"
+_KEY_TAIL = _LOWER + _DIGITS + "_-.*"
+_TOKEN_TAIL = _LOWER + _LOWER.upper() + _DIGITS + "!#$%&'*+-.^_`|~:/"
+
+
+class _Reader:
+    def __init__(self, text):
+        self.text = text
+        self.index = 0
+
+    def peek(self):
+        return self.text[self.index] if self.index < len(self.text) else ""
+
+    def take(self):
+        char = self.peek()
+        if not char:
+            raise ValueError("the field ends unexpectedly")
+        self.index += 1
+        return char
+
+    def skip_spaces(self):
+        while self.peek() == " ":
+            self.index += 1
+
+
+def _parse_key(reader):
+    char = reader.peek()
+    if not char or (char not in _LOWER and char != "*"):
+        raise ValueError(f"{char!r} cannot start a key")
+    key = ""
+    while reader.peek() and reader.peek() in _KEY_TAIL:
+        key += reader.take()
+    return key
+
+
+def _parse_string(reader):
+    reader.take()
+    out = ""
+    while True:
+        char = reader.take()
+        if char == "\\":
+            escaped = reader.take()
+            if escaped not in ('"', "\\"):
+                raise ValueError("only a quote or a backslash may be escaped")
+            out += escaped
+        elif char == '"':
+            return out
+        elif not (" " <= char <= "~"):
+            raise ValueError("a string holds printable ASCII only")
+        else:
+            out += char
+
+
+def _parse_number(reader):
+    digits = ""
+    if reader.peek() == "-":
+        digits += reader.take()
+    if not (reader.peek() and reader.peek() in _DIGITS):
+        raise ValueError("a number needs at least one digit")
+    while reader.peek() and reader.peek() in _DIGITS:
+        digits += reader.take()
+    if reader.peek() != ".":
+        if len(digits.lstrip("-")) > 15:
+            raise ValueError("an integer holds at most fifteen digits")
+        return int(digits)
+    reader.take()
+    fraction = ""
+    while reader.peek() and reader.peek() in _DIGITS:
+        fraction += reader.take()
+    if len(digits.lstrip("-")) > 12:
+        raise ValueError("a decimal holds at most twelve integer digits")
+    if not 1 <= len(fraction) <= 3:
+        raise ValueError("a decimal holds one to three fraction digits")
+    return float(digits + "." + fraction)
+
+
+def _parse_bare_item(reader):
+    char = reader.peek()
+    if char == "?":
+        reader.take()
+        flag = reader.take()
+        if flag == "0":
+            return False
+        if flag == "1":
+            return True
+        raise ValueError("a boolean is ?0 or ?1")
+    if char == '"':
+        return _parse_string(reader)
+    if char == "-" or (char and char in _DIGITS):
+        return _parse_number(reader)
+    if char and (char in _LOWER + _LOWER.upper() or char == "*"):
+        token = ""
+        while reader.peek() and reader.peek() in _TOKEN_TAIL:
+            token += reader.take()
+        return {"token": token}
+    raise ValueError(f"{char!r} cannot start a bare item")
+
+
+def _parse_parameters(reader):
+    parameters = {}
+    while reader.peek() == ";":
+        reader.take()
+        reader.skip_spaces()
+        name = _parse_key(reader)
+        if reader.peek() == "=":
+            reader.take()
+            parameters[name] = _parse_bare_item(reader)
+        else:
+            parameters[name] = True
+    return parameters
+
+
+def parse_dictionary(text):
+    reader = _Reader(text)
+    reader.skip_spaces()
+    members = {}
+    if not reader.peek():
+        return members
+    while True:
+        key = _parse_key(reader)
+        if reader.peek() == "=":
+            reader.take()
+            value = _parse_bare_item(reader)
+        else:
+            value = True
+        members[key] = (value, _parse_parameters(reader))
+        reader.skip_spaces()
+        if not reader.peek():
+            return members
+        if reader.take() != ",":
+            raise ValueError("members are separated by a comma")
+        reader.skip_spaces()
+        if not reader.peek():
+            raise ValueError("the dictionary ends with a trailing comma")
+'''
+
+
+REFERENCES["validation_parsing_serialization-0013"] = r'''
+_HEX = "0123456789abcdefABCDEF"
+
+
+def _parse_ipv4(text):
+    octets = text.split(".")
+    if len(octets) != 4:
+        raise ValueError("an embedded IPv4 part needs four octets")
+    values = []
+    for octet in octets:
+        if not octet or any(char not in "0123456789" for char in octet):
+            raise ValueError(f"{octet!r} is not a decimal octet")
+        if len(octet) > 1 and octet[0] == "0":
+            raise ValueError(f"{octet!r} has a leading zero")
+        value = int(octet)
+        if value > 255:
+            raise ValueError(f"{octet!r} is above 255")
+        values.append(value)
+    return [values[0] << 8 | values[1], values[2] << 8 | values[3]]
+
+
+def _parse_side(text):
+    if text == "":
+        return []
+    groups = []
+    pieces = text.split(":")
+    for position, piece in enumerate(pieces):
+        if "." in piece:
+            if position != len(pieces) - 1:
+                raise ValueError("an embedded IPv4 part must come last")
+            groups.extend(_parse_ipv4(piece))
+            continue
+        if not 1 <= len(piece) <= 4:
+            raise ValueError(f"{piece!r} is not a one to four digit group")
+        if any(char not in _HEX for char in piece):
+            raise ValueError(f"{piece!r} is not hexadecimal")
+        groups.append(int(piece, 16))
+    return groups
+
+
+def _parse(text):
+    if not text:
+        raise ValueError("an address cannot be empty")
+    if text.count("::") > 1:
+        raise ValueError("'::' may appear at most once")
+    if "::" in text:
+        left, right = text.split("::")
+        head = _parse_side(left)
+        tail = _parse_side(right)
+        if len(head) + len(tail) > 7:
+            raise ValueError("'::' must stand for at least one group")
+        return head + [0] * (8 - len(head) - len(tail)) + tail
+    groups = _parse_side(text)
+    if len(groups) != 8:
+        raise ValueError("an address without '::' needs eight groups")
+    return groups
+
+
+def canonical_ipv6(text):
+    groups = _parse(text)
+    best_start, best_length = -1, 0
+    index = 0
+    while index < 8:
+        if groups[index] != 0:
+            index += 1
+            continue
+        run = index
+        while run < 8 and groups[run] == 0:
+            run += 1
+        if run - index > best_length:
+            best_start, best_length = index, run - index
+        index = run
+    parts = [format(value, "x") for value in groups]
+    if best_length < 2:
+        return ":".join(parts)
+    head = ":".join(parts[:best_start])
+    tail = ":".join(parts[best_start + best_length:])
+    return head + "::" + tail
+'''
+
+
+REFERENCES["validation_parsing_serialization-0014"] = r'''
+_BASE = 36
+_TMIN = 1
+_TMAX = 26
+_SKEW = 38
+_DAMP = 700
+_INITIAL_BIAS = 72
+_INITIAL_N = 128
+_DELIMITER = "-"
+_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
+
+
+def _adapt(delta, numpoints, firsttime):
+    delta = delta // _DAMP if firsttime else delta // 2
+    delta += delta // numpoints
+    shift = 0
+    while delta > ((_BASE - _TMIN) * _TMAX) // 2:
+        delta //= _BASE - _TMIN
+        shift += _BASE
+    return shift + (((_BASE - _TMIN + 1) * delta) // (delta + _SKEW))
+
+
+def _threshold(k, bias):
+    return min(max(k - bias, _TMIN), _TMAX)
+
+
+def punycode_encode(label):
+    output = [char for char in label if ord(char) < 128]
+    basic_length = len(output)
+    handled = basic_length
+    if basic_length:
+        output.append(_DELIMITER)
+    n = _INITIAL_N
+    delta = 0
+    bias = _INITIAL_BIAS
+    while handled < len(label):
+        upcoming = min(ord(char) for char in label if ord(char) >= n)
+        delta += (upcoming - n) * (handled + 1)
+        n = upcoming
+        for char in label:
+            code = ord(char)
+            if code < n:
+                delta += 1
+            elif code == n:
+                q = delta
+                k = _BASE
+                while True:
+                    t = _threshold(k, bias)
+                    if q < t:
+                        break
+                    output.append(_ALPHABET[t + (q - t) % (_BASE - t)])
+                    q = (q - t) // (_BASE - t)
+                    k += _BASE
+                output.append(_ALPHABET[q])
+                bias = _adapt(delta, handled + 1, handled == basic_length)
+                delta = 0
+                handled += 1
+        delta += 1
+        n += 1
+    return "".join(output)
+
+
+def punycode_decode(text):
+    position = text.rfind(_DELIMITER)
+    basic = text[:position] if position >= 0 else ""
+    extended = text[position + 1:] if position >= 0 else text
+    for char in basic:
+        if ord(char) >= 128:
+            raise ValueError("the basic part must be ASCII")
+    output = list(basic)
+    n = _INITIAL_N
+    i = 0
+    bias = _INITIAL_BIAS
+    index = 0
+    while index < len(extended):
+        previous = i
+        weight = 1
+        k = _BASE
+        while True:
+            if index >= len(extended):
+                raise ValueError("the extended part ends inside a number")
+            digit = _ALPHABET.find(extended[index])
+            if digit < 0:
+                raise ValueError(f"{extended[index]!r} is not a digit")
+            index += 1
+            i += digit * weight
+            t = _threshold(k, bias)
+            if digit < t:
+                break
+            weight *= _BASE - t
+            k += _BASE
+        bias = _adapt(i - previous, len(output) + 1, previous == 0)
+        n += i // (len(output) + 1)
+        i %= len(output) + 1
+        output.insert(i, chr(n))
+        i += 1
+    return "".join(output)
+'''
+
+
+REFERENCES["validation_parsing_serialization-0015"] = r'''
+def _disposition_parameters(value):
+    parameters = {}
+    index = 0
+    while index < len(value) and value[index] != ";":
+        index += 1
+    while index < len(value):
+        index += 1
+        while index < len(value) and value[index] == " ":
+            index += 1
+        start = index
+        while index < len(value) and value[index] not in "=;":
+            index += 1
+        name = value[start:index].strip().lower()
+        text = ""
+        if index < len(value) and value[index] == "=":
+            index += 1
+            if index < len(value) and value[index] == '"':
+                index += 1
+                pieces = []
+                while index < len(value) and value[index] != '"':
+                    if value[index] == "\\":
+                        index += 1
+                        if index >= len(value):
+                            raise ValueError("a trailing backslash")
+                    pieces.append(value[index])
+                    index += 1
+                if index >= len(value):
+                    raise ValueError("an unterminated quoted parameter")
+                index += 1
+                text = "".join(pieces)
+            else:
+                start = index
+                while index < len(value) and value[index] != ";":
+                    index += 1
+                text = value[start:index].strip()
+        if name:
+            parameters[name] = text
+        while index < len(value) and value[index] != ";":
+            index += 1
+    return parameters
+
+
+def _parse_part(raw):
+    split = raw.find(b"\r\n\r\n")
+    if split < 0:
+        raise ValueError("a part's headers are not terminated")
+    headers = {}
+    for line in raw[:split].split(b"\r\n"):
+        if not line:
+            continue
+        if b":" not in line:
+            raise ValueError("a header line has no colon")
+        name, _, value = line.partition(b":")
+        headers[name.decode("utf-8").strip().lower()] = \
+            value.decode("utf-8").strip()
+    if "content-disposition" not in headers:
+        raise ValueError("a part has no Content-Disposition header")
+    parameters = _disposition_parameters(headers["content-disposition"])
+    if "name" not in parameters:
+        raise ValueError("a part has no name parameter")
+    return {
+        "name": parameters["name"],
+        "filename": parameters.get("filename"),
+        "headers": headers,
+        "content": raw[split + 4:],
+    }
+
+
+def parse_multipart(body, boundary):
+    marker = b"--" + boundary.encode("ascii")
+    if body.startswith(marker):
+        body = b"\r\n" + body
+    delimiter = b"\r\n" + marker
+    cursor = body.find(delimiter)
+    if cursor < 0:
+        raise ValueError("the body holds no boundary delimiter")
+    parts = []
+    while True:
+        cursor += len(delimiter)
+        if body[cursor:cursor + 2] == b"--":
+            return parts
+        if body[cursor:cursor + 2] != b"\r\n":
+            raise ValueError("a delimiter is followed by CRLF or '--'")
+        cursor += 2
+        end = body.find(delimiter, cursor)
+        if end < 0:
+            raise ValueError("the closing delimiter is missing")
+        parts.append(_parse_part(body[cursor:end]))
+        cursor = end
+'''
+
+
+REFERENCES["validation_parsing_serialization-0016"] = r'''
+_WHITESPACE = " \t\n\r"
+_DIGITS = "0123456789"
+_ESCAPES = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f",
+            "n": "\n", "r": "\r", "t": "\t"}
+
+
+class _Parser:
+    def __init__(self, text):
+        self.text = text
+        self.index = 0
+
+    def peek(self):
+        return self.text[self.index] if self.index < len(self.text) else ""
+
+    def skip(self):
+        while self.peek() and self.peek() in _WHITESPACE:
+            self.index += 1
+
+    def expect(self, char):
+        if self.peek() != char:
+            raise ValueError(f"expected {char!r} at offset {self.index}")
+        self.index += 1
+
+    def value(self):
+        char = self.peek()
+        if char == "{":
+            return self.object()
+        if char == "[":
+            return self.array()
+        if char == '"':
+            return self.string()
+        if char == "-" or (char and char in _DIGITS):
+            return self.number()
+        for literal, result in (("true", True), ("false", False),
+                                ("null", None)):
+            if self.text.startswith(literal, self.index):
+                self.index += len(literal)
+                return result
+        raise ValueError(f"unexpected input at offset {self.index}")
+
+    def object(self):
+        self.expect("{")
+        result = {}
+        self.skip()
+        if self.peek() == "}":
+            self.index += 1
+            return result
+        while True:
+            self.skip()
+            if self.peek() != '"':
+                raise ValueError("an object key must be a string")
+            key = self.string()
+            self.skip()
+            self.expect(":")
+            self.skip()
+            result[key] = self.value()
+            self.skip()
+            if self.peek() == ",":
+                self.index += 1
+                continue
+            self.expect("}")
+            return result
+
+    def array(self):
+        self.expect("[")
+        items = []
+        self.skip()
+        if self.peek() == "]":
+            self.index += 1
+            return items
+        while True:
+            self.skip()
+            items.append(self.value())
+            self.skip()
+            if self.peek() == ",":
+                self.index += 1
+                continue
+            self.expect("]")
+            return items
+
+    def string(self):
+        self.expect('"')
+        out = []
+        while True:
+            if self.index >= len(self.text):
+                raise ValueError("an unterminated string")
+            char = self.text[self.index]
+            self.index += 1
+            if char == '"':
+                return "".join(out)
+            if char == "\\":
+                out.append(self.escape())
+            elif char < " ":
+                raise ValueError("a raw control character in a string")
+            else:
+                out.append(char)
+
+    def escape(self):
+        if self.index >= len(self.text):
+            raise ValueError("an escape at the end of the document")
+        code = self.text[self.index]
+        self.index += 1
+        if code in _ESCAPES:
+            return _ESCAPES[code]
+        if code != "u":
+            raise ValueError(f"{code!r} is not a JSON escape")
+        first = self.hex4()
+        if 0xDC00 <= first <= 0xDFFF:
+            raise ValueError("a low surrogate with no high surrogate")
+        if 0xD800 <= first <= 0xDBFF:
+            if not self.text.startswith("\\u", self.index):
+                raise ValueError("a high surrogate with no low surrogate")
+            self.index += 2
+            second = self.hex4()
+            if not 0xDC00 <= second <= 0xDFFF:
+                raise ValueError("a high surrogate with no low surrogate")
+            return chr(0x10000 + ((first - 0xD800) << 10) + (second - 0xDC00))
+        return chr(first)
+
+    def hex4(self):
+        group = self.text[self.index:self.index + 4]
+        if len(group) != 4 or any(
+                char not in "0123456789abcdefABCDEF" for char in group):
+            raise ValueError("a unicode escape needs four hexadecimal digits")
+        self.index += 4
+        return int(group, 16)
+
+    def number(self):
+        start = self.index
+        floating = False
+        if self.peek() == "-":
+            self.index += 1
+        if self.peek() == "0":
+            self.index += 1
+        elif self.peek() and self.peek() in "123456789":
+            while self.peek() and self.peek() in _DIGITS:
+                self.index += 1
+        else:
+            raise ValueError("a number needs an integer part")
+        if self.peek() == ".":
+            floating = True
+            self.index += 1
+            if not (self.peek() and self.peek() in _DIGITS):
+                raise ValueError("a fraction needs at least one digit")
+            while self.peek() and self.peek() in _DIGITS:
+                self.index += 1
+        if self.peek() in ("e", "E"):
+            floating = True
+            self.index += 1
+            if self.peek() in ("+", "-"):
+                self.index += 1
+            if not (self.peek() and self.peek() in _DIGITS):
+                raise ValueError("an exponent needs at least one digit")
+            while self.peek() and self.peek() in _DIGITS:
+                self.index += 1
+        raw = self.text[start:self.index]
+        return float(raw) if floating else int(raw)
+
+
+def parse_json(text):
+    parser = _Parser(text)
+    parser.skip()
+    value = parser.value()
+    parser.skip()
+    if parser.index != len(parser.text):
+        raise ValueError("trailing content after the JSON value")
+    return value
+'''
+
+
 MUTATIONS: dict[str, tuple[str, str]] = {
     # Sign the payload alone, so the header can be rewritten after signing
     # and the token still verifies -- the alg-confusion family.
@@ -4810,6 +6390,45 @@ MUTATIONS: dict[str, tuple[str, str]] = {
     "validation_parsing_serialization-0006": (
         'if character == "\\\\" and index + 1 < length:',
         "if False:",
+    ),
+    # A suffix range is resolved as length - n, and n may exceed the
+    # representation. Without the floor the first byte goes negative and the
+    # caller seeks backwards past the start of the entity.
+    "validation_parsing_serialization-0007": (
+        "start = max(0, length - suffix)",
+        "start = length - suffix",
+    ),
+    "validation_parsing_serialization-0008": (
+        "out.append(0x20)",
+        "out.append(0x2b)",
+    ),
+    "validation_parsing_serialization-0009": (
+        "if 0xd800 <= code <= 0xdfff:",
+        "if False:",
+    ),
+    # Merge against the base path by cutting at the FIRST slash rather than
+    # the last: every relative reference then resolves against the root.
+    "validation_parsing_serialization-0010": (
+        'index = base_path.rfind("/")',
+        'index = base_path.find("/")',
+    ),
+    "validation_parsing_serialization-0011": (
+        'size_text = line.split(b";", 1)[0].strip()',
+        "size_text = line.strip()",
+    ),
+    # RFC 5952 section 4.2.3 gives the leftmost run to an equal-length tie.
+    # `>=` hands it to the rightmost, which is legal syntax and not canonical.
+    "validation_parsing_serialization-0012": (
+        "if run - index > best_length:",
+        "if run - index >= best_length:",
+    ),
+    "validation_parsing_serialization-0013": (
+        "if leftover and bits & ((1 << leftover) - 1):",
+        "if False:",
+    ),
+    "validation_parsing_serialization-0014": (
+        "first = 0x10000 + ((first - 0xd800) << 10) + (second - 0xdc00)",
+        "first = 0x10000 + ((first - 0xd800) << 10) + second",
     ),
     # Negate the translation without rotating it. Correct for a transform
     # that only translates, wrong the moment a joint also rotates -- so it
@@ -5208,5 +6827,71 @@ MUTATIONS: dict[str, tuple[str, str]] = {
     "architecture_multifile_integration-0006": (
         "        key=lambda entry: (-entry[1][0], entry[0]),",
         "        key=lambda entry: (entry[1][0], entry[0]),",
+    ),
+    # Merge a relative reference onto the whole base path instead of onto
+    # everything up to its last slash, so every sibling reference resolves
+    # one level too deep -- correct only when the base path ends in a slash.
+    "validation_parsing_serialization-0007": (
+        "    return base_path[:cut + 1] + reference_path",
+        "    return base_path + reference_path",
+    ),
+    # Adopt the unreserved set of JavaScript's encodeURIComponent, which
+    # leaves the sub-delimiters that a form parser goes on to treat as
+    # syntax.
+    "validation_parsing_serialization-0008": (
+        '"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"',
+        '"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~!*\'()"',
+    ),
+    # Drop the spare bits of a partial group instead of requiring them to be
+    # zero, which gives every short value several accepted spellings.
+    "validation_parsing_serialization-0009": (
+        "        if bits & ((1 << spare) - 1):",
+        "        if False:",
+    ),
+    # Order map keys by encoded length first -- the canonical form of the
+    # superseded RFC 7049, which agrees with RFC 8949 on same-length keys
+    # and disagrees the moment two key types are mixed.
+    "validation_parsing_serialization-0010": (
+        "            key=lambda pair: pair[0],",
+        "            key=lambda pair: (len(pair[0]), pair[0]),",
+    ),
+    # Let a Python bool answer to isinstance(int), so true validates as an
+    # integer, compares equal to 1 in an enum, and stops being unique.
+    "validation_parsing_serialization-0011": (
+        "    return isinstance(value, (int, float)) "
+        "and not isinstance(value, bool)",
+        "    return isinstance(value, (int, float))",
+    ),
+    # Give a member with no '=' the empty string rather than true, which is
+    # the whole point of allowing the shorthand.
+    "validation_parsing_serialization-0012": (
+        "            value = True",
+        "            value = \"\"",
+    ),
+    # Compress the first run of zero groups rather than the longest, which
+    # agrees with RFC 5952 whenever there is only one run.
+    "validation_parsing_serialization-0013": (
+        "        if run - index > best_length:",
+        "        if best_length == 0 and run - index > 0:",
+    ),
+    # Freeze the bias at its initial value. Every single-character label
+    # still encodes correctly, because the bias is adapted after the first
+    # code point and never consulted again.
+    "validation_parsing_serialization-0014": (
+        "                bias = _adapt(delta, handled + 1, "
+        "handled == basic_length)",
+        "                bias = _INITIAL_BIAS",
+    ),
+    # Trim the trailing CRLF with rstrip, which also eats blank lines the
+    # sender meant to transmit and silently corrupts binary content.
+    "validation_parsing_serialization-0015": (
+        '        "content": raw[split + 4:],',
+        '        "content": raw[split + 4:].rstrip(b"\\r\\n"),',
+    ),
+    # Funnel every number through float(), losing the int/float distinction
+    # the document's own syntax carries.
+    "validation_parsing_serialization-0016": (
+        "        return float(raw) if floating else int(raw)",
+        "        return float(raw)",
     ),
 }

@@ -333,6 +333,39 @@ It is a correct guard reporting a real transient state, so a session that
 finds it red should confirm the claim is live before "fixing" it by deleting
 another agent's work.
 
+#### The check is only valid at the instant you write
+
+Measured 2026-09-05, the next time a session woke into this repository. All
+three commands were run at 21:32 UTC and all three were clean:
+`git status --short` printed nothing, `git log` showed no architecture commit,
+and no `architecture_multifile_integration` key appeared in the references
+table. `authoring_status()` agreed at `0/70`. On that evidence the family was
+unclaimed, and it was the obvious pick — the only family nobody had started.
+
+By 21:37 the same three commands reported an untracked
+`scripts/programming_obstacle_tasks/architecture_multifile_integration.py`
+two minutes old, a references file modified thirty-three seconds earlier, and
+six architecture reference blocks. Nothing had changed about the session's
+own reasoning; another agent had simply been mid-file at 21:32, with its work
+still in an editor buffer rather than on disk. It committed as `2d17d76`
+seven minutes later.
+
+So the three commands establish nothing durable. They describe the working
+tree at the moment they run, and a family can be claimed in the gap between
+surveying and writing — which is exactly the gap that reading the module
+conventions, choosing a family, and drafting the first task opens up. **Re-run
+them immediately before the first write, not once at the start.** The cheapest
+strong signal is the pair of mtimes:
+
+```bash
+ls -lt --time-style=+%H:%M:%S tests/obstacle_references.py \
+    scripts/programming_obstacle_tasks/
+```
+
+A references file modified seconds ago is another agent typing, whatever the
+family counts say. A count of zero means nobody has *finished*, never that
+nobody has started.
+
 ### An invisible mutation is a validator that does not probe that axis
 
 The mutation test asserts the mutilated reference **fails**. So a mutation the
@@ -459,3 +492,66 @@ the candidate's filename:
 - An `AssertionError` is always `failed`, whatever raised it, so an ordinary
   assertion on fixture state after the candidate ran is safe and is the
   preferred shape.
+
+### A negative fixture has to reach the rule it violates
+
+The unsatisfiable direction has a shape distinct from the boundary-decimal
+one above, and it hides in the list of inputs a validator expects to be
+*rejected*. Those lists are written quickly — a handful of malformed strings
+per task — and each entry carries an implicit claim that the input actually
+reaches the rule it is supposed to break. When it does not, the validator
+demands an error no correct implementation can raise.
+
+Measured while writing `validation_parsing_serialization-0009`, the strict
+RFC 4648 base32 decoder. Canonical decoding requires that the bits left over
+after the last whole byte of a group are zero, and the task asserts a list of
+non-canonical strings all raise. One entry was `AAAQEAYB`: eight characters,
+no padding. Eight base32 characters are forty bits, which is exactly five
+bytes — a full group has *no* leftover bits, so the canonicality rule does not
+apply to it and there is nothing for a correct decoder to reject. The
+reference caught it immediately, but a course shipped without references
+would have reported it as a base32 capability failure forever.
+
+The rule is worth stating in general because it applies to every rejection
+list: **a value asserted to be invalid must be in the domain where the
+invalidating rule has force.** Padding counts, trailing bits, length limits
+and range checks all have preconditions, and a fixture that misses the
+precondition tests nothing while looking like a strict test. The check is to
+name, for each rejected input, the clause it violates and confirm the input
+satisfies that clause's preconditions — here, "spare bits are non-zero"
+presupposes a group that has spare bits, which is any group but a full one.
+
+The correction was to swap in `MZXR====` — four characters, twenty bits, two
+whole bytes and four spare, with the last of them set.
+
+### Where the standard ships with the language, generate the fixtures from it
+
+Prefer contracts specified by a public standard, and the fixtures for one
+still have to come from somewhere. Recalling them is how the wrong RFC 6901
+escape example and the wrong CLDR Arabic plural rule reached this repository.
+
+Some standards have a correct implementation already sitting in the standard
+library, and where they do it is the fixture generator: RFC 3492 punycode is
+`str.encode("punycode")`, Unicode normalization is `unicodedata`, and base64
+is `base64`. `validation_parsing_serialization-0014` states ten encode/decode
+vectors including `räksmörgås` → `rksmrgs-5wao1o` and `ドメイン名例` →
+`eckwd4c7cu47r2wf`, and every one of them was produced by running CPython's
+own codec at authoring time rather than transcribed from the RFC's test
+section. Punycode is the case that most rewards this: the bias adapts after
+each code point, so the encoding of a character depends on everything before
+it, and a vector that is one character wrong is indistinguishable by eye from
+a correct one.
+
+This does not weaken the task. The prompt forbids the candidate the same
+module — `codecs`, `encodings`, and the quoted codec names are checked
+against `RESPONSE_TEXT` — so the capability under test is still implementing
+the algorithm. The stdlib is used once, by the author, and never at scoring
+time; nothing about the verdict depends on it.
+
+Two cautions. The generator has to be genuinely independent of the thing
+under test: a fixture produced by the reference solution proves only that the
+reference agrees with itself, which is what the mutation test already checks
+from the other side. And a stdlib implementation is not always the standard —
+`base64.b32decode` accepts the non-canonical trailing bits that `-0009`
+requires be rejected, so it is a fixture source for the *encoding* direction
+and an example of the defect for the decoding one.
