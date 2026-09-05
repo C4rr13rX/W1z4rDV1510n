@@ -84,3 +84,37 @@ Two probe traps that produce confident wrong answers:
 - Cargo hard-links from its cache (link count 2). A rebuild that
   "Finished in 0.30s" and leaves the timestamp unchanged did not relink.
   `touch` the sources to force it, and check `ls -la` for a new mtime.
+
+## A work unit sized to fill the resource window starves its own gate
+
+Measured 2026-09-05 over 16 unattended hours: eight clean yield/recycle
+cycles, seven intervals advanced, `accepted_episodes` 18,568,
+`durable_next_row` past every interval end, every worker reporting
+`131072 xpool pairs posted, 0 failed` — and **zero admissions**, the last
+one two weeks earlier.
+
+A 131,072-row replay pass takes ~9,000 s while the brain exhausts its
+memory headroom in 2.0–2.5 h. The worker finished the rows, began the
+next interval inside the same invocation, and was SIGTERMed by the memory
+guard before `interval_recall` and the behavioural gate ran. The interval
+was sized to consume exactly the window the gate also needed.
+
+**The diagnostic:** count `*interval_recall*` artifacts. Zero of them
+means the gate never executed — which logs nothing, because an absent
+gate produces neither a pass nor a failure. Do not look for a failing
+gate; look for a missing one.
+
+**None of these mean training is converting:**
+
+| Signal | Was green while nothing admitted |
+|---|---|
+| `accepted_episodes` rising | 18,568 |
+| `durable_next_row` advancing | past every interval end |
+| worker `0 failed` | every pass |
+| resource yields `passed=True` | 8 of 8 |
+| supervisor `state` | `deferred_replay_training` |
+
+Only a rising `deferred_replay_admitted` count and the presence of gate
+artifacts mean anything. Size every per-pass work unit to fit **inside**
+the resource window with room for the verification that follows it
+(`--replay-rows-per-pass`), or the verification silently never happens.
