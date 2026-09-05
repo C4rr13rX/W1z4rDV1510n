@@ -93,6 +93,57 @@ validator asserted the wrong RFC 6901 escape example (`/~00~11` decodes to
 `~0/1`, not `~1`; the token that decodes to `~1` is `/~01`), and two mutations
 did not actually change behaviour.
 
+### The expected value is likelier to be wrong than the candidate
+
+The reference test is usually described as protecting against an unsatisfiable
+validator. In practice what it mostly catches is simpler and more embarrassing:
+**the author computed the expected answer in their head and got it wrong.**
+
+Of ten `testing_debugging_repair_refactoring` tasks authored on 2026-09-05,
+three shipped a wrong expected value, and all three passed every static check
+first:
+
+- the dead-code task listed four unreachable functions where its own fixture
+  had five — and the assertion's failure message spelled out, correctly, why
+  the fifth one was dead;
+- the snapshot task asserted a match between two texts that its own pattern
+  list normalizes to different strings, so it could never have passed;
+- the mutation-testing task claimed a `ZeroDivisionError` killed a mutant that
+  an assertion had already killed, because the crashing case ran second.
+
+None of these is detectable by inspection, by `validate()`, or by checking that
+an empty stub fails. Only executing a real solution finds them. So the order is:
+write the validator, write a solution, run it, and only then believe the
+expected values.
+
+The structural fix is to stop hand-writing expected values wherever the answer
+is computable. `testing_debugging_repair_refactoring-0011` asserts against a
+brute-force `reference()` defined inside the validator rather than a literal
+list, so the fixture and the expectation cannot drift apart; the two tasks that
+were wrong both hand-wrote a literal. Where an expectation must be a literal —
+because the whole point is to pin a specific behaviour — derive it from a
+second source rather than from reasoning, as the fixture-generation rule below
+does for standards that ship with the language.
+
+### A stub that fails proves almost nothing
+
+`test_a_broken_solution_fails_its_validator` mutates the *reference*, which is
+the strong form. Do not substitute the weak one. An empty candidate fails every
+validator that asserts anything at all, so "the stub failed" only re-proves the
+assertion check that `validate()` already enforces statically.
+
+What is worth running, once per authored batch, is a *plausible* wrong
+solution — the implementation a competent engineer writes when they miss the
+point of the task. On the batch above, six such solutions were run and each was
+rejected for precisely its intended reason: greedy set cover returned three
+tests where two suffice, textual inlining turned `score(-3,-3,-3)` from 24 into
+6, innermost-frame attribution blamed the assertion helper, a whole-module name
+scan found one of five dead functions, naming every read name a parameter added
+a `scaled` argument, and `math.isclose` failed NaN-matches-NaN.
+
+A task whose near-miss passes is not measuring the capability its prompt
+names, however elaborate its assertions look.
+
 ### Never pin a verdict to a decimal that looks exact
 
 There is a third way to be unsatisfiable, and the reference test catches it
