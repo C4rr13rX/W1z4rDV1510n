@@ -4200,6 +4200,369 @@ def varargs_layout(arguments):
 '''
 
 
+REFERENCES["architecture_multifile_integration-0001"] = r'''
+def _strongly_connected(nodes, edges):
+    # Tarjan, iterative: a recursive walk would blow the stack on a deep
+    # dependency graph, which is the shape this is used on.
+    index_of = {}
+    low = {}
+    on_stack = set()
+    stack = []
+    order = [0]
+    found = []
+
+    for root in nodes:
+        if root in index_of:
+            continue
+        work = [(root, iter(edges.get(root, ())))]
+        index_of[root] = low[root] = order[0]
+        order[0] += 1
+        stack.append(root)
+        on_stack.add(root)
+        while work:
+            node, children = work[-1]
+            advanced = False
+            for child in children:
+                if child not in index_of:
+                    index_of[child] = low[child] = order[0]
+                    order[0] += 1
+                    stack.append(child)
+                    on_stack.add(child)
+                    work.append((child, iter(edges.get(child, ()))))
+                    advanced = True
+                    break
+                if child in on_stack:
+                    low[node] = min(low[node], index_of[child])
+            if advanced:
+                continue
+            work.pop()
+            if work:
+                parent = work[-1][0]
+                low[parent] = min(low[parent], low[node])
+            if low[node] == index_of[node]:
+                component = []
+                while True:
+                    member = stack.pop()
+                    on_stack.discard(member)
+                    component.append(member)
+                    if member == node:
+                        break
+                found.append(component)
+    return found
+
+
+def audit(imports, layers, order):
+    if len(set(order)) != len(order):
+        raise ValueError(f"order repeats a layer: {order}")
+    rank = {name: position for position, name in enumerate(order)}
+    for module, layer in layers.items():
+        if layer not in rank:
+            raise ValueError(f"module {module!r} has unknown layer {layer!r}")
+
+    modules = set(imports)
+    for targets in imports.values():
+        modules.update(targets)
+
+    violations = []
+    for importer, targets in imports.items():
+        if importer not in layers:
+            continue
+        for imported in targets:
+            if imported not in layers:
+                continue
+            if rank[layers[importer]] < rank[layers[imported]]:
+                violations.append((importer, imported))
+
+    cycles = []
+    for component in _strongly_connected(sorted(modules), imports):
+        if len(component) > 1:
+            cycles.append(tuple(sorted(component)))
+        else:
+            only = component[0]
+            if only in imports.get(only, ()):
+                cycles.append((only,))
+
+    return {
+        "violations": sorted(violations),
+        "cycles": sorted(cycles),
+        "unlayered": sorted(module for module in modules
+                            if module not in layers),
+    }
+'''
+
+
+REFERENCES["architecture_multifile_integration-0002"] = r'''
+import collections
+
+
+def _graph(migrations):
+    edges = collections.defaultdict(list)
+    seen = set()
+    for source, target, function in migrations:
+        if source == target:
+            raise ValueError(f"migration {source!r} -> {target!r} is a no-op")
+        if (source, target) in seen:
+            raise ValueError(f"two migrations define {source!r} -> {target!r}")
+        seen.add((source, target))
+        edges[source].append((target, function))
+    return edges
+
+
+def plan(migrations, source, target):
+    edges = _graph(migrations)
+    if source == target:
+        return []
+
+    # Breadth first, so the first time a version is reached is by a shortest
+    # path -- and a second arrival at the same depth means the upgrade has
+    # two answers rather than one.
+    depth = {source: 0}
+    came_from = {source: None}
+    ambiguous = set()
+    queue = collections.deque([source])
+    while queue:
+        version = queue.popleft()
+        for nextt, _function in edges.get(version, ()):
+            if nextt not in depth:
+                depth[nextt] = depth[version] + 1
+                came_from[nextt] = (version, nextt)
+                queue.append(nextt)
+            elif depth[nextt] == depth[version] + 1 and \
+                    came_from[nextt] != (version, nextt):
+                ambiguous.add(nextt)
+
+    if target not in depth:
+        raise ValueError(f"no migration path from {source!r} to {target!r}")
+
+    steps = []
+    cursor = target
+    while came_from[cursor] is not None:
+        step = came_from[cursor]
+        if cursor in ambiguous:
+            raise ValueError(
+                f"two shortest paths reach {cursor!r}; the upgrade is "
+                f"ambiguous")
+        steps.append(step)
+        cursor = step[0]
+    steps.reverse()
+    return steps
+
+
+def migrate(migrations, document, source, target):
+    functions = {
+        (start, finish): function
+        for start, finish, function in migrations
+    }
+    current = dict(document)
+    for step in plan(migrations, source, target):
+        current = functions[step](current)
+    return current
+'''
+
+
+REFERENCES["architecture_multifile_integration-0003"] = r'''
+_TRUE = {"true", "1", "yes"}
+_FALSE = {"false", "0", "no"}
+
+
+def _coerce(kind, value, source, key):
+    if kind == "bool":
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        # bool("false") is True, so a string is never truthiness-tested.
+        if text in _TRUE:
+            return True
+        if text in _FALSE:
+            return False
+        raise ValueError(f"{source}: {key}={value!r} is not a boolean")
+    if kind == "int":
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+        try:
+            return int(str(value).strip())
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"{source}: {key}={value!r} is not an integer") from None
+    if kind == "float":
+        if isinstance(value, float):
+            return value
+        if isinstance(value, int) and not isinstance(value, bool):
+            return float(value)
+        try:
+            return float(str(value).strip())
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"{source}: {key}={value!r} is not a number") from None
+    if kind == "list":
+        if isinstance(value, list):
+            return list(value)
+        text = str(value).strip()
+        if not text:
+            return []
+        return [item.strip() for item in text.split(",")]
+    if kind == "str":
+        return value if isinstance(value, str) else str(value)
+    raise ValueError(f"{source}: {key} has unknown type {kind!r}")
+
+
+def compose(schema, sources):
+    values = {key: rule["default"] for key, rule in schema.items()}
+    origins = {key: "default" for key in schema}
+    ignored = []
+
+    for name, mapping in sources:
+        for key, raw in mapping.items():
+            if key not in schema:
+                ignored.append((name, key))
+                continue
+            values[key] = _coerce(schema[key]["type"], raw, name, key)
+            origins[key] = name
+
+    return {"values": values, "origins": origins, "ignored": ignored}
+'''
+
+
+REFERENCES["architecture_multifile_integration-0004"] = r'''
+import base64
+
+from cache_api import CacheMiss
+from legacy_store import LegacyError
+
+
+class LegacyBackedCache:
+    def __init__(self, store, clock):
+        self._store = store
+        self._clock = clock
+
+    @staticmethod
+    def _key(key):
+        if not isinstance(key, str) or not key:
+            raise ValueError(f"{key!r} is not a usable cache key")
+        return key
+
+    def get(self, key):
+        key = self._key(key)
+        try:
+            blob, expires_at = self._store.fetch(key)
+        except LegacyError:
+            # The whole point of the adapter: the caller's except clause is
+            # written against CacheMiss and would not catch LegacyError.
+            raise CacheMiss(key) from None
+        if expires_at is not None and expires_at <= self._clock():
+            self._store.drop(key)
+            raise CacheMiss(key)
+        return base64.b64decode(blob.encode("ascii"))
+
+    def set(self, key, value, ttl=None):
+        key = self._key(key)
+        blob = base64.b64encode(bytes(value)).decode("ascii")
+        expires_at = None if ttl is None else self._clock() + ttl
+        try:
+            self._store.put(key, blob, expires_at)
+        except LegacyError as error:
+            raise ValueError(str(error)) from None
+
+    def delete(self, key):
+        key = self._key(key)
+        try:
+            self._store.drop(key)
+        except LegacyError:
+            pass
+'''
+
+
+REFERENCES["architecture_multifile_integration-0005"] = r'''
+from stores import StoreError
+
+
+class PartialCommitError(Exception):
+    def __init__(self, committed, failed, cause=None):
+        super().__init__(
+            f"{failed} refused to commit after {committed} had committed")
+        self.committed = list(committed)
+        self.failed = failed
+        self.cause = cause
+
+
+class UnitOfWork:
+    def __init__(self, stores):
+        self._stores = dict(stores)
+        self._order = list(stores)
+        self._done = False
+
+    def stage(self, name, key, value):
+        if name not in self._stores:
+            raise KeyError(f"no store named {name!r}")
+        self._stores[name].stage(key, value)
+
+    def commit(self):
+        if self._done:
+            raise RuntimeError("this unit of work has already been committed")
+        self._done = True
+        committed = []
+        for position, name in enumerate(self._order):
+            try:
+                self._stores[name].commit()
+            except StoreError as error:
+                # Nothing here can un-commit what already succeeded, so the
+                # remaining resources are rolled back and the caller is told
+                # exactly how far the write got.
+                for pending in self._order[position + 1:]:
+                    self._stores[pending].rollback()
+                raise PartialCommitError(committed, name, error) from error
+            committed.append(name)
+        return committed
+
+    def rollback(self):
+        for name in self._order:
+            self._stores[name].rollback()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, kind, value, traceback):
+        if kind is not None:
+            self.rollback()
+            return False
+        self.commit()
+        return False
+'''
+
+
+REFERENCES["architecture_multifile_integration-0006"] = r'''
+from plugin_api import UnknownEvent
+
+
+def dispatch(registry, event, payload):
+    registered = registry.handlers_for(event)
+    if not registered:
+        raise UnknownEvent(event)
+
+    # Highest priority first; the enumerate index keeps equal priorities in
+    # registration order, which a bare sort on priority alone would not
+    # guarantee across implementations.
+    ordered = sorted(
+        enumerate(registered),
+        key=lambda entry: (-entry[1][0], entry[0]),
+    )
+
+    results = []
+    errors = []
+    for _position, (_priority, name, function) in ordered:
+        try:
+            value = function(payload)
+        except Exception as error:
+            # A plugin the host does not own must not be able to stop the
+            # handlers registered after it.
+            errors.append((name, str(error)))
+            continue
+        if value is not None:
+            results.append((name, value))
+    return {"results": results, "errors": errors}
+'''
+
+
 MUTATIONS: dict[str, tuple[str, str]] = {
     # Sign the payload alone, so the header can be rewritten after signing
     # and the token still verifies -- the alg-confusion family.
@@ -4806,5 +5169,44 @@ MUTATIONS: dict[str, tuple[str, str]] = {
     "polyglot_native_interop-0010": (
         "        promoted = _PROMOTIONS.get(ctype, ctype)",
         "        promoted = ctype",
+    ),
+    # Permit a layer to reach one level up, so the adjacent-layer inversion
+    # -- the one that actually happens -- stops being reported.
+    "architecture_multifile_integration-0001": (
+        "            if rank[layers[importer]] < rank[layers[imported]]:",
+        "            if rank[layers[importer]] + 1 < rank[layers[imported]]:",
+    ),
+    # Stop recording that a version was reached twice at the same depth, so
+    # an ambiguous upgrade quietly resolves to whichever path was walked
+    # first and the document ends up shaped by an arbitrary choice.
+    "architecture_multifile_integration-0002": (
+        "                ambiguous.add(nextt)",
+        "                pass",
+    ),
+    # Coerce a boolean by truthiness, so the string "false" -- the value an
+    # override exists to supply -- turns the flag on.
+    "architecture_multifile_integration-0003": (
+        "        if text in _TRUE:\n            return True\n"
+        "        if text in _FALSE:\n            return False",
+        "        return bool(value)",
+    ),
+    # Expire strictly after the deadline rather than at it, so an entry is
+    # served once more at the instant it was supposed to stop being valid.
+    "architecture_multifile_integration-0004": (
+        "        if expires_at is not None and expires_at <= self._clock():",
+        "        if expires_at is not None and expires_at < self._clock():",
+    ),
+    # Report the partial commit but leave the resources that never committed
+    # holding their staged writes, so the next unit of work commits them.
+    "architecture_multifile_integration-0005": (
+        "                for pending in self._order[position + 1:]:\n"
+        "                    self._stores[pending].rollback()",
+        "                pass",
+    ),
+    # Run the handlers lowest priority first, inverting an ordering the host
+    # publishes and plugins rely on.
+    "architecture_multifile_integration-0006": (
+        "        key=lambda entry: (-entry[1][0], entry[0]),",
+        "        key=lambda entry: (entry[1][0], entry[0]),",
     ),
 }

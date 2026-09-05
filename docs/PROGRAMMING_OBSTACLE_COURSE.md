@@ -420,3 +420,42 @@ authoring, and commit the family module and its reference/mutation block in
 **one** commit as soon as the family's tests are green. Do not leave a family
 sitting uncommitted while polishing it. The commit is the claim; the working
 tree is not.
+
+That rule was written after two collisions and has now been paid for a third
+time, in the other direction: a session left
+`frontend_state_ux_accessibility.py` untracked with twelve tasks and no
+references at all. The contract suite was red for the whole window, and the
+next session's first job was deciding whether the file was a live sibling's
+work or an abandoned one — a question the commit log would have answered in a
+line. Twelve tasks with no reference is not a partially finished family; it is
+an unmeasured one, because neither direction of the satisfiable/discriminating
+check has run against any of them.
+
+### Fixture modules: the other side of the seam
+
+`ObstacleTask.fixtures` maps a filename to file contents, written into the
+workspace beside the candidate before the validator runs. The harness does
+`os.chdir(WORKSPACE)` and `sys.path.insert(0, str(WORKSPACE))`, so a fixture
+is importable by name from both the candidate and the validator even though
+the child runs under `python -I -S`.
+
+`architecture_multifile_integration` is the first family to use them, and it
+needs them: the capability under test is fitting a seam the candidate does not
+own, which cannot be posed without supplying the other side. A fixture is
+therefore written to be *unhelpful in the way real code is* — the legacy store
+there raises one exception type for absence and for malformed input, holds
+text where the caller has bytes, and counts its own reads. None of it is a
+hint, and a validator can assert against that count to prove the adapter did
+not consult the store when the contract said it must not.
+
+Two attribution rules follow from `_blames_candidate`, which recognises only
+the candidate's filename:
+
+- **Never let the validator call a fixture directly in a way that can raise.**
+  A fixture frame is neither candidate nor validator by name, so an exception
+  raised with no candidate frame beneath it scores `validator_error` and
+  blocks admission instead of failing the task. Drive fixtures *through* the
+  candidate and have the validator inspect the fixture's resulting state.
+- An `AssertionError` is always `failed`, whatever raised it, so an ordinary
+  assertion on fixture state after the candidate ran is safe and is the
+  preferred shape.
