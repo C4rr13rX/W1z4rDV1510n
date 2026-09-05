@@ -2657,6 +2657,563 @@ def apply_patch(lines, hunks):
     return result
 '''
 
+REFERENCES['testing_debugging_repair_refactoring-0009'] = r'''
+import ast
+
+_BANNED = (ast.Return, ast.Yield, ast.YieldFrom, ast.Break, ast.Continue,
+           ast.Global, ast.Nonlocal)
+
+
+def _locals_of(function):
+    names = {a.arg for a in function.args.args}
+    names |= {a.arg for a in function.args.kwonlyargs}
+    for node in ast.walk(function):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            names.add(node.id)
+    return names
+
+
+def _flow(statements, local_names):
+    """Return (params, assigned) for a run of statements."""
+    params, assigned = [], set()
+
+    def read(node):
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load):
+                if sub.id in local_names and sub.id not in assigned:
+                    if sub.id not in params:
+                        params.append(sub.id)
+
+    def store(node):
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Store):
+                assigned.add(sub.id)
+
+    def visit(node):
+        if isinstance(node, ast.Assign):
+            read(node.value)
+            for target in node.targets:
+                store(target)
+        elif isinstance(node, ast.AugAssign):
+            read(node.value)
+            read(node.target)
+            store(node.target)
+        elif isinstance(node, ast.For):
+            read(node.iter)
+            store(node.target)
+            for inner in node.body + node.orelse:
+                visit(inner)
+        elif isinstance(node, (ast.If, ast.While)):
+            read(node.test)
+            for inner in node.body + node.orelse:
+                visit(inner)
+        else:
+            read(node)
+            store(node)
+
+    for statement in statements:
+        visit(statement)
+    return params, assigned
+
+
+def extract_function(source, function_name, start_line, end_line, new_name):
+    tree = ast.parse(source)
+    target = None
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == function_name:
+            target = node
+    if target is None:
+        raise ValueError(f"no module-level function {function_name}")
+
+    selected = [
+        node for node in target.body
+        if node.lineno >= start_line and node.end_lineno <= end_line
+    ]
+    if not selected:
+        raise ValueError("the range holds no whole top-level statement")
+    if selected[0].lineno != start_line or selected[-1].end_lineno != end_line:
+        raise ValueError("the range is not exactly a run of statements")
+    first = target.body.index(selected[0])
+    last = target.body.index(selected[-1])
+    if target.body[first:last + 1] != selected:
+        raise ValueError("the selected statements are not consecutive")
+    for node in selected:
+        for sub in ast.walk(node):
+            if isinstance(sub, _BANNED):
+                raise ValueError(f"the range contains {type(sub).__name__}")
+
+    local_names = _locals_of(target)
+    params, assigned = _flow(selected, local_names)
+    params = sorted(params)
+
+    after = target.body[last + 1:]
+    read_after = set()
+    for node in after:
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load):
+                read_after.add(sub.id)
+    returns = sorted(assigned & read_after)
+
+    body = list(selected)
+    if len(returns) == 1:
+        body.append(ast.Return(value=ast.Name(id=returns[0], ctx=ast.Load())))
+    elif returns:
+        body.append(ast.Return(value=ast.Tuple(
+            elts=[ast.Name(id=n, ctx=ast.Load()) for n in returns],
+            ctx=ast.Load(),
+        )))
+
+    extracted = ast.FunctionDef(
+        name=new_name,
+        args=ast.arguments(
+            posonlyargs=[], args=[ast.arg(arg=n) for n in params],
+            vararg=None, kwonlyargs=[], kw_defaults=[], kwarg=None,
+            defaults=[],
+        ),
+        body=body, decorator_list=[], returns=None, type_comment=None,
+        type_params=[],
+    )
+
+    call = ast.Call(
+        func=ast.Name(id=new_name, ctx=ast.Load()),
+        args=[ast.Name(id=n, ctx=ast.Load()) for n in params],
+        keywords=[],
+    )
+    if not returns:
+        replacement = ast.Expr(value=call)
+    elif len(returns) == 1:
+        replacement = ast.Assign(
+            targets=[ast.Name(id=returns[0], ctx=ast.Store())], value=call)
+    else:
+        replacement = ast.Assign(targets=[ast.Tuple(
+            elts=[ast.Name(id=n, ctx=ast.Store()) for n in returns],
+            ctx=ast.Store())], value=call)
+
+    target.body[first:last + 1] = [replacement]
+    tree.body.insert(tree.body.index(target), extracted)
+    ast.fix_missing_locations(tree)
+    return ast.unparse(tree)
+'''
+
+REFERENCES['testing_debugging_repair_refactoring-0010'] = r'''
+import ast
+
+_IMPURE = (ast.Call, ast.Await, ast.ListComp, ast.SetComp, ast.DictComp,
+           ast.GeneratorExp, ast.Lambda)
+
+
+class _Substitute(ast.NodeTransformer):
+    def __init__(self, variable, value, assignment):
+        self.variable = variable
+        self.value = value
+        self.assignment = assignment
+
+    def visit_Assign(self, node):
+        if node is self.assignment:
+            return None
+        return self.generic_visit(node)
+
+    def visit_Name(self, node):
+        if node.id == self.variable and isinstance(node.ctx, ast.Load):
+            return self.value
+        return node
+
+
+def inline_variable(source, function_name, variable):
+    tree = ast.parse(source)
+    target = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == function_name:
+            target = node
+            break
+    if target is None:
+        raise ValueError(f"no function {function_name}")
+
+    parameters = {a.arg for a in target.args.args}
+    parameters |= {a.arg for a in target.args.kwonlyargs}
+    if target.args.vararg:
+        parameters.add(target.args.vararg.arg)
+    if target.args.kwarg:
+        parameters.add(target.args.kwarg.arg)
+    if variable in parameters:
+        raise ValueError(f"{variable} is a parameter")
+
+    for node in ast.walk(target):
+        if isinstance(node, ast.AugAssign):
+            if isinstance(node.target, ast.Name) and node.target.id == variable:
+                raise ValueError(f"{variable} is augmented-assigned")
+
+    assignments = []
+    for node in ast.walk(target):
+        if isinstance(node, ast.Assign):
+            for sub in ast.walk(ast.Module(body=node.targets, type_ignores=[])):
+                if isinstance(sub, ast.Name) and sub.id == variable:
+                    assignments.append(node)
+                    break
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            for sub in ast.walk(node.target):
+                if isinstance(sub, ast.Name) and sub.id == variable:
+                    assignments.append(node)
+                    break
+    if len(assignments) != 1:
+        raise ValueError(
+            f"{variable} is assigned {len(assignments)} times, not once")
+    assignment = assignments[0]
+    if not isinstance(assignment, ast.Assign) or len(assignment.targets) != 1:
+        raise ValueError(f"{variable} is not a simple single assignment")
+    if not isinstance(assignment.targets[0], ast.Name):
+        raise ValueError(f"{variable} is bound by a destructuring assignment")
+
+    value = assignment.value
+    for sub in ast.walk(value):
+        if isinstance(sub, _IMPURE):
+            raise ValueError(
+                "the right-hand side is not safe to evaluate more than once")
+
+    read_names = {
+        sub.id for sub in ast.walk(value) if isinstance(sub, ast.Name)
+    }
+    for node in ast.walk(target):
+        if node is assignment:
+            continue
+        bound = []
+        if isinstance(node, ast.Assign):
+            bound = node.targets
+        elif isinstance(node, ast.AugAssign):
+            bound = [node.target]
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            bound = [node.target]
+        for holder in bound:
+            for sub in ast.walk(holder):
+                if isinstance(sub, ast.Name) and sub.id in read_names:
+                    raise ValueError(
+                        f"{sub.id} is rebound, so inlining would change value")
+
+    _Substitute(variable, value, assignment).visit(target)
+    ast.fix_missing_locations(tree)
+    return ast.unparse(tree)
+'''
+
+REFERENCES['testing_debugging_repair_refactoring-0011'] = r'''
+import itertools
+
+
+def minimize_test_suite(coverage):
+    universe = set()
+    for covered in coverage.values():
+        universe |= set(covered)
+    if not universe:
+        return []
+    names = sorted(name for name in coverage if coverage[name])
+    for size in range(1, len(names) + 1):
+        best = None
+        for combination in itertools.combinations(names, size):
+            union = set()
+            for name in combination:
+                union |= set(coverage[name])
+            if union == universe:
+                candidate = sorted(combination)
+                if best is None or candidate < best:
+                    best = candidate
+        if best is not None:
+            return best
+    return sorted(names)
+'''
+
+REFERENCES['testing_debugging_repair_refactoring-0012'] = r'''
+import ast
+import copy
+
+_BINARY = {ast.Add: ("+", "-", ast.Sub), ast.Sub: ("-", "+", ast.Add)}
+_COMPARE = {
+    ast.Lt: ("<", "<=", ast.LtE), ast.LtE: ("<=", "<", ast.Lt),
+    ast.Gt: (">", ">=", ast.GtE), ast.GtE: (">=", ">", ast.Gt),
+    ast.Eq: ("==", "!=", ast.NotEq), ast.NotEq: ("!=", "==", ast.Eq),
+}
+
+
+def _sites(tree):
+    """Every mutable operator, as (path index, lineno, original, new)."""
+    found = []
+    for index, node in enumerate(ast.walk(tree)):
+        if isinstance(node, ast.BinOp) and type(node.op) in _BINARY:
+            original, replacement, factory = _BINARY[type(node.op)]
+            found.append((index, None, node.lineno, original, replacement,
+                          factory))
+        elif isinstance(node, ast.Compare):
+            for position, op in enumerate(node.ops):
+                if type(op) in _COMPARE:
+                    original, replacement, factory = _COMPARE[type(op)]
+                    found.append((index, position, node.lineno, original,
+                                  replacement, factory))
+    return found
+
+
+def mutation_survivors(source, run_tests):
+    tree = ast.parse(source)
+    survivors = []
+    for site in _sites(tree):
+        index, position, lineno, original, replacement, factory = site
+        mutant = copy.deepcopy(tree)
+        node = list(ast.walk(mutant))[index]
+        if position is None:
+            node.op = factory()
+        else:
+            node.ops[position] = factory()
+        ast.fix_missing_locations(mutant)
+        namespace = {}
+        try:
+            exec(compile(mutant, "<mutant>", "exec"), namespace)
+            run_tests(namespace)
+        except BaseException:  # noqa: BLE001 - any escape kills the mutant
+            continue
+        survivors.append((lineno, original, replacement))
+    return sorted(survivors)
+'''
+
+REFERENCES['testing_debugging_repair_refactoring-0013'] = r'''
+import ast
+
+
+def unreachable_functions(source, entry_points):
+    tree = ast.parse(source)
+    functions = {
+        node.name: node for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+    }
+    for entry in entry_points:
+        if entry not in functions:
+            raise ValueError(f"{entry!r} is not a module-level function")
+
+    mentions = {}
+    for name, node in functions.items():
+        found = set()
+        for statement in node.body:
+            for sub in ast.walk(statement):
+                if isinstance(sub, ast.Name) and sub.id in functions:
+                    found.add(sub.id)
+        mentions[name] = found
+
+    reachable, queue = set(entry_points), list(entry_points)
+    while queue:
+        for name in mentions[queue.pop()]:
+            if name not in reachable:
+                reachable.add(name)
+                queue.append(name)
+    return sorted(set(functions) - reachable)
+'''
+
+REFERENCES['testing_debugging_repair_refactoring-0014'] = r'''
+def _longest_match(filename, prefixes):
+    best = None
+    for prefix in prefixes:
+        if filename.startswith(prefix):
+            if best is None or len(prefix) > len(best):
+                best = prefix
+    return best
+
+
+def attribute_failure(frames, owned_prefixes, helper_prefixes):
+    for frame in reversed(list(frames)):
+        filename = frame["filename"]
+        if filename.startswith("<"):
+            continue
+        owned = _longest_match(filename, owned_prefixes)
+        if owned is None:
+            continue
+        helper = _longest_match(filename, helper_prefixes)
+        if helper is not None and len(helper) > len(owned):
+            continue
+        return frame
+    return None
+'''
+
+REFERENCES['testing_debugging_repair_refactoring-0015'] = r'''
+import functools
+import inspect
+
+
+def capture_call_tree(namespace, entry, args):
+    if not inspect.isfunction(namespace.get(entry)):
+        raise KeyError(f"{entry!r} does not name a function in the namespace")
+
+    originals = {
+        name: value for name, value in list(namespace.items())
+        if inspect.isfunction(value)
+    }
+    stack, roots = [], []
+
+    def wrap(name, function):
+        @functools.wraps(function)
+        def wrapper(*call_args, **call_kwargs):
+            node = {"name": name, "args": tuple(call_args), "children": []}
+            (stack[-1]["children"] if stack else roots).append(node)
+            stack.append(node)
+            try:
+                result = function(*call_args, **call_kwargs)
+            except BaseException as exc:
+                node["error"] = type(exc).__name__
+                raise
+            finally:
+                stack.pop()
+            node["result"] = result
+            return result
+        return wrapper
+
+    for name, function in originals.items():
+        namespace[name] = wrap(name, function)
+    try:
+        result = namespace[entry](*args)
+    finally:
+        for name, function in originals.items():
+            namespace[name] = function
+    return result, roots[0]
+'''
+
+REFERENCES['testing_debugging_repair_refactoring-0016'] = r'''
+import math
+
+
+def close_enough(actual, expected, rel_tol, abs_tol):
+    if isinstance(actual, bool) or isinstance(expected, bool):
+        return (isinstance(actual, bool) and isinstance(expected, bool)
+                and actual == expected)
+    if isinstance(actual, (int, float)) and isinstance(expected, (int, float)):
+        a, e = float(actual), float(expected)
+        if math.isnan(a) or math.isnan(e):
+            return math.isnan(a) and math.isnan(e)
+        if math.isinf(a) or math.isinf(e):
+            return a == e
+        return abs(a - e) <= max(rel_tol * max(abs(a), abs(e)), abs_tol)
+    if actual is None or expected is None:
+        return actual is None and expected is None
+    if isinstance(actual, (str, bytes)) or isinstance(expected, (str, bytes)):
+        return type(actual) is type(expected) and actual == expected
+    if isinstance(actual, (list, tuple)) or isinstance(expected, (list, tuple)):
+        if type(actual) is not type(expected) or len(actual) != len(expected):
+            return False
+        return all(
+            close_enough(a, e, rel_tol, abs_tol)
+            for a, e in zip(actual, expected)
+        )
+    if isinstance(actual, dict) or isinstance(expected, dict):
+        if not (isinstance(actual, dict) and isinstance(expected, dict)):
+            return False
+        if set(actual) != set(expected):
+            return False
+        return all(
+            close_enough(actual[key], expected[key], rel_tol, abs_tol)
+            for key in actual
+        )
+    return False
+'''
+
+REFERENCES['testing_debugging_repair_refactoring-0017'] = r'''
+import ast
+
+
+def _always_exits(statements):
+    for statement in statements:
+        if isinstance(statement, (ast.Return, ast.Raise)):
+            return True
+        if isinstance(statement, ast.If) and statement.orelse:
+            if (_always_exits(statement.body)
+                    and _always_exits(statement.orelse)):
+                return True
+    return False
+
+
+def _simplify_block(statements):
+    result = []
+    for statement in statements:
+        if isinstance(statement, ast.If):
+            test = statement.test
+            if isinstance(test, ast.Constant) and isinstance(test.value, bool):
+                chosen = statement.body if test.value else statement.orelse
+                result.extend(_simplify_block(chosen))
+                continue
+            statement.body = _simplify_block(statement.body)
+            statement.orelse = _simplify_block(statement.orelse)
+            if statement.orelse and _always_exits(statement.body):
+                trailing = statement.orelse
+                statement.orelse = []
+                if not statement.body:
+                    statement.body = [ast.Pass()]
+                result.append(statement)
+                result.extend(trailing)
+                continue
+            if not statement.body:
+                statement.body = [ast.Pass()]
+            result.append(statement)
+            continue
+        if isinstance(statement, (ast.For, ast.While, ast.With, ast.Try,
+                                  ast.AsyncFor, ast.AsyncWith)):
+            statement.body = _simplify_block(statement.body) or [ast.Pass()]
+            if getattr(statement, "orelse", None):
+                statement.orelse = _simplify_block(statement.orelse)
+            result.append(statement)
+            continue
+        result.append(statement)
+
+    truncated = []
+    for statement in result:
+        truncated.append(statement)
+        if isinstance(statement, (ast.Return, ast.Raise)):
+            break
+    return truncated
+
+
+def simplify_control_flow(source, function_name):
+    tree = ast.parse(source)
+    target = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == function_name:
+            target = node
+            break
+    if target is None:
+        raise ValueError(f"no function {function_name}")
+
+    previous = None
+    while True:
+        target.body = _simplify_block(target.body) or [ast.Pass()]
+        ast.fix_missing_locations(tree)
+        current = ast.unparse(tree)
+        if current == previous:
+            return current
+        previous = current
+'''
+
+REFERENCES['testing_debugging_repair_refactoring-0018'] = r'''
+import re
+
+
+def _normalize(text, patterns):
+    lines = text.split("\n")
+    if text.endswith("\n"):
+        lines = lines[:-1]
+    normalized = []
+    for line in lines:
+        for pattern, replacement in patterns:
+            line = re.sub(pattern, replacement, line)
+        normalized.append(line)
+    return normalized
+
+
+def compare_snapshot(actual, stored, patterns, *, update=False):
+    actual_lines = _normalize(actual, patterns)
+    stored_lines = _normalize(stored, patterns)
+    matched = actual_lines == stored_lines
+    differences = []
+    for index in range(max(len(actual_lines), len(stored_lines))):
+        left = stored_lines[index] if index < len(stored_lines) else None
+        right = actual_lines[index] if index < len(actual_lines) else None
+        if left != right:
+            differences.append((index, left, right))
+    if update:
+        return matched, differences, actual_lines
+    return matched, differences
+'''
+
 REFERENCES["cicd_containers_packaging_platform-0001"] = r'''
 import gzip
 import io
@@ -6534,7 +7091,161 @@ def _idempotency_key(reference, attempt):
 '''
 
 
+REFERENCES["databases_migrations_transactions-0009"] = r'''
+import re
+
+OPERATORS = {"=", "!=", "<", "<=", ">", ">="}
+IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def build_filter_query(table, filters, allowed_columns):
+    if not isinstance(table, str) or not IDENTIFIER.match(table):
+        raise ValueError(f"invalid table name: {table!r}")
+
+    conditions = []
+    params = []
+    for column in sorted(filters):
+        if column not in allowed_columns or not IDENTIFIER.match(column):
+            raise ValueError(f"column is not filterable: {column!r}")
+        raw = filters[column]
+        if isinstance(raw, (list, tuple)):
+            if len(raw) != 2:
+                raise ValueError(f"malformed condition for {column!r}")
+            operator, value = raw
+            if operator == "IN":
+                if not isinstance(value, (list, tuple)):
+                    raise ValueError("IN requires a list or tuple")
+                if not value:
+                    conditions.append("1 = 0")
+                    continue
+                marks = ", ".join("?" * len(value))
+                conditions.append(f"{column} IN ({marks})")
+                params.extend(value)
+                continue
+            if operator not in OPERATORS:
+                raise ValueError(f"unsupported operator: {operator!r}")
+            conditions.append(f"{column} {operator} ?")
+            params.append(value)
+        else:
+            conditions.append(f"{column} = ?")
+            params.append(raw)
+
+    sql = f"SELECT * FROM {table}"
+    if conditions:
+        sql += " WHERE " + " AND ".join(conditions)
+    return (sql, params)
+'''
+
+
+REFERENCES["databases_migrations_transactions-0010"] = r'''
+import sqlite3
+
+
+def apply_line_items(connection, order_id, items):
+    rejected = []
+    connection.execute("BEGIN")
+    try:
+        connection.execute(
+            "INSERT OR IGNORE INTO order_totals (order_id, total)"
+            " VALUES (?, 0)",
+            (order_id,),
+        )
+        for index, (sku, quantity) in enumerate(items):
+            connection.execute("SAVEPOINT item")
+            try:
+                connection.execute(
+                    "INSERT INTO line_items (order_id, sku, quantity)"
+                    " VALUES (?, ?, ?)",
+                    (order_id, sku, quantity),
+                )
+                connection.execute(
+                    "UPDATE order_totals SET total = total + ?"
+                    " WHERE order_id = ?",
+                    (quantity, order_id),
+                )
+            except sqlite3.IntegrityError:
+                connection.execute("ROLLBACK TO item")
+                rejected.append(index)
+            connection.execute("RELEASE item")
+    except Exception:
+        connection.execute("ROLLBACK")
+        raise
+    connection.execute("COMMIT")
+    return rejected
+'''
+
+
+REFERENCES["databases_migrations_transactions-0011"] = r'''
+def summarize_regions(connection):
+    summary = {}
+    for region, rows, reported, total in connection.execute(
+        "SELECT region, COUNT(*), COUNT(amount), COALESCE(SUM(amount), 0)"
+        " FROM sales GROUP BY region"
+    ):
+        summary[region] = {
+            "rows": rows,
+            "reported": reported,
+            "total": total,
+            "average": (total / reported) if reported else None,
+        }
+    return summary
+'''
+
+
+REFERENCES["databases_migrations_transactions-0012"] = r'''
+def lapsed_customers(connection, since):
+    return sorted(
+        row[0]
+        for row in connection.execute(
+            "SELECT c.name FROM customers c"
+            " WHERE NOT EXISTS ("
+            "   SELECT 1 FROM orders o"
+            "   WHERE o.customer_id = c.id AND o.placed_on >= ?)",
+            (since,),
+        )
+    )
+'''
+
+
 MUTATIONS: dict[str, tuple[str, str]] = {
+    # Interpolate the value into the SQL text instead of parameterising it.
+    # Every ordinary value still works, which is why this ships.
+    "databases_migrations_transactions-0009": (
+        '            conditions.append(f"{column} = ?")\n'
+        "            params.append(raw)\n",
+        "            conditions.append(f\"{column} = '{raw}'\")\n",
+    ),
+    # Take the savepoint after the insert rather than before it. The item is
+    # still reported as rejected, and its line_items row stays behind while
+    # the total it belongs to does not.
+    "databases_migrations_transactions-0010": (
+        '            connection.execute("SAVEPOINT item")\n'
+        "            try:\n"
+        "                connection.execute(\n"
+        '                    "INSERT INTO line_items (order_id, sku, quantity)"\n'
+        '                    " VALUES (?, ?, ?)",\n'
+        "                    (order_id, sku, quantity),\n"
+        "                )\n",
+        "            connection.execute(\n"
+        '                "INSERT INTO line_items (order_id, sku, quantity)"\n'
+        '                " VALUES (?, ?, ?)",\n'
+        "                (order_id, sku, quantity),\n"
+        "            )\n"
+        '            connection.execute("SAVEPOINT item")\n'
+        "            try:\n",
+    ),
+    # Let SUM's NULL through. Correct for every region that has reported at
+    # least one amount, and None for the region that has reported none.
+    "databases_migrations_transactions-0011": (
+        "COALESCE(SUM(amount), 0)",
+        "SUM(amount)",
+    ),
+    # Make the boundary exclusive. An order placed exactly on `since` stops
+    # counting as recent, so that customer is reported as lapsed.
+    "databases_migrations_transactions-0012": (
+        '"   WHERE o.customer_id = c.id AND o.placed_on >= ?)",',
+        '"   WHERE o.customer_id = c.id AND o.placed_on > ?)",',
+    ),
     # Split on every comma. Correct for every directive anyone writes by
     # hand, and it silently truncates the quoted field list that says which
     # headers must not be cached.
@@ -7067,6 +7778,67 @@ MUTATIONS: dict[str, tuple[str, str]] = {
     "testing_debugging_repair_refactoring-0008": (
         "        if original[start - 1:start - 1 + len(remove)] != remove:",
         "        if False:",
+    ),
+    # Name every local the range reads as a parameter, including one
+    # the range assigns before reading, so `derive` takes a
+    # `scaled` argument it immediately overwrites.
+    'testing_debugging_repair_refactoring-0009': (
+        '                if sub.id in local_names and sub.id not in assigned:',
+        '                if sub.id in local_names:',
+    ),
+    # Allow a call on the right-hand side, so `x = len(a)` inlines and
+    # the call is evaluated once per use instead of once.
+    'testing_debugging_repair_refactoring-0010': (
+        '_IMPURE = (ast.Call, ast.Await, ast.ListComp, ast.SetComp, ast.DictComp,',
+        '_IMPURE = (ast.Await, ast.ListComp, ast.SetComp, ast.DictComp,',
+    ),
+    # Only ever consider the whole suite, which covers everything and
+    # is irredundant-looking but is not minimum.
+    'testing_debugging_repair_refactoring-0011': (
+        '    for size in range(1, len(names) + 1):',
+        '    for size in range(len(names), len(names) + 1):',
+    ),
+    # Drop `<` from the operator table, so the boundary mutant that
+    # this suite provably cannot kill is never generated.
+    'testing_debugging_repair_refactoring-0012': (
+        '    ast.Lt: ("<", "<=", ast.LtE), ast.LtE: ("<=", "<", ast.Lt),',
+        '    ast.LtE: ("<=", "<", ast.Lt),',
+    ),
+    # Take mentions from the module body rather than the function's,
+    # so every function appears to reference every other one.
+    'testing_debugging_repair_refactoring-0013': (
+        '        for statement in node.body:',
+        '        for statement in tree.body:',
+    ),
+    # Stop skipping helper frames, so every failure in the suite is
+    # attributed to the shared assertion helper.
+    'testing_debugging_repair_refactoring-0014': (
+        '        if helper is not None and len(helper) > len(owned):\n            continue',
+        '        if helper is not None and len(helper) > len(owned) and False:\n            continue',
+    ),
+    # Leave the namespace wrapped, so the instrumentation leaks into
+    # every later call the caller makes.
+    'testing_debugging_repair_refactoring-0015': (
+        '    finally:\n        for name, function in originals.items():\n            namespace[name] = function',
+        '    finally:\n        pass',
+    ),
+    # Compare a bool against an int numerically, so True == 1 and a
+    # flag that should have been a number passes unnoticed.
+    'testing_debugging_repair_refactoring-0016': (
+        '    if isinstance(actual, bool) or isinstance(expected, bool):\n        return (isinstance(actual, bool) and isinstance(expected, bool)\n                and actual == expected)',
+        '    if isinstance(actual, bool) and isinstance(expected, bool):\n        return actual == expected',
+    ),
+    # Keep the statements after a return, so unreachable code that the
+    # refactoring exists to remove survives it.
+    'testing_debugging_repair_refactoring-0017': (
+        '        if isinstance(statement, (ast.Return, ast.Raise)):\n            break',
+        '        if isinstance(statement, (ast.Return, ast.Raise)) and False:\n            break',
+    ),
+    # Stop dropping the single trailing newline, so every snapshot
+    # that ends with one reports a phantom final-line difference.
+    'testing_debugging_repair_refactoring-0018': (
+        '    if text.endswith("\\n"):\n        lines = lines[:-1]',
+        '    if False:\n        lines = lines[:-1]',
     ),
     # Skip the sort, so the archive's member order follows whatever
     # order the caller happened to iterate in. Every build still
