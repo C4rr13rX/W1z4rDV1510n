@@ -3574,6 +3574,20 @@ def recover_interrupted_deferred_replay(
                     "recovered committed final-brain deferred replay"
                 ),
             })
+            # A recovered commit is an admission and must say so.
+            #
+            # This branch exists precisely because the supervisor died after
+            # the artifact was published, so it is the *only* place the
+            # admitted event can still be written for those intervals. It
+            # never was, which is why the health ledger recorded 21 admissions
+            # against 60 resolves and every recovery looked like silence.
+            append_health_event(runtime, {
+                "kind": "deferred_replay_admitted",
+                "phase": phase.name,
+                "interval_id": interval_id,
+                "passed": True,
+                "recovered": True,
+            })
         guard = read_json(runtime / "brain" / "brain.last-good.json")
         if guard:
             if not accept_last_good_guard(runtime, phase.name):
@@ -3922,6 +3936,30 @@ def run_deferred_replays(args: argparse.Namespace, runtime: Path,
             "status": "resolved",
             "reason": "final-brain deferred replay passed comprehensive admission",
         })
+        # Announce the admission at the commit point, not after the cleanup.
+        #
+        # This event used to be appended last, behind `accept_last_good_guard`,
+        # two unlinks and `prune_resolved_deferred_bases` -- which deletes
+        # multi-gigabyte `.wbrain` bases and is by far the longest, most
+        # interruptible stretch of the commit. Anything that ended the
+        # supervisor in that window left the interval resolved in the ledger
+        # with a `passed: true` artifact on disk and NO admitted event, and
+        # `recover_interrupted_deferred_replay` then committed it on restart
+        # without writing one either.
+        #
+        # Measured 2026-09-05: 60 ledger resolves against 21 admitted events.
+        # Six intervals were admitted between 235.9 h and 71.8 h ago, each with
+        # an artifact whose own `updated_unix` matches its resolve, and not one
+        # logged an event -- so the watchdog read `hours_since_admission: 351.7`
+        # and woke an agent to repair a curriculum that had admitted six times
+        # in the window it called dead. The ledger resolve is the commit; the
+        # event belongs beside it.
+        append_health_event(runtime, {
+            "kind": "deferred_replay_admitted",
+            "phase": phase.name,
+            "interval_id": interval_id,
+            "passed": True,
+        })
         if not accept_last_good_guard(runtime, phase.name):
             raise RuntimeError(
                 f"could not release {phase.name} replay guard"
@@ -3933,12 +3971,6 @@ def run_deferred_replays(args: argparse.Namespace, runtime: Path,
             runtime / f"deferred-replay-{digest}.admission.json",
             {**report, "pruned_deferred_bases": [str(path) for path in pruned]},
         )
-        append_health_event(runtime, {
-            "kind": "deferred_replay_admitted",
-            "phase": phase.name,
-            "interval_id": interval_id,
-            "passed": True,
-        })
         if single_selected:
             publish(status_path, {
                 "state": "deferred_replay_complete",

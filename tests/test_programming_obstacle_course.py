@@ -509,3 +509,96 @@ def test_a_broken_solution_fails_its_validator(item):
         f"{item.task_id} accepted a candidate with broken behaviour "
         f"(outcome={result.outcome}): {result.detail[:400]}"
     )
+
+
+def test_no_task_is_defined_twice_in_the_reference_tables():
+    """A duplicate entry silently scores a task against the wrong solution.
+
+    `REFERENCES` is guarded at import by a write-once dict, but `MUTATIONS` is
+    a single dict literal, and Python collapses a duplicate key in a literal
+    before any guard could observe it -- the later entry simply wins. So this
+    reads the source rather than the built objects, which covers both tables
+    by the same rule regardless of how each is assembled.
+
+    Not hypothetical. On 2026-09-05 two sessions authored the
+    `scientific_3d_geometry_robotics` family concurrently and both reference
+    blocks landed in this file, the second shadowing the first for all eight
+    tasks. Both blocks parsed and the suite still passed, because every task
+    had *a* reference -- just not its own. The collision was found by reading
+    a diff, which is not a control.
+    """
+    import ast
+    import collections
+
+    source = (ROOT / "tests" / "obstacle_references.py").read_text(
+        encoding="utf-8"
+    )
+    tree = ast.parse(source)
+
+    seen = collections.defaultdict(list)
+    for node in ast.walk(tree):
+        # REFERENCES["task-id"] = ... / MUTATIONS["task-id"] = ...
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if (isinstance(target, ast.Subscript)
+                        and isinstance(target.value, ast.Name)
+                        and isinstance(target.slice, ast.Constant)
+                        and isinstance(target.slice.value, str)):
+                    seen[(target.value.id, target.slice.value)].append(
+                        target.lineno
+                    )
+            # MUTATIONS = {"task-id": (...), ...}
+            for target in node.targets:
+                name = getattr(target, "id", None) or getattr(
+                    getattr(target, "target", None), "id", None)
+                if name and isinstance(node.value, ast.Dict):
+                    for key in node.value.keys:
+                        if isinstance(key, ast.Constant) and isinstance(
+                                key.value, str):
+                            seen[(name, key.value)].append(key.lineno)
+        # MUTATIONS: dict[...] = {...}
+        if isinstance(node, ast.AnnAssign) and isinstance(node.value, ast.Dict):
+            name = getattr(node.target, "id", None)
+            if name:
+                for key in node.value.keys:
+                    if isinstance(key, ast.Constant) and isinstance(
+                            key.value, str):
+                        seen[(name, key.value)].append(key.lineno)
+
+    # A walker that matches nothing reports "no duplicates" forever. Prove it
+    # can see both tables before trusting its silence -- an absence nobody has
+    # confirmed is reachable is not evidence.
+    tables = {table for table, _ in seen}
+    assert tables == {"REFERENCES", "MUTATIONS"}, (
+        f"the duplicate scan only found {sorted(tables)}, so its verdict on "
+        "the others is vacuous"
+    )
+    assert len(seen) >= len(AUTHORED), (
+        f"the scan found {len(seen)} entries for {len(AUTHORED)} authored "
+        "tasks, so it is not reading the tables it claims to check"
+    )
+
+    duplicates = {
+        f"{table}[{key!r}]": lines
+        for (table, key), lines in seen.items() if len(lines) > 1
+    }
+    assert not duplicates, (
+        "these entries are defined more than once, and the later definition "
+        f"silently shadows the earlier one: {duplicates}"
+    )
+
+
+def test_every_authored_task_has_exactly_one_reference_and_mutation():
+    """Neither table may carry an entry for a task that does not exist.
+
+    A stale entry is the other half of the shadowing failure: it survives a
+    task being renamed or dropped, and then sits in the file looking like
+    coverage for something nothing runs.
+    """
+    authored = {item.task_id for item in AUTHORED}
+    assert not (set(REFERENCES) - authored), (
+        "references without a task: " f"{sorted(set(REFERENCES) - authored)}"
+    )
+    assert not (set(MUTATIONS) - authored), (
+        "mutations without a task: " f"{sorted(set(MUTATIONS) - authored)}"
+    )

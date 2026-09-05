@@ -19,7 +19,41 @@ held-out.
 
 from __future__ import annotations
 
-REFERENCES: dict[str, str] = {}
+
+class _WriteOnce(dict):
+    """A dict that refuses to overwrite a key it already holds.
+
+    Both tables below are populated by hundreds of separate
+    ``TABLE["task-id"] = ...`` statements, and a plain dict resolves a
+    duplicate key silently in favour of whichever assignment appears LATER in
+    the file. That is not a stylistic risk, it is a scoring one: the pair of
+    tests that keep a validator honest -- the reference must pass, the mutated
+    reference must fail -- would then run against a reference solving a
+    different problem than the task asks for.
+
+    It has already happened. On 2026-09-05 two sessions authored the
+    `scientific_3d_geometry_robotics` family concurrently and both reference
+    blocks landed in this file; the second shadowed the first for all eight
+    tasks. Both blocks parsed, so nothing complained, and the collision was
+    caught by reading the diff rather than by running anything.
+
+    Failing on the second assignment turns that silent shadowing into an
+    ImportError naming the duplicated task, at the moment the file is
+    imported and before any score exists to be wrong.
+    """
+
+    def __setitem__(self, key: str, value: str) -> None:
+        if key in self:
+            raise KeyError(
+                f"{key!r} already has an entry in this table. Two blocks "
+                f"define it, and the later one would silently shadow the "
+                f"earlier, scoring that task against the wrong solution. "
+                f"Keep exactly one and delete the other."
+            )
+        super().__setitem__(key, value)
+
+
+REFERENCES: dict[str, str] = _WriteOnce()
 
 
 REFERENCES["algorithms_data_structures-0001"] = r'''

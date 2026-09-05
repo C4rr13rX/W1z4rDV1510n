@@ -1650,6 +1650,68 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             self.assertFalse(guard.exists())
             self.assertFalse(deferred_replay_marker_path(runtime).exists())
 
+            # A RECOVERED COMMIT IS AN ADMISSION AND MUST ANNOUNCE ITSELF.
+            #
+            # This branch runs only because the supervisor died after
+            # publishing the admission artifact, so it is the last place the
+            # event can still be written. It never wrote one, and the
+            # divergence was large: measured on the training host 2026-09-05,
+            # 60 ledger resolves against 21 `deferred_replay_admitted` events.
+            # The watchdog reads that event to decide whether the curriculum is
+            # admitting, so every silent recovery aged a metric that can only
+            # ever get staler -- it reported a 351.7 h drought over a window
+            # containing six real admissions and woke an agent to repair them.
+            events = [
+                json.loads(line)
+                for line in (runtime / "curriculum-health.jsonl")
+                .read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            admitted = [
+                row for row in events
+                if row.get("kind") == "deferred_replay_admitted"
+            ]
+            self.assertEqual(len(admitted), 1, events)
+            self.assertEqual(admitted[0]["interval_id"], "corpus:100:120")
+            self.assertTrue(admitted[0]["recovered"])
+            self.assertTrue(admitted[0]["passed"])
+
+    def test_admission_event_precedes_the_interruptible_cleanup(self) -> None:
+        """The announcement must sit beside the commit, not after the prune.
+
+        Ordering, not presence, is the defect. The event was appended last --
+        behind `accept_last_good_guard`, two unlinks and
+        `prune_resolved_deferred_bases`, which deletes multi-gigabyte `.wbrain`
+        bases and is the longest interruptible stretch of the whole commit. An
+        interval that resolved in the ledger and then lost the supervisor
+        during the prune was fully admitted and completely silent.
+
+        Asserted against source order because that is what the bug was: both
+        orderings write the same event, and only their position relative to
+        the prune decides whether an interrupted commit is observable.
+
+        Anchor on call syntax, never a bare identifier: the first draft of
+        this test searched for `accept_last_good_guard` and matched the words
+        in the comment that explains the fix, so it failed against the very
+        ordering it was written to require.
+        """
+        source = (
+            ROOT / "scripts" / "programming_curriculum_supervisor.py"
+        ).read_text(encoding="utf-8")
+        resolved = source.index(
+            '"final-brain deferred replay passed comprehensive admission"'
+        )
+        announced = source.index('"kind": "deferred_replay_admitted"', resolved)
+        guard_release = source.index(
+            "if not accept_last_good_guard(runtime, phase.name):", resolved
+        )
+        prune = source.index(
+            "pruned = prune_resolved_deferred_bases(runtime)", resolved
+        )
+        self.assertLess(resolved, announced)
+        self.assertLess(announced, guard_release)
+        self.assertLess(guard_release, prune)
+
     def test_interrupted_replay_restore_retains_guard_until_next_transaction(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runtime = Path(directory)
