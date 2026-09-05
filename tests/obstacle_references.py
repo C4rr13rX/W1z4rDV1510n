@@ -2316,6 +2316,348 @@ def critical_path(spans):
 '''
 
 
+REFERENCES["testing_debugging_repair_refactoring-0001"] = r'''
+def minimize_failing_input(items, is_failing):
+    items = list(items)
+    if is_failing([]):
+        return []
+    if not is_failing(items):
+        raise ValueError("the whole input does not fail; nothing to reduce")
+
+    def split(sequence, count):
+        size, extra = divmod(len(sequence), count)
+        chunks = []
+        start = 0
+        for index in range(count):
+            width = size + (1 if index < extra else 0)
+            if width:
+                chunks.append(sequence[start:start + width])
+            start += width
+        return chunks
+
+    current = items
+    granularity = 2
+    while len(current) >= 2:
+        chunks = split(current, min(granularity, len(current)))
+        reduced = False
+        for chunk in chunks:
+            if is_failing(chunk):
+                current = chunk
+                granularity = 2
+                reduced = True
+                break
+        if not reduced:
+            for index in range(len(chunks)):
+                complement = [value
+                              for position, chunk in enumerate(chunks)
+                              if position != index
+                              for value in chunk]
+                if complement and is_failing(complement):
+                    current = complement
+                    granularity = max(len(chunks) - 1, 2)
+                    reduced = True
+                    break
+        if not reduced:
+            if granularity >= len(current):
+                break
+            granularity = min(len(current), granularity * 2)
+    return current
+'''
+
+
+REFERENCES["testing_debugging_repair_refactoring-0002"] = r'''
+def first_bad_revision(revisions, is_bad):
+    revisions = list(revisions)
+    if not revisions:
+        raise ValueError("there are no revisions to bisect")
+    low, high = 0, len(revisions)
+    while low < high:
+        middle = (low + high) // 2
+        if is_bad(revisions[middle]):
+            high = middle
+        else:
+            low = middle + 1
+    if low == len(revisions):
+        return None
+    return revisions[low]
+'''
+
+
+REFERENCES["testing_debugging_repair_refactoring-0003"] = r'''
+import re
+
+_FRAME = re.compile(r'^\s*File "(?P<path>.+)", line \d+, in (?P<function>.+)$')
+
+
+def _signature(text):
+    frames = []
+    for line in text.splitlines():
+        match = _FRAME.match(line)
+        if match:
+            path = match.group("path").replace("\\", "/")
+            basename = path.rsplit("/", 1)[-1]
+            frames.append(f"{basename}:{match.group('function').strip()}")
+    if not frames:
+        raise ValueError("a traceback with no frames is not a crash report")
+    body = [line.strip() for line in text.splitlines() if line.strip()]
+    last = body[-1]
+    kind = last.split(":", 1)[0].strip() if ":" in last else last
+    return kind + "|" + ";".join(frames)
+
+
+def group_failures(reports):
+    reports = list(reports)
+    if not reports:
+        raise ValueError("there are no reports to group")
+    buckets = {}
+    for report in reports:
+        if "test" not in report or "traceback" not in report:
+            raise ValueError("a report needs both a test and a traceback")
+        signature = _signature(report["traceback"])
+        entry = buckets.setdefault(signature, {"count": 0, "tests": set()})
+        entry["count"] += 1
+        entry["tests"].add(report["test"])
+    grouped = [{"signature": signature, "count": entry["count"],
+                "tests": sorted(entry["tests"])}
+               for signature, entry in buckets.items()]
+    grouped.sort(key=lambda group: (-group["count"], group["signature"]))
+    return grouped
+'''
+
+
+REFERENCES["testing_debugging_repair_refactoring-0004"] = r'''
+import math
+
+
+def rank_suspicious_lines(coverage, outcomes):
+    if not outcomes:
+        raise ValueError("no test outcomes were supplied")
+    if set(coverage) != set(outcomes):
+        raise ValueError("coverage and outcomes name different tests")
+    total_failing = sum(1 for passed in outcomes.values() if not passed)
+    if total_failing == 0:
+        raise ValueError("no test failed, so there is nothing to localise")
+
+    failing_hits = {}
+    passing_hits = {}
+    for test, lines in coverage.items():
+        hits = passing_hits if outcomes[test] else failing_hits
+        for line in lines:
+            if isinstance(line, bool) or not isinstance(line, int) or line < 1:
+                raise ValueError(f"{line!r} is not a positive line number")
+            hits[line] = hits.get(line, 0) + 1
+
+    ranked = []
+    for line in sorted(set(failing_hits) | set(passing_hits)):
+        executed_failing = failing_hits.get(line, 0)
+        if executed_failing == 0:
+            continue
+        executed_passing = passing_hits.get(line, 0)
+        ranked.append((line, executed_failing / math.sqrt(
+            total_failing * (executed_failing + executed_passing))))
+    ranked.sort(key=lambda item: (-item[1], item[0]))
+    return ranked
+'''
+
+
+REFERENCES["testing_debugging_repair_refactoring-0005"] = r'''
+import ast
+import keyword
+
+
+def _bound_names(function):
+    bound = set()
+    arguments = (function.args.posonlyargs + function.args.args
+                 + function.args.kwonlyargs)
+    for argument in arguments:
+        bound.add(argument.arg)
+    for extra in (function.args.vararg, function.args.kwarg):
+        if extra is not None:
+            bound.add(extra.arg)
+    for node in ast.walk(function):
+        if isinstance(node, ast.Name) and isinstance(node.ctx,
+                                                     (ast.Store, ast.Del)):
+            bound.add(node.id)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            bound.add(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                bound.add((alias.asname or alias.name).split(".")[0])
+    return bound
+
+
+def rename_local(source, function_name, old_name, new_name):
+    tree = ast.parse(source)
+    target = None
+    for node in tree.body:
+        if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == function_name):
+            target = node
+            break
+    if target is None:
+        raise ValueError(f"no top-level function named {function_name!r}")
+    if not new_name.isidentifier() or keyword.iskeyword(new_name):
+        raise ValueError(f"{new_name!r} is not a usable identifier")
+    for node in ast.walk(target):
+        if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                              ast.ClassDef)) and node is not target):
+            raise ValueError("the function contains a nested definition")
+        if (isinstance(node, (ast.Global, ast.Nonlocal))
+                and old_name in node.names):
+            raise ValueError(f"{old_name!r} is not local to {function_name!r}")
+
+    bound = _bound_names(target)
+    if old_name not in bound:
+        raise ValueError(f"{old_name!r} is not a local of {function_name!r}")
+    used = set(bound)
+    for node in ast.walk(target):
+        if isinstance(node, ast.Name):
+            used.add(node.id)
+    if new_name in used:
+        raise ValueError(f"{new_name!r} is already used in {function_name!r}")
+
+    class _Renamer(ast.NodeTransformer):
+        def visit_Name(self, node):
+            if node.id == old_name:
+                node.id = new_name
+            return node
+
+        def visit_arg(self, node):
+            if node.arg == old_name:
+                node.arg = new_name
+            return node
+
+    _Renamer().visit(target)
+    ast.fix_missing_locations(tree)
+    return ast.unparse(tree)
+'''
+
+
+REFERENCES["testing_debugging_repair_refactoring-0006"] = r'''
+_MISSING = "<missing>"
+_SCALARS = (str, int, float, bool, type(None))
+
+
+def _check(value):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError(f"dict keys must be strings, got {key!r}")
+            _check(item)
+    elif isinstance(value, list):
+        for item in value:
+            _check(item)
+    elif not isinstance(value, _SCALARS):
+        raise ValueError(f"unsupported value {value!r}")
+
+
+def _walk(expected, actual, path):
+    if type(expected) is not type(actual):
+        return {"path": path, "expected": expected, "actual": actual}
+    if isinstance(expected, dict):
+        for key in sorted(set(expected) | set(actual)):
+            if key not in expected:
+                return {"path": path + [key], "expected": _MISSING,
+                        "actual": actual[key]}
+            if key not in actual:
+                return {"path": path + [key], "expected": expected[key],
+                        "actual": _MISSING}
+            found = _walk(expected[key], actual[key], path + [key])
+            if found is not None:
+                return found
+        return None
+    if isinstance(expected, list):
+        shared = min(len(expected), len(actual))
+        for index in range(shared):
+            found = _walk(expected[index], actual[index], path + [index])
+            if found is not None:
+                return found
+        if len(expected) != len(actual):
+            return {
+                "path": path + [shared],
+                "expected": (expected[shared] if shared < len(expected)
+                             else _MISSING),
+                "actual": (actual[shared] if shared < len(actual)
+                           else _MISSING),
+            }
+        return None
+    if expected != actual:
+        return {"path": path, "expected": expected, "actual": actual}
+    return None
+
+
+def first_difference(expected, actual):
+    _check(expected)
+    _check(actual)
+    return _walk(expected, actual, [])
+'''
+
+
+REFERENCES["testing_debugging_repair_refactoring-0007"] = r'''
+def classify_test_history(history, window):
+    if not history:
+        raise ValueError("no test history was supplied")
+    if isinstance(window, bool) or not isinstance(window, int) or window < 2:
+        raise ValueError("window must be an integer of at least 2")
+
+    classes = {}
+    for test, recorded in history.items():
+        recorded = list(recorded)
+        if len(recorded) < 2:
+            raise ValueError(f"{test!r} has fewer than two recorded runs")
+        for outcome in recorded:
+            if outcome not in ("pass", "fail"):
+                raise ValueError(f"{outcome!r} is not a recorded outcome")
+        recent = recorded[-window:]
+        transitions = sum(1 for index in range(1, len(recent))
+                          if recent[index] != recent[index - 1])
+        if transitions >= 2:
+            classes[test] = "flaky"
+        elif recent[-1] == "fail":
+            classes[test] = "failing"
+        else:
+            classes[test] = "passing"
+    return {
+        "classes": classes,
+        "quarantine": sorted(test for test, label in classes.items()
+                             if label == "flaky"),
+    }
+'''
+
+
+REFERENCES["testing_debugging_repair_refactoring-0008"] = r'''
+def apply_patch(lines, hunks):
+    original = list(lines)
+    ordered = list(hunks)
+
+    boundary = 0
+    for index, hunk in enumerate(ordered):
+        start = hunk["start"]
+        remove = list(hunk["remove"])
+        if isinstance(start, bool) or not isinstance(start, int):
+            raise ValueError(f"hunk {index} has a non-integer start")
+        if start < 1 or start > len(original) + 1:
+            raise ValueError(f"hunk {index} starts outside the file")
+        if start <= boundary:
+            raise ValueError(f"hunk {index} overlaps the previous hunk")
+        if start - 1 + len(remove) > len(original):
+            raise ValueError(f"hunk {index} removes past the end of the file")
+        if original[start - 1:start - 1 + len(remove)] != remove:
+            raise ValueError(f"hunk {index} does not match the file")
+        boundary = max(start, start - 1 + len(remove))
+
+    result = []
+    cursor = 0
+    for hunk in ordered:
+        start = hunk["start"]
+        result.extend(original[cursor:start - 1])
+        result.extend(list(hunk["insert"]))
+        cursor = start - 1 + len(list(hunk["remove"]))
+    result.extend(original[cursor:])
+    return result
+'''
+
+
 MUTATIONS: dict[str, tuple[str, str]] = {
     # Sign the payload alone, so the header can be rewritten after signing
     # and the token still verifies -- the alg-confusion family.
@@ -2677,5 +3019,65 @@ MUTATIONS: dict[str, tuple[str, str]] = {
     "reliability_observability_performance-0008": (
         '-(span["end_ms"] - span["start_ms"]),',
         '-span["start_ms"],',
+    ),
+    # Drop the complement phase of delta debugging, keeping only "does this
+    # chunk fail on its own". Two elements that only fail together are then
+    # never separated from the noise, and the whole input comes back.
+    "testing_debugging_repair_refactoring-0001": (
+        "            for index in range(len(chunks)):",
+        "            for index in range(0):",
+    ),
+    # Exclude the probed revision from the remaining range instead of keeping
+    # it as the current best candidate: the bisect walks past the commit that
+    # introduced the break and blames an innocent one.
+    "testing_debugging_repair_refactoring-0002": (
+        "            high = middle",
+        "            high = middle - 1",
+    ),
+    # Sign the crash on its full path. Two runs of one defect in different
+    # working directories become two defects, which is how a triage queue
+    # fills with the same bug.
+    "testing_debugging_repair_refactoring-0003": (
+        '            basename = path.rsplit("/", 1)[-1]',
+        "            basename = path",
+    ),
+    # Rank lines no failing test ever executed. They score zero and sort last,
+    # so the list still looks right -- and every line of the file is now a
+    # suspect.
+    "testing_debugging_repair_refactoring-0004": (
+        "        if executed_failing == 0:",
+        "        if executed_failing < 0:",
+    ),
+    # Rename the references but not the parameters, which is the half-rename
+    # that still parses: the signature keeps the old name and the body no
+    # longer mentions it.
+    "testing_debugging_repair_refactoring-0005": (
+        "        def visit_arg(self, node):\n"
+        "            if node.arg == old_name:\n"
+        "                node.arg = new_name\n"
+        "            return node",
+        "        def visit_arg(self, node):\n"
+        "            return node",
+    ),
+    # Compare on value alone. True == 1 and 1 == 1.0 in Python, so the two
+    # mismatches a type-confusion bug actually produces are reported as a
+    # match.
+    "testing_debugging_repair_refactoring-0006": (
+        "    if type(expected) is not type(actual):",
+        "    if False:",
+    ),
+    # Call one transition flaky. A clean regression -- passing, then failing
+    # and staying failed -- is then quarantined, which is how a real break
+    # gets muted.
+    "testing_debugging_repair_refactoring-0007": (
+        "        if transitions >= 2:",
+        "        if transitions >= 1:",
+    ),
+    # Apply hunks without checking the context they were written against, so
+    # a patch built from an older revision of the file silently edits the
+    # wrong lines.
+    "testing_debugging_repair_refactoring-0008": (
+        "        if original[start - 1:start - 1 + len(remove)] != remove:",
+        "        if False:",
     ),
 }
