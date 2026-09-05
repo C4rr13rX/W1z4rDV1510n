@@ -33,6 +33,7 @@ It prints authored-versus-required for every family, the exact per-family
 shortfall, and exits 2 while any of them is unmet. It exits 0 only when a
 complete, valid course exists — so the exit code, not a paragraph, is the
 answer to "is the course built".
+
 No score has been produced against the brain yet, and none can be: the runner
 only accepts a manifest, and a manifest cannot be constructed from an
 incomplete task set.
