@@ -215,10 +215,11 @@ buying a window is a real fault that must surface.
 
 ## A retention suite is only as good as the path that trained it
 
-`/brain/observe` + `/brain/tick` cannot form a binding for a long response:
-recall via the observe path is exact below ~80 bytes and empty above it. A
-suite whose responses exceed that trains rows nothing can retrieve, then fails
-its own paraphrase check while reporting `trained` at full marks.
+`/brain/observe` + `/brain/tick` binds a short response reliably and a long one
+unreliably; the often-quoted "exact below ~80 bytes, empty above it" is too
+strong, and measurement below contradicts it. A suite whose responses exceed
+that size *may* train rows nothing can retrieve, then fail its own paraphrase
+check while reporting `trained` at full marks.
 
 That signature — **`trained` perfect, `paraphrase` empty** — is *consistent
 with* a training-path problem, but it does not prove one. It is also what a
@@ -229,15 +230,42 @@ Worked example, 2026-09-05. `programming_typescript_enterprise.py` still
 trained through the observe path with responses of 379 B, 560 B and 799 B, and
 `optimistic_store` recorded `trained 3/3, paraphrase 2/3` on every gate from
 2026-09-03 10:13 to 2026-09-04 18:32 — 8 intervals rejected. The training path
-was the obvious culprit and the wrong one: run against the recovered brain,
-those same observe-path bindings score `trained 3/3, paraphrase 3/3, oov 3/3`
-with no re-seed. The rejections sat inside the window when WAL corruption had
-left the brain empty, and they stopped when it was restored.
+was the obvious culprit, and the rejections sat inside the window when WAL
+corruption had left the brain empty — they stopped when it was restored.
+
+An earlier revision of this section claimed those same observe-path bindings
+scored `paraphrase 3/3` "with no re-seed", and drew the causal conclusion from
+it. That measurement was contaminated and does not support the claim: the
+brain server ran unrestarted from 14:06:12 to 14:33:59 UTC with no rollback and
+no health event, so the re-seed recorded in this same section — which took
+`paraphrase` from 2/3 to 3/3 — had *already* been applied when the "no re-seed"
+reading was taken. Both readings cannot describe one brain state, and the table
+below is the one with a mutation behind it.
+
+The exclusion check used to rule this out — "the newest typescript gate
+artifact is 2026-09-04, so nothing else ran the suite" — cannot detect what it
+claims. A re-seed run and an ad-hoc `--no-train` verification write wherever
+`--output` points, not to `<phase>.typescript-gate.json`; two verification runs
+at 14:29:09 and 14:29:56 that day left `typescript-reseed-verify.json` and
+`typescript-noTrain-verify.json` and were invisible to it. **Prove a suite was
+untouched from process and mtime evidence across the whole runtime directory,
+never from one artifact name** — and assume a concurrent agent is writing to
+the same brain, because on this project one usually is.
+
+The conclusion still stands, on evidence that does not depend on that reading.
+Two long-response suites were deliberately *not* re-seeded, so they still carry
+their original bindings, and both pass on the recovered brain:
+`programming_platform_eval.py` (1042 B responses) at `trained 4/4,
+paraphrase 4/4, oov 3/3`, and `programming_cross_language_transfer.py` (903 B)
+at `canonical 4/4, heldout 4/4, oov 2/2`. Long responses do retrieve here. The
+degraded brain was the cause; the training path was a symptom.
 
 **Re-measure a suite against the current brain before repairing it.** A gate
 artifact records what was true of the brain that ran it. Attributing an old
 rejection to a code path, then "fixing" that path, produces a change that
-cannot be shown to have done anything — and buries the real cause.
+cannot be shown to have done anything — and buries the real cause. The
+symmetric error is just as expensive: clearing a code path on a measurement
+taken *after* you already changed the brain underneath it.
 
 Two facts worth keeping anyway: `/brain/pretrain_binding` does not depend on a
 response being short enough for the observe path to bind, and the supervisor

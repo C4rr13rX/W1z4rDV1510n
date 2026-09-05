@@ -130,21 +130,27 @@ def execute(response: str, integration: str) -> tuple[bool, str]:
 def train(endpoint: str, repeats: int) -> None:
     # Form each case as an atom-grounded binding.
     #
-    # `/brain/observe` + `/brain/tick` cannot form a binding for a long
-    # response: recall via the observe path is exact below ~80 bytes and empty
-    # above it. These three responses are 379-799 bytes, so none of them
-    # entered labelled retrieval and all were reachable only by exact sequence
-    # match -- which a paraphrase by definition cannot use.
+    # `/brain/observe` + `/brain/tick` binds a short response reliably and a
+    # long one unreliably. These three responses are 379-799 bytes, which is
+    # past the size where the observe path is dependable -- but NOT past the
+    # size that can be retrieved at all: see the 903 B and 1042 B suites below,
+    # which still recall from observe-path bindings. `pretrain_binding` removes
+    # the dependence on response size rather than repairing a proven break.
     #
     # HARDENING, NOT A DIAGNOSED FIX. An earlier revision of this comment
     # blamed the observe path for the `optimistic_store` rejections of
-    # 2026-09-03/04 (`trained 3/3, paraphrase 2/3`, 8 intervals). Measured
-    # 2026-09-05 against the recovered brain, the suite scores
-    # `trained 3/3, paraphrase 3/3, oov 3/3` on those SAME observe-path
-    # bindings, with no re-seed. So the training path did not cause those
-    # rejections -- the brain did. They fall inside the window when WAL
-    # corruption had left it empty (0.08 GB resident, ~0.01 confidence), and
-    # they stopped when it was restored.
+    # 2026-09-03/04 (`trained 3/3, paraphrase 2/3`, 8 intervals). It did not
+    # cause them -- the brain did, inside the window when WAL corruption had
+    # left it empty (0.08 GB resident, ~0.01 confidence); the rejections
+    # stopped when it was restored.
+    #
+    # Do NOT cite the once-recorded "same observe-path bindings score 3/3 with
+    # no re-seed" as the evidence for that: the brain ran unrestarted across
+    # both readings, so the re-seed that took paraphrase 2/3 -> 3/3 had already
+    # been applied when it was taken. The sound evidence is the two suites that
+    # were deliberately never re-seeded and still pass on the recovered brain --
+    # programming_platform_eval.py (1042 B) at 4/4 + 4/4, and
+    # programming_cross_language_transfer.py (903 B) at 4/4 + 4/4.
     #
     # Keep pretrain_binding regardless: it is the path the three sibling
     # suites were moved to in 4e790fb, and it does not depend on a response
