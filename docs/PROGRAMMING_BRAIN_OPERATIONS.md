@@ -350,6 +350,12 @@ This generalises past this repo. A remote fix has two failure points — did the
 bytes land, and did anything reload them — and only the first one leaves an
 artifact you can grep.
 
+Two later sections qualify the remedy rather than the diagnosis. **Restarting
+the supervisor mid-replay rolls the interval back** — check
+`deferred-replay-active.json` before you restart anything to apply a fix. And
+**the watcher is subject to every rule it enforces**: it ran nineteen minutes
+behind its own repaired probe and alarmed on the pre-fix reading.
+
 ## The named failure is not the failure population
 
 The watchdog reports `last_failure`. It is one row. Repairing it and declaring
@@ -564,3 +570,177 @@ The prediction this supports is bounded, and the bound is the rule CLAUDE.md
 states: every gate stage passing means the gate is *expected* to admit. It is
 not an admission. The measurement that closes it out is `hours_since_admission`
 falling and the `resolved` count rising.
+
+## The watcher is subject to every rule it enforces
+
+`admission_watchdog.py` reports `stale_code_lag` for the supervisor because
+landing bytes and reloading them are different questions. The watcher exempted
+itself from that check, and the exemption produced a false alarm whose text was
+the exact inverse of the truth.
+
+The `gate_artifacts` probe was repaired at 10:06 on 2026-09-05 — it had counted
+`*interval_recall*`, a name nothing writes. The watcher process had started at
+09:46. Nineteen minutes older than its own fix, it kept counting with the
+vacuous glob and woke a session with:
+
+```
+fix_required: admission gate has never produced an artifact across 19 resource
+cycles: the gate is not running, so no interval can ever admit
+```
+
+Running the repaired probe against the same host in the same minute:
+
+| field | stale watcher | repaired probe |
+|---|---:|---:|
+| `gate_artifacts` | 0 | **45** |
+| `gate_rejections` | *absent* | **402** |
+| `replay_failures_at_gate` | *absent* | **235** |
+| `replay_failures_before_gate` | *absent* | **53** |
+
+The missing fields are the tell, and they are cheaper to read than the numbers.
+A payload lacking keys the current probe unconditionally emits was produced by
+older code, whatever the file on disk says. Check the shape of a payload before
+you argue with its values.
+
+The watcher now re-execs when its own source — or the SSM transport it imports
+— is newer than the process that compiled it. **Re-exec, not exit:** the
+`WizardVisionProgrammingBrainCodexWatch` scheduled task is *Disabled*, so
+nothing would restart it, and a watcher that exits to be correct supervises
+nothing. It runs at the top of the poll loop with no Claude invocation in
+flight, so it cannot abandon a running session.
+
+Corollary for a session woken by an alarm: **you cannot restart the watcher
+from inside the session it spawned.** Its activity log is streaming your own
+tool calls. That is why this is self-healing rather than an operator step.
+
+## The status file is not the heartbeat
+
+The supervisor publishes `curriculum-supervisor.status.json` only at state
+transitions. A 49,152-row replay pass at ~13 rows/s is therefore ~3,900 s of
+deliberate silence, against a watcher alarm set at 1,800 s.
+
+Measured 2026-09-05: `status_age 2630s` — alarming — on a host whose worker
+progress file was **2.3 s old** and advancing at **13.1 rows/s**. The status
+file records the last thing that changed; `deferred-replay-<digest>.progress.json`
+is rewritten every batch and carries `durable_next_row`. Liveness is the
+heartbeat's answer. Whether that liveness *converges* is a different question,
+and the admission-drought check already answers it. Both must be stale before
+control is actually gone.
+
+## The admitted event was written after the part that can die
+
+`edadb33` made the watcher read the admission drought from the ledger. This is
+why the two ever diverged, and the divergence was not small: **60 ledger
+resolves against 21 `deferred_replay_admitted` events.**
+
+The commit sequence appended the event *last* — behind `accept_last_good_guard`,
+two unlinks and `prune_resolved_deferred_bases`, which deletes multi-gigabyte
+`.wbrain` bases and is by far the longest, most interruptible stretch of the
+transaction. Anything that ended the supervisor in that window left the
+interval resolved in the ledger with a `passed: true` artifact on disk and no
+event. `recover_interrupted_deferred_replay` then committed it on restart and
+did not write one either — that branch exists *because* the supervisor died
+after publishing the artifact, so it is the last place the event can still be
+written.
+
+Six intervals were admitted between 235.9 h and 71.8 h ago, each with an
+artifact whose own `updated_unix` matches its resolve, and none logged an
+event. So `hours_since_admission` read **351.7 h** where the true drought was
+**71.8 h**, and a session was billed to repair a curriculum that had admitted
+six times inside the window the metric called dead.
+
+The event now sits beside the ledger resolve, before the cleanup, and the
+recovery path writes one too. Note the shape of the bug: the metric is
+*monotone* once it detaches. It can only ever get staler, so the same defect
+that invented a stall would equally have hidden a real one.
+
+**Announce a commit at the commit, never after the cleanup.**
+
+## Restarting the supervisor mid-replay rolls the interval back
+
+"Deploying a fix is not applying it" ends by telling you to restart the unit.
+During a deferred replay that instruction is expensive, and nothing above says
+so.
+
+`run_deferred_replays` publishes `deferred-replay-active.json` with
+`state: "training"` before the first pass. On startup
+`recover_interrupted_deferred_replay` reads that marker, and any state other
+than `admitted` takes the else branch:
+
+```python
+restore_rejected_deferred_replay(
+    args, runtime, phase, event,
+    "interrupted deferred replay rolled back before retry",
+)
+```
+
+That discards every row the interval has trained. Measured 2026-09-05 with the
+marker 6,762 s old and `durable_next_row` at 78,168 of 131,072: a restart to
+pick up an observability fix would have thrown away 78,168 rows — about two
+hours of billed compute — to deploy a change that writes one extra log line.
+
+So before restarting the supervisor, read `deferred-replay-active.json`:
+
+| marker | cost of restarting |
+|---|---|
+| absent | none; restart freely |
+| `state: admitted` | none; the recovery path commits it |
+| `state: training` | **the whole interval**, back to `start_row` |
+
+A correctness or throughput fix can still be worth that. An observability fix
+is not. Deploy it and let the next natural boundary load it — and say plainly
+in the handover that the bytes are on the host and the process has *not*
+reloaded them, because that is exactly the state the earlier section warns is
+invisible to a grep.
+
+## Sample throughput over minutes, or read a transient as a collapse
+
+`durable_next_row` advances in quantised jumps behind the WAL flush, not
+smoothly with training. Sampled every 20 s it moved exactly +16 rows a tick,
+giving **0.799 rows/s** against a healthy 12.5 — a 15x collapse, with a
+`batch_seconds_ema` of 4.9 s agreeing with it.
+
+Both numbers were real and the conclusion was wrong. Twelve consecutive 30 s
+windows minutes later:
+
+```
+rows/s  13.07 12.81 13.73 13.78 13.02 13.78 14.57 13.25 12.55 12.51 13.29 13.60
+ema      0.53  0.68  0.50  0.56  0.62  0.48  0.60  0.55  0.72  0.63  0.55  0.59
+```
+
+Steady at **13.1 rows/s**, inside the 0.61-0.76 ema band of every interval that
+has ever admitted. The brain tick advanced at 13.1/s alongside it, which is the
+independent confirmation: rows and ticks moving together cannot both be a
+flushing artifact.
+
+The supporting evidence had also been misread. `cpu_frac 0.888` with
+`majflt_s 0.0` and 0.96 MB/s of reads says **CPU-bound, not paging** — on a
+brain reporting `resident_terminals: 0` against a 309 GB `.wbrain` the tempting
+story is thrashing, and the counters refuse it.
+
+This is the "sample repeatedly; one probe is not verification" rule in
+`CLAUDE.md` costing real analysis time. An 80-second window is one probe
+wearing a disguise. Before attributing a slowdown to architecture, hold the
+measurement for five minutes and check whether an independent counter agrees.
+
+## Two agents share one index
+
+A watchdog wake-up does not mean you are alone in the repository — on this
+project a second session usually is. `git add` writes to a *shared* index, so
+staging only your own paths does not protect them: a concurrent `git commit -a`,
+or `git commit` with no pathspec, sweeps whatever you have staged into a commit
+whose message describes something else. That happened on 2026-09-05; 106 lines
+of an admission fix landed inside a commit about obstacle-course duplicate
+guards.
+
+Use `git commit -m ... -- <paths>`, which commits exactly those paths and
+ignores the rest of the index. Do not rewrite the shared branch to tidy the
+attribution afterwards — the other session has it checked out.
+
+One more, because knowing about a trap does not stop you setting it: a throwaway
+probe in this session globbed `*marker*` for the transaction marker, which is
+named `deferred-replay-active.json`, and reported `[]`. The conclusion drawn
+from that empty list — that restarting the supervisor was safe — was the
+opposite of the truth, and the section above exists because the second probe
+was done by name. Verify a pattern can match something before believing it
+matched nothing, in ad-hoc probes as much as in committed ones.
