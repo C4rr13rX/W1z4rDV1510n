@@ -927,7 +927,279 @@ def parse_link_header(header):
 '''
 
 
+REFERENCES["concurrency_async_distributed-0001"] = r'''
+class TokenBucket:
+    def __init__(self, capacity, refill_per_second, clock):
+        self.capacity = float(capacity)
+        self.refill_per_second = float(refill_per_second)
+        self._clock = clock
+        self._tokens = float(capacity)
+        self._updated = clock()
+
+    def _refill(self):
+        now = self._clock()
+        elapsed = now - self._updated
+        if elapsed > 0:
+            self._tokens = min(
+                self.capacity, self._tokens + elapsed * self.refill_per_second
+            )
+            self._updated = now
+
+    def allow(self, cost=1):
+        if cost > self.capacity:
+            return False
+        self._refill()
+        if self._tokens >= cost:
+            self._tokens -= cost
+            return True
+        return False
+'''
+
+
+REFERENCES["concurrency_async_distributed-0002"] = r'''
+class CircuitOpenError(Exception):
+    pass
+
+
+class CircuitBreaker:
+    def __init__(self, failure_threshold, recovery_seconds, clock):
+        self.failure_threshold = int(failure_threshold)
+        self.recovery_seconds = float(recovery_seconds)
+        self._clock = clock
+        self._failures = 0
+        self._opened_at = None
+
+    def call(self, operation):
+        if self._opened_at is not None:
+            if self._clock() - self._opened_at < self.recovery_seconds:
+                raise CircuitOpenError("circuit is open")
+        try:
+            result = operation()
+        except Exception:
+            self._failures += 1
+            if (self._opened_at is not None
+                    or self._failures >= self.failure_threshold):
+                self._opened_at = self._clock()
+            raise
+        self._failures = 0
+        self._opened_at = None
+        return result
+'''
+
+
+REFERENCES["concurrency_async_distributed-0003"] = r'''
+def retry_with_backoff(operation, attempts, base_delay, max_delay, sleep,
+                       should_retry):
+    last = None
+    for index in range(attempts):
+        try:
+            return operation()
+        except Exception as error:
+            if not should_retry(error):
+                raise
+            last = error
+            if index == attempts - 1:
+                raise
+            sleep(min(base_delay * (2 ** index), max_delay))
+    raise last
+'''
+
+
+REFERENCES["concurrency_async_distributed-0004"] = r'''
+def compare_clocks(left, right):
+    nodes = set(left) | set(right)
+    less = any(left.get(node, 0) < right.get(node, 0) for node in nodes)
+    greater = any(left.get(node, 0) > right.get(node, 0) for node in nodes)
+    if less and greater:
+        return "concurrent"
+    if less:
+        return "before"
+    if greater:
+        return "after"
+    return "equal"
+
+
+def merge_clocks(left, right):
+    nodes = set(left) | set(right)
+    return {
+        node: max(left.get(node, 0), right.get(node, 0)) for node in nodes
+    }
+'''
+
+
+REFERENCES["concurrency_async_distributed-0005"] = r'''
+class ExactlyOnceInbox:
+    def __init__(self, apply):
+        self._apply = apply
+        self._next = 1
+        self._buffer = {}
+
+    @property
+    def pending(self):
+        return len(self._buffer)
+
+    def deliver(self, sequence, payload):
+        sequence = int(sequence)
+        if sequence < self._next or sequence in self._buffer:
+            return []
+        self._buffer[sequence] = payload
+        released = []
+        while self._next in self._buffer:
+            released.append(self._next)
+            self._apply(self._buffer.pop(self._next))
+            self._next += 1
+        return released
+'''
+
+
+REFERENCES["concurrency_async_distributed-0006"] = r'''
+def schedule_batches(tasks, dependencies):
+    names = list(tasks)
+    known = set(names)
+    successors = {name: set() for name in names}
+    indegree = {name: 0 for name in names}
+    for before, after in dependencies:
+        if before not in known or after not in known:
+            raise ValueError(f"unknown task in dependency {(before, after)}")
+        if after not in successors[before]:
+            successors[before].add(after)
+            indegree[after] += 1
+
+    remaining = dict(indegree)
+    ready = sorted(name for name in names if remaining[name] == 0)
+    batches = []
+    scheduled = 0
+    while ready:
+        batches.append(list(ready))
+        scheduled += len(ready)
+        following = []
+        for name in ready:
+            for successor in sorted(successors[name]):
+                remaining[successor] -= 1
+                if remaining[successor] == 0:
+                    following.append(successor)
+        ready = sorted(following)
+    if scheduled != len(names):
+        raise ValueError("dependencies contain a cycle")
+    return batches
+'''
+
+
+REFERENCES["concurrency_async_distributed-0007"] = r'''
+import threading
+
+
+class Once:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._done = False
+        self._value = None
+
+    @property
+    def done(self):
+        return self._done
+
+    def do(self, factory):
+        if self._done:
+            return self._value
+        with self._lock:
+            if self._done:
+                return self._value
+            value = factory()
+            self._value = value
+            self._done = True
+            return value
+'''
+
+
+REFERENCES["concurrency_async_distributed-0008"] = r'''
+import threading
+
+
+class ReadWriteLock:
+    def __init__(self):
+        self._condition = threading.Condition()
+        self._readers = 0
+        self._writer = False
+        self._waiting_writers = 0
+
+    def acquire_read(self):
+        with self._condition:
+            while self._writer or self._waiting_writers > 0:
+                self._condition.wait()
+            self._readers += 1
+
+    def release_read(self):
+        with self._condition:
+            self._readers -= 1
+            if self._readers == 0:
+                self._condition.notify_all()
+
+    def acquire_write(self):
+        with self._condition:
+            self._waiting_writers += 1
+            try:
+                while self._writer or self._readers > 0:
+                    self._condition.wait()
+            finally:
+                self._waiting_writers -= 1
+            self._writer = True
+
+    def release_write(self):
+        with self._condition:
+            self._writer = False
+            self._condition.notify_all()
+'''
+
+
 MUTATIONS: dict[str, tuple[str, str]] = {
+    # Let the bucket accumulate while idle, so a long quiet period buys a
+    # burst the rate limit was supposed to forbid.
+    "concurrency_async_distributed-0001": (
+        "self.capacity, self._tokens + elapsed * self.refill_per_second",
+        "float('inf'), self._tokens + elapsed * self.refill_per_second",
+    ),
+    # Hold the circuit open through the instant the window elapses, so the
+    # half-open trial never gets its one call.
+    "concurrency_async_distributed-0002": (
+        "if self._clock() - self._opened_at < self.recovery_seconds:",
+        "if self._clock() - self._opened_at <= self.recovery_seconds:",
+    ),
+    # Sleep after the final attempt: the caller pays a delay for a retry
+    # that never happens.
+    "concurrency_async_distributed-0003": (
+        "if index == attempts - 1:",
+        "if index == attempts:",
+    ),
+    # Collapse concurrency into ordering, reporting a causal relationship
+    # between events that never saw each other.
+    "concurrency_async_distributed-0004": (
+        'if less and greater:\n        return "concurrent"',
+        'if False:\n        return "concurrent"',
+    ),
+    # Forget which sequence numbers were already applied, so a redelivery
+    # replays a side effect that the inbox exists to apply once.
+    "concurrency_async_distributed-0005": (
+        "if sequence < self._next or sequence in self._buffer:",
+        "if sequence in self._buffer:",
+    ),
+    # Return a partial plan for a cyclic graph instead of rejecting it.
+    "concurrency_async_distributed-0006": (
+        'if scheduled != len(names):\n        raise ValueError("dependencies contain a cycle")',
+        'if False:\n        raise ValueError("dependencies contain a cycle")',
+    ),
+    # Mark the Once done before the factory returns, so one failed attempt
+    # permanently poisons the value nobody ever produced.
+    "concurrency_async_distributed-0007": (
+        "value = factory()\n            self._value = value\n            self._done = True",
+        "self._done = True\n            value = factory()\n            self._value = value",
+    ),
+    # Drop writer preference: readers keep arriving and the writer waits
+    # behind an unbroken queue of them.
+    "concurrency_async_distributed-0008": (
+        "while self._writer or self._waiting_writers > 0:",
+        "while self._writer:",
+    ),
     # Take the first range that covers a candidate instead of the most
     # specific one: `*/*;q=0.5, text/html;q=0.1` then reads html at 0.5.
     "requirements_api_contracts-0001": (
