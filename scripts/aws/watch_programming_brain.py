@@ -699,6 +699,19 @@ def invoke_claude(session_id: str, decision: Decision, probe: dict,
     )
     returncode = _run_claude(command, decision, probe, stdout_path,
                              stderr_path, activity_path)
+    # A negative code (POSIX) or 128+n (shell convention) means the child was
+    # SIGNALLED, not that it failed. Verified 2026-09-05: stopping the parent
+    # task produced 143 (SIGTERM) on a run that had been working correctly,
+    # and the watcher reported it beside the 127 it uses for "no launcher on
+    # PATH" -- a deliberate stop reading as an install problem. Retrying one
+    # would also wake a second agent on a fault that never existed.
+    if returncode < 0 or returncode in (130, 143):
+        append_activity(
+            activity_path,
+            f"CLAUDE STOPPED by signal (returncode={returncode}); "
+            f"not retrying -- this is a deliberate stop, not a failure.",
+        )
+        return returncode
     if returncode != 0 and session_id:
         # A stale/absent session id must not swallow the alarm: retry once
         # without --resume so the fault still gets worked.
