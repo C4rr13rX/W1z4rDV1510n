@@ -176,6 +176,18 @@ if progress:
 else:
     out["progress_age"] = -1
     out["progress_row"] = None
+# The resume row is the only MONOTONIC evidence that a long interval is
+# converging. The progress file above restarts at 0 with every pass, so it
+# cannot distinguish a run accumulating rows across yields from one replaying
+# the same prefix forever -- which is precisely what happened for 13 passes.
+resume = _glob.glob(R + "/deferred-replay-*.resume.json")
+out["replay_resume_row"] = None
+if resume:
+    try:
+        out["replay_resume_row"] = json.load(
+            open(max(resume, key=os.path.getmtime))).get("durable_next_row")
+    except Exception:
+        pass
 # A gate legitimately freezes the tick: it settles the brain first. Treating
 # that as a stall is a false alarm, and one nearly sent me chasing a
 # non-problem.
@@ -325,11 +337,31 @@ def faults(now: dict, baseline_deferred: int) -> list[str]:
             f"latest {last.get('at')}s ago on {last.get('phase')} "
             f"-- failing suites: {suites}")
 
+    # A drought is only a fault when the queue is not CONVERGING.
+    #
+    # This alarm was written when a stalled interval was pinned at row 0
+    # forever, so silence and stall were the same thing. With mid-pass
+    # resume they are not: an interval is 131,072 rows at ~4-10 rows/s and
+    # yields the host several times on the way, so it legitimately takes
+    # many hours -- far past this 200-minute limit -- while accumulating
+    # rows the whole time. Firing here would wake the agent every ~3 minutes
+    # over a fault already fixed, which spends billed compute and, worse,
+    # teaches the operator to ignore the watchdog. That habit is exactly how
+    # the original stall went unnoticed for two days.
+    #
+    # So require silence AND a resume row that is not moving. Gating and a
+    # busy supervisor are excluded for the same reason they are excluded
+    # from `not_training` below: a settle or an admission gate legitimately
+    # writes no resume row for minutes.
     age = now.get("last_admission_age", -1)
-    if age > ADMISSION_SILENCE_LIMIT:
+    if (age > ADMISSION_SILENCE_LIMIT
+            and not now.get("replay_advancing")
+            and not now.get("gating")
+            and not now.get("supervisor_busy")):
         found.append(
             f"no_admission: nothing admitted for {age // 3600}h "
-            f"{(age % 3600) // 60}m -- the queue is not converting")
+            f"{(age % 3600) // 60}m and the resume row is not moving "
+            f"-- the queue is not converting")
 
     # A frozen tick is only a fault when nothing legitimately froze it.
     if (now.get("tick_delta") == 0
@@ -414,11 +446,24 @@ def main() -> int:
 
     deadline = time.monotonic() + DEADLINE_SECONDS
     pending: list[str] = []
+    last_resume_row = base.get("replay_resume_row")
     while time.monotonic() < deadline:
         time.sleep(POLL_SECONDS)
         now = probe()
         if now is None:
             continue
+
+        # CHANGED, not merely increased: an interval that finishes resets the
+        # next one's resume row to a lower value, and that rollover is
+        # progress too. Only a row that has not moved at all between polls
+        # means the run is replaying the same prefix.
+        row = now.get("replay_resume_row")
+        now["replay_advancing"] = (
+            row is not None and last_resume_row is not None
+            and row != last_resume_row
+        )
+        if row is not None:
+            last_resume_row = row
 
         problems = faults(now, baseline_deferred)
         stamp = time.strftime("%H:%M:%S")

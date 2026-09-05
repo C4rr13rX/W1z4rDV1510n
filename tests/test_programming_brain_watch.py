@@ -369,3 +369,59 @@ def test_the_probe_measures_the_process_not_just_the_file() -> None:
     # the file for the fix, which is what read as healthy on 2026-09-05.
     assert 'os.path.getmtime(f"/proc/{pid}")' in source
     assert "programming_curriculum_supervisor.py" in source
+
+
+def test_a_drought_is_only_a_fault_when_the_queue_is_not_converging() -> None:
+    """Silence and stall were the same thing only while a stalled interval
+    was pinned at row 0 forever.
+
+    With mid-pass resume an interval is 131,072 rows at ~4-10 rows/s and
+    yields the host several times on the way, so it legitimately outlives the
+    200-minute limit while accumulating rows the whole time. Firing there
+    wakes the agent every ~3 minutes over an already-fixed fault.
+    """
+    from scripts.aws.admission_watchdog import faults
+
+    drought = {
+        "unit": "active", "brain_up": True, "failed_since_deploy": 0,
+        "last_admission_age": 251282, "tick_delta": 5, "deferred": 3,
+        "disk_free_gb": 200, "mem_free_gb": 9, "progress_age": 4,
+        "status_age": 30, "state": "deferred_replay_training",
+        "stale_code_lag": 0,
+    }
+
+    # Converging: 69.8 h of silence, but the resume row moved this poll.
+    moving = faults({**drought, "replay_advancing": True}, baseline_deferred=3)
+    assert not any(f.startswith("no_admission") for f in moving), moving
+
+    # Not converging: the same silence with a resume row that never moves is
+    # the original 13-passes-at-row-0 stall, and must still alarm.
+    flat = faults({**drought, "replay_advancing": False}, baseline_deferred=3)
+    assert any(f.startswith("no_admission") for f in flat), flat
+    assert "resume row is not moving" in " ".join(flat)
+
+    # A settle or admission gate writes no resume row for minutes; that is a
+    # legitimate phase, not a stall.
+    for excuse in ("gating", "supervisor_busy"):
+        busy = faults({**drought, "replay_advancing": False, excuse: True},
+                      baseline_deferred=3)
+        assert not any(f.startswith("no_admission") for f in busy), (excuse, busy)
+
+    # Inside the limit nothing fires regardless.
+    fresh = faults({**drought, "last_admission_age": 60,
+                    "replay_advancing": False}, baseline_deferred=3)
+    assert not any(f.startswith("no_admission") for f in fresh), fresh
+
+
+def test_interval_rollover_counts_as_progress_not_a_stall() -> None:
+    """A finished interval resets the next one's resume row to a LOWER value.
+    Requiring a strictly increasing row would read that rollover -- the one
+    event that proves an interval completed -- as a stall."""
+    source = (
+        __import__("pathlib").Path(__file__).parents[1]
+        / "scripts/aws/admission_watchdog.py"
+    ).read_text(encoding="utf-8")
+    assert "row != last_resume_row" in source
+    # And the probe must actually publish the row the comparison reads.
+    assert 'out["replay_resume_row"]' in source
+    assert "deferred-replay-*.resume.json" in source
