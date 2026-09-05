@@ -93,6 +93,41 @@ validator asserted the wrong RFC 6901 escape example (`/~00~11` decodes to
 `~0/1`, not `~1`; the token that decodes to `~1` is `/~01`), and two mutations
 did not actually change behaviour.
 
+### Never pin a verdict to a decimal that looks exact
+
+There is a third way to be unsatisfiable, and the reference test catches it
+only after it has already cost the authoring time: a threshold comparison
+whose fixture sits *on* the threshold.
+
+`reliability_observability_performance-0005` scores multi-window burn-rate
+alerting, where a 1.44% error rate against a 99.9% objective is exactly the
+14.4x burn that pages. Written the obvious way, the validator fed an error
+rate of `0.0144` and a budget of `0.001` and demanded `severity == "page"`:
+
+```python
+>>> 0.0144 / 0.001
+14.399999999999999
+>>> 0.0144 / 0.001 >= 14.4
+False
+```
+
+A correct implementation fails that assertion. Nothing in the harness would
+have called it a harness bug — it would have been reported as a capability
+failure in burn-rate alerting, and the repair loop would have gone looking
+for SRE curriculum to fix arithmetic that was already right.
+
+Neither operand is representable in binary, so the quotient lands one ULP
+below a threshold that *is* representable. Decimal fixtures that look exact
+(`0.0144`, `0.006`, `0.1 + 0.2`) are the common case, not the exotic one.
+
+So: **drive a threshold verdict from a value clear of the boundary, and
+assert the boundary arithmetic separately against a tolerance.** The two
+questions — "does it compute the burn rate" and "does it apply the rule" —
+are separable, and only the first has anything to do with floating point.
+Where a task genuinely is about exact boundary behaviour, specify the
+comparison in the prompt over integers or `decimal`, so the contract and the
+verdict agree on what "equal" means.
+
 ## Outcome attribution
 
 The contract admits `1000/1000` "with no skipped, manually waived,

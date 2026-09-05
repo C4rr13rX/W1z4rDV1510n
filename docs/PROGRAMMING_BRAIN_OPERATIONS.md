@@ -356,6 +356,32 @@ the supervisor mid-replay rolls the interval back** — check
 **the watcher is subject to every rule it enforces**: it ran nineteen minutes
 behind its own repaired probe and alarmed on the pre-fix reading.
 
+### Confirmed in production, 2026-09-05
+
+With the module actually loaded — supervisor source mtime 3.19 h, process
+uptime 3.18 h, so `stale_code_lag` is ~30 s — the same event sequence now
+terminates differently:
+
+```
+settled_node_memory_recycle      age 1.6 min   available 3.00 GB -> 14.59 GB
+deferred_replay_resource_yield   age 1.6 min   jupyter-scientific-full:0:131072
+                                 (no deferred_replay_failed follows)
+```
+
+One yield, zero failures, against the previous 19-for-19. The interval was not
+rolled back: the worker relaunched with `--start-row 120880
+--durable-start-row 120880`, the exact row the pre-yield pass had made durable,
+and carried on from there.
+
+The discriminator is worth restating because two of the obvious metrics stay
+silent here. `deferred_replay_failed` was 288 in the payload and 0 since this
+process started — a cumulative counter cannot tell you a fault has stopped, so
+bound it by process start. `durable_next_row` rises whether or not the pass
+resumed, so it cannot tell you either. **`accepted_episodes` is the tell**: it
+read 704 ninety-eight seconds after the recycle and 8,944 thirteen minutes
+later, which is a pass converging, not one re-reading rows it had already
+trained.
+
 ## The named failure is not the failure population
 
 The watchdog reports `last_failure`. It is one row. Repairing it and declaring
@@ -612,6 +638,35 @@ flight, so it cannot abandon a running session.
 Corollary for a session woken by an alarm: **you cannot restart the watcher
 from inside the session it spawned.** Its activity log is streaming your own
 tool calls. That is why this is self-healing rather than an operator step.
+
+### Self-healing does not reach backwards
+
+The re-exec landed at 13:03. The watcher process had started at 09:46. A
+process cannot run a repair that did not exist when it compiled its own
+source, so the fix for stale watchers could not fix the stale watcher — and
+the next wake-up, at 14:07, still carried pre-fix numbers:
+
+| field | that wake-up's payload | ledger, same minute |
+|---|---:|---:|
+| `hours_since_admission` | 353.2 | **73.3** |
+| `gate_artifacts` | 0 | populated |
+
+Both were already repaired on disk. `git log -1 --format=%ad <file>` against
+the watcher's start time is the check, and it is worth running before
+believing any number in an alarm payload.
+
+**Any self-healing mechanism needs exactly one manual application to the
+generation that predates it.** Add the guard and the process still running
+without it is the last one that will ever need the operator; skip that step
+and it is every one after, because the process that would adopt the fix is
+the one that cannot.
+
+Restarting it must be deferred past the end of the invoked session, since
+`invoke_claude` blocks reading the agent's stdout and killing the parent
+breaks that pipe mid-turn. A detached helper that waits for the agent process
+to exit, stops the watcher, relaunches it with the same argv and writes the
+outcome to `activity.log` does this without a window where nothing supervises
+the host. Verify by the `WATCHER START` line, not by the absence of an error.
 
 ## The status file is not the heartbeat
 
