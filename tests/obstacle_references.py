@@ -2657,6 +2657,457 @@ def apply_patch(lines, hunks):
     return result
 '''
 
+REFERENCES["cicd_containers_packaging_platform-0001"] = r'''
+import gzip
+import io
+import tarfile
+
+
+def build_archive(entries):
+    items = []
+    seen = set()
+    for path, data, mode in entries:
+        if not path:
+            raise ValueError("an entry has an empty path")
+        parts = path.split("/")
+        if path.startswith("/") or ".." in parts:
+            raise ValueError(f"path {path!r} escapes the context")
+        if path in seen:
+            raise ValueError(f"duplicate path {path!r}")
+        seen.add(path)
+        items.append((path, bytes(data), int(mode)))
+    items.sort(key=lambda item: item[0])
+
+    raw = io.BytesIO()
+    with tarfile.open(fileobj=raw, mode="w", format=tarfile.USTAR_FORMAT) as tar:
+        for path, data, mode in items:
+            info = tarfile.TarInfo(path)
+            info.size = len(data)
+            info.mtime = 0
+            info.mode = mode
+            info.uid = 0
+            info.gid = 0
+            info.uname = ""
+            info.gname = ""
+            info.type = tarfile.REGTYPE
+            tar.addfile(info, io.BytesIO(data))
+
+    packed = io.BytesIO()
+    with gzip.GzipFile(filename="", mode="wb", fileobj=packed, mtime=0) as zipped:
+        zipped.write(raw.getvalue())
+    return packed.getvalue()
+'''
+
+
+REFERENCES["cicd_containers_packaging_platform-0002"] = r'''
+_OPERATORS = ("==", "!=", ">=", "<=", "~=", ">", "<")
+
+
+def _parse_version(text):
+    if not text or not all(part.isdigit() for part in text.split(".")):
+        raise ValueError(f"malformed version {text!r}")
+    return tuple(int(part) for part in text.split("."))
+
+
+def _pad(left, right):
+    width = max(len(left), len(right))
+    return (left + (0,) * (width - len(left)),
+            right + (0,) * (width - len(right)))
+
+
+def _compare(left, right):
+    left, right = _pad(left, right)
+    return (left > right) - (left < right)
+
+
+def _satisfies(version, operator, bound):
+    order = _compare(version, bound)
+    if operator == "==":
+        return order == 0
+    if operator == "!=":
+        return order != 0
+    if operator == ">=":
+        return order >= 0
+    if operator == "<=":
+        return order <= 0
+    if operator == ">":
+        return order > 0
+    if operator == "<":
+        return order < 0
+    if operator == "~=":
+        if len(bound) < 2:
+            raise ValueError("~= needs at least two version components")
+        ceiling = bound[:-1]
+        upper = ceiling[:-1] + (ceiling[-1] + 1,)
+        return order >= 0 and _compare(version, upper) < 0
+    raise ValueError(f"unknown operator {operator!r}")
+
+
+def _split_requirement(text):
+    text = text.strip()
+    if not text:
+        raise ValueError("empty requirement")
+    index = len(text)
+    for position, character in enumerate(text):
+        if not (character.isalnum() or character in "._-"):
+            index = position
+            break
+    name = text[:index]
+    if not name:
+        raise ValueError(f"requirement {text!r} names no package")
+    clauses = []
+    rest = text[index:].strip()
+    if rest:
+        for piece in rest.split(","):
+            piece = piece.strip()
+            if not piece:
+                raise ValueError(f"empty clause in {text!r}")
+            for operator in _OPERATORS:
+                if piece.startswith(operator):
+                    clauses.append((operator, _parse_version(
+                        piece[len(operator):].strip())))
+                    break
+            else:
+                raise ValueError(f"malformed clause {piece!r} in {text!r}")
+    return name, clauses
+
+
+def select_versions(requirements, available):
+    constraints = {}
+    for requirement in requirements:
+        name, clauses = _split_requirement(requirement)
+        constraints.setdefault(name, []).extend(clauses)
+
+    locked = {}
+    for name, clauses in constraints.items():
+        if name not in available:
+            raise ValueError(f"{name} is not available")
+        best = None
+        for text in available[name]:
+            version = _parse_version(text)
+            if all(_satisfies(version, operator, bound)
+                   for operator, bound in clauses):
+                if best is None or _compare(version, best[0]) > 0:
+                    best = (version, text)
+        if best is None:
+            raise ValueError(f"no version of {name} satisfies its constraints")
+        locked[name] = best[1]
+    return locked
+'''
+
+
+REFERENCES["cicd_containers_packaging_platform-0003"] = r'''
+import hashlib
+
+_HEX = set("0123456789abcdef")
+
+
+def _check(digest):
+    if not isinstance(digest, str) or not digest.startswith("sha256:"):
+        raise ValueError(f"malformed digest {digest!r}")
+    body = digest[len("sha256:"):]
+    if len(body) != 64 or not set(body) <= _HEX:
+        raise ValueError(f"malformed digest {digest!r}")
+    return digest
+
+
+def chain_ids(diff_ids):
+    chain = []
+    previous = None
+    for diff_id in diff_ids:
+        _check(diff_id)
+        if previous is None:
+            previous = diff_id
+        else:
+            previous = "sha256:" + hashlib.sha256(
+                f"{previous} {diff_id}".encode("utf-8")
+            ).hexdigest()
+        chain.append(previous)
+    return chain
+
+
+def image_id(config):
+    if not isinstance(config, (bytes, bytearray)):
+        raise ValueError("the image config must be bytes")
+    return "sha256:" + hashlib.sha256(bytes(config)).hexdigest()
+'''
+
+
+REFERENCES["cicd_containers_packaging_platform-0004"] = r'''
+import hashlib
+
+
+def _selected(source, context):
+    if source == ".":
+        return sorted(context)
+    prefix = source + "/"
+    return sorted(path for path in context
+                  if path == source or path.startswith(prefix))
+
+
+def _keys(instructions, context):
+    keys = []
+    parent = ""
+    for command, argument in instructions:
+        blob = f"{parent}\n{command}\n{argument}"
+        if command in ("COPY", "ADD"):
+            fields = argument.split()
+            if len(fields) != 2:
+                raise ValueError(
+                    f"{command} argument {argument!r} needs a source and a "
+                    "destination"
+                )
+            blob += "\n"
+            for path in _selected(fields[0], context):
+                content = hashlib.sha256(context[path]).hexdigest()
+                blob += f"{path} {content}\n"
+        parent = hashlib.sha256(blob.encode("utf-8")).hexdigest()
+        keys.append(parent)
+    return keys
+
+
+def first_rebuilt(instructions, previous, current):
+    before = _keys(instructions, previous)
+    after = _keys(instructions, current)
+    for index, (left, right) in enumerate(zip(before, after)):
+        if left != right:
+            return index
+    return None
+'''
+
+
+REFERENCES["cicd_containers_packaging_platform-0005"] = r'''
+def evaluate_pipeline(jobs, results):
+    order = []
+    by_name = {}
+    for job in jobs:
+        name = job["name"]
+        if name in by_name:
+            raise ValueError(f"duplicate job {name!r}")
+        by_name[name] = job
+        order.append(name)
+
+    for name, job in by_name.items():
+        for need in job.get("needs", []):
+            if need not in by_name:
+                raise ValueError(f"{name} needs unknown job {need!r}")
+
+    state = {}
+    remaining = list(order)
+    while remaining:
+        progressed = False
+        for name in list(remaining):
+            job = by_name[name]
+            needs = job.get("needs", [])
+            if any(need not in state for need in needs):
+                continue
+            condition = job.get("condition", "on_success")
+            if condition not in ("on_success", "on_failure", "always"):
+                raise ValueError(f"{name} has unknown condition {condition!r}")
+            effective = [state[need] for need in needs]
+            if condition == "on_success":
+                runs = all(status == "success" for status in effective)
+            elif condition == "on_failure":
+                runs = any(status == "failed" for status in effective)
+            else:
+                runs = True
+            if runs:
+                if name not in results:
+                    raise ValueError(f"{name} runs but has no result")
+                outcome = results[name]
+                if outcome not in ("pass", "fail"):
+                    raise ValueError(f"{name} has unknown result {outcome!r}")
+                status = "success" if outcome == "pass" else "failed"
+            else:
+                status = "skipped"
+            state[name] = (
+                "success"
+                if status == "failed" and job.get("continue_on_error", False)
+                else status
+            )
+            by_name[name] = dict(job, _status=status)
+            remaining.remove(name)
+            progressed = True
+        if not progressed:
+            raise ValueError("the job graph has a cycle")
+
+    statuses = {name: by_name[name]["_status"] for name in order}
+    conclusion = "success"
+    for name in order:
+        if (statuses[name] == "failed"
+                and not by_name[name].get("continue_on_error", False)):
+            conclusion = "failed"
+    return {"statuses": statuses, "conclusion": conclusion}
+'''
+
+
+REFERENCES["cicd_containers_packaging_platform-0006"] = r'''
+import re
+
+
+def _translate(pattern):
+    parts = pattern.split("/")
+    out = []
+    for index, part in enumerate(parts):
+        last = index == len(parts) - 1
+        if part == "**":
+            out.append(".*" if last else "(?:[^/]+/)*")
+            continue
+        piece = ""
+        for character in part:
+            if character == "*":
+                piece += "[^/]*"
+            elif character == "?":
+                piece += "[^/]"
+            else:
+                piece += re.escape(character)
+        out.append(piece)
+        if not last:
+            out.append("/")
+    return "^" + "".join(out) + "$"
+
+
+def _matches(pattern, text):
+    return re.fullmatch(_translate(pattern), text) is not None
+
+
+def ignored(paths, patterns):
+    directory_rules = []
+    file_rules = []
+    for line in patterns:
+        line = line.rstrip()
+        if not line or line.startswith("#"):
+            continue
+        negated = line.startswith("!")
+        if negated:
+            line = line[1:]
+        is_directory = line.endswith("/")
+        body = line[:-1] if is_directory else line
+        anchored = "/" in body
+        if body.startswith("/"):
+            body = body[1:]
+            anchored = True
+        if not body:
+            continue
+        (directory_rules if is_directory else file_rules).append(
+            (negated, anchored, body)
+        )
+
+    def verdict(rules, candidates):
+        excluded = None
+        for negated, anchored, body in rules:
+            if any(_matches(body, candidate)
+                   for candidate in candidates[anchored]):
+                excluded = not negated
+        return excluded
+
+    result = []
+    for path in paths:
+        parts = path.split("/")
+        prefixes = ["/".join(parts[:depth]) for depth in range(1, len(parts))]
+        components = parts[:-1]
+        blocked = verdict(directory_rules,
+                          {True: prefixes, False: components})
+        if blocked:
+            result.append(path)
+            continue
+        if verdict(file_rules, {True: [path], False: [parts[-1]]}):
+            result.append(path)
+    return sorted(result)
+'''
+
+
+REFERENCES["cicd_containers_packaging_platform-0007"] = r'''
+def plan_deletions(artifacts, policy, referenced, now):
+    for key in ("keep_per_branch", "min_age_seconds"):
+        if policy.get(key, 0) < 0:
+            raise ValueError(f"{key} must not be negative")
+    keep_per_branch = policy.get("keep_per_branch", 0)
+    keep_tagged = policy.get("keep_tagged", False)
+    min_age = policy.get("min_age_seconds", 0)
+
+    seen = set()
+    records = []
+    for item in artifacts:
+        for field in ("id", "branch", "created_unix", "tags"):
+            if field not in item:
+                raise ValueError(f"artifact is missing {field!r}")
+        if item["id"] in seen:
+            raise ValueError(f"duplicate artifact id {item['id']!r}")
+        seen.add(item["id"])
+        records.append(item)
+
+    by_branch = {}
+    for item in records:
+        by_branch.setdefault(item["branch"], []).append(item)
+    protected = set()
+    for branch, items in by_branch.items():
+        items.sort(key=lambda entry: (entry["created_unix"], entry["id"]),
+                   reverse=True)
+        for item in items[:keep_per_branch]:
+            protected.add(item["id"])
+
+    referenced = set(referenced)
+    doomed = []
+    for item in records:
+        if item["id"] in protected:
+            continue
+        if keep_tagged and item["tags"]:
+            continue
+        if item["id"] in referenced:
+            continue
+        if now - item["created_unix"] < min_age:
+            continue
+        doomed.append(item["id"])
+    return sorted(doomed)
+'''
+
+
+REFERENCES["cicd_containers_packaging_platform-0008"] = r'''
+def _parse(filename):
+    if not filename.endswith(".whl"):
+        raise ValueError(f"{filename!r} is not a wheel")
+    stem = filename[:-len(".whl")]
+    fields = stem.split("-")
+    if len(fields) not in (5, 6):
+        raise ValueError(f"{filename!r} has {len(fields)} fields")
+    if len(fields) == 6:
+        build = fields[2]
+        if not build or not build[0].isdigit():
+            raise ValueError(f"{filename!r} has a malformed build field")
+        build_number = int("".join(
+            character for character in build
+            if character.isdigit()
+        ))
+        pythons, abis, platforms = fields[3], fields[4], fields[5]
+    else:
+        build_number = -1
+        pythons, abis, platforms = fields[2], fields[3], fields[4]
+    tags = set()
+    for python in pythons.split("."):
+        for abi in abis.split("."):
+            for platform in platforms.split("."):
+                tags.add(f"{python}-{abi}-{platform}")
+    return build_number, tags
+
+
+def best_wheel(filenames, supported_tags):
+    priority = {}
+    for index, tag in enumerate(supported_tags):
+        priority.setdefault(tag, index)
+
+    best = None
+    for filename in filenames:
+        build_number, tags = _parse(filename)
+        ranks = [priority[tag] for tag in tags if tag in priority]
+        if not ranks:
+            continue
+        candidate = (min(ranks), -build_number, filename)
+        if best is None or candidate < best:
+            best = candidate
+    return None if best is None else best[2]
+'''
+
 
 MUTATIONS: dict[str, tuple[str, str]] = {
     # Sign the payload alone, so the header can be rewritten after signing
@@ -3079,5 +3530,56 @@ MUTATIONS: dict[str, tuple[str, str]] = {
     "testing_debugging_repair_refactoring-0008": (
         "        if original[start - 1:start - 1 + len(remove)] != remove:",
         "        if False:",
+    ),
+    # Skip the sort, so the archive's member order follows whatever
+    # order the caller happened to iterate in. Every build still
+    # produces a valid tarball, and no two agree.
+    "cicd_containers_packaging_platform-0001": (
+        "    items.sort(key=lambda item: item[0])",
+        "    pass",
+    ),
+    # Take the first satisfying version rather than the highest, which
+    # locks a stale release that the constraints do permit.
+    "cicd_containers_packaging_platform-0002": (
+        "                if best is None or _compare(version, best[0]) > 0:",
+        "                if best is None:",
+    ),
+    # Fold the FIRST diff id instead of the previous chain id. The
+    # result is a well-formed list of digests no registry agrees with.
+    "cicd_containers_packaging_platform-0003": (
+        '                f"{previous} {diff_id}".encode("utf-8")',
+        '                f"{diff_ids[0]} {diff_id}".encode("utf-8")',
+    ),
+    # Key copied files by size instead of content, so an edit that keeps
+    # the length hits the cache and ships the previous build's code.
+    "cicd_containers_packaging_platform-0004": (
+        "                content = hashlib.sha256(context[path]).hexdigest()",
+        "                content = str(len(context[path]))",
+    ),
+    # Ignore continue_on_error, so an advisory job's failure blocks the
+    # deploy and fails the pipeline.
+    "cicd_containers_packaging_platform-0005": (
+        '                if status == "failed" and job.get("continue_on_error", False)',
+        "                if False",
+    ),
+    # Consult the file patterns even under an excluded directory, letting
+    # a later negation re-include a file the directory rule removed.
+    "cicd_containers_packaging_platform-0006": (
+        "        if blocked:\n            result.append(path)\n"
+        "            continue",
+        "        if False:\n            result.append(path)\n"
+        "            continue",
+    ),
+    # Ignore the referenced set, deleting the artifact a live deployment
+    # is pinned to -- discovered during the rollback that needed it.
+    "cicd_containers_packaging_platform-0007": (
+        '        if item["id"] in referenced:\n            continue',
+        "        if False:\n            continue",
+    ),
+    # Order the build number ascending, so a tie picks the oldest build
+    # instead of the newest.
+    "cicd_containers_packaging_platform-0008": (
+        "        candidate = (min(ranks), -build_number, filename)",
+        "        candidate = (min(ranks), build_number, filename)",
     ),
 }

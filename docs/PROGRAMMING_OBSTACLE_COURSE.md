@@ -209,6 +209,36 @@ claim is part of the contract, assert it structurally — count comparisons or
 element reads — never by wall-clock time, which would make the verdict depend
 on host load.
 
+### Borrowing a standard's name obliges you to its whole rule
+
+Preferring standard-specified contracts has a failure mode of its own: a
+prompt that names a familiar format and then specifies *most* of it. The gap
+is invisible while writing, because the author fills it from memory of the
+real standard and the reader cannot.
+
+`cicd_containers_packaging_platform-0006` states gitignore-style matching. The
+first draft said a trailing `/` matches directories and left unsaid whether a
+pattern without one could match a directory too. In real gitignore it can, so
+`docs/*` excludes the directory `docs/img` and everything beneath it. The
+validator had been written from the other reading and asserted only
+`docs/api.md`. Both readings are defensible from the prompt, which means the
+task measured whether the candidate guessed the author's, not whether it can
+implement ignore semantics.
+
+The repair is to make the contract self-contained and say so: file patterns
+apply to the path, directory patterns to its directory components, stated as
+the prompt's own rule rather than as a pointer at git's. Deviating from a
+standard is allowed — silently deviating is not. Where the prompt keeps the
+standard's name, it owes the standard's behaviour, including the parts nobody
+remembers; where it narrows, it must define the narrowed rule outright.
+
+The cheap detection is to re-derive every expected value in a validator from
+the prompt's text alone, with the reference implementation closed. The same
+pass caught a second defect in that family: a retention fixture asserted an
+artifact would be swept when the policy's own per-branch rule protected it —
+the expected value had been written from the intent of the case rather than
+from the stated rule.
+
 ### Claim a family from the working tree, not from HEAD
 
 The write-once `REFERENCES` guard catches two blocks defining the same task.
