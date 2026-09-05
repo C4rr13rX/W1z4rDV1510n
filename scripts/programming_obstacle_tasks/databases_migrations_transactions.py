@@ -594,4 +594,420 @@ for bad in (0, -1, 2.5, "500", None, True):
 assert charges() == 2, "a rejected amount must not have been written"
 assert connection.in_transaction is False
 '''),
+
+    task(
+        f"{FAMILY}-0009", FAMILY,
+        prompt=(
+            "Implement a Python function build_filter_query(table, filters, "
+            "allowed_columns) returning a (sql, params) pair for a "
+            "parameterised SELECT. `allowed_columns` is the set of columns a "
+            "caller may filter on. Each entry in `filters` maps a column to "
+            "either a plain value, meaning equality, or a two-element list "
+            "or tuple (operator, value); a list or tuple value is always an "
+            "operator pair, never a plain value. Supported operators are "
+            "'=', '!=', '<', '<=', '>', '>=' and 'IN'. Emit "
+            "\"SELECT * FROM <table>\" followed, when there is at least one "
+            "filter, by \" WHERE \" and the conditions joined with \" AND \" "
+            "in ascending column-name order, so the same filters always "
+            "produce the same SQL. Every value must travel in `params` "
+            "behind a '?' placeholder and must never be interpolated into "
+            "the SQL text. 'IN' requires a list or tuple and expands to one "
+            "placeholder per element as \"col IN (?, ?)\"; an empty sequence "
+            "matches nothing and renders as the condition \"1 = 0\" with no "
+            "placeholder. Raise ValueError when the table name is not a bare "
+            "identifier of ASCII letters, digits and underscores not "
+            "starting with a digit, when a filter column is not in "
+            "allowed_columns, when an operator pair is not exactly two "
+            "elements, when the operator is unsupported, or when 'IN' is "
+            "given something other than a list or tuple."
+        ),
+        validator=LOAD_CANDIDATE + require("build_filter_query") + r'''
+import sqlite3
+
+db = sqlite3.connect(":memory:")
+db.execute(
+    "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)"
+)
+db.executemany("INSERT INTO users VALUES (?, ?, ?)", [
+    (1, "ada", 36), (2, "grace", 45), (3, "alan", 41), (4, "katherine", 52),
+])
+db.commit()
+ALLOWED = {"id", "name", "age"}
+
+
+def run(filters):
+    sql, params = build_filter_query("users", filters, ALLOWED)
+    return sorted(row[0] for row in db.execute(sql, params))
+
+
+# The generated SQL actually selects the right rows.
+assert run({}) == [1, 2, 3, 4]
+assert run({"name": "ada"}) == [1]
+assert run({"age": (">=", 45)}) == [2, 4]
+assert run({"age": ("<", 41)}) == [1]
+assert run({"age": ("<=", 41)}) == [1, 3]
+assert run({"age": (">", 41), "name": ("!=", "grace")}) == [4]
+assert run({"id": ("IN", [1, 3])}) == [1, 3]
+assert run({"id": ("IN", (2,))}) == [2]
+assert run({"id": ("IN", [])}) == []
+assert run({"name": "nobody"}) == []
+
+# No filters means no WHERE clause and no parameters.
+sql, params = build_filter_query("users", {}, ALLOWED)
+assert sql == "SELECT * FROM users", sql
+assert list(params) == []
+
+# The rendering is deterministic and ordered by column name.
+sql, params = build_filter_query("users", {"name": "ada", "age": 36}, ALLOWED)
+assert sql == "SELECT * FROM users WHERE age = ? AND name = ?", sql
+assert list(params) == [36, "ada"]
+
+sql, params = build_filter_query("users", {"id": ("IN", [1, 2])}, ALLOWED)
+assert sql == "SELECT * FROM users WHERE id IN (?, ?)", sql
+assert list(params) == [1, 2]
+
+sql, params = build_filter_query("users", {"id": ("IN", [])}, ALLOWED)
+assert sql == "SELECT * FROM users WHERE 1 = 0", sql
+assert list(params) == []
+
+# The value travels as data. This is the whole point of the exercise: the
+# hostile string must appear in params and never in the SQL.
+hostile = "ada'; DROP TABLE users; --"
+sql, params = build_filter_query("users", {"name": hostile}, ALLOWED)
+assert hostile not in sql, "the value was interpolated into the SQL text"
+assert list(params) == [hostile]
+assert list(db.execute(sql, params)) == []
+assert db.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 4, (
+    "the table did not survive executing the generated query"
+)
+
+# A NULL and a zero are ordinary values, not absent ones.
+sql, params = build_filter_query("users", {"age": None}, ALLOWED)
+assert list(params) == [None]
+sql, params = build_filter_query("users", {"age": 0}, ALLOWED)
+assert list(params) == [0]
+
+
+def rejects(table, filters, why):
+    try:
+        build_filter_query(table, filters, ALLOWED)
+    except ValueError:
+        return
+    raise AssertionError(why)
+
+
+# An identifier cannot be parameterised, so it must be allow-listed.
+rejects("users", {"password_hash": "x"}, "a column outside the allow-list was accepted")
+rejects("users", {"name; DROP TABLE users": "x"}, "an injected column was accepted")
+rejects("users", {"1name": "x"}, "an invalid column identifier was accepted")
+rejects("users; DROP TABLE users", {"name": "ada"}, "an injected table was accepted")
+rejects("", {"name": "ada"}, "an empty table name was accepted")
+rejects("1users", {"name": "ada"}, "a table name starting with a digit was accepted")
+rejects(None, {"name": "ada"}, "a non-string table name was accepted")
+
+# Malformed conditions.
+rejects("users", {"name": ("LIKE", "a%")}, "an unsupported operator was accepted")
+rejects("users", {"name": ("=",)}, "a one-element operator pair was accepted")
+rejects("users", {"name": ("=", "a", "b")}, "a three-element operator pair was accepted")
+rejects("users", {"name": ()}, "an empty operator pair was accepted")
+rejects("users", {"id": ("IN", "ada")}, "IN with a bare string was accepted")
+rejects("users", {"id": ("IN", 7)}, "IN with a non-sequence was accepted")
+'''),
+
+    task(
+        f"{FAMILY}-0010", FAMILY,
+        prompt=(
+            "Implement a Python function apply_line_items(connection, "
+            "order_id, items). `connection` is a sqlite3 connection opened "
+            "with isolation_level=None, so your function issues its own "
+            "transaction statements. The schema already holds line_items "
+            "(order_id, sku, quantity) with quantity constrained positive "
+            "and (order_id, sku) unique, and order_totals(order_id PRIMARY "
+            "KEY, total) with total constrained to at most 100. `items` is a "
+            "list of (sku, quantity) pairs. Ensure the order's totals row "
+            "exists starting at zero, then apply each item in turn: insert "
+            "the line item and add its quantity to the running total. "
+            "Applying an item takes two statements and must be all or "
+            "nothing -- an item rejected because its sku repeats, its "
+            "quantity is not positive, or it would push the total past the "
+            "cap must leave neither the line-items row nor any change to the "
+            "total, and the batch must carry on with the remaining items. "
+            "The call as a whole is one transaction that commits at the end, "
+            "so a concurrent reader sees either the state before the call or "
+            "every accepted item; on an unexpected error roll the whole "
+            "thing back and re-raise. Leave no transaction open. Return the "
+            "ascending list of indices into `items` that were rejected."
+        ),
+        validator=LOAD_CANDIDATE + require("apply_line_items") + r'''
+import sqlite3
+
+
+def fresh():
+    db = sqlite3.connect(":memory:", isolation_level=None)
+    db.execute(
+        "CREATE TABLE line_items ("
+        " order_id INTEGER NOT NULL, sku TEXT NOT NULL,"
+        " quantity INTEGER NOT NULL CHECK (quantity > 0),"
+        " UNIQUE (order_id, sku))"
+    )
+    db.execute(
+        "CREATE TABLE order_totals ("
+        " order_id INTEGER PRIMARY KEY,"
+        " total INTEGER NOT NULL CHECK (total <= 100))"
+    )
+    return db
+
+
+def rows(db, order_id=1):
+    return sorted(db.execute(
+        "SELECT sku, quantity FROM line_items WHERE order_id = ?", (order_id,)
+    ))
+
+
+def total(db, order_id=1):
+    row = db.execute(
+        "SELECT total FROM order_totals WHERE order_id = ?", (order_id,)
+    ).fetchone()
+    return None if row is None else row[0]
+
+
+# An item rejected by the SECOND of its two statements must undo the first.
+db = fresh()
+assert apply_line_items(db, 1, [("a", 60), ("b", 60), ("c", 30)]) == [1]
+assert total(db) == 90, total(db)
+assert rows(db) == [("a", 60), ("c", 30)], rows(db)
+assert db.execute(
+    "SELECT COUNT(*) FROM line_items WHERE sku = 'b'"
+).fetchone()[0] == 0, (
+    "the rejected item left its line_items row behind, so the insert was "
+    "not covered by the same unit of work as the total update"
+)
+assert db.in_transaction is False, "the connection was left in a transaction"
+
+# A duplicate sku within the batch is rejected without losing the first.
+db = fresh()
+assert apply_line_items(db, 1, [("a", 1), ("a", 2), ("b", 3)]) == [1]
+assert rows(db) == [("a", 1), ("b", 3)], rows(db)
+assert total(db) == 4, total(db)
+
+# A non-positive quantity is rejected by the insert itself.
+db = fresh()
+assert apply_line_items(db, 1, [("a", 0), ("b", -1), ("c", 5)]) == [0, 1]
+assert rows(db) == [("c", 5)]
+assert total(db) == 5
+
+# Every item rejected still leaves a committed, consistent state.
+db = fresh()
+assert apply_line_items(db, 1, [("a", 0), ("b", -1)]) == [0, 1]
+assert rows(db) == [] and total(db) == 0
+assert db.in_transaction is False
+
+# Nothing rejected.
+db = fresh()
+assert apply_line_items(db, 1, [("a", 1), ("b", 2)]) == []
+assert rows(db) == [("a", 1), ("b", 2)] and total(db) == 3
+
+# An empty batch is valid and still leaves the totals row consistent.
+db = fresh()
+assert apply_line_items(db, 1, []) == []
+assert total(db) == 0
+assert db.in_transaction is False
+
+# The cap is per order, so two orders may repeat a sku and each fill up.
+db = fresh()
+assert apply_line_items(db, 1, [("a", 100)]) == []
+assert apply_line_items(db, 2, [("a", 100)]) == []
+assert total(db, 1) == 100 and total(db, 2) == 100
+
+# Exactly at the cap is accepted; one past it is not.
+db = fresh()
+assert apply_line_items(db, 1, [("a", 100), ("b", 1)]) == [1]
+assert total(db) == 100 and rows(db) == [("a", 100)]
+
+# Accepted work is committed, not merely visible on this connection: a
+# later transaction that rolls back cannot take it away.
+db = fresh()
+apply_line_items(db, 3, [("z", 4)])
+db.execute("BEGIN")
+db.execute("ROLLBACK")
+assert db.execute(
+    "SELECT COUNT(*) FROM line_items WHERE order_id = 3"
+).fetchone()[0] == 1, "the accepted rows were never committed"
+
+# A second call adds to the existing total rather than resetting it.
+db = fresh()
+assert apply_line_items(db, 1, [("a", 40)]) == []
+assert apply_line_items(db, 1, [("b", 40)]) == []
+assert total(db) == 80
+'''),
+
+    task(
+        f"{FAMILY}-0011", FAMILY,
+        prompt=(
+            "Implement a Python function summarize_regions(connection) "
+            "reporting sales per region from a table sales(region TEXT NOT "
+            "NULL, amount INTEGER) where amount may be NULL, meaning the "
+            "sale was recorded but its value has not been reported yet. "
+            "Return a dict mapping each region that has at least one row to "
+            "a dict with four keys: 'rows', the number of rows for that "
+            "region; 'reported', the number of those rows whose amount is "
+            "not NULL; 'total', the sum of the non-NULL amounts, which is 0 "
+            "rather than None when the region has no reported amounts; and "
+            "'average', the mean of the non-NULL amounts as a float, or None "
+            "when there are none, since a mean over nothing is undefined "
+            "rather than zero. A region whose rows are all unreported must "
+            "still appear, with rows counted and reported zero."
+        ),
+        validator=LOAD_CANDIDATE + require("summarize_regions") + r'''
+import sqlite3
+
+db = sqlite3.connect(":memory:")
+db.execute("CREATE TABLE sales (region TEXT NOT NULL, amount INTEGER)")
+db.executemany("INSERT INTO sales VALUES (?, ?)", [
+    ("north", 100), ("north", 200), ("north", None),
+    ("south", 50),
+    ("east", None), ("east", None),
+    ("west", 0),
+])
+db.commit()
+
+summary = summarize_regions(db)
+assert set(summary) == {"north", "south", "east", "west"}, sorted(summary)
+
+# COUNT(*) and COUNT(amount) are different questions.
+assert summary["north"]["rows"] == 3, summary["north"]
+assert summary["north"]["reported"] == 2, summary["north"]
+assert summary["north"]["total"] == 300
+assert abs(summary["north"]["average"] - 150.0) < 1e-9
+
+assert summary["south"] == {
+    "rows": 1, "reported": 1, "total": 50, "average": 50.0,
+}, summary["south"]
+
+# A region with nothing reported still exists, and SUM over no rows is NULL
+# in SQL -- which must surface as 0, while the mean stays undefined.
+assert summary["east"]["rows"] == 2, summary["east"]
+assert summary["east"]["reported"] == 0, summary["east"]
+assert summary["east"]["total"] == 0, (
+    "SUM over no non-NULL amounts is NULL in SQL and must be reported as 0"
+)
+assert summary["east"]["average"] is None, (
+    "a mean over zero reported amounts is undefined, not zero"
+)
+
+# A reported zero is a reported amount, not a missing one.
+assert summary["west"] == {
+    "rows": 1, "reported": 1, "total": 0, "average": 0.0,
+}, summary["west"]
+
+# An empty table yields an empty summary rather than a row of zeros.
+empty = sqlite3.connect(":memory:")
+empty.execute("CREATE TABLE sales (region TEXT NOT NULL, amount INTEGER)")
+assert summarize_regions(empty) == {}
+
+# Negative amounts are ordinary and must not be confused with missing ones.
+signed = sqlite3.connect(":memory:")
+signed.execute("CREATE TABLE sales (region TEXT NOT NULL, amount INTEGER)")
+signed.executemany("INSERT INTO sales VALUES (?, ?)", [
+    ("refunds", -10), ("refunds", 10), ("refunds", None),
+])
+signed.commit()
+result = summarize_regions(signed)["refunds"]
+assert result["rows"] == 3 and result["reported"] == 2
+assert result["total"] == 0 and abs(result["average"] - 0.0) < 1e-9
+
+# The average is a float even when the division is exact.
+assert isinstance(summary["south"]["average"], float)
+'''),
+
+    task(
+        f"{FAMILY}-0012", FAMILY,
+        prompt=(
+            "Implement a Python function lapsed_customers(connection, since) "
+            "returning the sorted list of names of customers who have placed "
+            "no order on or after `since`. The schema is customers(id "
+            "INTEGER PRIMARY KEY, name TEXT NOT NULL) and orders(id INTEGER "
+            "PRIMARY KEY, customer_id INTEGER NOT NULL, placed_on TEXT NOT "
+            "NULL), where placed_on is an ISO date that sorts correctly as "
+            "text. A customer with no orders at all has placed no recent "
+            "order and must be included. A customer with both an old order "
+            "and a recent one has placed a recent order and must be "
+            "excluded. An order placed exactly on `since` counts as recent. "
+            "Note that filtering the joined order rows in a WHERE clause "
+            "answers a different question -- it finds customers who have an "
+            "old order, which is neither necessary nor sufficient for having "
+            "no recent one."
+        ),
+        validator=LOAD_CANDIDATE + require("lapsed_customers") + r'''
+import sqlite3
+
+db = sqlite3.connect(":memory:")
+db.execute("CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT NOT NULL)")
+db.execute(
+    "CREATE TABLE orders (id INTEGER PRIMARY KEY,"
+    " customer_id INTEGER NOT NULL, placed_on TEXT NOT NULL)"
+)
+db.executemany("INSERT INTO customers VALUES (?, ?)", [
+    (1, "alice"), (2, "bob"), (3, "cara"), (4, "dan"), (5, "eve"),
+])
+db.executemany("INSERT INTO orders VALUES (?, ?, ?)", [
+    # alice has no orders at all.
+    (10, 2, "2026-01-01"),                      # bob: only an old order
+    (11, 3, "2026-08-01"),                      # cara: only a recent order
+    (12, 4, "2026-01-15"), (13, 4, "2026-08-02"),  # dan: both
+    (14, 5, "2026-06-01"),                      # eve: exactly on the boundary
+])
+db.commit()
+
+SINCE = "2026-06-01"
+
+result = lapsed_customers(db, SINCE)
+assert result == ["alice", "bob"], result
+
+# Each of the four ways to get this wrong, named:
+assert "alice" in result, (
+    "a customer with no orders was dropped, which is what happens when the "
+    "date filter sits in WHERE and discards the NULL row of a LEFT JOIN"
+)
+assert "dan" not in result, (
+    "a customer with an old order AND a recent one was reported as lapsed"
+)
+assert "cara" not in result, "a customer with only a recent order was reported"
+assert "eve" not in result, (
+    "an order placed exactly on `since` must count as recent"
+)
+
+# The result is sorted and free of duplicates even though dan has two orders.
+assert result == sorted(result)
+assert len(result) == len(set(result))
+
+# Moving the boundary past every order lapses everyone who exists.
+assert lapsed_customers(db, "2027-01-01") == [
+    "alice", "bob", "cara", "dan", "eve",
+]
+
+# Moving it before every order lapses only the customer with no orders.
+assert lapsed_customers(db, "2020-01-01") == ["alice"]
+
+# A database with no orders at all lapses every customer.
+bare = sqlite3.connect(":memory:")
+bare.execute("CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT NOT NULL)")
+bare.execute(
+    "CREATE TABLE orders (id INTEGER PRIMARY KEY,"
+    " customer_id INTEGER NOT NULL, placed_on TEXT NOT NULL)"
+)
+bare.execute("INSERT INTO customers VALUES (1, 'solo')")
+bare.commit()
+assert lapsed_customers(bare, SINCE) == ["solo"]
+
+# No customers at all is an empty list, not an error.
+bare.execute("DELETE FROM customers")
+assert lapsed_customers(bare, SINCE) == []
+
+# An order belonging to no customer must not resurrect anyone.
+bare.execute("INSERT INTO customers VALUES (1, 'solo')")
+bare.execute("INSERT INTO orders VALUES (99, 42, '2026-09-01')")
+bare.commit()
+assert lapsed_customers(bare, SINCE) == ["solo"]
+'''),
 ]
