@@ -615,7 +615,362 @@ def parse_content_type(header):
 #: is a (find, replace) pair applied to the reference source; the mutation is
 #: chosen to break the behaviour contract rather than the syntax, so a
 #: validator that only parses the candidate will not notice it.
+REFERENCES["requirements_api_contracts-0001"] = r'''
+def _parse_ranges(header):
+    ranges = []
+    for part in header.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        bits = [bit.strip() for bit in part.split(";")]
+        media = bits[0].lower()
+        if "/" not in media:
+            continue
+        quality = 1.0
+        for param in bits[1:]:
+            name, _, value = param.partition("=")
+            if name.strip().lower() == "q":
+                try:
+                    quality = float(value.strip())
+                except ValueError:
+                    quality = 1.0
+        ranges.append((media, quality))
+    return ranges
+
+
+def select_media_type(header, available):
+    if not header or not header.strip():
+        return available[0] if available else None
+    ranges = _parse_ranges(header)
+    if not ranges:
+        return available[0] if available else None
+
+    best = None
+    for index, candidate in enumerate(available):
+        lowered = candidate.lower()
+        ctype, _, _csub = lowered.partition("/")
+        chosen = None
+        for media, quality in ranges:
+            mtype, _, msub = media.partition("/")
+            if mtype == "*" and msub == "*":
+                specificity = 1
+            elif msub == "*" and mtype == ctype:
+                specificity = 2
+            elif media == lowered:
+                specificity = 3
+            else:
+                continue
+            if chosen is None or specificity > chosen[0]:
+                chosen = (specificity, quality)
+        if chosen is None or chosen[1] <= 0:
+            continue
+        key = (chosen[1], -index)
+        if best is None or key > best[0]:
+            best = (key, candidate)
+    return best[1] if best else None
+'''
+
+
+REFERENCES["requirements_api_contracts-0002"] = r'''
+import copy
+
+
+def merge_patch(target, patch):
+    if not isinstance(patch, dict):
+        return copy.deepcopy(patch)
+    result = copy.deepcopy(target) if isinstance(target, dict) else {}
+    for key, value in patch.items():
+        if value is None:
+            result.pop(key, None)
+        elif isinstance(value, dict):
+            result[key] = merge_patch(result.get(key), value)
+        else:
+            result[key] = copy.deepcopy(value)
+    return result
+'''
+
+
+REFERENCES["requirements_api_contracts-0003"] = r'''
+def _tags(value):
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def _weak(tag):
+    return tag[2:] if tag.startswith('W/') else tag
+
+
+def evaluate_preconditions(method, headers, current_etag, exists):
+    lowered = {str(name).lower(): value for name, value in headers.items()}
+
+    if_match = lowered.get("if-match")
+    if if_match is not None:
+        value = if_match.strip()
+        if value == "*":
+            if not exists:
+                return 412
+        elif current_etag is None or current_etag.startswith("W/"):
+            return 412
+        elif not any(tag == current_etag for tag in _tags(value)):
+            return 412
+
+    if_none_match = lowered.get("if-none-match")
+    if if_none_match is not None:
+        value = if_none_match.strip()
+        if value == "*":
+            matched = bool(exists)
+        else:
+            matched = current_etag is not None and any(
+                _weak(tag) == _weak(current_etag) for tag in _tags(value)
+            )
+        if matched:
+            return 304 if method in ("GET", "HEAD") else 412
+
+    return 200
+'''
+
+
+REFERENCES["requirements_api_contracts-0004"] = r'''
+def parse_byte_range(header, length):
+    if not header or "=" not in header:
+        return None
+    unit, _, spec = header.partition("=")
+    if unit.strip().lower() != "bytes" or not spec.strip():
+        return None
+
+    satisfiable = []
+    for part in spec.split(","):
+        part = part.strip()
+        if not part or "-" not in part:
+            return None
+        first_text, _, last_text = part.partition("-")
+        first_text, last_text = first_text.strip(), last_text.strip()
+        if not first_text and not last_text:
+            return None
+
+        if not first_text:
+            if not last_text.isdigit():
+                return None
+            suffix = int(last_text)
+            if suffix == 0:
+                continue
+            satisfiable.append((max(0, length - suffix), length - 1))
+            continue
+
+        if not first_text.isdigit():
+            return None
+        start = int(first_text)
+        if not last_text:
+            end = length - 1
+        else:
+            if not last_text.isdigit():
+                return None
+            end = int(last_text)
+            if end < start:
+                return None
+            end = min(end, length - 1)
+        if start > length - 1:
+            continue
+        satisfiable.append((start, end))
+
+    if not satisfiable:
+        raise ValueError("no satisfiable range")
+    return satisfiable
+'''
+
+
+REFERENCES["requirements_api_contracts-0005"] = r'''
+class CursorPage:
+    def __init__(self, rows):
+        self._rows = {int(row["id"]): dict(row) for row in rows}
+
+    def insert(self, row):
+        self._rows[int(row["id"])] = dict(row)
+
+    def delete(self, row_id):
+        self._rows.pop(int(row_id), None)
+
+    def page(self, cursor, limit):
+        after = None if cursor is None else int(cursor)
+        selected = [
+            key for key in sorted(self._rows)
+            if after is None or key > after
+        ]
+        items = [dict(self._rows[key]) for key in selected[:limit]]
+        if len(selected) <= limit:
+            return items, None
+        return items, str(items[-1]["id"])
+'''
+
+
+REFERENCES["requirements_api_contracts-0006"] = r'''
+def check_compatibility(old, new):
+    findings = []
+    for name, before in old.items():
+        if name not in new:
+            findings.append(f"field {name} was removed")
+            continue
+        after = new[name]
+        if before.get("type") != after.get("type"):
+            findings.append(
+                f"field {name} changed type from {before.get('type')} "
+                f"to {after.get('type')}"
+            )
+        if not before.get("required", False) and after.get("required", False):
+            findings.append(f"field {name} became required")
+        old_enum = before.get("enum")
+        if old_enum is not None:
+            new_enum = after.get("enum")
+            for value in old_enum:
+                if new_enum is None or value not in new_enum:
+                    findings.append(
+                        f"field {name} no longer permits {value!r}"
+                    )
+    for name, after in new.items():
+        if name not in old and after.get("required", False):
+            findings.append(f"field {name} was added as required")
+    return sorted(findings)
+'''
+
+
+REFERENCES["requirements_api_contracts-0007"] = r'''
+import json
+
+
+class IdempotentEndpoint:
+    def __init__(self):
+        self._entries = {}
+
+    @staticmethod
+    def _fingerprint(body):
+        return json.dumps(body, sort_keys=True, separators=(",", ":"))
+
+    def submit(self, key, body, handler):
+        fingerprint = self._fingerprint(body)
+        if key in self._entries:
+            stored, response = self._entries[key]
+            if stored != fingerprint:
+                return 422, None
+            return 200, response
+        response = handler()
+        self._entries[key] = (fingerprint, response)
+        return 201, response
+'''
+
+
+REFERENCES["requirements_api_contracts-0008"] = r'''
+def parse_link_header(header):
+    if not header or not header.strip():
+        return []
+
+    text = header
+    length = len(text)
+    index = 0
+    links = []
+
+    while index < length:
+        while index < length and text[index] in ", \t":
+            index += 1
+        if index >= length:
+            break
+        if text[index] != "<":
+            raise ValueError("link is missing its angle-bracketed URI")
+        end = text.find(">", index)
+        if end == -1:
+            raise ValueError("unterminated URI reference")
+        entry = {"uri": text[index + 1:end]}
+        index = end + 1
+
+        while index < length:
+            while index < length and text[index] in " \t":
+                index += 1
+            if index >= length or text[index] == ",":
+                break
+            if text[index] != ";":
+                raise ValueError("expected a parameter separator")
+            index += 1
+            while index < length and text[index] in " \t":
+                index += 1
+            name_start = index
+            while index < length and text[index] not in "=;,":
+                index += 1
+            name = text[name_start:index].strip()
+
+            value = ""
+            if index < length and text[index] == "=":
+                index += 1
+                while index < length and text[index] in " \t":
+                    index += 1
+                if index < length and text[index] == '"':
+                    index += 1
+                    chunks = []
+                    while index < length and text[index] != '"':
+                        if text[index] == "\\" and index + 1 < length:
+                            chunks.append(text[index + 1])
+                            index += 2
+                            continue
+                        chunks.append(text[index])
+                        index += 1
+                    value = "".join(chunks)
+                    index += 1
+                else:
+                    value_start = index
+                    while index < length and text[index] not in ";,":
+                        index += 1
+                    value = text[value_start:index].strip()
+
+            if name and name not in entry:
+                entry[name] = value
+
+        links.append(entry)
+
+    return links
+'''
+
+
 MUTATIONS: dict[str, tuple[str, str]] = {
+    # Take the first range that covers a candidate instead of the most
+    # specific one: `*/*;q=0.5, text/html;q=0.1` then reads html at 0.5.
+    "requirements_api_contracts-0001": (
+        "if chosen is None or specificity > chosen[0]:",
+        "if chosen is None:",
+    ),
+    # Build the result on the caller's dict, so patching edits the target.
+    "requirements_api_contracts-0002": (
+        "result = copy.deepcopy(target) if isinstance(target, dict) else {}",
+        "result = target if isinstance(target, dict) else {}",
+    ),
+    # Treat a matched If-None-Match as 304 for every method, losing the
+    # 412 an unsafe method owes a caller whose copy is already current.
+    "requirements_api_contracts-0003": (
+        'return 304 if method in ("GET", "HEAD") else 412',
+        "return 304",
+    ),
+    # Trust the client's `last` offset instead of clamping it to the entity.
+    "requirements_api_contracts-0004": (
+        "end = min(end, length - 1)",
+        "end = end",
+    ),
+    # Resume at the cursor rather than after it, re-emitting one row a page.
+    "requirements_api_contracts-0005": (
+        "if after is None or key > after",
+        "if after is None or key >= after",
+    ),
+    # Stop reporting a newly added required field as breaking.
+    "requirements_api_contracts-0006": (
+        'if name not in old and after.get("required", False):',
+        "if False:",
+    ),
+    # Record the key before the side effect succeeds, so a failed attempt
+    # burns the key and the caller can never retry the charge.
+    "requirements_api_contracts-0007": (
+        "response = handler()\n        self._entries[key] = (fingerprint, response)",
+        "self._entries[key] = (fingerprint, None)\n        response = handler()",
+    ),
+    # Let a repeated parameter overwrite, so the last occurrence wins.
+    "requirements_api_contracts-0008": (
+        "if name and name not in entry:",
+        "if name:",
+    ),
     "algorithms_data_structures-0001": (
         "value = self._store.pop(key)\n        self._store[key] = value\n        return value",
         "return self._store[key]",
