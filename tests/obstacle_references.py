@@ -1398,7 +1398,325 @@ def process_payment(connection, idempotency_key, amount_cents):
 '''
 
 
+REFERENCES["http_apis_authn_appsec-0001"] = r'''
+import base64
+import hashlib
+import hmac
+import json
+
+
+def _b64decode(segment):
+    return base64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4))
+
+
+def verify_token(token, key, now):
+    if not isinstance(token, str):
+        raise ValueError("token must be a string")
+    parts = token.split(".")
+    if len(parts) != 3:
+        raise ValueError("malformed token")
+    head, body, signature_segment = parts
+    try:
+        header = json.loads(_b64decode(head))
+        payload = json.loads(_b64decode(body))
+        signature = _b64decode(signature_segment)
+    except Exception:
+        raise ValueError("malformed token")
+    if not isinstance(header, dict) or header.get("alg") != "HS256":
+        raise ValueError("unsupported algorithm")
+    if isinstance(key, str):
+        key = key.encode("utf-8")
+    expected = hmac.new(
+        key, f"{head}.{body}".encode("ascii"), hashlib.sha256
+    ).digest()
+    if not hmac.compare_digest(expected, signature):
+        raise ValueError("bad signature")
+    if not isinstance(payload, dict):
+        raise ValueError("malformed payload")
+    exp = payload.get("exp")
+    if not isinstance(exp, int) or isinstance(exp, bool):
+        raise ValueError("missing or invalid exp")
+    if now >= exp:
+        raise ValueError("expired")
+    return payload
+'''
+
+
+REFERENCES["http_apis_authn_appsec-0002"] = r'''
+import posixpath
+
+
+def resolve_within_root(root, user_path):
+    if not isinstance(user_path, str) or not user_path:
+        raise ValueError("user_path must be a non-empty string")
+    if "\x00" in user_path:
+        raise ValueError("NUL byte in path")
+    if user_path.startswith("/"):
+        raise ValueError("absolute paths are not allowed")
+    base = posixpath.normpath(root)
+    candidate = posixpath.normpath(posixpath.join(base, user_path))
+    if candidate != base and not candidate.startswith(base.rstrip("/") + "/"):
+        raise ValueError("path escapes the root")
+    return candidate
+'''
+
+
+REFERENCES["http_apis_authn_appsec-0003"] = r'''
+import base64
+import hashlib
+import hmac
+import secrets
+
+ITERATIONS = 200000
+
+
+def hash_password(password):
+    salt = secrets.token_bytes(16)
+    derived = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), salt, ITERATIONS
+    )
+    return "pbkdf2_sha256${}${}${}".format(
+        ITERATIONS,
+        base64.b64encode(salt).decode("ascii"),
+        base64.b64encode(derived).decode("ascii"),
+    )
+
+
+def verify_password(password, stored):
+    if not isinstance(stored, str) or not isinstance(password, str):
+        return False
+    parts = stored.split("$")
+    if len(parts) != 4:
+        return False
+    scheme, iterations, salt_b64, key_b64 = parts
+    if scheme != "pbkdf2_sha256":
+        return False
+    try:
+        rounds = int(iterations)
+        salt = base64.b64decode(salt_b64, validate=True)
+        expected = base64.b64decode(key_b64, validate=True)
+    except Exception:
+        return False
+    if rounds < 1 or not salt or not expected:
+        return False
+    derived = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), salt, rounds, dklen=len(expected)
+    )
+    return hmac.compare_digest(derived, expected)
+'''
+
+
+REFERENCES["http_apis_authn_appsec-0004"] = r'''
+ACTIONS = ("read", "write", "delete")
+
+
+def authorize(principal, action, resource):
+    if not isinstance(principal, dict) or action not in ACTIONS:
+        return False
+    roles = principal.get("roles")
+    if not isinstance(roles, list):
+        return False
+    if "admin" in roles:
+        return True
+    if "auditor" in roles:
+        return action == "read"
+    if action == "read" and resource.get("visibility") == "public":
+        return True
+    owner = resource.get("owner_id")
+    identity = principal.get("id")
+    if owner is None or identity is None:
+        return False
+    return type(owner) is type(identity) and owner == identity
+'''
+
+
+REFERENCES["http_apis_authn_appsec-0005"] = r'''
+import base64
+import hashlib
+import hmac
+import secrets
+
+
+def _b64(raw):
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _sign(session_id, nonce, key):
+    if isinstance(key, str):
+        key = key.encode("utf-8")
+    return _b64(hmac.new(
+        key, f"{session_id}.{nonce}".encode("ascii"), hashlib.sha256
+    ).digest())
+
+
+def issue_csrf(session_id, key):
+    nonce = _b64(secrets.token_bytes(16))
+    return f"{nonce}.{_sign(session_id, nonce, key)}"
+
+
+def check_csrf(session_id, token, key):
+    if not isinstance(token, str) or not isinstance(session_id, str):
+        return False
+    parts = token.split(".")
+    if len(parts) != 2:
+        return False
+    nonce, signature = parts
+    if not nonce or not signature:
+        return False
+    try:
+        expected = _sign(session_id, nonce, key)
+    except Exception:
+        return False
+    return hmac.compare_digest(expected, signature)
+'''
+
+
+REFERENCES["http_apis_authn_appsec-0006"] = r'''
+FORBIDDEN = set(';,"\\ ') | {chr(code) for code in range(0x21)} | {chr(0x7F)}
+SAME_SITE = ("Strict", "Lax", "None")
+
+
+def _check(text, label, extra=""):
+    if not isinstance(text, str) or not text:
+        raise ValueError(f"{label} must be a non-empty string")
+    for character in text:
+        if character in FORBIDDEN or character in extra:
+            raise ValueError(f"illegal character in {label}")
+
+
+def build_set_cookie(name, value, *, max_age=None, path="/", secure=True,
+                     http_only=True, same_site="Lax"):
+    _check(name, "name", extra="=")
+    _check(value, "value")
+    if same_site not in SAME_SITE:
+        raise ValueError("same_site must be Strict, Lax or None")
+    if same_site == "None" and not secure:
+        raise ValueError("SameSite=None requires Secure")
+    if max_age is not None:
+        if isinstance(max_age, bool) or not isinstance(max_age, int):
+            raise ValueError("max_age must be an integer")
+    parts = [f"{name}={value}"]
+    if max_age is not None:
+        parts.append(f"Max-Age={max_age}")
+    if path:
+        parts.append(f"Path={path}")
+    if secure:
+        parts.append("Secure")
+    if http_only:
+        parts.append("HttpOnly")
+    parts.append(f"SameSite={same_site}")
+    return "; ".join(parts)
+'''
+
+
+REFERENCES["http_apis_authn_appsec-0007"] = r'''
+import urllib.parse
+
+
+def safe_redirect(target, allowed_hosts):
+    if not isinstance(target, str) or not target:
+        return "/"
+    if any(character in target for character in "\r\n\x00"):
+        return "/"
+    normalised = target.replace("\\", "/")
+    if normalised.startswith("//"):
+        return "/"
+    if normalised.startswith("/"):
+        return target
+    try:
+        parsed = urllib.parse.urlparse(target)
+    except ValueError:
+        return "/"
+    if parsed.scheme not in ("http", "https"):
+        return "/"
+    if parsed.username is not None or parsed.password is not None:
+        return "/"
+    if "@" in parsed.netloc:
+        return "/"
+    hostname = parsed.hostname
+    if not hostname or hostname.lower() not in allowed_hosts:
+        return "/"
+    return target
+'''
+
+
+REFERENCES["http_apis_authn_appsec-0008"] = r'''
+REDACTED = "[REDACTED]"
+
+
+def _is_secret(key, secret_keys):
+    if not isinstance(key, str):
+        return False
+    lowered = key.lower()
+    return any(name in lowered for name in secret_keys)
+
+
+def redact(record, secret_keys):
+    if isinstance(record, dict):
+        result = {}
+        for key, value in record.items():
+            if _is_secret(key, secret_keys):
+                result[key] = REDACTED
+            else:
+                result[key] = redact(value, secret_keys)
+        return result
+    if isinstance(record, tuple):
+        return tuple(redact(item, secret_keys) for item in record)
+    if isinstance(record, list):
+        return [redact(item, secret_keys) for item in record]
+    return record
+'''
+
+
 MUTATIONS: dict[str, tuple[str, str]] = {
+    # Sign the payload alone, so the header can be rewritten after signing
+    # and the token still verifies -- the alg-confusion family.
+    "http_apis_authn_appsec-0001": (
+        'key, f"{head}.{body}".encode("ascii"), hashlib.sha256',
+        'key, body.encode("ascii"), hashlib.sha256',
+    ),
+    # Compare the root as a text prefix rather than on a segment boundary,
+    # so /srv/data-private passes the containment check for /srv/data.
+    "http_apis_authn_appsec-0002": (
+        'not candidate.startswith(base.rstrip("/") + "/")',
+        "not candidate.startswith(base)",
+    ),
+    # Derive from a fixed salt: every user who picked the same password now
+    # shares one hash, and one precomputed table covers all of them.
+    "http_apis_authn_appsec-0003": (
+        "salt = secrets.token_bytes(16)",
+        'salt = b"static-salt-1234"',
+    ),
+    # Authenticate without authorising: any signed-in principal reads any
+    # resource, which is the object-level access defect exactly.
+    "http_apis_authn_appsec-0004": (
+        '    if action == "read" and resource.get("visibility") == "public":\n        return True',
+        '    if action == "read":\n        return True',
+    ),
+    # Sign the nonce alone, unbinding the token from its session so one
+    # issued anywhere validates everywhere.
+    "http_apis_authn_appsec-0005": (
+        'key, f"{session_id}.{nonce}".encode("ascii"), hashlib.sha256',
+        'key, nonce.encode("ascii"), hashlib.sha256',
+    ),
+    # Drop CR and LF from the forbidden set, letting a cookie value inject
+    # a second response header.
+    "http_apis_authn_appsec-0006": (
+        "{chr(code) for code in range(0x21)}",
+        "{chr(code) for code in range(0x21) if code not in (0x0A, 0x0D)}",
+    ),
+    # Miss the protocol-relative form, which a browser resolves as an
+    # absolute URL to an attacker's host.
+    "http_apis_authn_appsec-0007": (
+        '    if normalised.startswith("//"):\n        return "/"\n',
+        "",
+    ),
+    # Redact in place, destroying the caller's own data on the way to the
+    # log.
+    "http_apis_authn_appsec-0008": (
+        "        result = {}\n        for key, value in record.items():",
+        "        result = record\n        for key, value in list(record.items()):",
+    ),
     # Keep the account row a failed item already wrote by releasing its
     # savepoint instead of rolling back to it: the batch then commits half
     # of a row it reported as rejected.
