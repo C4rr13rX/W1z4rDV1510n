@@ -349,3 +349,52 @@ after, it read `durable_next_row: 544` against a progress file at 552.
 This generalises past this repo. A remote fix has two failure points — did the
 bytes land, and did anything reload them — and only the first one leaves an
 artifact you can grep.
+
+## The named failure is not the failure population
+
+The watchdog reports `last_failure`. It is one row. Repairing it and declaring
+the queue fixed assumes the most recent failure is the representative one,
+and on 2026-09-05 that assumption was wrong by a factor of fifteen.
+
+`last_failure` read `deferred replay worker exited -15`, the yield
+misattribution the section above describes. Classifying all 288
+`deferred_replay_failed` events by their error text instead gives:
+
+| Count | Cause |
+|---:|---|
+| 119 | `gate command failed (1)` — enterprise retention |
+| 99 | semantic recall |
+| 34 | worker exit, other |
+| 19 | `exited -15` — the yield misattribution |
+| 8 | `gate command failed (1)` — typescript route |
+
+The SIGTERM story was real, fully diagnosed, and **6.6 %** of the population.
+Four fifths of the queue was rejected by the enterprise gate, whose own stdout
+names the four suites responsible — `platform`, `cross_project`, `composition`,
+`semantic_stress`, all with `infrastructure_failure: false`.
+
+The second half of the lesson is why that table still did not justify repairing
+those four suites. Those 119 events accumulated over fourteen days; the gate
+artifact written that same afternoon read:
+
+```
+jupyter-scientific-full.enterprise-gate.json   passed=True   (12/12 suites)
+jupyter-scientific-full.completion-gate.json   passed=True
+```
+
+The suites had already been repaired. A count aggregated over a fortnight
+describes the brain that produced it, not the brain on disk now, and
+`hours_since_admission: 351` is consistent with both "still broken" and "was
+broken, fixed at hour 350". Only a fresh artifact separates them.
+
+So: classify the whole population before repairing anything, then re-measure
+the dominant cause against the current brain. History says where to look; only
+a current measurement says whether to act. This is the same discipline
+`verify_before_repairing_a_suite` records, arrived at from the opposite
+direction — there the confident story was of a live defect, here of a live
+defect that had already been fixed.
+
+One transport note, because it silently produces the wrong table: events in
+`curriculum-health.jsonl` carry `updated_unix`, not `unix`. A filter on
+`r.get("unix")` matches nothing and reports a quiet, empty window regardless of
+what happened in it — `vacuous_zero_signals` again, in a new key.
