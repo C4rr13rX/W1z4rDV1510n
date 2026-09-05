@@ -5645,21 +5645,63 @@ def decode_chunked(data):
 
 
 REFERENCES["http_apis_authn_appsec-0009"] = r'''
-class RateLimiter:
-    def __init__(self, capacity, refill_per_second):
-        self.capacity = float(capacity)
-        self.rate = float(refill_per_second)
-        self._buckets = {}
+DELTA_SECONDS = {
+    "max-age", "s-maxage", "min-fresh", "max-stale",
+    "stale-while-revalidate", "stale-if-error",
+}
 
-    def allow(self, key, now):
-        tokens, last = self._buckets.get(key, (self.capacity, now))
-        elapsed = max(0.0, now - last)
-        tokens = min(self.capacity, tokens + elapsed * self.rate)
-        if tokens >= 1.0:
-            self._buckets[key] = (tokens - 1.0, now)
-            return True
-        self._buckets[key] = (tokens, now)
-        return False
+
+def _split_directives(header):
+    """Split on commas that are not inside a quoted string."""
+    parts = []
+    current = []
+    quoted = False
+    escaped = False
+    for char in header:
+        if escaped:
+            current.append(char)
+            escaped = False
+        elif quoted and char == "\\":
+            current.append(char)
+            escaped = True
+        elif char == '"':
+            quoted = not quoted
+            current.append(char)
+        elif char == "," and not quoted:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+    parts.append("".join(current))
+    return parts
+
+
+def parse_cache_control(header):
+    if not isinstance(header, str):
+        return {}
+
+    result = {}
+    for part in _split_directives(header):
+        part = part.strip()
+        if not part:
+            continue
+        name, sep, value = part.partition("=")
+        name = name.strip().lower()
+        if not name or name in result:
+            continue
+        if not sep:
+            result[name] = True
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value.startswith('"') and value.endswith('"'):
+            value = value[1:-1]
+        if name in DELTA_SECONDS:
+            if not value.isascii() or not value.isdigit():
+                continue
+            result[name] = int(value)
+        else:
+            result[name] = value
+    return result
 '''
 
 
@@ -6248,12 +6290,12 @@ def request_framing(headers):
 
 
 MUTATIONS: dict[str, tuple[str, str]] = {
-    # Drop the cap on accrued tokens. The steady state is unchanged, so the
-    # limiter looks correct until a client goes quiet and returns with a
-    # burst proportional to how long it waited.
+    # Split on every comma. Correct for every directive anyone writes by
+    # hand, and it silently truncates the quoted field list that says which
+    # headers must not be cached.
     "http_apis_authn_appsec-0009": (
-        "tokens = min(self.capacity, tokens + elapsed * self.rate)",
-        "tokens = tokens + elapsed * self.rate",
+        "    for part in _split_directives(header):",
+        '    for part in header.split(","):',
     ),
     # Treat q=0 as merely the lowest preference rather than a refusal, so a
     # type the client explicitly rejected is still served.

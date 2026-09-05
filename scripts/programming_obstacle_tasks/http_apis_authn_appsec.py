@@ -565,60 +565,84 @@ assert redact({"a": 1}, set()) == {"a": 1}
     task(
         f"{FAMILY}-0009", FAMILY,
         prompt=(
-            "Implement a Python class RateLimiter(capacity, "
-            "refill_per_second) implementing a token bucket. Expose "
-            "allow(key, now) returning True when the call is permitted and "
-            "False when it is throttled. `now` is a float of monotonic "
-            "seconds and is non-decreasing across calls. Each key has its "
-            "own independent bucket which starts full at `capacity`. A "
-            "permitted call consumes one token. Tokens accrue continuously "
-            "at refill_per_second and must never exceed capacity, so an idle "
-            "client cannot bank credit and arrive with an unbounded burst."
+            "Implement a Python function parse_cache_control(header) parsing "
+            "a Cache-Control header into a dict. Directive names are "
+            "case-insensitive and appear lowercased in the result. A "
+            "directive with no value maps to True; one with a value maps to "
+            "that value as a str, with surrounding double quotes removed. "
+            "The delta-seconds directives max-age, s-maxage, min-fresh, "
+            "max-stale, stale-while-revalidate and stale-if-error map to an "
+            "int instead, and a value that is not a bare run of ASCII digits "
+            "is not a usable delta-seconds, so that one directive is dropped "
+            "while the rest of the header still applies. Whitespace around "
+            "names, values and separators is insignificant, and empty "
+            "elements are skipped. When a directive repeats, the first "
+            "occurrence wins. Crucially, the comma that separates directives "
+            "may also appear inside a quoted field list, as in "
+            "no-cache=\"Set-Cookie, Authorization\"; splitting on every "
+            "comma tears that directive in half and loses the field list it "
+            "names. A non-string header yields an empty dict."
         ),
-        validator=LOAD_CANDIDATE + require("RateLimiter") + r'''
-limiter = RateLimiter(3, 1.0)
-assert limiter.allow("a", 0.0) is True
-assert limiter.allow("a", 0.0) is True
-assert limiter.allow("a", 0.0) is True
-assert limiter.allow("a", 0.0) is False, "burst exceeded capacity"
+        validator=LOAD_CANDIDATE + require("parse_cache_control") + r'''
+assert parse_cache_control("") == {}
+assert parse_cache_control("   ") == {}
+for bad in (None, 7, b"no-store", ["no-store"]):
+    assert parse_cache_control(bad) == {}, repr(bad)
 
-# Buckets are per key, so one noisy client cannot throttle another.
-assert limiter.allow("b", 0.0) is True
+# Valueless directives.
+assert parse_cache_control("no-store") == {"no-store": True}
+assert parse_cache_control("no-cache, no-store") == \
+    {"no-cache": True, "no-store": True}
+assert parse_cache_control("must-revalidate,proxy-revalidate,immutable") == \
+    {"must-revalidate": True, "proxy-revalidate": True, "immutable": True}
 
-# Refill is proportional to elapsed time, not granted per call.
-assert limiter.allow("a", 0.5) is False, "refilled faster than the rate"
-assert limiter.allow("a", 1.0) is True
-assert limiter.allow("a", 1.0) is False
+# delta-seconds become ints.
+assert parse_cache_control("max-age=60") == {"max-age": 60}
+assert parse_cache_control("max-age=0") == {"max-age": 0}
+assert parse_cache_control("MAX-AGE=60") == {"max-age": 60}
+assert parse_cache_control("  max-age = 60  ") == {"max-age": 60}
+assert parse_cache_control('max-age="60"') == {"max-age": 60}
+assert parse_cache_control("max-age=0006") == {"max-age": 6}
+assert parse_cache_control(
+    "s-maxage=30, stale-while-revalidate=10, stale-if-error=5, min-fresh=2"
+) == {"s-maxage": 30, "stale-while-revalidate": 10,
+      "stale-if-error": 5, "min-fresh": 2}
 
-# The cap is the whole point: 99 idle seconds must not buy 99 requests.
-assert limiter.allow("a", 100.0) is True
-assert limiter.allow("a", 100.0) is True
-assert limiter.allow("a", 100.0) is True
-assert limiter.allow("a", 100.0) is False, "idle time accumulated past capacity"
+# An unusable delta-seconds drops that directive only.
+for bad in ("max-age=-1", "max-age=abc", "max-age=", "max-age=1.5",
+            "max-age=+1", "max-age=1 2", "max-age=٦"):
+    assert parse_cache_control(bad) == {}, bad
+assert parse_cache_control("max-age=-1, no-store") == {"no-store": True}
+assert parse_cache_control("no-store, max-age=nope, immutable") == \
+    {"no-store": True, "immutable": True}
 
-# Fractional rates are ordinary.
-slow = RateLimiter(1, 0.25)
-assert slow.allow("k", 0.0) is True
-assert slow.allow("k", 3.9) is False
-assert slow.allow("k", 4.5) is True
+# max-stale is a delta-seconds directive that is also legal bare.
+assert parse_cache_control("max-stale") == {"max-stale": True}
+assert parse_cache_control("max-stale=120") == {"max-stale": 120}
 
-# Sustained traffic exactly at the refill rate is never throttled. The step
-# is a power of two so the arithmetic is exact and the verdict cannot drift
-# with floating-point representation.
-steady = RateLimiter(2, 8.0)
-allowed = sum(1 for i in range(100) if steady.allow("s", i / 8.0))
-assert allowed == 100, f"steady traffic at the refill rate throttled: {allowed}"
+# Quoted field lists survive intact, comma and all.
+assert parse_cache_control('private="Set-Cookie"') == {"private": "Set-Cookie"}
+assert parse_cache_control('no-cache="Set-Cookie, Authorization"') == \
+    {"no-cache": "Set-Cookie, Authorization"}, (
+        "a comma inside a quoted field list was treated as a separator"
+    )
+assert parse_cache_control(
+    'no-store, no-cache="Set-Cookie, Authorization", max-age=0'
+) == {"no-store": True,
+      "no-cache": "Set-Cookie, Authorization",
+      "max-age": 0}
 
-# Twice the refill rate settles at about half.
-fast = RateLimiter(2, 8.0)
-allowed = sum(1 for i in range(100) if fast.allow("f", i / 16.0))
-assert 50 <= allowed <= 52, f"double rate not throttled to about half: {allowed}"
+# Unknown directives pass through as strings rather than being discarded.
+assert parse_cache_control("immutable, x-vendor=7") == \
+    {"immutable": True, "x-vendor": "7"}
 
-# A repeated timestamp accrues nothing.
-same = RateLimiter(2, 1000.0)
-assert same.allow("z", 5.0) is True
-assert same.allow("z", 5.0) is True
-assert same.allow("z", 5.0) is False, "refilled without time passing"
+# The first occurrence of a repeated directive wins.
+assert parse_cache_control("max-age=60, max-age=120") == {"max-age": 60}
+assert parse_cache_control("no-store, no-store") == {"no-store": True}
+
+# Stray and empty elements.
+assert parse_cache_control(",, no-store ,,") == {"no-store": True}
+assert parse_cache_control("=60") == {}
 '''),
 
     task(

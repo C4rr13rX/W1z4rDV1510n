@@ -265,6 +265,50 @@ claim is part of the contract, assert it structurally — count comparisons or
 element reads — never by wall-clock time, which would make the verdict depend
 on host load.
 
+### The distinctness digest cannot see a behavioural duplicate
+
+`build_manifest` keys distinctness on a digest of the normalized validator
+plus its fixtures, which catches a task reworded and renumbered into a clone.
+It does not catch the same *capability* written twice by two authors, because
+two independent validators for one behaviour share no text.
+
+Measured while extending this family. `http_apis_authn_appsec-0009` was
+written as a per-key `RateLimiter(capacity, refill_per_second)` taking `now`
+as an argument. `concurrency_async_distributed-0001` already specifies
+`TokenBucket(capacity, refill_per_second, clock)` taking an injected clock,
+and asserts the same five properties: starts full, drains exactly, refills in
+proportion to elapsed time, never accumulates past capacity, and handles
+fractional rates. The only axis the new task added was per-key isolation.
+
+The digests differed, every test passed, and the course would have carried two
+tasks measuring one capability while both counted toward the fixed family
+totals — so a slot that should measure something the brain cannot yet do
+would instead re-measure something already covered. That is the contract's
+"1,000 distinct" requirement failing quietly, and no automated check in this
+repository is positioned to notice it.
+
+So the guard is procedural and belongs *before* authoring, not after: grep
+every family for the **behaviour**, not for the family name or the identifier
+you have in mind.
+
+```bash
+grep -rin "token bucket\|rate limit\|circuit break\|backoff" \
+    scripts/programming_obstacle_tasks/
+```
+
+Rate limiting, circuit breaking and retry/backoff live in
+`concurrency_async_distributed`; `reliability_observability_performance`
+carries a header saying so, which is the pattern worth copying — when a
+family declines a behaviour because a sibling owns it, record that in the
+module docstring so the next author finds it by reading rather than by
+colliding.
+
+The repair is to replace the duplicate rather than to keep both and hope the
+totals absorb it. Here 0009 became Cache-Control parsing, a capability no
+family covered, whose discriminating case — a comma inside a quoted field
+list, `no-cache="Set-Cookie, Authorization"` — is not reachable from any
+existing task.
+
 ### Borrowing a standard's name obliges you to its whole rule
 
 Preferring standard-specified contracts has a failure mode of its own: a
