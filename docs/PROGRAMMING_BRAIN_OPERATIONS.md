@@ -99,10 +99,31 @@ next interval inside the same invocation, and was SIGTERMed by the memory
 guard before `interval_recall` and the behavioural gate ran. The interval
 was sized to consume exactly the window the gate also needed.
 
-**The diagnostic:** count `*interval_recall*` artifacts. Zero of them
-means the gate never executed — which logs nothing, because an absent
-gate produces neither a pass nor a failure. Do not look for a failing
-gate; look for a missing one.
+**The diagnostic:** ask *where the transaction died*, not how often it
+failed. A starved gate and a rejecting gate both surface as
+`deferred_replay_failed`, and they need opposite fixes — resize the work
+unit, or repair the capability under test. The error string separates
+them: `worker exited -15` died before the gate; anything else means the
+gate ran and returned a verdict. The probe reports this split as
+`replay_failures_before_gate` / `replay_failures_at_gate`.
+
+**Count a name something actually writes.** This section used to say
+"count `*interval_recall*` artifacts; zero means the gate never ran."
+Nothing writes that name — `interval_recall` is a health-event *kind* and
+a JSON *key* inside `deferred-replay-<digest>.admission.json` — so the
+glob returned 0 whether the gate had run a thousand times or never at
+all. Measured 2026-09-05, it reported 0 with **45** admission artifacts
+and **402** rejection records in the same tree, and that vacuous 0 was
+quoted back as evidence the gate had never executed. The real artifacts:
+
+| Outcome | Artifact |
+|---|---|
+| gate passed | `deferred-replay-<digest>.admission.json` |
+| gate ran, rejected | `deferred/<digest>/evidence/<attempt>/failure.json` |
+
+A zero from a glob is only evidence when some non-zero could have
+produced it. Check that the pattern matches a real artifact before
+reading meaning into its absence.
 
 **None of these mean training is converting:**
 

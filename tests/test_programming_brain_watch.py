@@ -210,6 +210,75 @@ def test_a_gate_that_never_runs_is_an_alarm_not_a_healthy_brain() -> None:
     assert single.kind == "healthy"
 
 
+def test_the_probe_counts_artifact_names_the_supervisor_actually_writes() -> None:
+    """A glob that matches nothing reports 0 forever, which reads as an alarm.
+
+    The probe counted `*interval_recall*`. Nothing writes that name:
+    `interval_recall` is a health-event *kind* and a JSON *key* inside
+    deferred-replay-<digest>.admission.json. Measured 2026-09-05 on the
+    training host, the glob returned 0 while 45 admission artifacts and 402
+    rejection records sat in the same tree -- and that vacuous 0 was quoted
+    as evidence the gate had never executed.
+
+    So pin the counted names to the writer: every pattern the probe globs for
+    gate evidence must correspond to something the supervisor publishes.
+    """
+    root = Path(__file__).parents[1]
+    watcher = (root / "scripts" / "aws" / "watch_programming_brain.py").read_text(
+        encoding="utf-8"
+    )
+    supervisor = (
+        root / "scripts" / "programming_curriculum_supervisor.py"
+    ).read_text(encoding="utf-8")
+
+    assert "runtime.glob('*interval_recall*')" not in watcher, (
+        "nothing writes a file named *interval_recall*; counting it is vacuous"
+    )
+    # A passing gate publishes this; a rejected one leaves failure.json.
+    assert "deferred-replay-*.admission.json" in watcher
+    assert 'f"deferred-replay-{digest}.admission.json"' in supervisor
+    assert "deferred/*/evidence/*/failure.json" in watcher
+    assert '"deferred" / digest / "evidence"' in supervisor
+    assert 'evidence / "failure.json"' in supervisor
+
+
+def test_a_starved_gate_is_distinguished_from_a_rejecting_one() -> None:
+    """Both arrive as `deferred_replay_failed`; they need opposite fixes.
+
+    A worker SIGTERMed by the memory guard never reached its gate, so the work
+    unit is too large for the window. A gate that ran and rejected is a real
+    capability failure. Counting failures cannot tell them apart -- only where
+    the transaction died can.
+    """
+    live = probe("deferred_replay_training")
+    yields = {"deferred_replay_resource_yield": 8}
+
+    starved = classify_probe(
+        {**live,
+         "admissions": {"gate_artifacts": 45, "hours_since_admission": 300.0,
+                        "replay_failures_before_gate": 53,
+                        "replay_failures_at_gate": 0,
+                        "event_counts": yields},
+         "memory": {"available_gb": 6.0}},
+        stall_seconds=1800.0,
+    )
+    assert starved.kind == "fix_required"
+    assert "starving its own gate" in starved.reason
+
+    # The gate is reaching a verdict, so this is a capability failure, not a
+    # starved gate -- it must not be reported as the work unit being too big.
+    rejecting = classify_probe(
+        {**live,
+         "admissions": {"gate_artifacts": 45, "hours_since_admission": 0.5,
+                        "replay_failures_before_gate": 53,
+                        "replay_failures_at_gate": 235,
+                        "event_counts": yields},
+         "memory": {"available_gb": 6.0}},
+        stall_seconds=1800.0,
+    )
+    assert rejecting.kind == "healthy", rejecting.reason
+
+
 def test_a_long_admission_drought_wakes_the_agent() -> None:
     stale = classify_probe(
         {**probe("deferred_replay_training"),

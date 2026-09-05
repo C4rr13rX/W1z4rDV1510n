@@ -158,6 +158,23 @@ def classify_probe(probe: dict, *, stall_seconds: float,
         counts = admissions.get("event_counts") or {}
         yields = int(counts.get("deferred_replay_resource_yield") or 0)
 
+        before_gate = int(admissions.get("replay_failures_before_gate") or 0)
+        at_gate = int(admissions.get("replay_failures_at_gate") or 0)
+
+        # A starved gate is not a failing gate, and the distinction decides
+        # the fix: resize the work unit, or repair the capability it tests.
+        # Both surface as `deferred_replay_failed`, so read WHERE the
+        # transaction died. Every recent failure dying before its gate while
+        # the host keeps recycling memory is the work-unit-too-large
+        # signature -- the pass consumes exactly the window the gate needs.
+        if before_gate >= 2 and at_gate == 0 and yields >= 2:
+            return Decision(
+                "fix_required",
+                f"all {before_gate} replay failures died before reaching "
+                f"their admission gate across {yields} resource cycles: the "
+                f"work unit is starving its own gate, so nothing can admit",
+                event_fingerprint("gate_never_ran", probe),
+            )
         if gate_artifacts == 0 and yields >= 2:
             return Decision(
                 "fix_required",
@@ -269,6 +286,8 @@ kinds = {{}}
 admitted_unix = 0.0
 last_yield = {{}}
 recent_fail = ''
+worker_killed = 0
+gate_reached = 0
 try:
     for line in health.read_text(errors='replace').splitlines()[-4000:]:
         try:
@@ -288,12 +307,35 @@ try:
             }}
         elif kind == 'deferred_replay_failed':
             recent_fail = str(ev.get('error') or '')[:180]
+            # Which half of the transaction died? A worker killed by the
+            # memory guard never reached the gate; anything else means the
+            # gate ran and returned a verdict. Both arrive as the same
+            # `deferred_replay_failed` kind, so the count alone cannot tell
+            # a starved gate from a rejecting one -- and they need opposite
+            # fixes (resize the work unit vs. repair the capability).
+            if 'worker exited' in recent_fail:
+                worker_killed += 1
+            else:
+                gate_reached += 1
 except OSError:
     pass
 
-# A gate that never RUNS logs neither pass nor failure. Counting its
-# artifacts is the only way to tell "failing" from "never executed".
-gate_artifacts = len(list(runtime.glob('*interval_recall*')))
+# A gate that never RUNS logs neither pass nor failure, so only its artifacts
+# can tell "failing" from "never executed".
+#
+# COUNT A NAME SOMETHING ACTUALLY WRITES. This globbed '*interval_recall*',
+# which nothing in the codebase ever creates: `interval_recall` is a health
+# event *kind* built as f'{{gate_kind}}_infrastructure_retry' and a JSON *key*
+# inside deferred-replay-<digest>.admission.json. The glob therefore matched
+# zero files whether the gate had run a thousand times or never at all.
+# Measured 2026-09-05 on the training host: it reported gate_artifacts 0 while
+# 45 admission artifacts and 402 rejection records sat in the same tree, and
+# that vacuous 0 was quoted as evidence the gate had never executed.
+#
+# A passing gate publishes deferred-replay-<digest>.admission.json; a gate that
+# ran and rejected leaves deferred/<digest>/evidence/<attempt>/failure.json.
+gate_artifacts = len(list(runtime.glob('deferred-replay-*.admission.json')))
+gate_rejections = len(list(runtime.glob('deferred/*/evidence/*/failure.json')))
 
 meminfo = {{}}
 try:
@@ -360,6 +402,9 @@ print(json.dumps({{
             round((time.time() - admitted_unix) / 3600.0, 1)
             if admitted_unix else None),
         'gate_artifacts': gate_artifacts,
+        'gate_rejections': gate_rejections,
+        'replay_failures_before_gate': worker_killed,
+        'replay_failures_at_gate': gate_reached,
         'last_resource_yield': last_yield,
         'last_failure': recent_fail,
     }},
