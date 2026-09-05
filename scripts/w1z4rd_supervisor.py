@@ -183,7 +183,20 @@ DEFAULT_CONFIG = {
             {
                 "name":  "production_manager",
                 "match": "start_production",
-                "args":  ["-u", "main.py", "--action", "start_production", "--stay-alive"],
+                # -X utf8 BEFORE main.py, mirroring launch_revenir.ps1:149 and
+                # every other launcher of this service (scripts/main_keeper.py,
+                # scripts/live_watchdog.py, web/opsconsole/manager.py,
+                # services/wallet_runner.py). Without it the interpreter starts
+                # in cp1252 and open()'s default encoding is fixed for the life
+                # of the process, so CoolCryptoUtilities' own harden_stdio()
+                # cannot reach a bare open(path, "w") inside library code --
+                # see services/utf8_mode.py, which documents this exact command
+                # shape ("-u main.py --action start_production --stay-alive",
+                # no -X utf8) as what killed every live trade on 2026-09-03.
+                # This supervisor is OUTSIDE that repo, so its launcher test
+                # cannot see this line; it was the only launcher still missing.
+                "args":  ["-X", "utf8", "-u", "main.py",
+                          "--action", "start_production", "--stay-alive"],
                 "log":   "prod_direct",
             },
             {

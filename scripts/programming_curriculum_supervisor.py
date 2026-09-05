@@ -2839,9 +2839,30 @@ def deferred_handoff_exit_code(forward_harvest: bool) -> int:
 
 def deferred_replay_command(args: argparse.Namespace, phase: Phase,
                             runtime: Path, event: dict) -> list[str]:
-    """Build an exact, independently durable replay for one quarantined span."""
+    """Build an exact, independently durable replay for one quarantined span.
+
+    Trains at most `replay_rows_per_pass` rows per invocation so the
+    post-training admission gate fits inside the host's memory window.
+
+    Measured 2026-09-05 over 16 unattended hours: a 131,072-row interval takes
+    ~9,000 s and the brain exhausts its headroom in 2.0-2.5 h, so the worker
+    finished every interval ("131072 xpool pairs posted, 0 failed") and was
+    then SIGTERMed during the NEXT one before `interval_recall` and the
+    behavioural gate could run. Eight clean yield/recycle cycles, forward
+    progress through seven intervals, `accepted_episodes` rising -- and zero
+    admissions, the last one dated 2026-08-22. The gate lost a race it could
+    never win, because the interval was sized to consume exactly the window
+    the gate also needed.
+
+    The worker resumes from its own `durable_next_row`, so a capped pass
+    trains a prefix and the next pass continues from that exact row; the
+    interval is only marked resolved once its whole span has passed the gate.
+    """
     start = int(event["start_row"])
     end = int(event["end_row"])
+    cap = max(0, int(getattr(args, "replay_rows_per_pass", 0) or 0))
+    if cap:
+        end = min(end, start + cap)
     digest = hashlib.sha256(
         str(event["interval_id"]).encode("utf-8")
     ).hexdigest()[:16]
@@ -3701,6 +3722,15 @@ def main() -> int:
         help=(
             "stop at a WAL-durable row and settle the neuron-scoped state "
             "before the runtime volume drops below this floor; 0 disables"
+        ),
+    )
+    parser.add_argument(
+        "--replay-rows-per-pass", type=int, default=49152,
+        help=(
+            "Maximum corpus rows one deferred-replay invocation trains before "
+            "returning for its admission gate. 0 disables the cap. A "
+            "131,072-row pass measured ~9,000 s against a 2.0-2.5 h memory "
+            "window, so the gate was never reached and no interval admitted."
         ),
     )
     parser.add_argument("--checkpoint-rows", type=int, default=131072)

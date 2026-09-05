@@ -351,6 +351,51 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         self.assertEqual(events[0]["kind"], "deferred_replay_resource_yield")
         self.assertTrue(events[0]["passed"])
 
+    def test_replay_pass_is_capped_so_the_gate_can_run(self) -> None:
+        """A replay pass must leave memory-window room for its admission gate.
+
+        Measured 2026-09-05 over 16 unattended hours: a 131,072-row interval
+        takes ~9,000 s while the brain exhausts its headroom in 2.0-2.5 h. The
+        worker finished every interval ("131072 xpool pairs posted, 0 failed")
+        and was then SIGTERMed during the next one before interval_recall and
+        the behavioural gate could run -- eight clean yield/recycle cycles,
+        forward progress across seven intervals, and zero admissions since
+        2026-08-22. The gate lost a race it could never win.
+        """
+        args = SimpleNamespace(
+            replay_rows_per_pass=49152, lock_chunk_size=8,
+            max_live_lock_seconds=8.0, endpoint="http://x", batch_size=8,
+            checkpoint_rows=131072, inter_batch_yield_seconds=0.0,
+        )
+        phase = SimpleNamespace(
+            name="p", script_id="s", corpus=Path("c.jsonl"), repeats=1)
+
+        cmd = deferred_replay_command(
+            args, phase, Path("."),
+            {"start_row": 0, "end_row": 131072, "interval_id": "p:0:131072"})
+        self.assertEqual(cmd[cmd.index("--limit-rows") + 1], "49152")
+        self.assertEqual(cmd[cmd.index("--start-row") + 1], "0")
+
+        # A later pass resumes at its own durable row and covers the tail.
+        cmd = deferred_replay_command(
+            args, phase, Path("."),
+            {"start_row": 98304, "end_row": 131072,
+             "interval_id": "p:98304:131072"})
+        self.assertEqual(cmd[cmd.index("--limit-rows") + 1], "32768")
+
+        # An interval already smaller than the cap is untouched.
+        cmd = deferred_replay_command(
+            args, phase, Path("."),
+            {"start_row": 0, "end_row": 1024, "interval_id": "p:0:1024"})
+        self.assertEqual(cmd[cmd.index("--limit-rows") + 1], "1024")
+
+        # 0 disables the cap, restoring whole-interval passes.
+        args.replay_rows_per_pass = 0
+        cmd = deferred_replay_command(
+            args, phase, Path("."),
+            {"start_row": 0, "end_row": 131072, "interval_id": "p:0:131072"})
+        self.assertEqual(cmd[cmd.index("--limit-rows") + 1], "131072")
+
     def test_memory_floor_requires_forward_durable_progress(self) -> None:
         gib = 1024 * 1024 * 1024
         self.assertFalse(memory_floor_breached(6.0, 100, 100, 100, 1 * gib))
@@ -2921,7 +2966,12 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         )
         self.assertIn("--batch-size 8", source)
         self.assertIn("--lock-chunk-size 8", source)
-        self.assertIn("--min-free-memory-gb 8", source)
+        # 3 GB, not 8: the floor must sit BELOW the brain's working peak.
+        # Measured 2026-09-04 on the 15.26 GB host, the brain reaches an
+        # 8.6 GB baseline within 47 s of launch, so an 8 GB free-memory floor
+        # left it 7.26 GB -- less than it needs to exist -- and every replay
+        # interval died on the guard's SIGTERM before finishing.
+        self.assertIn("--min-free-memory-gb 3", source)
         self.assertNotIn("--batch-size 32", source)
         self.assertNotIn("--lock-chunk-size 32", source)
 

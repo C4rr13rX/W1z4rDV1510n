@@ -166,6 +166,12 @@ common=(
   # baseline) while staying 3 GB clear of the OOM point -- the kernel killed
   # the brain at anon-rss 15,450,400 kB.
   --min-free-memory-gb 3
+  # Cap one replay pass so its admission gate fits in the memory window.
+  # A 131,072-row pass measured ~9,000 s against a 2.0-2.5 h window, so the
+  # worker finished every interval and was SIGTERMed during the next one
+  # before interval_recall and the behavioural gate could run: zero
+  # admissions since 2026-08-22 despite eight clean yield/recycle cycles.
+  --replay-rows-per-pass 49152
   --min-free-disk-gb 8
   --max-restarts 10
 )
