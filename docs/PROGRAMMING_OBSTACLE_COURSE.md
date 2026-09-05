@@ -731,6 +731,49 @@ is mid-write and staging it commits their unfinished state under your message.
 The import line is the cheap one and catches this entire class: it is the
 guard's own check, run at the moment the guard cannot run itself.
 
+#### Staging by path protects HEAD from you, not you from a sibling
+
+The rule above is written from the perspective of the session doing the
+staging, and it is complete only from that side. The other side happened on
+2026-09-05 and breaks HEAD just as effectively.
+
+Two sessions were authoring different families. Both had reference blocks in
+`tests/obstacle_references.py` — the file is shared by every family, so
+"stage by path" does not separate them. The sibling committed that one file
+for its own family, correctly by path, and the commit carried this session's
+in-flight reference block along with it, because a whole-file add takes
+whatever the file contains. The task module those references belonged to was
+still uncommitted. HEAD then had four references and no tasks:
+
+```
+references without a task: ['databases_migrations_transactions-0009', ...]
+```
+
+`test_every_authored_task_has_exactly_one_reference_and_mutation` failed at
+HEAD for everyone, on a guard written to catch a reference left behind by a
+*dropped* task. Neither session did anything wrong: staging was by path in
+both, and neither could see the other's uncommitted half.
+
+What follows is a change to the ordering, not to the staging discipline:
+
+- **Write the module and its reference block, then commit both immediately**,
+  before authoring the next task. The window in which the two halves are
+  separable is the window a sibling's commit can split them in. Minimising it
+  is the only control either session has.
+- **A reference block is not a scratch area.** Text parked in
+  `tests/obstacle_references.py` while you decide on the task is publishable
+  by someone else at any moment. Draft in the family module, where a
+  half-written task is at worst invisible, or leave the file untouched until
+  the module is ready.
+- **If you find your own references already on HEAD**, commit the module that
+  completes them before doing anything else. HEAD is broken for every session
+  until you do, and it costs one commit.
+
+The generalisation for any shared file in a multi-session repository: `git
+add <path>` is atomic over a path, not over an author. Where two sessions
+must both write one file, the unit that has to be short-lived is the *time
+between the halves*, not the size of the change.
+
 #### Recovering a duplicated authoring: check behaviour before renumbering
 
 When your blocks are the duplicate, the salvage is not to renumber them onto
