@@ -908,4 +908,1421 @@ for bad in ([hunk(0, [], ["x"])],
         raise AssertionError(f"an invalid patch was accepted: {bad!r}")
 ''',
     ),
+    task(
+        f"{FAMILY}-0009", FAMILY,
+        prompt=(
+            "Implement a Python function extract_function(source, "
+            "function_name, start_line, end_line, new_name) that performs the "
+            "extract-function refactoring on Python source and returns the "
+            "new source as a string. start_line and end_line are 1-based and "
+            "inclusive and refer to lines of source. The statements they "
+            "cover must be moved out of function_name into a new "
+            "module-level function called new_name, defined immediately "
+            "before function_name, and replaced in place by a call to it.\n\n"
+            "The new function's parameters are exactly the local names the "
+            "moved statements read before assigning them, sorted "
+            "alphabetically. It returns exactly the local names the moved "
+            "statements assign that are still read after the range inside "
+            "function_name, sorted alphabetically: no return statement when "
+            "there are none, the bare value when there is one, and a tuple "
+            "otherwise. The replacement statement rebinds those same names in "
+            "that order, and is a bare expression statement when there are "
+            "none. Raise ValueError if the range is not a whole run of "
+            "consecutive statements at the top level of function_name's body, "
+            "or if the moved statements contain return, yield, break, "
+            "continue, global, or nonlocal."
+        ),
+        timeout_seconds=60.0,
+        validator=LOAD_CANDIDATE + require("extract_function") + r'''
+import ast
+
+
+def namespace(source):
+    scope = {}
+    exec(compile(source, "<case>", "exec"), scope)
+    return scope
+
+
+def top_level_function(source, name):
+    tree = ast.parse(source)
+    found = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    ]
+    assert len(found) == 1, (
+        f"expected exactly one module-level def {name}, found {len(found)}"
+    )
+    return found[0]
+
+
+COMPUTE = "\n".join([
+    "def compute(values, factor):",          # 1
+    "    total = 0",                          # 2
+    "    for value in values:",               # 3
+    "        total += value",                 # 4
+    "    scaled = total * factor",            # 5
+    "    offset = scaled + len(values)",      # 6
+    "    return offset - total",              # 7
+])
+
+# --- one returned name, and a name that is assigned before it is read -------
+# `scaled` is assigned on line 5 and read on line 6, so it is written before
+# it is read inside the range: it is a local of the new function, not a
+# parameter. Treating every name the range mentions as a parameter is the
+# usual way to get this wrong, and it is caught here.
+result = extract_function(COMPUTE, "compute", 5, 6, "derive")
+derive = top_level_function(result, "derive")
+parameters = [argument.arg for argument in derive.args.args]
+assert parameters == ["factor", "total", "values"], (
+    f"expected parameters ['factor', 'total', 'values'], got {parameters!r}"
+)
+tree = ast.parse(result)
+order = [node.name for node in tree.body if isinstance(node, ast.FunctionDef)]
+assert order == ["derive", "compute"], (
+    f"the extracted function must precede its caller; got {order!r}"
+)
+original, refactored = namespace(COMPUTE), namespace(result)
+for values, factor in (([1, 2, 3], 2), ([], 5), ([7], -1), ([4, 4, 4], 0)):
+    expected = original["compute"](values, factor)
+    actual = refactored["compute"](values, factor)
+    assert actual == expected, (
+        f"compute({values!r}, {factor!r}) changed: {expected!r} -> {actual!r}"
+    )
+body = top_level_function(result, "compute").body
+assert not any(
+    isinstance(node, ast.Assign)
+    and any(getattr(t, "id", None) == "scaled" for t in node.targets)
+    for node in body
+), "the moved statements are still present in compute"
+
+# --- two returned names, so the call site unpacks a tuple -------------------
+ANALYSE = "\n".join([
+    "def analyse(data):",                     # 1
+    "    low = min(data)",                    # 2
+    "    high = max(data)",                   # 3
+    "    span = high - low",                  # 4
+    "    return span, low, high",             # 5
+])
+result = extract_function(ANALYSE, "analyse", 2, 3, "bounds")
+bounds = top_level_function(result, "bounds")
+parameters = [argument.arg for argument in bounds.args.args]
+assert parameters == ["data"], f"expected ['data'], got {parameters!r}"
+original, refactored = namespace(ANALYSE), namespace(result)
+for data in ([1, 2, 3], [5], [-4, 0, 4]):
+    expected = original["analyse"](data)
+    actual = refactored["analyse"](data)
+    assert actual == expected, (
+        f"analyse({data!r}) changed: {expected!r} -> {actual!r}"
+    )
+returned = bounds.body[-1]
+assert isinstance(returned, ast.Return), "bounds must return its two names"
+assert isinstance(returned.value, ast.Tuple), (
+    "two returned names must be returned as a tuple"
+)
+names = [getattr(element, "id", None) for element in returned.value.elts]
+assert names == ["high", "low"], (
+    f"returned names must be alphabetical: expected ['high', 'low'], "
+    f"got {names!r}"
+)
+
+# --- nothing is read afterwards, so the call is a bare statement ------------
+LOG_ALL = "\n".join([
+    "def log_all(items, sink):",              # 1
+    "    count = 0",                          # 2
+    "    for item in items:",                 # 3
+    "        sink.append(item)",              # 4
+    "    return len(items)",                  # 5
+])
+result = extract_function(LOG_ALL, "log_all", 3, 4, "drain")
+drain = top_level_function(result, "drain")
+parameters = [argument.arg for argument in drain.args.args]
+assert parameters == ["items", "sink"], (
+    f"expected ['items', 'sink'], got {parameters!r}"
+)
+assert not any(isinstance(node, ast.Return) for node in ast.walk(drain)), (
+    "nothing the moved statements assign is read afterwards, so drain must "
+    "not return anything"
+)
+original, refactored = namespace(LOG_ALL), namespace(result)
+for items in ([1, 2], [], ["a"]):
+    expected_sink, actual_sink = [], []
+    expected = original["log_all"](items, expected_sink)
+    actual = refactored["log_all"](items, actual_sink)
+    assert (expected, expected_sink) == (actual, actual_sink), (
+        f"log_all({items!r}) changed: {(expected, expected_sink)!r} -> "
+        f"{(actual, actual_sink)!r}"
+    )
+
+# --- ranges that are not whole top-level statements are refused -------------
+for start, end, why in (
+        (3, 3, "the for statement spans lines 3-4, so 3-3 is half of it"),
+        (4, 4, "line 4 is nested inside the loop, not at the top level"),
+        (7, 7, "the range contains a return"),
+        (6, 7, "the range ends inside a return"),
+        (2, 9, "the range runs past the end of the function"),
+):
+    try:
+        extract_function(COMPUTE, "compute", start, end, "extracted")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"accepted lines {start}-{end}: {why}")
+''',
+    ),
+    task(
+        f"{FAMILY}-0010", FAMILY,
+        prompt=(
+            "Implement a Python function inline_variable(source, "
+            "function_name, variable) that performs the inline-variable "
+            "refactoring and returns the new source as a string. Inside "
+            "function_name, delete the single assignment to variable and "
+            "replace every later read of it with the assignment's "
+            "right-hand-side expression, adding parentheses wherever they are "
+            "needed so that the value of every enclosing expression is "
+            "unchanged.\n\n"
+            "Raise ValueError if variable is a parameter of function_name, is "
+            "never assigned in it, is assigned more than once, is the target "
+            "of an augmented assignment, if the right-hand side contains a "
+            "call, await, comprehension, or lambda, or if any name the right-"
+            "hand side reads is rebound anywhere between the assignment and a "
+            "read of variable -- in each of those cases inlining would not "
+            "preserve behaviour."
+        ),
+        timeout_seconds=60.0,
+        validator=LOAD_CANDIDATE + require("inline_variable") + r'''
+import ast
+
+
+def namespace(source):
+    scope = {}
+    exec(compile(source, "<case>", "exec"), scope)
+    return scope
+
+
+def reads_variable(source, function_name, variable):
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == function_name:
+            return any(
+                isinstance(inner, ast.Name) and inner.id == variable
+                for inner in ast.walk(node)
+            )
+    raise AssertionError(f"{function_name} is missing from the result")
+
+
+# --- precedence: the inlined expression binds looser than its context -------
+# Substituting the text of `a + b` into `weight * c - weight` without
+# parentheses yields `a + b * c - a + b`, which evaluates differently. The
+# check is by value over many operands, so a candidate cannot pass by
+# reproducing one sample's arithmetic coincidence.
+SCORE = "\n".join([
+    "def score(a, b, c):",
+    "    weight = a + b",
+    "    return weight * c - weight",
+])
+result = inline_variable(SCORE, "score", "weight")
+assert not reads_variable(result, "score", "weight"), (
+    "weight is still read after being inlined"
+)
+original, refactored = namespace(SCORE), namespace(result)
+for a in range(-3, 4):
+    for b in range(-3, 4):
+        for c in range(-3, 4):
+            expected = original["score"](a, b, c)
+            actual = refactored["score"](a, b, c)
+            assert actual == expected, (
+                f"score({a}, {b}, {c}) changed: {expected!r} -> {actual!r}"
+            )
+
+# --- precedence again, where unary minus and ** disagree about binding ------
+# `-base ** 2` is -(base ** 2). Inlining `a - b` for base must produce
+# -((a - b) ** 2), not -a - b ** 2.
+POWER = "\n".join([
+    "def power(a, b):",
+    "    base = a - b",
+    "    return -base ** 2",
+])
+result = inline_variable(POWER, "power", "base")
+assert not reads_variable(result, "power", "base"), (
+    "base is still read after being inlined"
+)
+original, refactored = namespace(POWER), namespace(result)
+for a in range(-4, 5):
+    for b in range(-4, 5):
+        expected = original["power"](a, b)
+        actual = refactored["power"](a, b)
+        assert actual == expected, (
+            f"power({a}, {b}) changed: {expected!r} -> {actual!r}"
+        )
+
+# --- a comparison chain must survive being substituted into ----------------
+BETWEEN = "\n".join([
+    "def between(a, b, c):",
+    "    limit = a or b",
+    "    return limit and c",
+])
+result = inline_variable(BETWEEN, "between", "limit")
+original, refactored = namespace(BETWEEN), namespace(result)
+for a in (0, 1, "", "x", None):
+    for b in (0, 2, "", "y", None):
+        for c in (0, 3, "", "z", None):
+            expected = original["between"](a, b, c)
+            actual = refactored["between"](a, b, c)
+            assert actual == expected, (
+                f"between({a!r}, {b!r}, {c!r}) changed: {expected!r} -> "
+                f"{actual!r}"
+            )
+
+# --- the cases where inlining is not behaviour-preserving -------------------
+REFUSALS = (
+    ("\n".join([
+        "def twice(a):",
+        "    x = a + 1",
+        "    x = x + 1",
+        "    return x",
+    ]), "twice", "x", "x is assigned twice"),
+    ("\n".join([
+        "def counted(a):",
+        "    x = len(a)",
+        "    return x + x",
+    ]), "counted", "x", "the right-hand side calls len, so inlining would "
+       "evaluate it twice"),
+    ("\n".join([
+        "def rebound(a):",
+        "    x = a + 1",
+        "    a = a * 2",
+        "    return x + a",
+    ]), "rebound", "x", "a is rebound between the assignment and the read"),
+    ("\n".join([
+        "def parameter(x):",
+        "    return x + 1",
+    ]), "parameter", "x", "x is a parameter, not a local assignment"),
+    ("\n".join([
+        "def missing(a):",
+        "    return a + 1",
+    ]), "missing", "x", "x is never assigned"),
+    ("\n".join([
+        "def accumulated(a):",
+        "    x = a",
+        "    x += 1",
+        "    return x",
+    ]), "accumulated", "x", "x is the target of an augmented assignment"),
+)
+for source, function_name, variable, why in REFUSALS:
+    try:
+        inline_variable(source, function_name, variable)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"inlined {variable} in {function_name}: {why}")
+''',
+    ),
+    task(
+        f"{FAMILY}-0011", FAMILY,
+        prompt=(
+            "Implement a Python function minimize_test_suite(coverage) that "
+            "performs coverage-preserving test-suite minimization. coverage "
+            "maps a test name to the collection of requirement ids that test "
+            "covers. Return a list of test names whose covered ids union to "
+            "exactly the same set as the whole suite, of minimum possible "
+            "length. When several subsets of that length cover everything, "
+            "return the one whose sorted name list is smallest "
+            "lexicographically. The returned list itself must be sorted by "
+            "name. Tests that cover nothing are never included. Return the "
+            "empty list when the suite covers nothing at all. The suite "
+            "contains at most 14 tests."
+        ),
+        timeout_seconds=90.0,
+        validator=LOAD_CANDIDATE + require("minimize_test_suite") + r'''
+import itertools
+
+
+def reference(coverage):
+    """Brute force, which is affordable at the 14-test bound the prompt sets."""
+    universe = set()
+    for covered in coverage.values():
+        universe |= set(covered)
+    if not universe:
+        return []
+    names = sorted(coverage)
+    for size in range(1, len(names) + 1):
+        best = None
+        for combination in itertools.combinations(names, size):
+            union = set()
+            for name in combination:
+                union |= set(coverage[name])
+            if union == universe:
+                candidate = sorted(combination)
+                if best is None or candidate < best:
+                    best = candidate
+        if best is not None:
+            return best
+    raise AssertionError("unreachable: the whole suite always covers")
+
+
+def check(coverage, note):
+    expected = reference(coverage)
+    actual = minimize_test_suite(coverage)
+    assert isinstance(actual, list), f"expected a list, got {type(actual)}"
+    assert actual == sorted(actual), f"result is not sorted by name: {actual!r}"
+    universe = set()
+    for covered in coverage.values():
+        universe |= set(covered)
+    union = set()
+    for name in actual:
+        assert name in coverage, f"{name!r} is not a test in the suite"
+        union |= set(coverage[name])
+    assert union == universe, (
+        f"{note}: coverage was lost; missing {sorted(universe - union)}"
+    )
+    assert len(actual) == len(expected), (
+        f"{note}: {len(actual)} tests returned but {len(expected)} suffice "
+        f"({expected!r})"
+    )
+    assert actual == expected, (
+        f"{note}: expected the lexicographically smallest minimum "
+        f"{expected!r}, got {actual!r}"
+    )
+
+
+# --- greedy picks the big set first and then needs three more --------------
+# The largest-first heuristic takes `broad` (4 ids) and must then add three
+# singletons, for four tests. The optimum is the two `half` tests. A candidate
+# that implements textbook greedy set cover fails exactly here.
+check({
+    "broad": ["a", "b", "c", "d"],
+    "half_one": ["a", "b", "e", "f"],
+    "half_two": ["c", "d", "g", "h"],
+    "tiny_e": ["e"],
+    "tiny_f": ["f"],
+    "tiny_g": ["g"],
+    "tiny_h": ["h"],
+}, "greedy is suboptimal here")
+
+# --- a tie broken by name, not by insertion order --------------------------
+check({
+    "zulu": ["x", "y"],
+    "alpha": ["x", "y"],
+    "mike": ["x", "y"],
+}, "three equivalent tests: the answer is the alphabetically first")
+
+# --- redundant tests, and one that covers nothing --------------------------
+check({
+    "empty": [],
+    "one": ["p"],
+    "two": ["q"],
+    "both": ["p", "q"],
+    "superset": ["p", "q"],
+}, "a test covering nothing must never be selected")
+
+# --- every test is essential -----------------------------------------------
+check({
+    "t1": ["r1"],
+    "t2": ["r2"],
+    "t3": ["r3"],
+    "t4": ["r4"],
+}, "disjoint coverage means the whole suite is minimal")
+
+# --- nothing is covered at all ---------------------------------------------
+assert minimize_test_suite({"a": [], "b": []}) == [], (
+    "a suite that covers nothing minimizes to no tests"
+)
+assert minimize_test_suite({}) == [], "an empty suite minimizes to no tests"
+
+# --- duplicate ids inside one test must not change the answer --------------
+check({
+    "dupes": ["a", "a", "a", "b"],
+    "other": ["b", "c"],
+    "third": ["c", "a"],
+}, "repeated ids within a test are still one requirement")
+
+# --- overlapping mid-size sets where the optimum is three ------------------
+check({
+    "s1": ["1", "2", "3"],
+    "s2": ["3", "4", "5"],
+    "s3": ["5", "6", "7"],
+    "s4": ["7", "8", "1"],
+    "s5": ["2", "4", "6"],
+    "s6": ["8", "3", "5"],
+}, "a denser instance where the optimum is not the greedy prefix")
+''',
+    ),
+    task(
+        f"{FAMILY}-0012", FAMILY,
+        prompt=(
+            "Implement a Python function mutation_survivors(source, run_tests) "
+            "that performs mutation testing. Produce one mutant per mutable "
+            "operator occurrence in source, applying exactly these swaps and "
+            "no others: binary + becomes -, binary - becomes +, < becomes <=, "
+            "<= becomes <, > becomes >=, >= becomes >, == becomes !=, and != "
+            "becomes ==. Unary minus is not a binary operator and is never "
+            "mutated.\n\n"
+            "For each mutant, execute it in a fresh namespace and call "
+            "run_tests(namespace). The mutant is killed if run_tests raises "
+            "any exception, and it survives if run_tests returns. A mutant "
+            "that fails to execute at all is killed. Return the survivors as "
+            "a sorted list of (line_number, original_operator, "
+            "replacement_operator) tuples, with the operators written as the "
+            "source symbols above. Mutants must not leak state into each "
+            "other."
+        ),
+        timeout_seconds=90.0,
+        validator=LOAD_CANDIDATE + require("mutation_survivors") + r'''
+SOURCE = "\n".join([
+    "def total(items, bonus):",               # 1
+    "    result = 0",                         # 2
+    "    for item in items:",                 # 3
+    "        result = result + item",         # 4
+    "    return result + bonus",              # 5
+])
+
+
+def weak_tests(namespace):
+    """Never passes a non-zero bonus, so the line 5 mutant cannot be killed."""
+    assert namespace["total"]([1, 2], 0) == 3
+    assert namespace["total"]([], 0) == 0
+
+
+survivors = mutation_survivors(SOURCE, weak_tests)
+assert survivors == [(5, "+", "-")], (
+    "the only + this suite cannot kill is the bonus on line 5, because the "
+    f"suite always passes bonus=0; got {survivors!r}"
+)
+
+
+def strong_tests(namespace):
+    """Passes a non-zero bonus, which kills the line 5 mutant too."""
+    assert namespace["total"]([1, 2], 0) == 3
+    assert namespace["total"]([1, 2], 10) == 13
+
+
+assert mutation_survivors(SOURCE, strong_tests) == [], (
+    "a suite that exercises a non-zero bonus kills every mutant here"
+)
+
+# --- boundary operators, including a genuinely equivalent mutant ------------
+CLAMP = "\n".join([
+    "def clamp(value, low, high):",           # 1
+    "    if value < low:",                    # 2
+    "        return low",                     # 3
+    "    if value > high:",                   # 4
+    "        return high",                    # 5
+    "    return value",                       # 6
+])
+
+
+def clamp_tests(namespace):
+    clamp = namespace["clamp"]
+    assert clamp(5, 0, 10) == 5
+    assert clamp(-1, 0, 10) == 0
+    assert clamp(11, 0, 10) == 10
+
+
+survivors = mutation_survivors(CLAMP, clamp_tests)
+assert survivors == [(2, "<", "<="), (4, ">", ">=")], (
+    "both boundary mutants survive: at value == low the mutant returns low, "
+    "which is the same value the original returns, so no test can kill it. "
+    f"got {survivors!r}"
+)
+
+# --- a mutant that crashes counts as killed, not as a survivor -------------
+DIVIDE = "\n".join([
+    "def safe(numerator, denominator):",      # 1
+    "    if denominator != 0:",               # 2
+    "        return numerator / denominator", # 3
+    "    return 0",                           # 4
+])
+
+
+def divide_tests(namespace):
+    # The zero case runs first, so the mutant crashes before any assertion
+    # can fail: this is the "a mutant that fails to execute is killed" rule
+    # rather than the ordinary killed-by-assertion one.
+    assert namespace["safe"](1, 0) == 0
+    assert namespace["safe"](6, 3) == 2
+
+
+survivors = mutation_survivors(DIVIDE, divide_tests)
+assert survivors == [], (
+    "mutating != to == makes safe(1, 0) divide by zero; the ZeroDivisionError "
+    f"escapes run_tests, which kills the mutant. got {survivors!r}"
+)
+
+# --- unary minus is not a mutation site ------------------------------------
+NEGATE = "\n".join([
+    "def negate(value):",                     # 1
+    "    return -value",                      # 2
+])
+
+
+def negate_tests(namespace):
+    assert namespace["negate"](3) == -3
+
+
+assert mutation_survivors(NEGATE, negate_tests) == [], (
+    "unary minus must not be mutated, so this source has no mutants at all "
+    "and therefore no survivors"
+)
+
+# --- mutants must be independent -------------------------------------------
+# If mutants share a namespace, this counter keeps its value across runs and
+# the reported survivor set changes. Each call must start from zero.
+PAIR = "\n".join([
+    "def pair(a, b):",                        # 1
+    "    return a + b",                       # 2
+])
+seen = []
+
+
+def recording_tests(namespace):
+    seen.append(namespace["pair"](2, 2))
+    assert namespace["pair"](2, 2) == 4
+
+
+survivors = mutation_survivors(PAIR, recording_tests)
+assert survivors == [], f"the + on line 2 is killed; got {survivors!r}"
+assert seen == [0], (
+    f"expected exactly one mutant execution reporting 2 - 2 = 0, got {seen!r}"
+)
+''',
+    ),
+    task(
+        f"{FAMILY}-0013", FAMILY,
+        prompt=(
+            "Implement a Python function unreachable_functions(source, "
+            "entry_points) that returns the sorted list of module-level "
+            "function names in source that are not reachable from any name in "
+            "entry_points through the static call graph.\n\n"
+            "A function is reachable if an entry point reaches it through a "
+            "chain of references. A reference is any mention of the "
+            "function's name inside a reachable function's body, whether it "
+            "is called, passed as an argument, assigned, or returned -- a "
+            "name that escapes may be called later, so it is live. Names "
+            "mentioned only inside unreachable functions stay unreachable, "
+            "which means mutually recursive dead code is still dead. Only "
+            "module-level def names are considered; methods, nested "
+            "functions, and imported names are never reported. Entry points "
+            "are themselves reachable. Raise ValueError if an entry point is "
+            "not a module-level function in source."
+        ),
+        timeout_seconds=45.0,
+        validator=LOAD_CANDIDATE + require("unreachable_functions") + r'''
+SOURCE = "\n".join([
+    "import json",
+    "",
+    "",
+    "def main(payload):",
+    "    parsed = parse(payload)",
+    "    return render(parsed, formatter=as_text)",
+    "",
+    "",
+    "def parse(payload):",
+    "    return json.loads(payload)",
+    "",
+    "",
+    "def render(parsed, formatter):",
+    "    return formatter(parsed)",
+    "",
+    "",
+    "def as_text(parsed):",
+    "    return str(parsed)",
+    "",
+    "",
+    "def as_xml(parsed):",
+    "    return wrap(str(parsed))",
+    "",
+    "",
+    "def wrap(text):",
+    "    return '<v>' + text + '</v>'",
+    "",
+    "",
+    "def legacy_a(value):",
+    "    return legacy_b(value)",
+    "",
+    "",
+    "def legacy_b(value):",
+    "    return legacy_a(value)",
+    "",
+    "",
+    "def helper(value):",
+    "    return value",
+    "",
+    "",
+    "class Service:",
+    "    def parse(self, payload):",
+    "        return helper(payload)",
+])
+
+result = unreachable_functions(SOURCE, ["main"])
+assert result == ["as_xml", "helper", "legacy_a", "legacy_b", "wrap"], (
+    "as_text is reachable because main passes it as a keyword argument even "
+    "though main never calls it; wrap is dead because only as_xml mentions "
+    "it; legacy_a and legacy_b are mutually recursive dead code; helper is "
+    "mentioned only by a method, and a method body is not a module-level "
+    f"reference. got {result!r}"
+)
+
+# --- a method's mentions do not resurrect a function ------------------------
+# `helper` is referenced from Service.parse. That is not reachable from main,
+# so helper stays dead. A candidate that scans the whole module for the name
+# rather than walking the call graph reports helper as live and fails above.
+
+# --- adding an entry point makes its whole cone reachable ------------------
+result = unreachable_functions(SOURCE, ["main", "as_xml"])
+assert result == ["helper", "legacy_a", "legacy_b"], (
+    f"as_xml as an entry point makes wrap reachable; got {result!r}"
+)
+
+result = unreachable_functions(SOURCE, ["legacy_a"])
+assert result == ["as_text", "as_xml", "helper", "main", "parse", "render",
+                  "wrap"], (
+    f"only the legacy cycle is reachable from legacy_a; got {result!r}"
+)
+
+# --- every function reachable, and none ------------------------------------
+assert unreachable_functions(SOURCE, [
+    "main", "as_xml", "legacy_a", "helper",
+]) == [], "these entry points cover every module-level function"
+
+assert unreachable_functions(SOURCE, []) == [
+    "as_text", "as_xml", "helper", "legacy_a", "legacy_b", "main", "parse",
+    "render", "wrap",
+], "with no entry points every module-level function is unreachable"
+
+# --- self-recursion is not a second reference ------------------------------
+RECURSIVE = "\n".join([
+    "def countdown(n):",
+    "    if n <= 0:",
+    "        return 0",
+    "    return countdown(n - 1)",
+    "",
+    "",
+    "def orphan(n):",
+    "    return n",
+])
+assert unreachable_functions(RECURSIVE, ["countdown"]) == ["orphan"], (
+    "a function that calls itself is reachable from itself"
+)
+
+# --- a nested def shadows nothing at module level --------------------------
+NESTED = "\n".join([
+    "def outer(value):",
+    "    def inner(x):",
+    "        return x + 1",
+    "    return inner(value)",
+    "",
+    "",
+    "def inner(x):",
+    "    return x - 1",
+])
+assert unreachable_functions(NESTED, ["outer"]) == [], (
+    "outer's body mentions the name `inner`, which is a live reference to the "
+    "module-level function of that name; a nested def does not remove it"
+)
+
+# --- an entry point that is not a module-level function is an error --------
+for bad in ("Service", "json", "missing", "parse_payload"):
+    try:
+        unreachable_functions(SOURCE, [bad])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(
+            f"{bad!r} is not a module-level function and must be rejected"
+        )
+''',
+    ),
+    task(
+        f"{FAMILY}-0014", FAMILY,
+        prompt=(
+            "Implement a Python function attribute_failure(frames, "
+            "owned_prefixes, helper_prefixes) that attributes a crash to the "
+            "code responsible for it. frames is a traceback's frames ordered "
+            "outermost first and innermost last; each is a mapping with "
+            "'filename', 'lineno', and 'function'. owned_prefixes and "
+            "helper_prefixes are collections of path prefixes.\n\n"
+            "Return the innermost frame that is owned and is not a helper. A "
+            "frame is owned when its filename starts with an owned prefix, "
+            "and is a helper when it starts with a helper prefix; the longer "
+            "matching prefix wins when a path matches both, so a helper "
+            "directory nested inside an owned tree is still a helper. A "
+            "filename that is not a real path, meaning one that starts with "
+            "'<', is never owned however the prefixes are written. Return "
+            "None when no frame qualifies. Return the frame object itself, "
+            "not a copy."
+        ),
+        timeout_seconds=45.0,
+        validator=LOAD_CANDIDATE + require("attribute_failure") + r'''
+def frame(filename, lineno, function):
+    return {"filename": filename, "lineno": lineno, "function": function}
+
+
+OWNED = ["/srv/app/"]
+HELPERS = ["/srv/app/tests/support/"]
+
+# --- blame the deepest owned frame, not the deepest frame ------------------
+# The innermost frame is in the standard library. Attributing there produces
+# the familiar useless bug report "the crash is in json/decoder.py".
+frames = [
+    frame("/srv/app/main.py", 10, "handle"),
+    frame("/srv/app/parse.py", 42, "load_config"),
+    frame("/usr/lib/python3.13/json/__init__.py", 346, "loads"),
+    frame("/usr/lib/python3.13/json/decoder.py", 337, "decode"),
+]
+picked = attribute_failure(frames, OWNED, HELPERS)
+assert picked is frames[1], (
+    "the deepest owned frame is parse.py:42; the two stdlib frames below it "
+    f"are not ours. got {picked!r}"
+)
+
+# --- a helper frame is skipped in favour of the code that called it --------
+# An assertion helper is always the innermost owned frame, so blaming it
+# buckets every failure in the suite under one location.
+frames = [
+    frame("/srv/app/tests/test_orders.py", 88, "test_total"),
+    frame("/srv/app/tests/support/assertions.py", 12, "assert_matches"),
+]
+picked = attribute_failure(frames, OWNED, HELPERS)
+assert picked is frames[0], (
+    "the innermost owned frame is the assertion helper; the test that called "
+    f"it is the real location. got {picked!r}"
+)
+
+# --- generated code is never owned, however the prefixes are written -------
+# Code the candidate produced runs in a frame with a filename like <string>.
+# A prefix check that only compares strings can match '<string>' against an
+# owned prefix of '' or '<'; it must not.
+frames = [
+    frame("/srv/app/runner.py", 5, "run"),
+    frame("<string>", 3, "<module>"),
+    frame("<stdin>", 1, "<module>"),
+]
+picked = attribute_failure(frames, OWNED, HELPERS)
+assert picked is frames[0], (
+    f"generated frames are never owned; got {picked!r}"
+)
+picked = attribute_failure(frames, ["<"], HELPERS)
+assert picked is None, (
+    "even an owned prefix of '<' must not make a generated frame ours; got "
+    f"{picked!r}"
+)
+picked = attribute_failure(frames, [""], HELPERS)
+assert picked is frames[0], (
+    "an empty prefix owns every real path but still not the generated "
+    f"frames; got {picked!r}"
+)
+
+# --- the longer matching prefix decides -----------------------------------
+frames = [
+    frame("/srv/app/tests/support/assertions.py", 12, "assert_matches"),
+]
+assert attribute_failure(frames, OWNED, HELPERS) is None, (
+    "the only frame is a helper, so nothing qualifies"
+)
+assert attribute_failure(frames, OWNED, []) is frames[0], (
+    "with no helper prefixes the same frame is the answer"
+)
+# Owned prefix is longer than the helper prefix here, so the frame is owned.
+picked = attribute_failure(
+    frames, ["/srv/app/tests/support/assertions.py"], ["/srv/app/"]
+)
+assert picked is frames[0], (
+    "the longer matching prefix wins, so this frame is owned rather than a "
+    f"helper; got {picked!r}"
+)
+# And the reverse.
+picked = attribute_failure(
+    frames, ["/srv/"], ["/srv/app/tests/"]
+)
+assert picked is None, (
+    f"the longer helper prefix wins here, so nothing qualifies; got {picked!r}"
+)
+
+# --- nothing owned, and nothing at all ------------------------------------
+frames = [frame("/usr/lib/python3.13/runpy.py", 198, "_run_module_as_main")]
+assert attribute_failure(frames, OWNED, HELPERS) is None, (
+    "no frame is ours"
+)
+assert attribute_failure([], OWNED, HELPERS) is None, (
+    "an empty traceback attributes to nothing"
+)
+
+# --- several owned frames: the innermost non-helper wins -------------------
+frames = [
+    frame("/srv/app/a.py", 1, "a"),
+    frame("/srv/app/b.py", 2, "b"),
+    frame("/srv/app/tests/support/h.py", 3, "h"),
+    frame("/srv/app/tests/support/i.py", 4, "i"),
+]
+picked = attribute_failure(frames, OWNED, HELPERS)
+assert picked is frames[1], (
+    f"b.py is the innermost owned non-helper frame; got {picked!r}"
+)
+''',
+    ),
+    task(
+        f"{FAMILY}-0015", FAMILY,
+        prompt=(
+            "Implement a Python function capture_call_tree(namespace, entry, "
+            "args) that instruments a module namespace so the calls between "
+            "its functions are recorded, calls namespace[entry](*args), and "
+            "returns the pair (result, tree).\n\n"
+            "Every value in namespace that is a function must be wrapped so "
+            "that calls made through the namespace are recorded, including "
+            "calls functions make to each other and to themselves. A node is "
+            "a dict with 'name', 'args' as a tuple, 'children' as the list of "
+            "calls it made in the order they were made, and exactly one of "
+            "'result' or 'error'; 'error' is the exception's class name. The "
+            "tree is the node for the entry call. Restore namespace to its "
+            "original functions before returning, including when the entry "
+            "call raises. If the entry call raises, let the exception "
+            "propagate after restoring. Raise KeyError if entry does not name "
+            "a function in namespace."
+        ),
+        timeout_seconds=45.0,
+        validator=LOAD_CANDIDATE + require("capture_call_tree") + r'''
+def build(source):
+    scope = {}
+    exec(compile(source, "<case>", "exec"), scope)
+    return scope
+
+
+NESTED = "\n".join([
+    "def outer(n):",
+    "    return middle(n) + leaf(n)",
+    "",
+    "def middle(n):",
+    "    return leaf(n) * 2",
+    "",
+    "def leaf(n):",
+    "    return n + 1",
+])
+
+namespace = build(NESTED)
+originals = {
+    name: value for name, value in namespace.items()
+    if callable(value) and not name.startswith("__")
+}
+result, tree = capture_call_tree(namespace, "outer", (3,))
+assert result == 12, f"outer(3) is middle(3) + leaf(3) = 8 + 4; got {result!r}"
+assert tree["name"] == "outer", f"the root is the entry call; got {tree!r}"
+assert tree["args"] == (3,), f"args must be a tuple; got {tree['args']!r}"
+assert tree["result"] == 12, f"got {tree!r}"
+assert "error" not in tree, "a successful call has no 'error' key"
+names = [child["name"] for child in tree["children"]]
+assert names == ["middle", "leaf"], (
+    f"children are recorded in call order; got {names!r}"
+)
+assert [c["name"] for c in tree["children"][0]["children"]] == ["leaf"], (
+    "middle's call to leaf must be nested under middle, not under outer"
+)
+assert tree["children"][0]["children"][0]["result"] == 4, (
+    "the inner leaf(3) returned 4"
+)
+assert tree["children"][1]["children"] == [], "leaf calls nothing"
+
+# --- the namespace is put back exactly as it was ---------------------------
+for name, value in originals.items():
+    assert namespace[name] is value, (
+        f"{name} was left wrapped in the namespace after the call returned"
+    )
+
+# --- recursion nests rather than flattening --------------------------------
+RECURSIVE = "\n".join([
+    "def countdown(n):",
+    "    if n <= 0:",
+    "        return 0",
+    "    return countdown(n - 1) + 1",
+])
+namespace = build(RECURSIVE)
+result, tree = capture_call_tree(namespace, "countdown", (3,))
+assert result == 3, f"countdown(3) is 3; got {result!r}"
+depth, node = 0, tree
+while node["children"]:
+    assert len(node["children"]) == 1, (
+        f"each recursive call makes exactly one call; got {node!r}"
+    )
+    node = node["children"][0]
+    depth += 1
+assert depth == 3, (
+    f"countdown(3) recurses three times, so the tree is four deep; got a "
+    f"depth of {depth}"
+)
+assert node["args"] == (0,), f"the deepest call is countdown(0); got {node!r}"
+
+# --- an exception is recorded and then propagates --------------------------
+FAILING = "\n".join([
+    "def top(n):",
+    "    return bottom(n)",
+    "",
+    "def bottom(n):",
+    "    raise ValueError('no')",
+])
+namespace = build(FAILING)
+originals = {
+    name: value for name, value in namespace.items()
+    if callable(value) and not name.startswith("__")
+}
+captured = {}
+try:
+    capture_call_tree(namespace, "top", (1,))
+except ValueError as exc:
+    captured["exc"] = exc
+else:
+    raise AssertionError("the entry call raised, so capture must re-raise it")
+for name, value in originals.items():
+    assert namespace[name] is value, (
+        f"{name} was left wrapped after the entry call raised; restoring must "
+        "happen on the failure path too"
+    )
+
+# --- a caught exception is recorded on the child, not the parent -----------
+CAUGHT = "\n".join([
+    "def guarded(n):",
+    "    try:",
+    "        return risky(n)",
+    "    except ValueError:",
+    "        return -1",
+    "",
+    "def risky(n):",
+    "    raise ValueError('no')",
+])
+namespace = build(CAUGHT)
+result, tree = capture_call_tree(namespace, "guarded", (1,))
+assert result == -1, f"guarded swallows the error and returns -1; got {result!r}"
+assert tree["result"] == -1 and "error" not in tree, (
+    f"guarded returned normally; got {tree!r}"
+)
+child = tree["children"][0]
+assert child["name"] == "risky", f"got {child!r}"
+assert child["error"] == "ValueError", (
+    f"the child records the exception class name; got {child!r}"
+)
+assert "result" not in child, "a failed call has no 'result' key"
+
+# --- an entry that is not a function in the namespace ----------------------
+namespace = build(NESTED)
+namespace["not_callable"] = 5
+for bad in ("missing", "not_callable"):
+    try:
+        capture_call_tree(namespace, bad, ())
+    except KeyError:
+        pass
+    else:
+        raise AssertionError(f"{bad!r} does not name a function in namespace")
+''',
+    ),
+    task(
+        f"{FAMILY}-0016", FAMILY,
+        prompt=(
+            "Implement a Python function close_enough(actual, expected, "
+            "rel_tol, abs_tol) returning a bool, for use as a numeric test "
+            "assertion over nested data.\n\n"
+            "Numbers compare within tolerance: they match when the absolute "
+            "difference is at most max(rel_tol * max(abs(actual), "
+            "abs(expected)), abs_tol). Two NaNs match each other and a NaN "
+            "matches nothing else. Infinities match only the same-signed "
+            "infinity, whatever the tolerances. Negative and positive zero "
+            "match. bool is not a number here: True matches only True, and "
+            "never 1 or 1.0. Lists and tuples match element-wise, and only a "
+            "list matches a list. Dicts match when their key sets are equal "
+            "and every value matches. Strings, bytes, and None match by "
+            "equality. Any other type, or a structure mismatch, is False. "
+            "Recursion is by structure, so nesting may be arbitrarily deep."
+        ),
+        timeout_seconds=45.0,
+        validator=LOAD_CANDIDATE + require("close_enough") + r'''
+NAN = float("nan")
+INF = float("inf")
+
+
+def yes(actual, expected, note, rel_tol=1e-9, abs_tol=0.0):
+    got = close_enough(actual, expected, rel_tol, abs_tol)
+    assert got is True or got == True, (  # noqa: E712 - a truthy int is a bug
+        f"{note}: expected a match for {actual!r} vs {expected!r}, got {got!r}"
+    )
+
+
+def no(actual, expected, note, rel_tol=1e-9, abs_tol=0.0):
+    got = close_enough(actual, expected, rel_tol, abs_tol)
+    assert got is False or got == False, (  # noqa: E712
+        f"{note}: expected no match for {actual!r} vs {expected!r}, got {got!r}"
+    )
+
+
+# --- the tolerance formula itself ------------------------------------------
+yes(1.0, 1.0 + 1e-12, "well inside the relative tolerance")
+no(1.0, 1.1, "well outside it")
+yes(1e10, 1e10 + 1.0, "relative tolerance scales with magnitude", rel_tol=1e-9)
+no(1e-10, 1e-11, "relative tolerance does not rescue tiny magnitudes")
+yes(1e-10, 1e-11, "but an absolute tolerance does", abs_tol=1e-9)
+yes(0.0, 0.0, "zero matches zero with no tolerance at all")
+no(0.0, 1e-12, "a pure relative tolerance can never match against zero")
+yes(0.0, 1e-12, "an absolute tolerance can", abs_tol=1e-9)
+yes(-5.0, -5.0000000001, "negatives use magnitudes, not signed differences")
+no(-5.0, 5.0, "opposite signs are far apart")
+
+# --- the special values ----------------------------------------------------
+yes(NAN, NAN, "NaN matches NaN, which plain == does not")
+no(NAN, 1.0, "NaN matches nothing else")
+no(1.0, NAN, "and not in the other direction either")
+no(NAN, INF, "NaN is not an infinity")
+yes(INF, INF, "same-signed infinities match")
+yes(-INF, -INF, "including negative")
+no(INF, -INF, "opposite infinities do not")
+no(INF, 1e308, "an infinity does not match a large finite number")
+no(INF, 1e308, "not even with a huge tolerance", rel_tol=1.0, abs_tol=1e308)
+yes(-0.0, 0.0, "signed zeros match")
+yes(0.0, -0.0, "in both directions")
+
+# --- bool is not a number --------------------------------------------------
+yes(True, True, "True matches True")
+yes(False, False, "False matches False")
+no(True, 1, "a bool must not match an int")
+no(1, True, "nor an int a bool")
+no(True, 1.0, "nor a bool a float")
+no(1.0, True, "nor a float a bool")
+no(True, False, "and the two bools differ")
+no(0, False, "zero is not False here")
+
+# --- integers and floats do compare numerically ---------------------------
+yes(1, 1.0, "an int matches an equal float")
+yes(2, 2.0000000001, "and within tolerance")
+no(2, 3, "but not outside it")
+
+# --- containers ------------------------------------------------------------
+yes([1.0, 2.0], [1.0, 2.0 + 1e-12], "lists match element-wise")
+no([1.0, 2.0], [1.0, 2.5], "one bad element fails the list")
+no([1.0, 2.0], [1.0], "different lengths do not match")
+no([1.0, 2.0], (1.0, 2.0), "a list does not match a tuple")
+yes((1.0, 2.0), (1.0, 2.0), "a tuple matches a tuple")
+yes([], [], "empty lists match")
+no([], {}, "an empty list is not an empty dict")
+
+yes({"a": 1.0}, {"a": 1.0 + 1e-12}, "dict values compare with tolerance")
+no({"a": 1.0}, {"b": 1.0}, "different keys do not match")
+no({"a": 1.0}, {"a": 1.0, "b": 2.0}, "a missing key does not match")
+no({"a": 1.0, "b": 2.0}, {"a": 1.0}, "nor an extra one")
+yes({}, {}, "empty dicts match")
+
+# --- exact-equality types --------------------------------------------------
+yes("x", "x", "strings match exactly")
+no("x", "y", "and only exactly")
+no("1", 1, "a string does not match a number")
+yes(b"x", b"x", "bytes match exactly")
+no(b"x", "x", "bytes do not match a str")
+yes(None, None, "None matches None")
+no(None, 0, "None is not zero")
+no(None, "", "nor an empty string")
+
+# --- unsupported types are False, not an exception ------------------------
+no(object(), object(), "two unrelated objects do not match")
+no({1, 2}, {1, 2}, "a set is not a supported structure")
+
+# --- nesting ---------------------------------------------------------------
+yes(
+    {"points": [[1.0, 2.0], [3.0, 4.0]], "label": "run", "ok": True},
+    {"points": [[1.0, 2.0 + 1e-12], [3.0, 4.0]], "label": "run", "ok": True},
+    "nested structures recurse",
+)
+no(
+    {"points": [[1.0, 2.0], [3.0, 4.0]], "ok": True},
+    {"points": [[1.0, 2.0], [3.0, 4.5]], "ok": True},
+    "a deep mismatch still fails",
+)
+no(
+    {"ok": True},
+    {"ok": 1},
+    "the bool rule holds at depth too",
+)
+''',
+    ),
+    task(
+        f"{FAMILY}-0017", FAMILY,
+        prompt=(
+            "Implement a Python function simplify_control_flow(source, "
+            "function_name) that returns new source in which the body of "
+            "function_name has been simplified without changing what it "
+            "does. Apply all three of these, repeatedly until nothing "
+            "changes:\n\n"
+            "First, an if whose test is the literal True or False is "
+            "replaced by the branch that runs, with the other branch dropped; "
+            "when the surviving branch is empty the whole statement goes, and "
+            "when a body would become empty it gets a pass. Second, a "
+            "statement that follows a return or a raise in the same block is "
+            "unreachable and is removed. Third, when every path through an "
+            "if's body returns or raises, its else branch is unindented to "
+            "follow the if instead of nesting inside it.\n\n"
+            "Only literal True and False count as constant tests; a name or a "
+            "comparison never does. Behaviour must be identical for every "
+            "input."
+        ),
+        timeout_seconds=60.0,
+        validator=LOAD_CANDIDATE + require("simplify_control_flow") + r'''
+import ast
+
+
+def namespace(source):
+    scope = {}
+    exec(compile(source, "<case>", "exec"), scope)
+    return scope
+
+
+def body_of(source, name):
+    for node in ast.parse(source).body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    raise AssertionError(f"{name} is missing from the result")
+
+
+def same_behaviour(before, after, name, cases):
+    original, simplified = namespace(before), namespace(after)
+    for arguments in cases:
+        try:
+            expected = ("value", original[name](*arguments))
+        except Exception as exc:  # noqa: BLE001 - the class is the contract
+            expected = ("error", type(exc).__name__)
+        try:
+            actual = ("value", simplified[name](*arguments))
+        except Exception as exc:  # noqa: BLE001
+            actual = ("error", type(exc).__name__)
+        assert actual == expected, (
+            f"{name}{arguments!r} changed: {expected!r} -> {actual!r}"
+        )
+
+
+# --- constant tests, unreachable code, and an else that can be unindented --
+SOURCE = "\n".join([
+    "def classify(value):",
+    "    if False:",
+    "        return 'never'",
+    "    if True:",
+    "        marker = 'always'",
+    "    else:",
+    "        marker = 'unreachable'",
+    "    if value > 0:",
+    "        return marker + ':positive'",
+    "    else:",
+    "        if value == 0:",
+    "            raise ValueError('zero')",
+    "        else:",
+    "            return marker + ':negative'",
+    "    return 'dead'",
+])
+result = simplify_control_flow(SOURCE, "classify")
+same_behaviour(SOURCE, result, "classify", [(5,), (-5,), (0,), (1,), (-1,)])
+
+simplified = body_of(result, "classify")
+for node in ast.walk(simplified):
+    if isinstance(node, ast.If):
+        assert not (
+            isinstance(node.test, ast.Constant)
+            and isinstance(node.test.value, bool)
+        ), "a literal-constant if survived the simplification"
+
+assert "'never'" not in result, "the `if False` branch was kept"
+assert "'unreachable'" not in result, "the dead else of `if True` was kept"
+assert "'dead'" not in result, (
+    "the statement after the if/else is unreachable because both branches "
+    "return or raise, so it must be removed"
+)
+assert "'always'" in result, "the live branch of `if True` was lost"
+
+outer = [n for n in simplified.body if isinstance(n, ast.If)]
+assert outer and outer[0].orelse == [], (
+    "the `value > 0` body returns on every path, so its else must be "
+    "unindented to follow the if rather than nesting inside it"
+)
+
+# --- a name or comparison is not a constant test ---------------------------
+KEEP = "\n".join([
+    "def keep(flag, other):",
+    "    if flag:",
+    "        return 1",
+    "    if other == other:",
+    "        return 2",
+    "    return 3",
+])
+result = simplify_control_flow(KEEP, "keep")
+same_behaviour(KEEP, result, "keep", [
+    (True, 1), (False, 1), (0, 2), ("", 3), (None, 0),
+])
+kept = body_of(result, "keep")
+assert len([n for n in ast.walk(kept) if isinstance(n, ast.If)]) == 2, (
+    "neither `if flag` nor `if other == other` is a literal constant, so "
+    "both must survive"
+)
+
+# --- the rules must be applied to a fixed point ----------------------------
+# Removing the `if False` exposes a `return` that makes the next statement
+# unreachable, which in turn empties a block. One pass is not enough.
+CASCADE = "\n".join([
+    "def cascade(value):",
+    "    if True:",
+    "        if False:",
+    "            value = value * 100",
+    "        return value + 1",
+    "    value = value * 2",
+    "    return value",
+])
+result = simplify_control_flow(CASCADE, "cascade")
+same_behaviour(CASCADE, result, "cascade", [(0,), (1,), (-3,), (7,)])
+cascaded = body_of(result, "cascade")
+assert not [n for n in ast.walk(cascaded) if isinstance(n, ast.If)], (
+    "every if here is constant, so none should remain"
+)
+assert "* 100" not in result and "* 2" not in result, (
+    "both multiplications are unreachable"
+)
+
+# --- a body that would become empty needs a pass ---------------------------
+EMPTIED = "\n".join([
+    "def emptied(value):",
+    "    if value:",
+    "        if False:",
+    "            value = 1",
+    "    return value",
+])
+result = simplify_control_flow(EMPTIED, "emptied")
+same_behaviour(EMPTIED, result, "emptied", [(0,), (1,), ("",), ("x",)])
+compile(result, "<result>", "exec")
+
+# --- an unconditional raise also makes what follows unreachable ------------
+RAISER = "\n".join([
+    "def raiser(value):",
+    "    raise ValueError('always')",
+    "    return value",
+])
+result = simplify_control_flow(RAISER, "raiser")
+same_behaviour(RAISER, result, "raiser", [(1,), (2,)])
+assert "return value" not in result, (
+    "the return after an unconditional raise is unreachable"
+)
+''',
+    ),
+    task(
+        f"{FAMILY}-0018", FAMILY,
+        prompt=(
+            "Implement a Python function compare_snapshot(actual, stored, "
+            "patterns) for golden-file testing. patterns is a sequence of "
+            "(regex, replacement) pairs used to erase incidental detail such "
+            "as timestamps, temporary paths, and object addresses.\n\n"
+            "Normalize both texts by splitting them into lines on '\\n', "
+            "dropping a single trailing empty line if the text ended with a "
+            "newline, and applying every pattern to every line in the order "
+            "given, replacing all occurrences. Return the pair (matched, "
+            "differences). matched is True when the normalized line lists are "
+            "equal. differences is a list of (index, stored_line, "
+            "actual_line) for every position where they differ, using None on "
+            "whichever side has no line at that index, ordered by index. "
+            "Return the normalized actual lines as a third element only when "
+            "asked: the function takes a keyword-only argument update "
+            "defaulting to False, and when it is True return (matched, "
+            "differences, normalized_actual_lines) instead."
+        ),
+        timeout_seconds=45.0,
+        validator=LOAD_CANDIDATE + require("compare_snapshot") + r'''
+TIMESTAMP = (r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", "<TS>")
+ADDRESS = (r"0x[0-9a-f]+", "<ADDR>")
+TMPDIR = (r"/tmp/[A-Za-z0-9_]+", "<TMP>")
+PATTERNS = [TIMESTAMP, ADDRESS, TMPDIR]
+
+# --- incidental detail must not fail the comparison -----------------------
+stored = (
+    "run started 2026-01-01T00:00:00\n"
+    "object <Widget at 0xdeadbeef>\n"
+    "workspace /tmp/aaaaaaa\n"
+)
+actual = (
+    "run started 2026-09-05T18:30:12\n"
+    "object <Widget at 0x1234abcd>\n"
+    "workspace /tmp/zz99zz\n"
+)
+matched, differences = compare_snapshot(actual, stored, PATTERNS)
+assert matched is True, (
+    f"only the normalized detail differs, so this matches; got {differences!r}"
+)
+assert differences == [], f"a match reports no differences; got {differences!r}"
+
+# --- normalization must not hide a real change ----------------------------
+changed = (
+    "run started 2026-09-05T18:30:12\n"
+    "object <Gadget at 0x1234abcd>\n"
+    "workspace /tmp/zz99zz\n"
+)
+matched, differences = compare_snapshot(changed, stored, PATTERNS)
+assert matched is False, "Widget became Gadget, which is a real change"
+assert differences == [
+    (1, "object <Widget at <ADDR>>", "object <Gadget at <ADDR>>"),
+], f"got {differences!r}"
+
+# --- with no patterns the same texts differ everywhere --------------------
+matched, differences = compare_snapshot(actual, stored, [])
+assert matched is False, "without normalization every line differs"
+assert [index for index, _, _ in differences] == [0, 1, 2], (
+    f"got {differences!r}"
+)
+
+# --- a trailing newline is not a difference, but a blank line is ----------
+matched, differences = compare_snapshot("a\nb\n", "a\nb", PATTERNS)
+assert matched is True, (
+    f"one trailing newline is dropped on both sides; got {differences!r}"
+)
+matched, differences = compare_snapshot("a\nb\n\n", "a\nb\n", PATTERNS)
+assert matched is False, (
+    "the second text has a genuine trailing blank line"
+)
+assert differences == [(2, None, "")], f"got {differences!r}"
+
+# --- length mismatches use None on the short side -------------------------
+matched, differences = compare_snapshot("a\nb\nc\n", "a\n", PATTERNS)
+assert matched is False, "the actual text has two extra lines"
+assert differences == [(1, None, "b"), (2, None, "c")], f"got {differences!r}"
+matched, differences = compare_snapshot("a\n", "a\nb\nc\n", PATTERNS)
+assert differences == [(1, "b", None), (2, "c", None)], f"got {differences!r}"
+
+# --- patterns apply in order and to every occurrence ----------------------
+# The second pattern rewrites what the first produced, so applying them in the
+# wrong order, or only to the first match on a line, gives a different result.
+ordered = [(r"a", "b"), (r"b", "c")]
+matched, differences, normalized = compare_snapshot(
+    "aaa", "ccc", ordered, update=True
+)
+assert normalized == ["ccc"], (
+    "every 'a' becomes 'b' and then every 'b' becomes 'c'; got "
+    f"{normalized!r}"
+)
+assert matched is True, f"got {differences!r}"
+
+matched, differences, normalized = compare_snapshot(
+    "aaa", "aaa", list(reversed(ordered)), update=True
+)
+assert normalized == ["bbb"], (
+    "with the patterns reversed the 'b' rule runs first and matches nothing, "
+    "so only 'a' -> 'b' applies; a candidate that applies them in a fixed or "
+    f"sorted order produces 'ccc' here. got {normalized!r}"
+)
+assert matched is True, f"got {differences!r}"
+
+# --- update returns the lines to store ------------------------------------
+result = compare_snapshot(changed, stored, PATTERNS, update=True)
+assert len(result) == 3, f"update mode returns a triple; got {len(result)}"
+matched, differences, normalized = result
+assert matched is False, "update mode still reports the comparison"
+assert normalized == [
+    "run started <TS>",
+    "object <Gadget at <ADDR>>",
+    "workspace <TMP>",
+], f"the stored form is the normalized actual text; got {normalized!r}"
+assert len(compare_snapshot(changed, stored, PATTERNS)) == 2, (
+    "without update the result is a pair"
+)
+
+# --- empty texts -----------------------------------------------------------
+matched, differences = compare_snapshot("", "", PATTERNS)
+assert matched is True and differences == [], f"got {differences!r}"
+matched, differences = compare_snapshot("", "a", PATTERNS)
+assert matched is False and differences == [(0, "a", "")], f"got {differences!r}"
+''',
+    ),
 ]
