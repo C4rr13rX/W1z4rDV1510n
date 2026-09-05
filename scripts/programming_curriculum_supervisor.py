@@ -3063,7 +3063,17 @@ def replay_interval_recall_command(args: argparse.Namespace, phase: Phase,
     return command
 
 
-PROTECTED_ROUTE_CERTIFICATE_VERSION = 4
+#: Bump whenever the protected-route probe SET changes, not just its logic.
+#:
+#: The certificate is cached against the brain's tick, and a rollback restores
+#: the guard's tick exactly -- so a certificate written before a rollback
+#: revalidates after it, forever. That is sound only while the certificate
+#: covers the same suites the preflight would run now. Version 4 was written
+#: on 2026-09-02 at tick 4148213 for a probe set of multilanguage + python;
+#: adding typescript in version 5 made it stale, and without this bump the
+#: preflight short-circuited on it and skipped the typescript probe entirely
+#: on every post-rollback run -- precisely when the route needs re-seeding.
+PROTECTED_ROUTE_CERTIFICATE_VERSION = 5
 PROTECTED_ROUTE_REFRESH_REPEATS = 8
 
 

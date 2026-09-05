@@ -2132,6 +2132,31 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         self.assertIn('"/brain/pretrain_bindings"', source)
         self.assertNotIn('"/brain/pretrain/batch"', source)
 
+    def test_changing_the_protected_probe_set_invalidates_the_certificate(self) -> None:
+        """The probe set and the certificate version must move together.
+
+        The certificate short-circuits the preflight when its cached tick
+        matches the brain's. A rollback restores the guard's tick exactly, so
+        a certificate written before a rollback revalidates after it forever
+        -- sound only while it covers the suites the preflight would run now.
+
+        Adding typescript to the probe set without bumping the version left a
+        certificate written 2026-09-02 at tick 4148213, for multilanguage +
+        python only, still authoritative. The preflight took the cached branch
+        and never probed typescript on any post-rollback run, which is exactly
+        when the discarded route needs re-seeding. This pairing is asserted so
+        the next probe-set change cannot repeat it.
+        """
+        self.assertEqual(
+            (sup.PROTECTED_ROUTE_CERTIFICATE_VERSION,
+             tuple(sorted(sup.PROTECTED_ROUTE_SUITES))),
+            (5, ("multilanguage", "python", "typescript")),
+            "the protected-route probe set changed: bump "
+            "PROTECTED_ROUTE_CERTIFICATE_VERSION so certificates written for "
+            "the old set stop revalidating after a rollback, then update this "
+            "pairing",
+        )
+
     def test_gate_suites_that_can_be_rolled_back_are_protected_routes(self) -> None:
         """Every suite the completion gate demands must be re-seedable.
 
