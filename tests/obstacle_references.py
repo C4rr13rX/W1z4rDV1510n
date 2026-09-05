@@ -3753,6 +3753,453 @@ def move_selection(items, selected, to_index):
 '''
 
 
+REFERENCES["polyglot_native_interop-0001"] = r'''
+#: (size, natural alignment) per C type name.
+_TYPES = {
+    "int8": (1, 1), "uint8": (1, 1),
+    "int16": (2, 2), "uint16": (2, 2),
+    "int32": (4, 4), "uint32": (4, 4),
+    "int64": (8, 8), "uint64": (8, 8),
+    "float": (4, 4), "double": (8, 8),
+    "pointer": (8, 8),
+}
+
+
+def _round_up(value, alignment):
+    remainder = value % alignment
+    return value if remainder == 0 else value + alignment - remainder
+
+
+def layout(fields, pack=None):
+    if pack is not None:
+        if not isinstance(pack, int) or isinstance(pack, bool) or pack < 1 \
+                or pack & (pack - 1):
+            raise ValueError(f"pack must be a positive power of two: {pack!r}")
+
+    offsets = {}
+    cursor = 0
+    struct_alignment = 1
+    for name, kind in fields:
+        if kind not in _TYPES:
+            raise ValueError(f"unknown type {kind!r}")
+        if name in offsets:
+            raise ValueError(f"duplicate field name {name!r}")
+        size, alignment = _TYPES[kind]
+        if pack is not None:
+            alignment = min(alignment, pack)
+        cursor = _round_up(cursor, alignment)
+        offsets[name] = cursor
+        cursor += size
+        struct_alignment = max(struct_alignment, alignment)
+
+    # Trailing padding: without it an array of this struct would put every
+    # element after the first at a misaligned address.
+    return {
+        "offsets": offsets,
+        "size": _round_up(cursor, struct_alignment),
+        "alignment": struct_alignment,
+    }
+'''
+
+
+REFERENCES["polyglot_native_interop-0002"] = r'''
+def encode_varint(value):
+    if value < -(2 ** 63) or value > 2 ** 64 - 1:
+        raise ValueError(f"{value} does not fit a 64-bit varint")
+    if value < 0:
+        # Protobuf sign-extends to 64 bits, which is why a negative varint
+        # is always the maximum ten bytes long.
+        value += 1 << 64
+    out = bytearray()
+    while True:
+        group = value & 0x7F
+        value >>= 7
+        if value:
+            out.append(group | 0x80)
+        else:
+            out.append(group)
+            return bytes(out)
+
+
+def decode_varint(data, offset=0):
+    value = 0
+    shift = 0
+    index = offset
+    for _ in range(10):
+        if index >= len(data):
+            raise ValueError("varint ends past the end of the data")
+        byte = data[index]
+        index += 1
+        value |= (byte & 0x7F) << shift
+        if not byte & 0x80:
+            return (value, index)
+        shift += 7
+    raise ValueError("varint is longer than ten bytes")
+
+
+def encode_zigzag(value):
+    return (value << 1) ^ (value >> 63) if value < 0 else value << 1
+
+
+def decode_zigzag(value):
+    return (value >> 1) ^ -(value & 1)
+'''
+
+
+REFERENCES["polyglot_native_interop-0003"] = r'''
+def _units(text):
+    units = []
+    for character in text:
+        point = ord(character)
+        if point < 0x10000:
+            units.append(point)
+        else:
+            rest = point - 0x10000
+            units.append(0xD800 + (rest >> 10))
+            units.append(0xDC00 + (rest & 0x3FF))
+    return units
+
+
+def utf16_length(text):
+    return len(_units(text))
+
+
+def encode_utf16_units(text):
+    return tuple(_units(text))
+
+
+def decode_utf16_units(units):
+    out = []
+    pending = None
+    for unit in units:
+        if not isinstance(unit, int) or unit < 0 or unit > 0xFFFF:
+            raise ValueError(f"{unit!r} is not a UTF-16 code unit")
+        if pending is not None:
+            if not 0xDC00 <= unit <= 0xDFFF:
+                raise ValueError("a high surrogate was not followed by a low")
+            out.append(chr(0x10000 + ((pending - 0xD800) << 10)
+                           + (unit - 0xDC00)))
+            pending = None
+        elif 0xD800 <= unit <= 0xDBFF:
+            pending = unit
+        elif 0xDC00 <= unit <= 0xDFFF:
+            raise ValueError("a low surrogate appeared without a high one")
+        else:
+            out.append(chr(unit))
+    if pending is not None:
+        raise ValueError("the text ends on an unpaired high surrogate")
+    return "".join(out)
+
+
+def code_point_index(text, unit_index):
+    total = utf16_length(text)
+    if unit_index < 0 or unit_index > total:
+        raise IndexError(f"unit offset {unit_index} is outside 0..{total}")
+    consumed = 0
+    for position, character in enumerate(text):
+        if consumed == unit_index:
+            return position
+        consumed += 2 if ord(character) >= 0x10000 else 1
+        if consumed > unit_index:
+            raise ValueError(
+                f"unit offset {unit_index} falls inside a surrogate pair")
+    return len(text)
+'''
+
+
+REFERENCES["polyglot_native_interop-0004"] = r'''
+_WIDTHS = (8, 16, 32, 64)
+
+
+def _check(bits):
+    if bits not in _WIDTHS:
+        raise ValueError(f"{bits} is not a C integer width")
+
+
+def wrap(value, bits, signed):
+    _check(bits)
+    value &= (1 << bits) - 1
+    if signed and value >> (bits - 1):
+        value -= 1 << bits
+    return value
+
+
+def _range(bits, signed):
+    if signed:
+        return -(1 << (bits - 1)), (1 << (bits - 1)) - 1
+    return 0, (1 << bits) - 1
+
+
+def add(a, b, bits, signed):
+    _check(bits)
+    exact = a + b
+    low, high = _range(bits, signed)
+    return (wrap(exact, bits, signed), not low <= exact <= high)
+
+
+def mul(a, b, bits, signed):
+    _check(bits)
+    exact = a * b
+    low, high = _range(bits, signed)
+    return (wrap(exact, bits, signed), not low <= exact <= high)
+
+
+def shift_right(value, amount, bits, signed):
+    _check(bits)
+    if amount < 0 or amount >= bits:
+        raise ValueError(f"shift of {amount} is undefined for {bits} bits")
+    # Wrapping into the type first is the whole of it. Python's >> is
+    # arithmetic on an integer of unbounded width, which is exactly right
+    # once the value carries the type's own sign: an unsigned value has
+    # wrapped to a non-negative one, so the same operator shifts in zeros.
+    value = wrap(value, bits, signed)
+    return value >> amount
+'''
+
+
+REFERENCES["polyglot_native_interop-0005"] = r'''
+import struct
+
+
+def float_to_bits(value):
+    return struct.unpack(">I", struct.pack(">f", value))[0]
+
+
+def bits_to_float(bits):
+    if not isinstance(bits, int) or isinstance(bits, bool) \
+            or bits < 0 or bits > 2 ** 32 - 1:
+        raise ValueError(f"{bits!r} is not a 32-bit pattern")
+    return struct.unpack(">f", struct.pack(">I", bits))[0]
+
+
+def half_bits_to_float(bits):
+    if not isinstance(bits, int) or isinstance(bits, bool) \
+            or bits < 0 or bits > 0xFFFF:
+        raise ValueError(f"{bits!r} is not a 16-bit pattern")
+    sign = -1.0 if bits >> 15 else 1.0
+    exponent = (bits >> 10) & 0x1F
+    significand = bits & 0x3FF
+    if exponent == 0x1F:
+        if significand:
+            return float("nan")
+        return sign * float("inf")
+    if exponent == 0:
+        # Subnormal: no implicit leading one, and the exponent is the same
+        # as the smallest normal rather than one below it.
+        return sign * (2.0 ** -14) * (significand / 1024)
+    return sign * (2.0 ** (exponent - 15)) * (1 + significand / 1024)
+'''
+
+
+REFERENCES["polyglot_native_interop-0006"] = r'''
+def to_c_string(text, capacity):
+    if "\x00" in text:
+        raise ValueError("the text contains a NUL and would be truncated")
+    encoded = text.encode("utf-8")
+    if len(encoded) + 1 > capacity:
+        raise ValueError(
+            f"{len(encoded)} bytes plus a terminator do not fit {capacity}")
+    return encoded + b"\x00" * (capacity - len(encoded))
+
+
+def from_c_string(buffer):
+    end = bytes(buffer).find(b"\x00")
+    if end < 0:
+        raise ValueError("the buffer has no NUL terminator")
+    return bytes(buffer[:end]).decode("utf-8")
+
+
+def truncate_utf8(data, limit):
+    if limit < 0:
+        raise ValueError("limit must not be negative")
+    if limit >= len(data):
+        return bytes(data)
+    end = limit
+    # Walk back off continuation bytes so the cut never lands inside a
+    # sequence; the lead byte goes with them.
+    while end > 0 and (data[end] & 0xC0) == 0x80:
+        end -= 1
+    return bytes(data[:end])
+'''
+
+
+REFERENCES["polyglot_native_interop-0007"] = r'''
+EPOCH_DIFFERENCE_SECONDS = 11644473600
+TICKS_PER_SECOND = 10_000_000
+
+_UNIX_EPOCH_IN_TICKS = EPOCH_DIFFERENCE_SECONDS * TICKS_PER_SECOND
+
+
+def filetime_to_unix(ticks):
+    if not isinstance(ticks, int) or isinstance(ticks, bool) \
+            or ticks < 0 or ticks > 2 ** 64 - 1:
+        raise ValueError(f"{ticks!r} is not an unsigned 64-bit FILETIME")
+    return (ticks - _UNIX_EPOCH_IN_TICKS) / TICKS_PER_SECOND
+
+
+def unix_to_filetime(seconds):
+    ticks = round(seconds * TICKS_PER_SECOND) + _UNIX_EPOCH_IN_TICKS
+    if ticks < 0 or ticks > 2 ** 64 - 1:
+        raise ValueError(f"{seconds!r} is outside the FILETIME range")
+    return ticks
+'''
+
+
+REFERENCES["polyglot_native_interop-0008"] = r'''
+_PRIMITIVES = {
+    "Z": "boolean", "B": "byte", "C": "char", "S": "short",
+    "I": "int", "J": "long", "F": "float", "D": "double",
+}
+
+
+def _read_type(signature, index, allow_void):
+    dimensions = 0
+    while index < len(signature) and signature[index] == "[":
+        dimensions += 1
+        index += 1
+    if index >= len(signature):
+        raise ValueError(f"truncated type in {signature!r}")
+    code = signature[index]
+    index += 1
+    if code == "V":
+        if not allow_void or dimensions:
+            raise ValueError("void is only legal as an unarrayed return type")
+        name = "void"
+    elif code == "L":
+        end = signature.find(";", index)
+        if end < 0 or end == index:
+            raise ValueError(f"unterminated object type in {signature!r}")
+        name = signature[index:end].replace("/", ".")
+        index = end + 1
+    elif code in _PRIMITIVES:
+        name = _PRIMITIVES[code]
+    else:
+        raise ValueError(f"unknown type code {code!r}")
+    return name + "[]" * dimensions, index
+
+
+def parse_signature(signature):
+    if not signature or signature[0] != "(":
+        raise ValueError("a descriptor starts with '('")
+    close = signature.find(")")
+    if close < 0:
+        raise ValueError("a descriptor needs a ')'")
+
+    parameters = []
+    index = 1
+    while index < close:
+        name, index = _read_type(signature, index, False)
+        if index > close:
+            raise ValueError("a parameter type runs past the ')'")
+        parameters.append(name)
+
+    returned, index = _read_type(signature, close + 1, True)
+    if index != len(signature):
+        raise ValueError("trailing text after the return type")
+    return (tuple(parameters), returned)
+'''
+
+
+REFERENCES["polyglot_native_interop-0009"] = r'''
+def _prepare(fields, order):
+    if order not in ("lsb", "msb"):
+        raise ValueError(f"unknown bit order {order!r}")
+    seen = set()
+    total = 0
+    for name, width in fields:
+        if width < 1:
+            raise ValueError(f"field {name!r} has width {width}")
+        if name in seen:
+            raise ValueError(f"duplicate field name {name!r}")
+        seen.add(name)
+        total += width
+    if total > 64:
+        raise ValueError(f"{total} bits do not fit a 64-bit container")
+    return total
+
+
+def _positions(fields, total, order):
+    # Yields (name, width, shift), where shift is the field's low bit.
+    if order == "lsb":
+        shift = 0
+        for name, width in fields:
+            yield name, width, shift
+            shift += width
+    else:
+        shift = total
+        for name, width in fields:
+            shift -= width
+            yield name, width, shift
+
+
+def pack_bits(fields, values, order):
+    total = _prepare(fields, order)
+    expected = {name for name, _ in fields}
+    if set(values) != expected:
+        raise KeyError(
+            f"values {sorted(values)} are not the fields {sorted(expected)}")
+    packed = 0
+    for name, width, shift in _positions(fields, total, order):
+        value = values[name]
+        if value < 0 or value >> width:
+            raise ValueError(f"{name}={value} does not fit {width} bits")
+        packed |= value << shift
+    return packed
+
+
+def unpack_bits(fields, packed, order):
+    total = _prepare(fields, order)
+    if packed < 0 or packed >> total:
+        raise ValueError(f"{packed} does not fit {total} bits")
+    return {
+        name: (packed >> shift) & ((1 << width) - 1)
+        for name, width, shift in _positions(fields, total, order)
+    }
+'''
+
+
+REFERENCES["polyglot_native_interop-0010"] = r'''
+#: Types narrower than int are promoted to int; float is promoted to double.
+_PROMOTIONS = {
+    "bool": "int",
+    "char": "int",
+    "signed char": "int",
+    "unsigned char": "int",
+    "short": "int",
+    "unsigned short": "int",
+    "float": "double",
+}
+
+#: Size of every type that can appear AFTER promotion. Alignment equals size.
+_SIZES = {
+    "int": 4, "unsigned int": 4,
+    "long": 8, "unsigned long": 8, "long long": 8,
+    "double": 8, "pointer": 8,
+}
+
+
+def varargs_layout(arguments):
+    placed = []
+    cursor = 0
+    widest = 1
+    for ctype, value in arguments:
+        if ctype not in _PROMOTIONS and ctype not in _SIZES:
+            raise ValueError(f"unknown C type {ctype!r}")
+        promoted = _PROMOTIONS.get(ctype, ctype)
+        size = _SIZES[promoted]
+        remainder = cursor % size
+        if remainder:
+            cursor += size - remainder
+        placed.append((promoted, value, cursor))
+        cursor += size
+        widest = max(widest, size)
+    remainder = cursor % widest
+    if remainder:
+        cursor += widest - remainder
+    return {"arguments": placed, "size": cursor}
+'''
+
+
 MUTATIONS: dict[str, tuple[str, str]] = {
     # Sign the payload alone, so the header can be rewritten after signing
     # and the token still verifies -- the alg-confusion family.
@@ -4298,5 +4745,66 @@ MUTATIONS: dict[str, tuple[str, str]] = {
     "frontend_state_ux_accessibility-0012": (
         "    position = to_index - (1 if from_index < to_index else 0)",
         "    position = to_index",
+    ),
+    # Report the struct's size as the end of its last member, dropping the
+    # trailing padding that keeps element one of an array aligned.
+    "polyglot_native_interop-0001": (
+        '        "size": _round_up(cursor, struct_alignment),',
+        '        "size": cursor,',
+    ),
+    # Encode a negative varint as a magnitude instead of sign-extending it
+    # to 64 bits, producing one byte where the wire format needs ten.
+    "polyglot_native_interop-0002": (
+        "        value += 1 << 64",
+        "        value = -value",
+    ),
+    # Count code points rather than code units, which is Python's length and
+    # not the length the other runtime indexes and slices by.
+    "polyglot_native_interop-0003": (
+        "def utf16_length(text):\n    return len(_units(text))",
+        "def utf16_length(text):\n    return len(text)",
+    ),
+    # Wrap as signed whatever the type asked for, so an unsigned right shift
+    # keeps a sign bit the C type does not have and drags ones down from the
+    # top instead of zeros.
+    "polyglot_native_interop-0004": (
+        "    value = wrap(value, bits, signed)\n    return value >> amount",
+        "    value = wrap(value, bits, True)\n    return value >> amount",
+    ),
+    # Bias the binary16 exponent by 16 instead of 15, halving every normal
+    # value while leaving zero, the infinities and the NaNs looking right.
+    "polyglot_native_interop-0005": (
+        "    return sign * (2.0 ** (exponent - 15)) * (1 + significand / 1024)",
+        "    return sign * (2.0 ** (exponent - 16)) * (1 + significand / 1024)",
+    ),
+    # Cut at the byte limit without backing off the continuation bytes, so
+    # the receiver is handed a prefix that does not decode.
+    "polyglot_native_interop-0006": (
+        "    while end > 0 and (data[end] & 0xC0) == 0x80:",
+        "    while False:",
+    ),
+    # Treat a tick as a microsecond rather than 100 nanoseconds: every
+    # converted timestamp is off by a factor of ten.
+    "polyglot_native_interop-0007": (
+        "TICKS_PER_SECOND = 10_000_000",
+        "TICKS_PER_SECOND = 1_000_000",
+    ),
+    # Leave the class name in JNI internal form, so every object type comes
+    # back as java/lang/String and no source-level name matches.
+    "polyglot_native_interop-0008": (
+        'name = signature[index:end].replace("/", ".")',
+        "name = signature[index:end]",
+    ),
+    # Lay the fields out least-significant-first whatever the order asked
+    # for, quietly reversing every header packed most-significant-first.
+    "polyglot_native_interop-0009": (
+        "    if order == \"lsb\":\n        shift = 0",
+        "    if True:\n        shift = 0",
+    ),
+    # Skip the default argument promotions, so a float occupies four bytes
+    # and every argument after it is read from the wrong offset.
+    "polyglot_native_interop-0010": (
+        "        promoted = _PROMOTIONS.get(ctype, ctype)",
+        "        promoted = ctype",
     ),
 }
