@@ -49,6 +49,16 @@ MAX_COPY_RESERVE_BYTES = 4 * 1024 * 1024 * 1024
 RESOURCE_SETTLED_EXIT = 88
 RESOURCE_SETTLEMENT_FAILED_EXIT = 89
 
+#: How many consecutive resource yields may end a replay pass without the
+#: pass having made any durable progress, before that counts as a failure.
+#:
+#: Each yield settles and recycles the node, which is what actually returns
+#: the memory (measured 2.99 GB -> 14.66 GB), so a barren yield is normally
+#: followed by a pass that runs. Three of them in a row means recycling is no
+#: longer buying a window, and that is a real fault worth surfacing rather
+#: than spinning on billed compute.
+MAX_BARREN_REPLAY_YIELDS = 3
+
 
 class GateCommandFailure(RuntimeError):
     """A gate subprocess failed after it was launched successfully."""
@@ -411,7 +421,9 @@ def replay_memory_floor_breached(min_free_memory_gb: float,
 def run_deferred_replay_worker(args: argparse.Namespace, phase: Phase,
                                runtime: Path, event: dict, status_path: Path,
                                interval_id: str, stdout, stderr,
-                               build_command=None):
+                               build_command=None, resume_row=None,
+                               digest=None, guard_identity=None,
+                               replay_progress=None):
     """Run one deferred-replay interval, yielding the host before it OOMs.
 
     Replaces a blocking `subprocess.run`. Polls the worker; if host memory
@@ -420,22 +432,54 @@ def run_deferred_replay_worker(args: argparse.Namespace, phase: Phase,
     node process -- which is what actually returns allocator-retained pages,
     measured 13.12 GB -> 8.66 GB RSS across one restart.
 
+    Checkpoints the resume row AS THE PASS RUNS, not only when it finishes.
+    The caller recorded it once per completed pass, so anything that ended a
+    pass early -- a supervisor restart, a host reboot, a kill that is not a
+    resource yield -- threw away every row the pass had trained and started
+    the interval again from its first row. Measured 2026-09-05: two restarts
+    inside one hour discarded 29,552 and then 1,776 already-durable episodes,
+    and at ~13 rows/s a 49,152-row pass is an hour of billed compute to lose.
+
+    Recording mid-pass is only sound because the worker runs `--wal-durable`:
+    `durable_next_row` advances behind a WAL flush, so a brain that dies
+    uncleanly recovers exactly those rows on replay. That in turn is only
+    true with the fixed WAL reader -- before it, replay stopped at the first
+    short read and the rows were NOT there. Do not port this back to a binary
+    without that fix.
+
     Returns an object exposing `.returncode`, matching the previous contract.
     """
     poll_seconds = max(1.0, float(getattr(args, "poll_seconds", 2.0)))
     floor_gb = max(0.0, float(getattr(args, "min_free_memory_gb", 0.0)))
     build = build_command or deferred_replay_command
     worker = subprocess.Popen(
-        build(args, phase, runtime, event),
+        build(args, phase, runtime, event, resume_row),
         cwd=ROOT,
         stdout=stdout,
         stderr=stderr,
     )
+    can_checkpoint = (
+        digest is not None
+        and guard_identity is not None
+        and replay_progress is not None
+        and resume_row is not None
+    )
+    recorded_row = int(resume_row or 0)
     streak = 0
     while True:
         code = worker.poll()
         if code is not None:
+            if can_checkpoint:
+                checkpoint_replay_resume(
+                    runtime, digest, event, guard_identity,
+                    replay_progress, recorded_row,
+                )
             return worker
+        if can_checkpoint:
+            recorded_row = checkpoint_replay_resume(
+                runtime, digest, event, guard_identity,
+                replay_progress, recorded_row,
+            )
         if replay_memory_floor_breached(floor_gb):
             streak += 1
         else:
@@ -476,6 +520,12 @@ def run_deferred_replay_worker(args: argparse.Namespace, phase: Phase,
                 "recycled": recycled,
                 "error": error,
             })
+            # A yield is a deliberate pause at an already WAL-durable
+            # boundary, not a crash. Flagging it lets the caller resume the
+            # interval from that boundary instead of rolling the whole span
+            # back: treating SIGTERM as a semantic failure is what produced
+            # 288 `deferred_replay_failed` events against 19 yields.
+            worker.resource_yield = True
             return worker
         time.sleep(poll_seconds)
 
@@ -2826,6 +2876,95 @@ def deferred_replay_marker_path(runtime: Path) -> Path:
     return runtime / "deferred-replay-active.json"
 
 
+def deferred_replay_resume_path(runtime: Path, digest: str) -> Path:
+    return runtime / f"deferred-replay-{digest}.resume.json"
+
+
+def last_good_guard_identity(runtime: Path) -> str:
+    """Name the exact accepted state a partial replay was trained onto.
+
+    A resumed pass is only valid if the brain still holds the rows the
+    previous pass trained. Every rollback path restores the last-good guard
+    and publishes a new one, so the guard's own barrier is a sufficient
+    identity: if it changed, the prefix this record describes is gone and the
+    interval must be retrained from its first row.
+    """
+    guard = read_json(runtime / "brain" / "brain.last-good.json")
+    checkpoint = (guard.get("checkpoint_proof") or {}).get("checkpoint") or {}
+    return ":".join(str(part) for part in (
+        guard.get("phase") or "",
+        guard.get("created_unix") or 0,
+        checkpoint.get("tick") or 0,
+    ))
+
+
+def record_deferred_replay_resume(runtime: Path, digest: str, event: dict,
+                                  guard_identity: str, row: int) -> None:
+    publish(deferred_replay_resume_path(runtime, digest), {
+        "interval_id": str(event["interval_id"]),
+        "start_row": int(event["start_row"]),
+        "end_row": int(event["end_row"]),
+        "durable_next_row": int(row),
+        "guard_identity": guard_identity,
+        "updated_unix": time.time(),
+    })
+
+
+def deferred_replay_resume_row(runtime: Path, digest: str, event: dict,
+                               guard_identity: str) -> int:
+    """Return the first row of this interval not yet durably trained.
+
+    Rows below the returned row are already live on the brain, so replaying
+    them again is pure waste; rows at or above it have never been trained and
+    the interval's recall gate covers all of them.
+    """
+    start = int(event["start_row"])
+    end = int(event["end_row"])
+    record = read_json(deferred_replay_resume_path(runtime, digest))
+    if record.get("interval_id") != str(event["interval_id"]):
+        return start
+    if record.get("guard_identity") != guard_identity:
+        return start
+    row = int(record.get("durable_next_row") or 0)
+    if not start < row <= end:
+        return start
+    return row
+
+
+def checkpoint_replay_resume(runtime: Path, digest: str, event: dict,
+                             guard_identity: str, replay_progress: Path,
+                             recorded_row: int) -> int:
+    """Persist the boundary a running pass has already made WAL-durable.
+
+    Returns the row now on record, so the poll loop only writes when the
+    worker has actually advanced. Never lowers the recorded row and never
+    records outside the interval: a resume row past `end_row` would hand the
+    admission gate rows the replay never posted.
+    """
+    try:
+        durable = replay_pass_durable_row(
+            replay_progress, recorded_row, int(event["end_row"])
+        )
+    except (OSError, ValueError, KeyError, TypeError):
+        return recorded_row
+    if durable <= recorded_row:
+        return recorded_row
+    if not int(event["start_row"]) < durable <= int(event["end_row"]):
+        return recorded_row
+    record_deferred_replay_resume(
+        runtime, digest, event, guard_identity, durable
+    )
+    return durable
+
+
+def replay_pass_durable_row(progress_path: Path, resume_row: int,
+                            interval_end: int) -> int:
+    """Read the WAL-durable boundary a replay pass actually reached."""
+    progress = read_json(progress_path)
+    durable = int(progress.get("durable_next_row") or 0)
+    return max(int(resume_row), min(durable, int(interval_end)))
+
+
 def deferred_handoff_exit_code(forward_harvest: bool) -> int:
     """Distinguish a completed forward harvest from an incomplete run.
 
@@ -2838,11 +2977,13 @@ def deferred_handoff_exit_code(forward_harvest: bool) -> int:
 
 
 def deferred_replay_command(args: argparse.Namespace, phase: Phase,
-                            runtime: Path, event: dict) -> list[str]:
+                            runtime: Path, event: dict,
+                            resume_row: int | None = None) -> list[str]:
     """Build an exact, independently durable replay for one quarantined span.
 
-    Trains at most `replay_rows_per_pass` rows per invocation so the
-    post-training admission gate fits inside the host's memory window.
+    Trains at most `replay_rows_per_pass` rows per invocation, starting at
+    `resume_row`, so the post-training admission gate fits inside the host's
+    memory window while successive passes still cover the whole interval.
 
     Measured 2026-09-05 over 16 unattended hours: a 131,072-row interval takes
     ~9,000 s and the brain exhausts its headroom in 2.0-2.5 h, so the worker
@@ -2854,15 +2995,20 @@ def deferred_replay_command(args: argparse.Namespace, phase: Phase,
     never win, because the interval was sized to consume exactly the window
     the gate also needed.
 
-    The worker resumes from its own `durable_next_row`, so a capped pass
-    trains a prefix and the next pass continues from that exact row; the
-    interval is only marked resolved once its whole span has passed the gate.
+    The driver does NOT resume by itself: it reads `--start-row` and
+    `--limit-rows` from its arguments and never consults the progress file it
+    writes. Capping alone therefore retrained the identical prefix on every
+    pass and left the rest of the interval untrained forever, so the caller
+    must supply `resume_row` from the previous pass's WAL-durable boundary.
+    The interval is only marked resolved once its whole span has passed the
+    gate.
     """
     start = int(event["start_row"])
     end = int(event["end_row"])
+    resume = start if resume_row is None else min(max(int(resume_row), start), end)
     cap = max(0, int(getattr(args, "replay_rows_per_pass", 0) or 0))
     if cap:
-        end = min(end, start + cap)
+        end = min(end, resume + cap)
     digest = hashlib.sha256(
         str(event["interval_id"]).encode("utf-8")
     ).hexdigest()[:16]
@@ -2877,9 +3023,9 @@ def deferred_replay_command(args: argparse.Namespace, phase: Phase,
         "--input-path", str(phase.corpus),
         "--repeats", str(phase.repeats),
         "--direct-pretrain",
-        "--start-row", str(start),
-        "--limit-rows", str(end - start),
-        "--durable-start-row", str(start),
+        "--start-row", str(resume),
+        "--limit-rows", str(end - resume),
+        "--durable-start-row", str(resume),
         "--batch-size", str(args.batch_size),
         "--lock-chunk-size", str(args.lock_chunk_size),
         "--initial-lock-chunk-size", str(initial_lock_chunk_size),
@@ -3304,7 +3450,22 @@ def refresh_replay_candidate_routes(
 def restore_rejected_deferred_replay(args: argparse.Namespace, runtime: Path,
                                      phase: Phase, event: dict,
                                      error: str) -> None:
-    """Restore the final accepted brain without changing completed offsets."""
+    """Restore the final accepted brain without changing completed offsets.
+
+    Every deferred-replay rollback funnels through here, so this is where a
+    partial-pass resume boundary must be discarded. The guard is deliberately
+    retained across a rollback (`retain_guard=True` below), so its identity
+    cannot distinguish a restored brain from the one that trained the prefix;
+    only clearing the record here guarantees the retry replays the interval
+    from its first row instead of resuming onto rows that no longer exist.
+    """
+    digest = hashlib.sha256(
+        str(event["interval_id"]).encode("utf-8")
+    ).hexdigest()[:16]
+    deferred_replay_resume_path(runtime, digest).unlink(missing_ok=True)
+    (runtime / f"deferred-replay-{digest}.progress.json").unlink(
+        missing_ok=True
+    )
     last_good = read_json(runtime / "brain" / "brain.last-good.json")
     publish(canary_quarantine_path(runtime), {
         "state": "deferred_replay_failed",
@@ -3472,13 +3633,21 @@ def run_deferred_replays(args: argparse.Namespace, runtime: Path,
             interval_id.encode("utf-8")
         ).hexdigest()[:16]
         replay_progress = runtime / f"deferred-replay-{digest}.progress.json"
-        replay_progress.unlink(missing_ok=True)
+        interval_end = int(event["end_row"])
+        guard_identity = last_good_guard_identity(runtime)
+        resume_row = deferred_replay_resume_row(
+            runtime, digest, event, guard_identity
+        )
+        if resume_row <= int(event["start_row"]):
+            replay_progress.unlink(missing_ok=True)
+            deferred_replay_resume_path(runtime, digest).unlink(missing_ok=True)
         publish(status_path, {
             "state": "deferred_replay_training",
             "phase": phase.name,
             "interval_id": interval_id,
             "start_row": int(event["start_row"]),
-            "end_row": int(event["end_row"]),
+            "resume_row": resume_row,
+            "end_row": interval_end,
             "updated_unix": time.time(),
         })
 
@@ -3490,15 +3659,88 @@ def run_deferred_replays(args: argparse.Namespace, runtime: Path,
         try:
             with stdout_path.open("a", encoding="utf-8") as stdout, \
                     stderr_path.open("a", encoding="utf-8") as stderr:
-                worker = run_deferred_replay_worker(
-                    args, phase, runtime, event, status_path,
-                    interval_id, stdout, stderr,
-                )
-            if worker.returncode != 0:
-                raise RuntimeError(
-                    f"deferred replay worker exited {worker.returncode}; "
-                    f"stderr={stderr_path}"
-                )
+                # Train the interval in capped passes until its whole span is
+                # live. The gate below covers [start_row, end_row), so it can
+                # only be reached once every row in that span is trained --
+                # capping the pass without advancing the start row left 62% of
+                # each 131,072-row interval untrained and failed its recall
+                # check on rows the replay had never posted.
+                barren_yields = 0
+                while resume_row < interval_end:
+                    worker = run_deferred_replay_worker(
+                        args, phase, runtime, event, status_path,
+                        interval_id, stdout, stderr, resume_row=resume_row,
+                        digest=digest, guard_identity=guard_identity,
+                        replay_progress=replay_progress,
+                    )
+                    yielded = bool(getattr(worker, "resource_yield", False))
+                    if worker.returncode != 0 and not yielded:
+                        raise RuntimeError(
+                            f"deferred replay worker exited "
+                            f"{worker.returncode}; stderr={stderr_path}"
+                        )
+                    trained_row = replay_pass_durable_row(
+                        replay_progress, resume_row, interval_end
+                    )
+                    if trained_row <= resume_row:
+                        # A YIELD THAT WON NOTHING IS STILL NOT A VERDICT.
+                        #
+                        # The yield path already refuses to "convert host
+                        # pressure into a semantic failure", but this check
+                        # did exactly that: when the floor was already
+                        # breached at pass start the worker was stopped
+                        # before its first durable batch, and the interval --
+                        # untouched, unjudged -- was marked failed. The
+                        # recycle that follows a yield frees the memory
+                        # (measured 2.99 GB -> 14.66 GB), so the retry has
+                        # the window this pass never got.
+                        #
+                        # Bounded, because a yield loop that never progresses
+                        # must still surface rather than spin on billed
+                        # compute.
+                        if yielded and barren_yields < MAX_BARREN_REPLAY_YIELDS:
+                            barren_yields += 1
+                            append_health_event(runtime, {
+                                "kind": "deferred_replay_barren_yield",
+                                "passed": True,
+                                "phase": phase.name,
+                                "interval_id": interval_id,
+                                "resume_row": resume_row,
+                                "attempt": barren_yields,
+                                "limit": MAX_BARREN_REPLAY_YIELDS,
+                            })
+                            continue
+                        raise RuntimeError(
+                            "deferred replay pass made no durable progress "
+                            f"from row {resume_row} of {interval_id}"
+                            + (f" after {barren_yields} resource yields"
+                               if barren_yields else "")
+                        )
+                    barren_yields = 0
+                    resume_row = trained_row
+                    record_deferred_replay_resume(
+                        runtime, digest, event, guard_identity, resume_row
+                    )
+                    if resume_row >= interval_end:
+                        break
+                    publish(status_path, {
+                        "state": "deferred_replay_training",
+                        "phase": phase.name,
+                        "interval_id": interval_id,
+                        "start_row": int(event["start_row"]),
+                        "resume_row": resume_row,
+                        "end_row": interval_end,
+                        "updated_unix": time.time(),
+                    })
+                    if not yielded:
+                        # Give the next pass the window this one started with.
+                        # A yield has already settled and recycled the node.
+                        settle_brain_for_admission(
+                            args, phase, runtime, interval_end
+                        )
+                        recycle_settled_runtime_node(
+                            args, runtime, phase, interval_end, status_path
+                        )
             interval_recall = run_admission_json_command(
                 runtime, phase, int(event["end_row"]),
                 "deferred_replay", "interval_recall",
@@ -3573,6 +3815,10 @@ def run_deferred_replays(args: argparse.Namespace, runtime: Path,
                 args, runtime, phase, event, error
             )
             replay_progress.unlink(missing_ok=True)
+            # The rollback discarded every row this interval trained, so any
+            # partial-pass boundary now describes state the brain no longer
+            # holds. The retry must start from the interval's first row.
+            deferred_replay_resume_path(runtime, digest).unlink(missing_ok=True)
             append_health_event(runtime, {
                 "kind": (
                     "deferred_replay_infrastructure_paused"
@@ -3630,6 +3876,7 @@ def run_deferred_replays(args: argparse.Namespace, runtime: Path,
             raise RuntimeError(
                 f"could not release {phase.name} replay guard"
             )
+        deferred_replay_resume_path(runtime, digest).unlink(missing_ok=True)
         deferred_replay_marker_path(runtime).unlink(missing_ok=True)
         pruned = prune_resolved_deferred_bases(runtime)
         publish(

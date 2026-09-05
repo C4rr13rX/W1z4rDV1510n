@@ -125,11 +125,17 @@ def execute(case: Case, response: str) -> tuple[bool, str]:
 
 
 def train(endpoint: str, repeats: int) -> None:
+    # Bind through the path that can hold a long response. The observe path is
+    # exact below ~80 bytes and empty above it; these responses reach 903, so
+    # they never entered labelled retrieval and no paraphrase could reach them.
+    # See test_long_response_suites_bind_through_pretrain_binding.
     for _ in range(repeats):
         for case in CASES:
-            request(endpoint, "/brain/observe", {"pool_id": 1, "frame": b64(case.prompt)})
-            request(endpoint, "/brain/observe", {"pool_id": 12, "frame": b64(case.prompt)})
-            request(endpoint, "/brain/observe", {"pool_id": 4, "frame": b64(case.response)})
+            request(endpoint, "/brain/pretrain_binding", {"frames": [
+                {"pool_id": 1, "frame": b64(case.prompt)},
+                {"pool_id": 12, "frame": b64(case.prompt)},
+                {"pool_id": 4, "frame": b64(case.response)},
+            ]})
             request(endpoint, "/brain/tick", {})
 
 

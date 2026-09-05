@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import argparse
+import hashlib
+import importlib
 import os
 import subprocess
 import sys
@@ -49,6 +51,9 @@ from scripts.programming_curriculum_supervisor import (
     deferred_handoff_exit_code,
     deferred_replay_command,
     deferred_replay_marker_path,
+    deferred_replay_resume_row,
+    record_deferred_replay_resume,
+    replay_pass_durable_row,
     latest_passing_canary_row,
     disk_floor_breached,
     memory_floor_breached,
@@ -324,6 +329,7 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         self.assertIs(out, done)
         settle.assert_not_called()
         recycle.assert_not_called()
+        self.assertFalse(getattr(out, "resource_yield", False))
 
         # Under sustained pressure the worker stops, the brain settles and the
         # node is recycled -- the recycle is what actually returns
@@ -341,7 +347,7 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             proc.Popen.return_value = running
             ps.virtual_memory.return_value = SimpleNamespace(available=2 * gib)
             ps.Error = RuntimeError
-            run_deferred_replay_worker(
+            yielded = run_deferred_replay_worker(
                 args, phase, Path("."), event, Path("s.json"), "iv",
                 None, None, build_command=lambda *a: [],
             )
@@ -350,6 +356,12 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         recycle.assert_called_once()
         self.assertEqual(events[0]["kind"], "deferred_replay_resource_yield")
         self.assertTrue(events[0]["passed"])
+        # A yield stops the worker at an already WAL-durable boundary, so it
+        # must be distinguishable from a crash: the caller resumes the
+        # interval instead of rolling its whole span back. Counting SIGTERM as
+        # a semantic failure produced 288 `deferred_replay_failed` events
+        # against 19 yields and admitted nothing for two weeks.
+        self.assertTrue(yielded.resource_yield)
 
     def test_replay_pass_is_capped_so_the_gate_can_run(self) -> None:
         """A replay pass must leave memory-window room for its admission gate.
@@ -370,18 +382,34 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         phase = SimpleNamespace(
             name="p", script_id="s", corpus=Path("c.jsonl"), repeats=1)
 
-        cmd = deferred_replay_command(
-            args, phase, Path("."),
-            {"start_row": 0, "end_row": 131072, "interval_id": "p:0:131072"})
+        interval = {"start_row": 0, "end_row": 131072,
+                    "interval_id": "p:0:131072"}
+        cmd = deferred_replay_command(args, phase, Path("."), interval)
         self.assertEqual(cmd[cmd.index("--limit-rows") + 1], "49152")
         self.assertEqual(cmd[cmd.index("--start-row") + 1], "0")
 
-        # A later pass resumes at its own durable row and covers the tail.
-        cmd = deferred_replay_command(
-            args, phase, Path("."),
-            {"start_row": 98304, "end_row": 131072,
-             "interval_id": "p:98304:131072"})
-        self.assertEqual(cmd[cmd.index("--limit-rows") + 1], "32768")
+        # Capping alone is not enough. The driver reads --start-row from its
+        # arguments and never consults the progress file it writes, so without
+        # an advancing resume row every pass retrained rows [0, 49152) and the
+        # remaining 62% of the interval stayed untrained forever -- while the
+        # recall gate below still sampled the whole span and failed on rows the
+        # replay had never posted. Successive passes must cover the interval.
+        covered = []
+        resume = 0
+        while resume < interval["end_row"]:
+            cmd = deferred_replay_command(
+                args, phase, Path("."), interval, resume)
+            start = int(cmd[cmd.index("--start-row") + 1])
+            rows = int(cmd[cmd.index("--limit-rows") + 1])
+            self.assertEqual(start, resume)
+            self.assertGreater(rows, 0)
+            # A resumed pass must not re-checkpoint rows already durable.
+            self.assertEqual(
+                int(cmd[cmd.index("--durable-start-row") + 1]), resume)
+            covered.append((start, start + rows))
+            resume = start + rows
+        self.assertEqual(covered, [(0, 49152), (49152, 98304),
+                                   (98304, 131072)])
 
         # An interval already smaller than the cap is untouched.
         cmd = deferred_replay_command(
@@ -395,6 +423,97 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             args, phase, Path("."),
             {"start_row": 0, "end_row": 131072, "interval_id": "p:0:131072"})
         self.assertEqual(cmd[cmd.index("--limit-rows") + 1], "131072")
+
+    def test_replay_resume_is_bound_to_the_state_it_trained_onto(self) -> None:
+        """A partial replay may only resume onto the brain that still holds it.
+
+        Every rejection path restores the last-good guard, discarding the rows
+        a partial pass trained. Resuming past them afterwards would leave the
+        interval's earlier rows permanently untrained while its gate passed on
+        the tail alone -- silently violating the invariant that every corpus
+        row is either admitted or covered by an unresolved interval.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            event = {"interval_id": "p:0:131072", "start_row": 0,
+                     "end_row": 131072, "phase": "p"}
+
+            # Nothing recorded yet: start at the interval's first row.
+            self.assertEqual(
+                deferred_replay_resume_row(runtime, "d", event, "guard-a"), 0)
+
+            record_deferred_replay_resume(runtime, "d", event, "guard-a", 49152)
+            self.assertEqual(
+                deferred_replay_resume_row(runtime, "d", event, "guard-a"),
+                49152)
+
+            # The guard changed, so the brain was rolled back underneath the
+            # record and those 49,152 rows are gone.
+            self.assertEqual(
+                deferred_replay_resume_row(runtime, "d", event, "guard-b"), 0)
+
+            # A record for a different interval never applies.
+            other = dict(event, interval_id="p:131072:262144")
+            self.assertEqual(
+                deferred_replay_resume_row(runtime, "d", other, "guard-a"), 0)
+
+            # An out-of-range row is not trusted.
+            record_deferred_replay_resume(runtime, "d", event, "guard-a",
+                                          999999)
+            self.assertEqual(
+                deferred_replay_resume_row(runtime, "d", event, "guard-a"), 0)
+
+            # The pass boundary is the WAL-durable row, clamped to the
+            # interval, and never moves backwards.
+            progress = runtime / "progress.json"
+            progress.write_text(json.dumps({"durable_next_row": 60000}),
+                                encoding="utf-8")
+            self.assertEqual(replay_pass_durable_row(progress, 49152, 131072),
+                             60000)
+            self.assertEqual(replay_pass_durable_row(progress, 70000, 131072),
+                             70000)
+            progress.write_text(json.dumps({"durable_next_row": 200000}),
+                                encoding="utf-8")
+            self.assertEqual(replay_pass_durable_row(progress, 0, 131072),
+                             131072)
+
+    def test_rollback_clears_the_partial_replay_resume_boundary(self) -> None:
+        """Every rollback path must discard the resume record, not just one.
+
+        The last-good guard is retained across a rollback on purpose, so its
+        identity cannot tell a restored brain from the one that trained a
+        prefix. An interrupted replay recovered after a supervisor restart
+        therefore rolls back through this same function without any failure
+        branch running -- and would resume past rows the rollback discarded.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            (runtime / "brain").mkdir()
+            event = {"interval_id": "p:0:131072", "start_row": 0,
+                     "end_row": 131072, "phase": "p"}
+            digest = hashlib.sha256(
+                b"p:0:131072").hexdigest()[:16]
+            record_deferred_replay_resume(runtime, digest, event, "g", 49152)
+            progress = runtime / f"deferred-replay-{digest}.progress.json"
+            progress.write_text("{}", encoding="utf-8")
+
+            args = SimpleNamespace(endpoint="http://brain", node_bin="node")
+            with patch.object(sup, "publish"), \
+                    patch.object(sup, "stop_runtime_node"), \
+                    patch.object(sup, "restore_canary_quarantine",
+                                 return_value={}), \
+                    patch.object(sup, "start_runtime_node"), \
+                    patch.object(sup, "endpoint_json", return_value={}), \
+                    patch.object(sup, "verify_restored_topology"), \
+                    patch.object(sup, "finalize_canary_restore"):
+                sup.restore_rejected_deferred_replay(
+                    args, runtime, SimpleNamespace(name="p", rows=131072),
+                    event, "rejected",
+                )
+
+            self.assertFalse(progress.exists())
+            self.assertEqual(
+                deferred_replay_resume_row(runtime, digest, event, "g"), 0)
 
     def test_memory_floor_requires_forward_durable_progress(self) -> None:
         gib = 1024 * 1024 * 1024
@@ -2010,6 +2129,56 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         )
         self.assertIn('"/brain/pretrain_bindings"', source)
         self.assertNotIn('"/brain/pretrain/batch"', source)
+
+    def test_long_response_suites_bind_through_pretrain_binding(self) -> None:
+        """A suite whose responses exceed the observe ceiling must not use it.
+
+        Recall through `/brain/observe` + `/brain/tick` is exact below ~80
+        bytes and empty above it, so a longer response never enters labelled
+        retrieval and is reachable only by exact sequence match -- which a
+        paraphrase by definition cannot use. 4e790fb converted three suites for
+        this reason but had no test, so `typescript_enterprise` (379-799 B),
+        `cross_language_transfer` (903 B) and `platform_eval` (1042 B) silently
+        kept the defect. typescript_enterprise's `optimistic_store` paraphrase
+        then returned an empty reply on every gate from 2026-09-02, rejecting
+        every deferred interval that reached a verdict for three days.
+
+        This measures the suites instead of listing them, so a new suite or a
+        lengthened response cannot reintroduce it.
+        """
+        ceiling = 80
+        offenders = []
+        for path in sorted((ROOT / "scripts").glob("programming_*.py")):
+            source = path.read_text(encoding="utf-8")
+            if "def train(" not in source:
+                continue
+            module_name = path.stem
+            sys.path.insert(0, str(ROOT / "scripts"))
+            try:
+                module = importlib.import_module(module_name)
+            except Exception:
+                continue
+            finally:
+                sys.path.pop(0)
+            longest = 0
+            for attribute in vars(module).values():
+                if not isinstance(attribute, (list, tuple)):
+                    continue
+                for item in attribute:
+                    response = getattr(item, "response", None)
+                    if isinstance(response, str):
+                        longest = max(longest, len(response))
+            if longest <= ceiling:
+                continue
+            trains_by_observe = (
+                '"/brain/observe"' in source
+                and '"pool_id": 4' in source
+                and '"/brain/pretrain_binding"' not in source
+            )
+            if trains_by_observe:
+                offenders.append(f"{path.name} (longest response {longest}B)")
+        self.assertEqual(offenders, [], "suites bind long responses through "
+                         "the observe path, which cannot hold them")
 
     def test_multidomain_fixture_requires_twelve_independent_premises(self) -> None:
         self.assertEqual(len(DISCIPLINES), 12)
