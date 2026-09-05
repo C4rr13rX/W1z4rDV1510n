@@ -128,11 +128,30 @@ def execute(response: str, integration: str) -> tuple[bool, str]:
 
 
 def train(endpoint: str, repeats: int) -> None:
+    # Form each case as an atom-grounded binding.
+    #
+    # `/brain/observe` + `/brain/tick` cannot form a binding for a long
+    # response: recall via the observe path is exact below ~80 bytes and empty
+    # above it. These three responses are 379-799 bytes, so none of them
+    # entered labelled retrieval and all were reachable only by exact sequence
+    # match -- which a paraphrase by definition cannot use.
+    #
+    # That is why `optimistic_store` passed `trained` 3/3 and still failed its
+    # paraphrase. Measured from the gate artifacts: it passed on 2026-09-01
+    # 22:37, then failed every typescript gate from 2026-09-03 10:13 to
+    # 2026-09-04 18:32 -- 8 rejected intervals, each one recorded as
+    # `trained 3/3, paraphrase 2/3`. It took over as the blocking suite from
+    # `composition`, which had rejected the intervals before it.
+    #
+    # The three sibling suites were converted for this exact reason in
+    # 4e790fb; this one was missed and kept the defect.
     for _ in range(repeats):
         for case in CASES:
-            request(endpoint, "/brain/observe", {"pool_id": 1, "frame": b64(case.prompt)})
-            request(endpoint, "/brain/observe", {"pool_id": 12, "frame": b64(case.prompt)})
-            request(endpoint, "/brain/observe", {"pool_id": 4, "frame": b64(case.response)})
+            request(endpoint, "/brain/pretrain_binding", {"frames": [
+                {"pool_id": 1, "frame": b64(case.prompt)},
+                {"pool_id": 12, "frame": b64(case.prompt)},
+                {"pool_id": 4, "frame": b64(case.response)},
+            ]})
             request(endpoint, "/brain/tick", {})
 
 
