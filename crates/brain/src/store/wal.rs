@@ -114,12 +114,38 @@ fn read_framed_event<R: Read>(r: &mut R) -> io::Result<Option<WalEvent>> {
         ));
     }
     let mut body = vec![0u8; len];
-    match r.read(&mut body)? {
-        n if n == len => {}
-        _ => {
-            tracing::warn!("WAL replay: torn body; stopping replay at tail");
+    // READ_EXACT, NOT READ.
+    //
+    // `Read::read` is permitted to return fewer bytes than the buffer holds
+    // whenever fewer are immediately available -- that is its contract, not a
+    // failure. On a 76 MB WAL behind a buffered reader a short read is
+    // ordinary: it happens every time an event straddles the reader's
+    // internal buffer boundary.
+    //
+    // The old code treated any short read as a torn tail and stopped. That
+    // silently discarded every event after the first buffer boundary, and it
+    // left the stream positioned mid-body, so the NEXT length prefix was read
+    // out of event payload. Measured 2026-09-05, that desync surfaced as
+    //
+    //     WAL replay failed; continuing from brain.bin
+    //     error=invalid value: integer `36`, expected variant index 0 <= i < 8
+    //
+    // WalEvent has 8 variants; 36 is payload bytes being read as a
+    // discriminant. 76 MB of learning since Aug 19 was unreplayable, the
+    // brain fell back to a checkpoint that then failed too, and it came up
+    // empty -- 0.08 GB resident against a 15 GB container, answering every
+    // query with "outcome steady" at ~0.01 confidence.
+    //
+    // read_exact loops until the buffer is full and returns UnexpectedEof
+    // only when the file genuinely ends mid-event, which is the one case that
+    // really is a torn tail.
+    match r.read_exact(&mut body) {
+        Ok(()) => {}
+        Err(ref e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+            tracing::warn!("WAL replay: torn body at tail; stopping replay");
             return Ok(None);
         }
+        Err(e) => return Err(e),
     }
     let event: WalEvent = bincode::deserialize(&body)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -456,5 +482,127 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0], WalEvent::TickAdvanced { new_tick: 5 }));
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod short_read_replay_tests {
+    use super::*;
+    use crate::neuron::NeuronKind;
+
+    /// A reader that hands back at most `chunk` bytes per call.
+    ///
+    /// This is not a contrived hostile reader -- it is exactly what any
+    /// buffered reader does when an event straddles its internal buffer
+    /// boundary, and `Read::read` is explicitly permitted to behave this way.
+    struct ChunkedReader<'a> {
+        data: &'a [u8],
+        pos: usize,
+        chunk: usize,
+    }
+
+    impl<'a> Read for ChunkedReader<'a> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let remaining = self.data.len().saturating_sub(self.pos);
+            let n = remaining.min(buf.len()).min(self.chunk);
+            if n == 0 {
+                return Ok(0);
+            }
+            buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+    }
+
+    fn framed(events: &[WalEvent]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for ev in events {
+            let body = bincode::serialize(ev).expect("serialise event");
+            out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+            out.extend_from_slice(&body);
+        }
+        out
+    }
+
+    /// Every event must survive a reader that returns short reads.
+    ///
+    /// Before read_exact, a short read was treated as a torn tail: replay
+    /// stopped at the first buffer boundary AND left the stream positioned
+    /// mid-body, so the next length prefix came out of event payload.
+    /// Measured on the real 76 MB WAL 2026-09-05:
+    ///
+    ///     WAL replay failed; continuing from brain.bin
+    ///     error=invalid value: integer `36`, expected variant index 0 <= i < 8
+    ///
+    /// WalEvent has 8 variants; 36 was payload read as a discriminant. The
+    /// brain came up empty -- 0.08 GB resident against a 15 GB container.
+    #[test]
+    fn short_reads_do_not_truncate_or_desync_replay() {
+        let events = vec![
+            WalEvent::AtomCreated {
+                pool_id: 0,
+                id: 1,
+                kind: NeuronKind::Excitatory,
+                label: "a-label-long-enough-to-straddle-a-boundary".into(),
+                born_tick: 0,
+            },
+            WalEvent::AtomCreated {
+                pool_id: 0,
+                id: 2,
+                kind: NeuronKind::Excitatory,
+                label: "another-label-of-similar-length-here".into(),
+                born_tick: 0,
+            },
+            WalEvent::AtomCreated {
+                pool_id: 1,
+                id: 3,
+                kind: NeuronKind::Inhibitory,
+                label: "third".into(),
+                born_tick: 0,
+            },
+        ];
+        let bytes = framed(&events);
+
+        // Seven bytes at a time: every event spans several reads.
+        let reader = ChunkedReader { data: &bytes, pos: 0, chunk: 7 };
+        let replayed: Vec<_> = WalReader::new(reader)
+            .collect::<io::Result<Vec<_>>>()
+            .expect("a short-reading stream must still replay cleanly");
+
+        assert_eq!(
+            replayed.len(),
+            events.len(),
+            "short reads dropped events: got {} of {}",
+            replayed.len(),
+            events.len()
+        );
+    }
+
+    /// A genuinely truncated tail still stops replay, without an error.
+    ///
+    /// The old behaviour must be preserved for the case it was written for:
+    /// a process that died mid-append leaves a half-written event, and that
+    /// is a normal end-of-log, not corruption.
+    #[test]
+    fn a_genuinely_torn_tail_still_stops_cleanly() {
+        let events = vec![WalEvent::AtomCreated {
+            pool_id: 0,
+            id: 1,
+            kind: NeuronKind::Excitatory,
+            label: "complete".into(),
+            born_tick: 0,
+        }];
+        let mut bytes = framed(&events);
+
+        // Append a length prefix promising far more than follows.
+        bytes.extend_from_slice(&(512u32).to_le_bytes());
+        bytes.extend_from_slice(b"only a few bytes, not 512");
+
+        let reader = ChunkedReader { data: &bytes, pos: 0, chunk: 7 };
+        let replayed: Vec<_> = WalReader::new(reader)
+            .collect::<io::Result<Vec<_>>>()
+            .expect("a torn tail is an end-of-log, not an error");
+
+        assert_eq!(replayed.len(), 1, "the complete event must survive");
     }
 }
