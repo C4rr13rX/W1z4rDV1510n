@@ -593,6 +593,35 @@ That arithmetic is the useful form of "is it healthy". `quarantine_ready` with
 nothing about convergence; seven yields with zero failures and a resume row
 advancing across them does.
 
+**The interval above did finish.** The evidence in this section stops at a
+worker resuming from row 246,576, which shows a yield is non-destructive but
+not yet that a repeatedly-yielded span terminates. Checked at 1788648278,
+`jupyter-scientific-full:201344:262144` had reached the end of its span after
+five yields inside the generation:
+
+```
+deferred-replay-909de5e9d4936130.resume.json
+  {"durable_next_row": 262144, "end_row": 262144, "start_row": 201344}
+```
+
+`durable_next_row == end_row` is the terminating condition, and it is worth
+reading directly rather than inferring from a rising row count — that is the
+distinction the parent section is named for. At that moment the brain had just
+been recycled (RSS 1.42 GB, 13.8 GB free) and no `drive_corpora_brain` process
+existed, which is the normal gap between a completed pass and its admission
+gate, not a stall: `close_deferred_replay_interval` runs the comprehensive
+gate before the next worker starts.
+
+One caveat when reading `deferred-replay-active.json` at this point. Its
+`interval.error` and `interval.reason` describe why the interval was
+**originally quarantined**, not how the current replay is going. Here it still
+carried a `programming_typescript_enterprise.py` gate failure with
+`paraphrase 2/3` and `"status": "deferred"`, stamped `updated_unix
+1786195753` — 28 days before the observation. The file's own mtime was 7,114 s
+old for the same reason. Timestamp that block against the supervisor's start
+before treating it as news; see "The failure ledger is older than the process
+that will be blamed for it" below.
+
 ## The failure ledger is older than the process that will be blamed for it
 
 The section on deploying a fix warns that the running process can be older
