@@ -209,6 +209,44 @@ claim is part of the contract, assert it structurally — count comparisons or
 element reads — never by wall-clock time, which would make the verdict depend
 on host load.
 
+### Claim a family from the working tree, not from HEAD
+
+The write-once `REFERENCES` guard catches two blocks defining the same task.
+It does not catch two agents authoring the same *family*, because that
+collision happens before either one writes a reference — and by then a family
+module is already 30 KB of finished work.
+
+Measured 2026-09-05. `authoring_status()` reported
+`testing_debugging_repair_refactoring` at `0/100` and `git log` showed no
+commit for it, so it looked like the obvious next family. It was not: another
+session had already written all eight of its references into
+`tests/obstacle_references.py` and was mid-authoring. The file was `M` in
+`git status` with an mtime eighteen seconds old, and the references named
+`minimize_failing_input` where the new module named `minimize` — two
+incompatible halves of one family. It was caught by scrolling to the end of
+the references file for the insertion point, which is luck, not a control.
+The other session committed it forty minutes later as `33b836f`.
+
+So the check before authoring is three commands, not one:
+
+```bash
+git status --short                     # is the references file already dirty?
+git log --oneline -5                   # did a family land since this checkout?
+grep -o 'REFERENCES\["[a-z_]*' tests/obstacle_references.py | sort -u
+```
+
+The third is the one that matters, because a claim appears in the references
+table before it appears anywhere `authoring_status()` can see it: references
+live in `tests/`, authored tasks live in `scripts/`, and the status helper
+reads only the latter. A family with references and no tasks is not an
+inconsistency to repair — it is somebody else's claim, in progress.
+
+That asymmetry is also load-bearing in the other direction, and it is already
+guarded: `test_no_reference_without_a_task` fails while such a claim is open.
+It is a correct guard reporting a real transient state, so a session that
+finds it red should confirm the claim is live before "fixing" it by deleting
+another agent's work.
+
 ### An invisible mutation is a validator that does not probe that axis
 
 The mutation test asserts the mutilated reference **fails**. So a mutation the
@@ -236,3 +274,63 @@ by its two attribute bytes — and if the suite still passes, the gap is in the
 assertions. Every one of those is correct on the example a prompt would quote
 and wrong in an assembly, which is the same reason the contract asks for
 standard-specified behaviour rather than reproduced examples.
+
+### A validator that runs candidate output owns the attribution
+
+`_blames_candidate` decides `failed` versus `validator_error` by walking the
+traceback for the candidate's own filename. That is the right rule, and it has
+a blind spot the author has to close by hand: **code the candidate *produced*
+is not code the candidate *ran*.**
+
+A refactoring task is the natural case. `rename_local` returns source text, so
+checking it means compiling and executing that text — and a rewrite that
+breaks raises inside `exec`, in a frame belonging to `<module>`, not to
+`candidate.py`. No candidate frame appears anywhere in the traceback, so the
+runner attributes a genuine capability failure to the harness. The contract
+counts `validator_error` separately and lets it **block admission** rather than
+score, exactly so a broken harness never reads as a capability gap; the cost
+of getting this wrong is therefore not a wrong verdict but no verdict, on a
+task that was working correctly as a measurement.
+
+So a validator that executes anything the candidate generated must convert the
+outcome itself:
+
+```python
+def evaluate(text):
+    try:
+        exec(compile(text, "<module>", "exec"), namespace)
+        return namespace["compute"](0, [Row(3), Row(4)])
+    except Exception as error:
+        raise AssertionError(f"the rewritten module does not run: {error!r}")
+```
+
+The same applies to any task whose subject is emitted code, a generated
+config, or a serialized document that the validator then loads.
+
+There is a corollary for the mutation. The mutated reference must trip an
+assertion that runs **before** any such `exec`, or the mutation test asserts
+`FAILED` and gets `VALIDATOR_ERROR` — a failure that looks like a broken
+mutation and is really an ordering problem. For the rename that means the
+structural checks (parameters renamed, attribute untouched, literals
+untouched) come first and the behaviour check comes last, which is the useful
+order anyway: it says *what* is wrong rather than only that something is.
+
+### Commit a family atomically; it is the only claim other sessions can see
+
+Two sessions have now taken the same family at the same time, and the second
+occasion was worse than the first. Both wrote
+`scripts/programming_obstacle_tasks/<family>.py`, one withdrew, and for a
+window the tree held eight references and eight mutations for a module that no
+longer existed.
+
+Nothing in that state is silently wrong — the write-once `REFERENCES` guard,
+the AST duplicate scan and
+`test_every_authored_task_has_exactly_one_reference_and_mutation` all catch it
+— but every one of them catches it only when something runs them, and an
+untracked file is invisible to a sibling session's `git log`.
+
+So: check `git log --oneline` and `authoring_status()` immediately before
+authoring, and commit the family module and its reference/mutation block in
+**one** commit as soon as the family's tests are green. Do not leave a family
+sitting uncommitted while polishing it. The commit is the claim; the working
+tree is not.

@@ -504,6 +504,29 @@ necessary for admission and is not evidence of it. The count that closes this
 out is `resolved` rising — the same rule CLAUDE.md states for the curriculum
 as a whole, applied one level down.
 
+**It closed.** `jupyter-scientific-full:0:131072` — the interval converging in
+the measurement above — admitted at 14:40 the same day:
+
+```
+14:24  deferred=28  resolved=59  last_admission=264627s   (73.5 h)
+14:42  deferred=27  resolved=60  last_admission=162s
+```
+
+So the whole chain held end to end on one interval: a resource yield paused
+the worker and did **not** roll it back, the pass resumed at row 120880 rather
+than at 0, it ran to its cap, and the enterprise gate admitted it. That is the
+first admission since the yield-accounting repair and it is the evidence the
+repair converts, which neither a live PID, an advancing tick, nor a rising
+`durable_next_row` could have supplied.
+
+Note what the alarm that prompted the check had said: `hours_since_admission:
+353.2`, against a ledger reading 73.5 h at the moment it fired and 0.05 h
+eighteen minutes later. Both numbers came from the same host in the same hour.
+The rule stands — read the ledger, and treat a drought figure from a watcher
+whose payload is missing `hours_since_admission_event`, `gate_rejections`,
+`replay_failures_at_gate` and `replay_failures_before_gate` as a statement
+about the watcher rather than about the curriculum.
+
 ## The failure ledger is older than the process that will be blamed for it
 
 The section on deploying a fix warns that the running process can be older
