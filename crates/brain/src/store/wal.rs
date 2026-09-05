@@ -293,8 +293,29 @@ impl Store for MmapWalStore {
         // The checkpoint has already been written through an atomic rename
         // and fsync. Retain the validated file header and make all future
         // appends the post-checkpoint recovery tail.
-        inner.writer.get_mut().set_len(8)?;
-        inner.writer.seek(SeekFrom::Start(8))?;
+        //
+        // TRUNCATE AND SEEK THE SAME HANDLE, THROUGH THE SAME WRAPPER.
+        //
+        // This is defensive hardening, NOT the fix for the 2026-09-05 WAL
+        // loss. That was `read_framed_event` treating a short read as a torn
+        // tail; see the comment there. An earlier revision of this function
+        // blamed compaction, claiming `set_len` through `get_mut()` and the
+        // seek through the `BufWriter` left two disagreeing positions. They
+        // do not: `<BufWriter as Seek>::seek` flushes its buffer before
+        // seeking the inner handle, and `flush()` on the line above has
+        // already emptied it. Both forms were measured against
+        // `compaction_framing_tests` below and both pass, so nothing here
+        // ever wrote an unframed byte.
+        //
+        // Keep this form anyway. It is equivalent and it removes the reach
+        // past the wrapper, so the invariant "the writer's position is the
+        // file's position" holds by construction rather than by relying on
+        // std's flush-before-seek. Do not re-derive a corruption story from
+        // it: if framing breaks, the reader is where to look first.
+        let mut file = inner.writer.get_ref().try_clone()?;
+        file.set_len(8)?;
+        file.seek(SeekFrom::Start(8))?;
+        inner.writer = BufWriter::new(file);
         // Do not issue another full-file sync after truncation.  The WAL was
         // flushed above and the checkpoint itself was already fsynced and
         // atomically installed before compaction began.  On Windows,
@@ -604,5 +625,115 @@ mod short_read_replay_tests {
             .expect("a torn tail is an end-of-log, not an error");
 
         assert_eq!(replayed.len(), 1, "the complete event must survive");
+    }
+}
+
+#[cfg(test)]
+mod compaction_framing_tests {
+    use super::*;
+    use crate::neuron::NeuronKind;
+
+    fn tmpdir_for(test: &str) -> PathBuf {
+        let pid = std::process::id();
+        let nano = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("w1z4rd_wal_{}_{}_{}", test, pid, nano))
+    }
+
+    fn atom(id: u32, label: &str) -> WalEvent {
+        WalEvent::AtomCreated {
+            pool_id: 0,
+            id,
+            kind: NeuronKind::Excitatory,
+            label: label.into(),
+            born_tick: 0,
+        }
+    }
+
+    /// Appends after a compaction must still be framed.
+    ///
+    /// This guards the invariant, it does not reproduce a past bug. The
+    /// 2026-09-05 WAL loss was `read_framed_event` stopping at a short read;
+    /// compaction was accused and cleared. Both the current form and the
+    /// older `get_mut().set_len()` + `writer.seek()` form pass this test,
+    /// which is the measurement that cleared it.
+    ///
+    /// Sized to cross the writer's 64 KiB buffer many times on both sides of
+    /// the truncation, so the file offset at `set_len` time is genuinely far
+    /// past the header. A cheaper version that never fills the buffer proves
+    /// nothing: with an empty buffer every position trivially agrees.
+    #[test]
+    fn events_appended_after_compaction_are_still_framed() {
+        // Each event is ~50 bytes framed, so 4,096 of them is ~200 KiB --
+        // three full 64 KiB buffer flushes before compaction even begins.
+        const EVENTS: u32 = 4096;
+
+        let dir = tmpdir_for("compaction_framing");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+
+        let store = MmapWalStore::open(&dir).expect("open wal");
+        for i in 0..EVENTS {
+            store
+                .append(&atom(i, "a-label-with-some-length-to-it"))
+                .expect("append before compaction");
+        }
+        store.flush().expect("flush");
+        assert!(
+            store.log_size_bytes() > 64 * 1024,
+            "the pre-compaction log must exceed the writer's buffer, or the \
+             truncation is not being exercised at a non-trivial offset"
+        );
+
+        store.compact_after_checkpoint().expect("compact");
+
+        for i in 100_000..(100_000 + EVENTS) {
+            store
+                .append(&atom(i, "a-label-written-after-the-truncation"))
+                .expect("append after compaction");
+        }
+        store.flush().expect("flush");
+        drop(store);
+
+        // The whole file must parse: a length prefix in front of every body,
+        // all the way to EOF, with nothing left over.
+        let f = MmapWalStore::open_replay_only(&dir).expect("open replay");
+        let events: Vec<_> = WalReader::new(f)
+            .collect::<io::Result<Vec<_>>>()
+            .expect("every frame after a compaction must parse");
+
+        assert_eq!(
+            events.len(),
+            EVENTS as usize,
+            "compaction keeps only post-checkpoint events, and all of them \
+             must be readable"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Compaction really does drop the pre-checkpoint tail.
+    #[test]
+    fn compaction_truncates_to_the_header() {
+        let dir = tmpdir_for("compaction_truncates");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+
+        let store = MmapWalStore::open(&dir).expect("open wal");
+        for i in 0..32 {
+            store.append(&atom(i, "pre-checkpoint")).expect("append");
+        }
+        store.flush().expect("flush");
+        store.compact_after_checkpoint().expect("compact");
+        store.flush().expect("flush");
+        drop(store);
+
+        let f = MmapWalStore::open_replay_only(&dir).expect("open replay");
+        let events: Vec<_> = WalReader::new(f)
+            .collect::<io::Result<Vec<_>>>()
+            .expect("a compacted WAL is a valid empty log");
+        assert!(events.is_empty(), "compaction must clear the replay tail");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
