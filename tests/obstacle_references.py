@@ -6289,6 +6289,251 @@ def request_framing(headers):
 '''
 
 
+REFERENCES["architecture_multifile_integration-0007"] = r'''
+"""A resumable projection over the fixed append-only log."""
+
+_KINDS = {"opened", "deposited", "withdrew", "closed"}
+
+
+class BalanceProjection:
+    def __init__(self, log, balances=None, next_offset=0):
+        self._log = log
+        self.balances = dict(balances or {})
+        self.next_offset = int(next_offset)
+
+    @classmethod
+    def restore(cls, log, snapshot):
+        return cls(log, snapshot["balances"], snapshot["next_offset"])
+
+    def snapshot(self):
+        return {"balances": dict(self.balances),
+                "next_offset": self.next_offset}
+
+    def catch_up(self):
+        applied = 0
+        for offset, event in self._log.read_from(self.next_offset):
+            if offset < self.next_offset:
+                continue
+            # The offset advances only once the event has been accepted, so a
+            # rejected event is reconsidered rather than stepped over.
+            self._apply(event)
+            self.next_offset = offset + 1
+            applied += 1
+        return applied
+
+    def _apply(self, event):
+        kind = event.get("type")
+        if kind not in _KINDS:
+            raise ValueError(f"unrecognised event type {kind!r}")
+        account = event.get("account")
+        if kind == "opened":
+            if account in self.balances:
+                raise ValueError(f"{account!r} is already open")
+            self.balances[account] = 0
+            return
+        if account not in self.balances:
+            raise ValueError(f"{account!r} is not open")
+        if kind == "closed":
+            if self.balances[account] != 0:
+                raise ValueError(f"{account!r} still holds funds")
+            del self.balances[account]
+            return
+        amount = event.get("amount")
+        if (not isinstance(amount, int) or isinstance(amount, bool)
+                or amount <= 0):
+            raise ValueError(f"bad amount {amount!r}")
+        if kind == "withdrew":
+            if amount > self.balances[account]:
+                raise ValueError(f"{account!r} cannot cover {amount}")
+            self.balances[account] -= amount
+        else:
+            self.balances[account] += amount
+'''
+
+
+REFERENCES["architecture_multifile_integration-0008"] = r'''
+"""Wiring that builds in dependency order and unwinds in reverse."""
+
+
+class Container:
+    def __init__(self, specs):
+        self._specs = dict(specs)
+        self._built = {}
+        self._order = []
+
+    def get(self, name):
+        if name not in self._specs:
+            raise KeyError(name)
+        # Only what THIS call brings into existence may be unwound; anything
+        # an earlier call built belongs to the container, not to this attempt.
+        fresh = []
+        try:
+            return self._resolve(name, (), fresh)
+        except BaseException:
+            for made in reversed(fresh):
+                component = self._built.pop(made)
+                self._order.remove(made)
+                component.close()
+            raise
+
+    def _resolve(self, name, path, fresh):
+        if name in self._built:
+            return self._built[name]
+        if name in path:
+            trail = path[path.index(name):] + (name,)
+            raise ValueError("dependency cycle: " + " -> ".join(trail))
+        if name not in self._specs:
+            raise KeyError(name)
+        spec = self._specs[name]
+        resolved = {dependency: self._resolve(dependency, path + (name,), fresh)
+                    for dependency in spec.get("requires", ())}
+        component = spec["build"](**resolved)
+        self._built[name] = component
+        self._order.append(name)
+        fresh.append(name)
+        return component
+
+    def close(self):
+        while self._order:
+            name = self._order.pop()
+            self._built.pop(name).close()
+'''
+
+
+REFERENCES["architecture_multifile_integration-0009"] = r'''
+"""The anti-corruption layer between the upstream feed and the domain."""
+
+import datetime
+from decimal import Decimal
+
+import domain
+
+_STATES = {"P": domain.Status.PENDING,
+           "S": domain.Status.SETTLED,
+           "F": domain.Status.FAILED}
+
+_REQUIRED = ("ref", "amount_cents", "ccy", "ts", "state")
+
+
+def translate(record):
+    if not isinstance(record, dict):
+        raise domain.TranslationError("an upstream record is a mapping")
+    for key in _REQUIRED:
+        if key not in record:
+            raise domain.TranslationError(f"missing {key!r}")
+
+    reference = record["ref"]
+    if not isinstance(reference, str) or not reference:
+        raise domain.TranslationError(f"bad reference {reference!r}")
+
+    cents = record["amount_cents"]
+    if not isinstance(cents, int) or isinstance(cents, bool) or cents < 0:
+        raise domain.TranslationError(f"bad amount {cents!r}")
+
+    code = record["ccy"]
+    if not isinstance(code, str) or len(code) != 3 or not code.isalpha():
+        raise domain.TranslationError(f"bad currency {code!r}")
+
+    seconds = record["ts"]
+    if not isinstance(seconds, int) or isinstance(seconds, bool):
+        raise domain.TranslationError(f"bad timestamp {seconds!r}")
+
+    state = record["state"]
+    if not isinstance(state, str) or state not in _STATES:
+        raise domain.TranslationError(f"unrecognised state {state!r}")
+
+    money = domain.Money(_major_units(cents), code.upper())
+    occurred_at = datetime.datetime.fromtimestamp(
+        seconds, tz=datetime.timezone.utc)
+    return domain.Payment(reference, money, occurred_at, _STATES[state])
+
+
+def _major_units(cents):
+    """Minor units as an exact decimal, never via a binary float."""
+    return Decimal(cents) / Decimal(100)
+'''
+
+
+REFERENCES["architecture_multifile_integration-0010"] = r'''
+"""The router that moves traffic from the legacy pricer to the modern one."""
+
+import pricers
+
+_MODES = ("legacy", "shadow", "modern")
+
+
+class StranglerPricer:
+    def __init__(self, legacy, modern, mode, on_event):
+        if mode not in _MODES:
+            raise ValueError(f"unknown mode {mode!r}")
+        self._legacy = legacy
+        self._modern = modern
+        self._mode = mode
+        self._on_event = on_event
+
+    def price(self, order):
+        if self._mode == "legacy":
+            return self._legacy.price(order)
+        if self._mode == "shadow":
+            return self._shadow(order)
+        return self._modern_first(order)
+
+    def _shadow(self, order):
+        # Legacy is authoritative during a shadow, so nothing the modern
+        # pricer does may change the answer or reach the caller.
+        legacy_result = self._legacy.price(order)
+        try:
+            modern_result = self._modern.price(order)
+        except pricers.PricingError as error:
+            self._on_event("error", order["id"], legacy_result, str(error))
+            return legacy_result
+        if modern_result != legacy_result:
+            self._on_event("mismatch", order["id"], legacy_result,
+                           modern_result)
+        return legacy_result
+
+    def _modern_first(self, order):
+        try:
+            return self._modern.price(order)
+        except pricers.PricingError as error:
+            fallback = self._legacy.price(order)
+            self._on_event("fallback", order["id"], None, str(error))
+            return fallback
+'''
+
+
+REFERENCES["architecture_multifile_integration-0011"] = r'''
+"""A capture that survives retries without taking the money twice."""
+
+from gateway import TransientError
+
+
+def charge_once(gateway, reference, amount_cents, attempts=3):
+    if not isinstance(reference, str) or not reference:
+        raise ValueError("a non-empty reference is required")
+    if (not isinstance(amount_cents, int) or isinstance(amount_cents, bool)
+            or amount_cents <= 0):
+        raise ValueError("amount_cents must be a positive integer")
+    if (not isinstance(attempts, int) or isinstance(attempts, bool)
+            or attempts < 1):
+        raise ValueError("attempts must be at least one")
+
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            return gateway.charge(_idempotency_key(reference, attempt),
+                                  amount_cents)
+        except TransientError as error:
+            last_error = error
+    raise last_error
+
+
+def _idempotency_key(reference, attempt):
+    """One key per reference. The attempt number must not enter it."""
+    return f"charge:{reference}"
+'''
+
+
 MUTATIONS: dict[str, tuple[str, str]] = {
     # Split on every comma. Correct for every directive anyone writes by
     # hand, and it silently truncates the quoted field list that says which
@@ -7129,5 +7374,49 @@ MUTATIONS: dict[str, tuple[str, str]] = {
     "validation_parsing_serialization-0019": (
         'size_text = line.split(b";", 1)[0].strip()',
         "size_text = line.strip()",
+    ),
+    # Advance the offset before the event is accepted rather than after. Every
+    # valid log still projects correctly; the difference only shows when an
+    # event is rejected, and then the log has silently stepped over it.
+    "architecture_multifile_integration-0007": (
+        "            self._apply(event)\n"
+        "            self.next_offset = offset + 1",
+        "            self.next_offset = offset + 1\n"
+        "            self._apply(event)",
+    ),
+    # Close in construction order. Every component is still closed exactly
+    # once, so a test that counts teardowns passes -- but a component is torn
+    # down before the things that depend on it.
+    "architecture_multifile_integration-0008": (
+        "            name = self._order.pop()",
+        "            name = self._order.pop(0)",
+    ),
+    # Divide in binary floating point. Correct for every amount small enough
+    # to be representable, and quietly wrong for the ones that are not.
+    "architecture_multifile_integration-0009": (
+        "    return Decimal(cents) / Decimal(100)",
+        "    return Decimal(cents / 100)",
+    ),
+    # Return the shadow's result. The shadow is supposed to observe the modern
+    # pricer, not to be routed to it, so this silently ships an unverified
+    # price while still reporting the mismatch it just acted on.
+    "architecture_multifile_integration-0010": (
+        "        if modern_result != legacy_result:\n"
+        "            self._on_event(\"mismatch\", order[\"id\"], "
+        "legacy_result,\n"
+        "                           modern_result)\n"
+        "        return legacy_result",
+        "        if modern_result != legacy_result:\n"
+        "            self._on_event(\"mismatch\", order[\"id\"], "
+        "legacy_result,\n"
+        "                           modern_result)\n"
+        "        return modern_result",
+    ),
+    # Put the attempt number in the idempotency key. Every retry then looks
+    # like a new payment to the gateway, which is the double-charge this task
+    # exists to catch.
+    "architecture_multifile_integration-0011": (
+        '    return f"charge:{reference}"',
+        '    return f"charge:{reference}:{attempt}"',
     ),
 }

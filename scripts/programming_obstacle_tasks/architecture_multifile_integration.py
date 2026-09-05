@@ -139,6 +139,190 @@ class Registry:
         return sorted(self._handlers)
 '''
 
+#: The append-only log for -0007. It records every offset it is asked to read
+#: from, which is how the validator tells an incremental catch-up from a
+#: projection that quietly rebuilds the world on every call.
+_EVENT_LOG = '''\
+"""The append-only event log that already exists. It cannot be changed."""
+
+
+class LogError(Exception):
+    """The log refused a read."""
+
+
+class EventLog:
+    def __init__(self, events=()):
+        self._events = [dict(event) for event in events]
+        self.offsets_requested = []
+
+    def read_from(self, offset):
+        """Every record at or after `offset`, as (offset, event) pairs."""
+        if not isinstance(offset, int) or isinstance(offset, bool) \\
+                or offset < 0:
+            raise LogError(f"bad offset {offset!r}")
+        self.offsets_requested.append(offset)
+        return [(index, dict(event))
+                for index, event in enumerate(self._events)
+                if index >= offset]
+
+    def append(self, event):
+        self._events.append(dict(event))
+
+    def __len__(self):
+        return len(self._events)
+'''
+
+#: The components for -0008. Construction and teardown both append to a shared
+#: trace, so the validator can assert the exact order rather than the fact
+#: that a teardown happened at all.
+_COMPONENTS = '''\
+"""The components that already exist. They cannot be changed."""
+
+
+class ComponentError(Exception):
+    """A component refused to start."""
+
+
+class Component:
+    def __init__(self, name, trace, fails=False):
+        self.name = name
+        self.trace = trace
+        self.closed = False
+        if fails:
+            trace.append(("failed", name))
+            raise ComponentError(f"{name} refused to start")
+        trace.append(("started", name))
+
+    def close(self):
+        if self.closed:
+            raise ComponentError(f"{self.name} was closed twice")
+        self.closed = True
+        self.trace.append(("closed", self.name))
+'''
+
+#: The domain model for -0009. `Money` refuses a float outright, so a
+#: candidate that divides in binary floating point cannot hide the loss behind
+#: a rounded repr -- it either carries an exact Decimal or it does not.
+_DOMAIN = '''\
+"""The domain model the application is written against. It is fixed."""
+
+import enum
+from dataclasses import dataclass
+from datetime import datetime
+from decimal import Decimal
+
+
+class TranslationError(Exception):
+    """The upstream record cannot be represented in this domain."""
+
+
+class Status(enum.Enum):
+    PENDING = "pending"
+    SETTLED = "settled"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class Money:
+    amount: Decimal
+    currency: str
+
+    def __post_init__(self):
+        if not isinstance(self.amount, Decimal):
+            raise TypeError("Money holds a Decimal, never a float")
+        if self.currency != self.currency.upper() or len(self.currency) != 3:
+            raise ValueError("currency is a three-letter upper-case code")
+
+
+@dataclass(frozen=True)
+class Payment:
+    reference: str
+    money: Money
+    occurred_at: datetime
+    status: Status
+'''
+
+#: The two pricers for -0010. Both record every order they are asked to
+#: price, which is what makes "the shadow call happened exactly once and
+#: changed nothing" an assertable property rather than a claim.
+_PRICERS = '''\
+"""Two pricing implementations that already exist. Neither can change."""
+
+
+class PricingError(Exception):
+    """The pricer could not price the order."""
+
+
+class LegacyPricer:
+    def __init__(self, raise_on=()):
+        self.calls = []
+        self._raise = set(raise_on)
+
+    def price(self, order):
+        self.calls.append(order["id"])
+        if order["id"] in self._raise:
+            raise PricingError("legacy cannot price this order")
+        return order["quantity"] * 100
+
+
+class ModernPricer:
+    def __init__(self, disagree_on=(), raise_on=()):
+        self.calls = []
+        self._disagree = set(disagree_on)
+        self._raise = set(raise_on)
+
+    def price(self, order):
+        self.calls.append(order["id"])
+        if order["id"] in self._raise:
+            raise PricingError("modern is not ready for this order")
+        if order["id"] in self._disagree:
+            return order["quantity"] * 100 + 1
+        return order["quantity"] * 100
+'''
+
+#: The gateway for -0011. It replays a key it has already seen and counts the
+#: money it actually captured, so a retry that invents a fresh key per attempt
+#: is visible as a second capture rather than as a successful retry.
+_GATEWAY = '''\
+"""The payment gateway that already exists. It cannot be changed."""
+
+
+class TransientError(Exception):
+    """A temporary failure. The identical request may be retried."""
+
+
+class DeclinedError(Exception):
+    """The issuer refused. Retrying will not help."""
+
+
+class Gateway:
+    def __init__(self, transient_failures=0, decline=False):
+        self._remaining = transient_failures
+        self._decline = decline
+        self._by_key = {}
+        self.captured_total = 0
+        self.attempts = 0
+
+    def charge(self, idempotency_key, amount_cents):
+        self.attempts += 1
+        if not isinstance(idempotency_key, str) or not idempotency_key:
+            raise ValueError("an idempotency key is required")
+        if idempotency_key in self._by_key:
+            record = dict(self._by_key[idempotency_key])
+            record["replayed"] = True
+            return record
+        if self._remaining > 0:
+            self._remaining -= 1
+            raise TransientError("the gateway is briefly unavailable")
+        if self._decline:
+            raise DeclinedError("the issuer declined the card")
+        self.captured_total += amount_cents
+        record = {"id": f"ch_{len(self._by_key) + 1}",
+                  "amount_cents": amount_cents, "replayed": False}
+        self._by_key[idempotency_key] = record
+        return dict(record)
+'''
+
 TASKS = [
     task(
         f"{FAMILY}-0001", FAMILY,
@@ -789,6 +973,578 @@ def first(payload):
 assert dispatch(passthrough, 'echo', {'k': 'v'})['results'] == \
     [('first', {'k': 'v'})]
 assert seen == [{'k': 'v'}], 'the payload is passed through unchanged'
+''',
+    ),
+    task(
+        f"{FAMILY}-0007", FAMILY,
+        prompt=(
+            "The module event_log.py already exists and cannot be changed: "
+            "EventLog.read_from(offset) returns every (offset, event) pair at "
+            "or after offset, append(event) adds one, and len() counts them. "
+            "Write a class BalanceProjection(log) that folds that log into "
+            "account balances. It exposes balances, a dict of account name to "
+            "integer balance holding only open accounts; next_offset, the "
+            "offset the next read will start from; catch_up(), which applies "
+            "every event at or after next_offset and returns how many it "
+            "applied; snapshot(), returning a JSON-serialisable dict; and a "
+            "classmethod restore(log, snapshot) rebuilding a projection from "
+            "one. The event types are opened, deposited, withdrew and closed, "
+            "each carrying an account, with deposited and withdrew also "
+            "carrying a positive integer amount. Opening an account that is "
+            "already open, touching one that is not open, withdrawing more "
+            "than the balance, closing an account that still holds funds, a "
+            "non-positive or non-integer amount, and an unrecognised event "
+            "type are each a ValueError. A rejected event must leave both the "
+            "balances and next_offset exactly as they were before it, so that "
+            "the same event is reconsidered rather than skipped on the next "
+            "call. A catch-up must read only from next_offset."
+        ),
+        fixtures={"event_log.py": _EVENT_LOG},
+        validator=LOAD_CANDIDATE + require("BalanceProjection") + r'''
+import event_log
+
+EVENTS = [
+    {'type': 'opened', 'account': 'alice'},
+    {'type': 'deposited', 'account': 'alice', 'amount': 120},
+    {'type': 'opened', 'account': 'bob'},
+    {'type': 'deposited', 'account': 'bob', 'amount': 40},
+    {'type': 'withdrew', 'account': 'alice', 'amount': 20},
+]
+
+log = event_log.EventLog(EVENTS)
+projection = BalanceProjection(log)
+assert projection.catch_up() == 5, 'not every event was applied'
+assert projection.balances == {'alice': 100, 'bob': 40}, projection.balances
+assert projection.next_offset == 5
+
+# A second catch-up with nothing new applies nothing and changes nothing.
+assert projection.catch_up() == 0, 'events were applied twice'
+assert projection.balances == {'alice': 100, 'bob': 40}
+
+# ...and it must not have re-read the whole log to discover that.
+assert log.offsets_requested[-1] == 5, (
+    'the catch-up read from offset '
+    f'{log.offsets_requested[-1]} rather than from next_offset'
+)
+
+log.append({'type': 'withdrew', 'account': 'bob', 'amount': 40})
+log.append({'type': 'closed', 'account': 'bob'})
+assert projection.catch_up() == 2, 'the appended events were not applied'
+assert projection.balances == {'alice': 100}, 'a closed account still shows'
+
+# A snapshot must survive a round trip through JSON and resume from it.
+import json
+
+carried = json.loads(json.dumps(projection.snapshot()))
+resumed = BalanceProjection.restore(log, carried)
+assert resumed.balances == {'alice': 100}, resumed.balances
+assert resumed.next_offset == projection.next_offset
+assert resumed.catch_up() == 0, 'a resumed projection re-applied the log'
+
+# ...and resuming must land exactly where a full rebuild does.
+ALL_EVENTS = EVENTS + [{'type': 'withdrew', 'account': 'bob', 'amount': 40},
+                       {'type': 'closed', 'account': 'bob'}]
+rebuilt = BalanceProjection(event_log.EventLog(ALL_EVENTS))
+assert rebuilt.catch_up() == len(ALL_EVENTS)
+assert rebuilt.balances == resumed.balances, \
+    'restoring from a snapshot diverged from a full rebuild'
+assert rebuilt.next_offset == resumed.next_offset
+
+# The seam: a rejected event must be reconsidered, never stepped over.
+broken = event_log.EventLog([
+    {'type': 'opened', 'account': 'carol'},
+    {'type': 'deposited', 'account': 'carol', 'amount': 10},
+    {'type': 'withdrew', 'account': 'carol', 'amount': 99},
+    {'type': 'deposited', 'account': 'carol', 'amount': 5},
+])
+stalled = BalanceProjection(broken)
+try:
+    stalled.catch_up()
+except ValueError:
+    pass
+else:
+    raise AssertionError('an overdraft was accepted')
+assert stalled.balances == {'carol': 10}, \
+    f'the rejected event changed the balances: {stalled.balances}'
+assert stalled.next_offset == 2, (
+    f'next_offset advanced to {stalled.next_offset}, so the rejected event '
+    'would be skipped instead of reconsidered'
+)
+try:
+    stalled.catch_up()
+except ValueError:
+    pass
+else:
+    raise AssertionError('the rejected event was skipped on the second call')
+
+for bad in ([{'type': 'deposited', 'account': 'nobody', 'amount': 1}],
+            [{'type': 'opened', 'account': 'x'},
+             {'type': 'opened', 'account': 'x'}],
+            [{'type': 'opened', 'account': 'x'},
+             {'type': 'deposited', 'account': 'x', 'amount': 0}],
+            [{'type': 'opened', 'account': 'x'},
+             {'type': 'deposited', 'account': 'x', 'amount': 1.5}],
+            [{'type': 'opened', 'account': 'x'},
+             {'type': 'deposited', 'account': 'x', 'amount': 5},
+             {'type': 'closed', 'account': 'x'}],
+            [{'type': 'transferred', 'account': 'x'}]):
+    try:
+        BalanceProjection(event_log.EventLog(bad)).catch_up()
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f'{bad!r} was accepted')
+
+assert BalanceProjection(event_log.EventLog([])).catch_up() == 0
+''',
+    ),
+    task(
+        f"{FAMILY}-0008", FAMILY,
+        prompt=(
+            "The module components.py already exists and cannot be changed: "
+            "Component(name, trace, fails=False) appends ('started', name) to "
+            "the shared trace list, or appends ('failed', name) and raises "
+            "ComponentError when fails is true, and close() appends "
+            "('closed', name) and raises ComponentError if called twice. "
+            "Write a class Container(specs) wiring them together, where specs "
+            "maps a component name to a dict with 'requires', a list of names "
+            "it depends on, and 'build', a callable taking those dependencies "
+            "as keyword arguments. get(name) returns the component, building "
+            "each dependency before its dependant and building any given name "
+            "at most once for the life of the container. An unknown name is a "
+            "KeyError and a dependency cycle is a ValueError. close() closes "
+            "every component that was built, in the reverse of the order they "
+            "were built, exactly once each, and is a no-op when called again. "
+            "If a build raises, every component that this particular get() "
+            "call brought into existence must be closed in reverse order and "
+            "the original exception must propagate, while components built by "
+            "earlier calls stay open and registered."
+        ),
+        fixtures={"components.py": _COMPONENTS},
+        validator=LOAD_CANDIDATE + require("Container") + r'''
+import components
+
+
+def spec(name, trace, requires=(), fails=False):
+    def build(**resolved):
+        return components.Component(name, trace, fails=fails)
+    return {'requires': list(requires), 'build': build}
+
+
+trace = []
+specs = {
+    'config': spec('config', trace),
+    'pool': spec('pool', trace, ['config']),
+    'cache': spec('cache', trace, ['config']),
+    'api': spec('api', trace, ['pool', 'cache']),
+}
+container = Container(specs)
+api = container.get('api')
+assert api.name == 'api'
+
+started = [name for kind, name in trace if kind == 'started']
+assert started[0] == 'config', f'config was not built first: {started}'
+assert started.index('pool') < started.index('api')
+assert started.index('cache') < started.index('api')
+assert sorted(started) == ['api', 'cache', 'config', 'pool']
+
+# A second get must reuse, not rebuild.
+assert container.get('api') is api
+assert container.get('config') is not None
+assert [name for kind, name in trace if kind == 'started'] == started, \
+    'a component was built twice'
+
+container.close()
+closed = [name for kind, name in trace if kind == 'closed']
+assert closed == list(reversed(started)), (
+    f'closed in {closed}, which is not the reverse of the build order '
+    f'{started}'
+)
+container.close()
+assert [name for kind, name in trace if kind == 'closed'] == closed, \
+    'a second close() closed something a second time'
+
+# The seam: a failure part-way through one get() unwinds only what that call
+# built, in reverse, and leaves the earlier component alone.
+trace = []
+specs = {
+    'base': spec('base', trace),
+    'left': spec('left', trace, ['base']),
+    'right': spec('right', trace, ['base'], fails=True),
+    'top': spec('top', trace, ['left', 'right']),
+}
+container = Container(specs)
+base = container.get('base')
+assert trace == [('started', 'base')]
+
+try:
+    container.get('top')
+except components.ComponentError:
+    pass
+else:
+    raise AssertionError('the failing build did not propagate')
+
+after = trace[1:]
+assert ('started', 'left') in after and ('failed', 'right') in after
+assert ('closed', 'left') in after, \
+    'the component built by the failing call was left open'
+assert ('closed', 'base') not in after, (
+    'a component built by an earlier call was closed by an unrelated '
+    'failure'
+)
+assert not base.closed
+closed_after = [name for kind, name in after if kind == 'closed']
+started_after = [name for kind, name in after if kind == 'started']
+assert closed_after == list(reversed(started_after)), (
+    f'partial teardown ran {closed_after}, not the reverse of '
+    f'{started_after}'
+)
+
+# The container is still usable, and did not keep the half-built component.
+assert container.get('left') is not None
+assert [name for kind, name in trace if kind == 'started'].count('left') == 2
+
+for bad in ('absent', 'also absent'):
+    try:
+        Container(specs).get(bad)
+    except KeyError:
+        pass
+    else:
+        raise AssertionError(f'{bad!r} was resolved')
+
+cyclic = {
+    'a': spec('a', [], ['b']),
+    'b': spec('b', [], ['c']),
+    'c': spec('c', [], ['a']),
+}
+try:
+    Container(cyclic).get('a')
+except ValueError:
+    pass
+else:
+    raise AssertionError('a dependency cycle was not reported')
+
+selfish = {'a': spec('a', [], ['a'])}
+try:
+    Container(selfish).get('a')
+except ValueError:
+    pass
+else:
+    raise AssertionError('a self-dependency was not reported')
+''',
+    ),
+    task(
+        f"{FAMILY}-0009", FAMILY,
+        prompt=(
+            "The module domain.py already exists and cannot be changed: it "
+            "defines TranslationError, a Status enum of PENDING, SETTLED and "
+            "FAILED, a frozen Money(amount, currency) that rejects anything "
+            "but a Decimal amount and a three-letter upper-case currency, and "
+            "a frozen Payment(reference, money, occurred_at, status). Write a "
+            "function translate(record) turning one upstream record into a "
+            "Payment. The upstream shape is fixed and unhelpful: 'ref' is the "
+            "reference, 'amount_cents' is a non-negative integer number of "
+            "minor units, 'ccy' is a lower-case currency code, 'ts' is an "
+            "integer count of seconds since the Unix epoch in UTC, and "
+            "'state' is 'P', 'S' or 'F'. The Payment's amount must be the "
+            "exact decimal value of those minor units, its occurred_at must "
+            "be a timezone-aware UTC datetime, and its status must be the "
+            "matching Status member. Any missing key, unrecognised state, "
+            "malformed currency, or negative or non-integer amount must raise "
+            "domain.TranslationError, and no other exception type may reach "
+            "the caller."
+        ),
+        fixtures={"domain.py": _DOMAIN},
+        validator=LOAD_CANDIDATE + require("translate") + r'''
+import datetime
+import domain
+from decimal import Decimal
+
+payment = translate({'ref': 'r-1', 'amount_cents': 1250, 'ccy': 'usd',
+                     'ts': 1700000000, 'state': 'S'})
+assert isinstance(payment, domain.Payment)
+assert payment.reference == 'r-1'
+assert payment.money.currency == 'USD', 'the currency was not normalised'
+assert payment.money.amount == Decimal('12.50')
+assert payment.status is domain.Status.SETTLED, 'status is not the enum member'
+
+assert payment.occurred_at.tzinfo is not None, 'occurred_at is naive'
+assert payment.occurred_at.utcoffset() == datetime.timedelta(0), \
+    'occurred_at is not UTC'
+assert payment.occurred_at == datetime.datetime(
+    2023, 11, 14, 22, 13, 20, tzinfo=datetime.timezone.utc), \
+    payment.occurred_at
+
+assert translate({'ref': 'r', 'amount_cents': 0, 'ccy': 'eur', 'ts': 0,
+                  'state': 'P'}).money.amount == Decimal('0')
+assert translate({'ref': 'r', 'amount_cents': 7, 'ccy': 'eur', 'ts': 0,
+                  'state': 'F'}).status is domain.Status.FAILED
+
+# The seam. A binary-floating-point division survives every small example and
+# loses the cents on a large one, and Money refuses a float outright so the
+# loss cannot be hidden behind a rounded repr.
+exact = translate({'ref': 'big', 'amount_cents': 1234567890123457,
+                   'ccy': 'jpy', 'ts': 1, 'state': 'P'})
+assert exact.money.amount == Decimal('12345678901234.57'), (
+    'the minor units were not converted exactly: got '
+    f'{exact.money.amount}'
+)
+
+base = {'ref': 'r', 'amount_cents': 100, 'ccy': 'usd', 'ts': 0, 'state': 'P'}
+for key in ('ref', 'amount_cents', 'ccy', 'ts', 'state'):
+    missing = dict(base)
+    del missing[key]
+    try:
+        translate(missing)
+    except domain.TranslationError:
+        pass
+    except Exception as error:
+        raise AssertionError(
+            f'a missing {key!r} raised {type(error).__name__}, which no '
+            'caller of this layer is written to catch')
+    else:
+        raise AssertionError(f'a record with no {key!r} was translated')
+
+for field, value in (('state', 'X'), ('state', ''), ('state', None),
+                     ('ccy', 'dollars'), ('ccy', 'us'), ('ccy', None),
+                     ('amount_cents', -1), ('amount_cents', 1.5),
+                     ('amount_cents', '100'), ('ts', 'yesterday')):
+    bad = dict(base)
+    bad[field] = value
+    try:
+        translate(bad)
+    except domain.TranslationError:
+        pass
+    except Exception as error:
+        raise AssertionError(
+            f'{field}={value!r} raised {type(error).__name__} rather than '
+            'TranslationError')
+    else:
+        raise AssertionError(f'{field}={value!r} was translated')
+''',
+    ),
+    task(
+        f"{FAMILY}-0010", FAMILY,
+        prompt=(
+            "The module pricers.py already exists and cannot be changed: "
+            "LegacyPricer and ModernPricer both expose price(order) and "
+            "record every order id they are asked to price in a calls list, "
+            "and either may raise PricingError. Write a class "
+            "StranglerPricer(legacy, modern, mode, on_event) migrating "
+            "traffic from one to the other. mode is 'legacy', 'shadow' or "
+            "'modern', and any other value is a ValueError at construction. "
+            "price(order) in legacy mode calls only the legacy pricer and "
+            "returns its result. In shadow mode it calls both exactly once "
+            "and still returns the legacy result, because legacy is "
+            "authoritative during a shadow: if the two disagree it calls "
+            "on_event('mismatch', order_id, legacy_result, modern_result) "
+            "once, and if the modern pricer raises it calls "
+            "on_event('error', order_id, legacy_result, message) with the "
+            "exception's string and still returns the legacy result. A "
+            "PricingError from the legacy pricer propagates in both of those "
+            "modes. In modern mode it calls only the modern pricer, but if "
+            "that raises PricingError it falls back to the legacy pricer, "
+            "calls on_event('fallback', order_id, None, message) and returns "
+            "the legacy result, propagating the legacy error if that fails "
+            "too."
+        ),
+        fixtures={"pricers.py": _PRICERS},
+        validator=LOAD_CANDIDATE + require("StranglerPricer") + r'''
+import pricers
+
+
+def order(identifier, quantity=2):
+    return {'id': identifier, 'quantity': quantity}
+
+
+events = []
+
+
+def record(*args):
+    events.append(args)
+
+
+legacy = pricers.LegacyPricer()
+modern = pricers.ModernPricer()
+router = StranglerPricer(legacy, modern, 'legacy', record)
+assert router.price(order('a')) == 200
+assert legacy.calls == ['a'] and modern.calls == [], \
+    'legacy mode must not reach the modern pricer'
+assert events == []
+
+# Shadow: both run, legacy answers, and agreement is silent.
+legacy = pricers.LegacyPricer()
+modern = pricers.ModernPricer(disagree_on=['b'])
+router = StranglerPricer(legacy, modern, 'shadow', record)
+assert router.price(order('a')) == 200
+assert legacy.calls == ['a'] and modern.calls == ['a'], \
+    'a shadow must call both exactly once'
+assert events == [], 'agreement must not be reported'
+
+# ...and disagreement is reported without changing the answer.
+assert router.price(order('b')) == 200, \
+    'the shadow returned the modern result; legacy is authoritative'
+assert events == [('mismatch', 'b', 200, 201)], events
+assert legacy.calls == ['a', 'b'] and modern.calls == ['a', 'b']
+
+# A modern failure during a shadow must not become the caller's problem.
+events.clear()
+legacy = pricers.LegacyPricer()
+modern = pricers.ModernPricer(raise_on=['c'])
+router = StranglerPricer(legacy, modern, 'shadow', record)
+assert router.price(order('c')) == 200, \
+    'the modern pricer failing changed what the caller received'
+assert len(events) == 1 and events[0][0] == 'error'
+assert events[0][1] == 'c' and events[0][2] == 200
+assert 'not ready' in events[0][3]
+
+# The legacy pricer is authoritative, so its failure is real.
+events.clear()
+legacy = pricers.LegacyPricer(raise_on=['d'])
+modern = pricers.ModernPricer()
+router = StranglerPricer(legacy, modern, 'shadow', record)
+try:
+    router.price(order('d'))
+except pricers.PricingError:
+    pass
+else:
+    raise AssertionError('a legacy failure was swallowed during a shadow')
+
+# Modern mode: only the modern pricer, unless it cannot cope.
+events.clear()
+legacy = pricers.LegacyPricer()
+modern = pricers.ModernPricer(disagree_on=['e'])
+router = StranglerPricer(legacy, modern, 'modern', record)
+assert router.price(order('e')) == 201, 'modern mode did not return modern'
+assert legacy.calls == [], 'modern mode called the legacy pricer anyway'
+assert events == []
+
+events.clear()
+legacy = pricers.LegacyPricer()
+modern = pricers.ModernPricer(raise_on=['f'])
+router = StranglerPricer(legacy, modern, 'modern', record)
+assert router.price(order('f')) == 200, 'no fallback to the legacy pricer'
+assert legacy.calls == ['f'] and modern.calls == ['f']
+assert len(events) == 1 and events[0][0] == 'fallback'
+assert events[0][1] == 'f' and events[0][2] is None
+assert 'not ready' in events[0][3]
+
+events.clear()
+legacy = pricers.LegacyPricer(raise_on=['g'])
+modern = pricers.ModernPricer(raise_on=['g'])
+router = StranglerPricer(legacy, modern, 'modern', record)
+try:
+    router.price(order('g'))
+except pricers.PricingError as error:
+    assert 'legacy' in str(error), \
+        'the fallback failing must surface the legacy error'
+else:
+    raise AssertionError('both pricers failed and nothing was raised')
+
+for bad in ('canary', '', None, 'Shadow'):
+    try:
+        StranglerPricer(pricers.LegacyPricer(), pricers.ModernPricer(),
+                        bad, record)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f'mode {bad!r} was accepted')
+''',
+    ),
+    task(
+        f"{FAMILY}-0011", FAMILY,
+        prompt=(
+            "The module gateway.py already exists and cannot be changed: "
+            "Gateway.charge(idempotency_key, amount_cents) captures the "
+            "amount and returns a record with an id and replayed set to "
+            "False; called again with a key it has already captured it "
+            "returns that same record with replayed set to True and takes no "
+            "further money; it raises TransientError while it is briefly "
+            "unavailable and DeclinedError when the issuer refuses. Write a "
+            "function charge_once(gateway, reference, amount_cents, "
+            "attempts=3) that captures a payment at most once. It must derive "
+            "a single idempotency key from the reference and present that "
+            "same key on every attempt, retry only TransientError, make no "
+            "more than attempts calls in total, and re-raise the last "
+            "TransientError if they are all exhausted. DeclinedError must "
+            "propagate immediately without a retry. A reference that is not a "
+            "non-empty string, an amount that is not a positive integer, and "
+            "an attempts below one are each a ValueError raised before the "
+            "gateway is called at all. Two separate calls with the same "
+            "reference must never capture the money twice."
+        ),
+        fixtures={"gateway.py": _GATEWAY},
+        validator=LOAD_CANDIDATE + require("charge_once") + r'''
+import gateway as gw
+
+# A retry presents the same key, so the money moves exactly once.
+service = gw.Gateway(transient_failures=2)
+record = charge_once(service, 'order-1', 500)
+assert record['amount_cents'] == 500
+assert service.attempts == 3, f'{service.attempts} attempts, expected 3'
+assert service.captured_total == 500, \
+    f'captured {service.captured_total}, so a retry charged again'
+
+# The seam: calling again for the same reference is a replay, not a purchase.
+again = charge_once(service, 'order-1', 500)
+assert service.captured_total == 500, (
+    f'a repeat call captured a second time: total {service.captured_total}'
+)
+assert again['id'] == record['id'], 'the replay returned a different charge'
+assert again['replayed'] is True, 'the gateway did not see a familiar key'
+
+# A different reference is a different payment.
+assert charge_once(service, 'order-2', 250)['replayed'] is False
+assert service.captured_total == 750
+
+# A decline is final and must not be retried.
+declining = gw.Gateway(decline=True)
+try:
+    charge_once(declining, 'order-3', 100)
+except gw.DeclinedError:
+    pass
+else:
+    raise AssertionError('a decline was not propagated')
+assert declining.attempts == 1, \
+    f'a decline was retried {declining.attempts} times'
+assert declining.captured_total == 0
+
+# Exhausting the retries surfaces the transient failure rather than hiding it.
+flaky = gw.Gateway(transient_failures=5)
+try:
+    charge_once(flaky, 'order-4', 100, attempts=3)
+except gw.TransientError:
+    pass
+else:
+    raise AssertionError('exhausted retries did not raise')
+assert flaky.attempts == 3, f'made {flaky.attempts} attempts, expected 3'
+assert flaky.captured_total == 0
+
+single = gw.Gateway(transient_failures=1)
+try:
+    charge_once(single, 'order-5', 100, attempts=1)
+except gw.TransientError:
+    pass
+else:
+    raise AssertionError('attempts=1 retried anyway')
+assert single.attempts == 1
+
+# Bad input is rejected before any money can move.
+guarded = gw.Gateway()
+for reference, amount, attempts in (
+        ('', 100, 3), (None, 100, 3), (7, 100, 3),
+        ('r', 0, 3), ('r', -5, 3), ('r', 1.5, 3), ('r', '100', 3),
+        ('r', True, 3), ('r', 100, 0), ('r', 100, -1)):
+    try:
+        charge_once(guarded, reference, amount, attempts)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(
+            f'charge_once({reference!r}, {amount!r}, {attempts!r}) was '
+            'accepted')
+assert guarded.attempts == 0, 'the gateway was called with invalid input'
+assert guarded.captured_total == 0
 ''',
     ),
 ]
