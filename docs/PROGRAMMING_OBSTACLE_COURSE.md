@@ -464,6 +464,76 @@ line. Twelve tasks with no reference is not a partially finished family; it is
 an unmeasured one, because neither direction of the satisfiable/discriminating
 check has run against any of them.
 
+### What you commit is the whole tree, not the part you were working on
+
+The rule above says commit the family as soon as it is green. It has now been
+paid for a fourth time by the case it does not cover: what a commit captures
+is not what you wrote, it is everything staged in the working tree at that
+instant, and a sibling session's half-finished edits are sitting in that same
+tree.
+
+`65e57cf` committed a validation family carrying twenty-four task ids for
+sixteen distinct tasks. Ten of them were that session's own `0007`-`0016`.
+The other eight were a second session's independently authored `0007`-`0014`,
+spliced into the same two files minutes earlier and still uncommitted. Both
+authorings were correct in isolation. Committed together they gave every id
+from `0007` to `0014` two entries.
+
+The write-once `REFERENCES` guard caught it exactly as designed:
+
+```
+KeyError: 'validation_parsing_serialization-0007' already has an entry in
+this table. Two blocks define it, and the later one would silently shadow
+the earlier...
+```
+
+Which is the point worth keeping. The guard raises on **import**, and a commit
+does not import anything. So the failure was not detected when it was created;
+it was detected by the next session that tried to run the suite, and by then
+HEAD itself could not collect a single test — not the family, the whole
+obstacle course. A broken working tree is one session's problem for a few
+minutes. A broken HEAD is every session's problem until someone repairs it.
+
+So the check before `git commit` is not "are my changes right", it is:
+
+```bash
+git status --porcelain                 # whose work is in this tree?
+python -c "import tests.obstacle_references"   # does the tree import at all?
+python -m pytest tests/test_programming_obstacle_course.py -q
+```
+
+Stage by path, and read `git status` before doing it. If it lists a file you
+did not touch, or a file you touched shows changes you did not make, a sibling
+is mid-write and staging it commits their unfinished state under your message.
+The import line is the cheap one and catches this entire class: it is the
+guard's own check, run at the moment the guard cannot run itself.
+
+#### Recovering a duplicated authoring: check behaviour before renumbering
+
+When your blocks are the duplicate, the salvage is not to renumber them onto
+free ids. Two sessions given the same family and the same contract row pick
+overlapping subject matter, and a renumbered duplicate is precisely what
+`test_authored_tasks_are_all_behaviourally_distinct` exists to reject.
+
+Of the eight recovered here, five had been authored by the other session under
+different names — URI reference resolution, percent-encoding, base32,
+IPv6 canonicalisation and strict JSON — and were dropped. Three described wire
+formats no task in the family read, and those were renumbered and kept as
+`0017`-`0019`: RFC 7233 byte ranges, hand-written RFC 3629 UTF-8 decoding, and
+RFC 7230 chunked transfer decoding. Compare the prompts before spending the
+ids:
+
+```bash
+python -c "
+from scripts.programming_obstacle_tasks.<family> import TASKS
+for t in TASKS: print(t.task_id[-4:], ' '.join(t.prompt.split())[:110])
+"
+```
+
+Discarding five authored tasks costs less than admitting one duplicate, which
+would sit in the frozen course reporting a capability twice and consuming a
+slot the contract allocated to a behaviour nothing else tests.
+
 ### Fixture modules: the other side of the seam
 
 `ObstacleTask.fixtures` maps a filename to file contents, written into the
