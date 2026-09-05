@@ -219,11 +219,124 @@ where
 }
 
 pub fn load_snapshot<P: AsRef<Path>>(path: P) -> io::Result<BrainSnapshot> {
+    use bincode::Options;
     use std::io::BufReader;
     // Symmetric streaming read — never allocates a Vec<u8> the size of the
     // whole file.  Bincode's deserialise reads only as much as the next
     // primitive demands.
+    //
+    // BOUNDED, because "only as much as the next primitive demands" is
+    // exactly the problem when the file is damaged.  Bincode reads a length
+    // prefix and immediately allocates that many elements; on a truncated or
+    // corrupt snapshot that length is whatever bytes happen to sit there.
+    //
+    // Observed 2026-09-05: brain-data/brain.bin.tmp was 179 bytes — a
+    // checkpoint that died mid-write — and the node aborted on startup with
+    //
+    //     memory allocation of 4575657221408424000 bytes failed
+    //
+    // 4.5 exabytes.  Not a real request: a garbage length prefix read as a
+    // count.  The process died before it could report a parse error, so the
+    // brain looked like it "kept crashing" rather than "has one damaged
+    // file", and brain.bin has not been checkpointed since Aug 19 while the
+    // WAL grew to 75 MB.
+    //
+    // The limit is deliberately generous — larger than any legitimate
+    // snapshot this machine can hold — so it never rejects real data.  Its
+    // only job is to turn an impossible allocation into an error the caller
+    // can act on.
     let file = fs::File::open(path)?;
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
     let mut r = BufReader::with_capacity(256 * 1024, file);
-    bincode::deserialize_from(&mut r).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+
+    // A serialised structure cannot be larger than a generous multiple of
+    // the bytes it was read from.  Anything past that is corruption, not
+    // data.
+    let limit = len.saturating_mul(64).max(64 * 1024 * 1024);
+
+    bincode::options()
+        .with_limit(limit)
+        .with_fixint_encoding()
+        .allow_trailing_bytes()
+        .deserialize_from(&mut r)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+#[cfg(test)]
+mod truncated_snapshot_tests {
+    use super::*;
+    use std::io::Write;
+
+    /// A snapshot that died mid-write must fail as an ERROR, not abort the
+    /// process.
+    ///
+    /// These are the first 179 bytes of the real brain-data/brain.bin.tmp
+    /// recovered on 2026-09-05. Loading it aborted the node with
+    /// "memory allocation of 4575657221408424000 bytes failed" -- a garbage
+    /// length prefix read as an element count. The node had been dying on
+    /// startup for days, and the failure looked like instability rather than
+    /// one damaged file, because an abort leaves no error to report.
+    #[test]
+    fn a_truncated_snapshot_errors_instead_of_aborting() {
+        let dir = std::env::temp_dir().join("w1z4rd_truncated_snapshot_test");
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("torn.bin");
+
+        // Header bytes as recovered, then nothing -- the write died here.
+        let torn: [u8; 32] = [
+            0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x03, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+            0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x9a, 0x99, 0x19, 0x3e, 0x02, 0x00, 0x00, 0x00,
+        ];
+        {
+            let mut f = fs::File::create(&path).expect("create torn snapshot");
+            f.write_all(&torn).expect("write torn snapshot");
+        }
+
+        // The contract is simply that it RETURNS. Before the bound, this
+        // line never returned at all -- the allocator aborted the process.
+        let result = load_snapshot(&path);
+        assert!(result.is_err(), "a torn snapshot must not deserialise");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    /// The bound must never reject data that is merely large.
+    ///
+    /// Exercises the same bincode options the loader uses against a payload
+    /// far bigger than any header, so a limit set too tight would fail here
+    /// rather than in production on a real brain.
+    #[test]
+    fn the_bound_does_not_reject_legitimate_data() {
+        use bincode::Options;
+
+        let dir = std::env::temp_dir().join("w1z4rd_truncated_snapshot_test");
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("big.bin");
+
+        // A million elements: larger than any snapshot header, and exactly
+        // the shape (length prefix + payload) that the bound governs.
+        let payload: Vec<u64> = (0..1_000_000u64).collect();
+        {
+            let f = fs::File::create(&path).expect("create");
+            let mut w = std::io::BufWriter::new(f);
+            bincode::serialize_into(&mut w, &payload).expect("serialise");
+            w.flush().expect("flush");
+        }
+
+        let f = fs::File::open(&path).expect("open");
+        let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+        let mut r = std::io::BufReader::new(f);
+        let limit = len.saturating_mul(64).max(64 * 1024 * 1024);
+        let back: Vec<u64> = bincode::options()
+            .with_limit(limit)
+            .with_fixint_encoding()
+            .allow_trailing_bytes()
+            .deserialize_from(&mut r)
+            .expect("a payload we just wrote must load back");
+        assert_eq!(back.len(), 1_000_000);
+
+        let _ = fs::remove_file(&path);
+    }
 }
