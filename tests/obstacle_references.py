@@ -1668,6 +1668,655 @@ def redact(record, secret_keys):
 '''
 
 
+REFERENCES["scientific_3d_geometry_robotics-0001"] = r'''
+def compose(a, b):
+    return tuple(
+        tuple(sum(a[i][k] * b[k][j] for k in range(4)) for j in range(4))
+        for i in range(4)
+    )
+
+
+def apply(t, point):
+    x, y, z = point
+    return tuple(
+        t[i][0] * x + t[i][1] * y + t[i][2] * z + t[i][3] for i in range(3)
+    )
+
+
+def invert(t):
+    rows = []
+    for i in range(3):
+        rotation = tuple(t[j][i] for j in range(3))
+        offset = -sum(t[j][i] * t[j][3] for j in range(3))
+        rows.append(rotation + (offset,))
+    rows.append((0.0, 0.0, 0.0, 1.0))
+    return tuple(rows)
+'''
+
+
+REFERENCES["scientific_3d_geometry_robotics-0002"] = r'''
+import math
+
+
+def normalize(q):
+    w, x, y, z = q
+    norm = math.sqrt(w * w + x * x + y * y + z * z)
+    if norm == 0.0:
+        raise ValueError("the zero quaternion has no direction")
+    return (w / norm, x / norm, y / norm, z / norm)
+
+
+def multiply(q1, q2):
+    w1, x1, y1, z1 = q1
+    w2, x2, y2, z2 = q2
+    return (
+        w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+        w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+        w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+        w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+    )
+
+
+def to_matrix(q):
+    w, x, y, z = normalize(q)
+    return (
+        (1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)),
+        (2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)),
+        (2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)),
+    )
+
+
+def rotate(q, v):
+    m = to_matrix(q)
+    return tuple(sum(m[i][j] * v[j] for j in range(3)) for i in range(3))
+'''
+
+
+REFERENCES["scientific_3d_geometry_robotics-0003"] = r'''
+def mesh_report(vertices, triangles):
+    directed = {}
+    undirected = {}
+    for a, b, c in triangles:
+        for u, v in ((a, b), (b, c), (c, a)):
+            directed[(u, v)] = directed.get((u, v), 0) + 1
+            key = (u, v) if u < v else (v, u)
+            undirected[key] = undirected.get(key, 0) + 1
+    boundary = sum(1 for count in undirected.values() if count == 1)
+    nonmanifold = sum(1 for count in undirected.values() if count > 2)
+    return {
+        "boundary_edges": boundary,
+        "nonmanifold_edges": nonmanifold,
+        "closed": boundary == 0 and nonmanifold == 0,
+        "consistent_winding": all(
+            count == 1 for count in directed.values()
+        ),
+        "euler_characteristic":
+            len(vertices) - len(undirected) + len(triangles),
+    }
+'''
+
+
+REFERENCES["scientific_3d_geometry_robotics-0004"] = r'''
+def _determinant(a, b, c):
+    return (
+        a[0] * (b[1] * c[2] - b[2] * c[1])
+        - a[1] * (b[0] * c[2] - b[2] * c[0])
+        + a[2] * (b[0] * c[1] - b[1] * c[0])
+    )
+
+
+def signed_volume(vertices, triangles):
+    total = 0.0
+    for ia, ib, ic in triangles:
+        total += _determinant(vertices[ia], vertices[ib], vertices[ic])
+    return total / 6.0
+
+
+def centroid(vertices, triangles):
+    volume = signed_volume(vertices, triangles)
+    if volume == 0.0:
+        raise ValueError("a mesh enclosing no volume has no centroid")
+    moment = [0.0, 0.0, 0.0]
+    for ia, ib, ic in triangles:
+        a, b, c = vertices[ia], vertices[ib], vertices[ic]
+        det = _determinant(a, b, c)
+        for axis in range(3):
+            moment[axis] += det * (a[axis] + b[axis] + c[axis]) / 24.0
+    return tuple(value / volume for value in moment)
+'''
+
+
+REFERENCES["scientific_3d_geometry_robotics-0005"] = r'''
+def box_inertia(mass, sx, sy, sz):
+    if mass <= 0.0 or min(sx, sy, sz) <= 0.0:
+        raise ValueError("mass and extents must be positive")
+    factor = mass / 12.0
+    return (
+        (factor * (sy * sy + sz * sz), 0.0, 0.0),
+        (0.0, factor * (sx * sx + sz * sz), 0.0),
+        (0.0, 0.0, factor * (sx * sx + sy * sy)),
+    )
+
+
+def translate_inertia(inertia, mass, offset):
+    squared = sum(component * component for component in offset)
+    rows = []
+    for i in range(3):
+        row = []
+        for j in range(3):
+            delta = squared if i == j else 0.0
+            row.append(
+                inertia[i][j] + mass * (delta - offset[i] * offset[j])
+            )
+        rows.append(tuple(row))
+    return tuple(rows)
+'''
+
+
+REFERENCES["scientific_3d_geometry_robotics-0006"] = r'''
+def _cross(u, v):
+    return (
+        u[1] * v[2] - u[2] * v[1],
+        u[2] * v[0] - u[0] * v[2],
+        u[0] * v[1] - u[1] * v[0],
+    )
+
+
+def _dot(u, v):
+    return u[0] * v[0] + u[1] * v[1] + u[2] * v[2]
+
+
+def intersect(origin, direction, triangle):
+    epsilon = 1e-12
+    a, b, c = triangle
+    edge1 = tuple(b[i] - a[i] for i in range(3))
+    edge2 = tuple(c[i] - a[i] for i in range(3))
+    pvec = _cross(direction, edge2)
+    det = _dot(edge1, pvec)
+    if abs(det) < epsilon:
+        return None
+    inv_det = 1.0 / det
+    tvec = tuple(origin[i] - a[i] for i in range(3))
+    u = _dot(tvec, pvec) * inv_det
+    if u < -1e-9 or u > 1.0 + 1e-9:
+        return None
+    qvec = _cross(tvec, edge1)
+    v = _dot(direction, qvec) * inv_det
+    if v < -1e-9 or u + v > 1.0 + 1e-9:
+        return None
+    t = _dot(edge2, qvec) * inv_det
+    if t <= 0.0:
+        return None
+    return t
+'''
+
+
+REFERENCES["scientific_3d_geometry_robotics-0007"] = r'''
+import struct
+
+
+def _normal(triangle):
+    a, b, c = triangle
+    u = [b[i] - a[i] for i in range(3)]
+    v = [c[i] - a[i] for i in range(3)]
+    n = [
+        u[1] * v[2] - u[2] * v[1],
+        u[2] * v[0] - u[0] * v[2],
+        u[0] * v[1] - u[1] * v[0],
+    ]
+    length = (n[0] ** 2 + n[1] ** 2 + n[2] ** 2) ** 0.5
+    if length == 0.0:
+        return (0.0, 0.0, 0.0)
+    return tuple(component / length for component in n)
+
+
+def write_binary_stl(triangles, header=b""):
+    triangles = list(triangles)
+    out = bytearray(header[:80].ljust(80, b"\x00"))
+    out += struct.pack("<I", len(triangles))
+    for triangle in triangles:
+        out += struct.pack("<3f", *_normal(triangle))
+        for vertex in triangle:
+            out += struct.pack("<3f", *vertex)
+        out += struct.pack("<H", 0)
+    return bytes(out)
+
+
+def read_binary_stl(data):
+    if len(data) < 84:
+        raise ValueError("buffer is shorter than a binary STL header")
+    count = struct.unpack_from("<I", data, 80)[0]
+    if len(data) != 84 + 50 * count:
+        raise ValueError("buffer length disagrees with its triangle count")
+    triangles = []
+    for index in range(count):
+        values = struct.unpack_from("<12f", data, 84 + 50 * index)
+        triangles.append(tuple(
+            tuple(values[3 + 3 * corner + axis] for axis in range(3))
+            for corner in range(3)
+        ))
+    return triangles
+'''
+
+
+REFERENCES["scientific_3d_geometry_robotics-0008"] = r'''
+import math
+
+
+def _link_matrix(a, alpha, d, theta):
+    ct, st = math.cos(theta), math.sin(theta)
+    ca, sa = math.cos(alpha), math.sin(alpha)
+    return (
+        (ct, -st * ca, st * sa, a * ct),
+        (st, ct * ca, -ct * sa, a * st),
+        (0.0, sa, ca, d),
+        (0.0, 0.0, 0.0, 1.0),
+    )
+
+
+def _multiply(m, n):
+    return tuple(
+        tuple(sum(m[i][k] * n[k][j] for k in range(4)) for j in range(4))
+        for i in range(4)
+    )
+
+
+def forward_kinematics(links, joint_values):
+    links = list(links)
+    values = list(joint_values)
+    if len(links) != len(values):
+        raise ValueError("one joint value is required per link")
+    pose = tuple(
+        tuple(1.0 if row == column else 0.0 for column in range(4))
+        for row in range(4)
+    )
+    for (a, alpha, d, offset), value in zip(links, values):
+        pose = _multiply(pose, _link_matrix(a, alpha, d, offset + value))
+    return pose
+'''
+
+
+REFERENCES["scientific_3d_geometry_robotics-0001"] = r'''
+def mesh_manifold_report(vertices, triangles):
+    directed = {}
+    undirected = {}
+    for triangle in triangles:
+        a, b, c = triangle[0], triangle[1], triangle[2]
+        for start, end in ((a, b), (b, c), (c, a)):
+            directed[(start, end)] = directed.get((start, end), 0) + 1
+            key = (start, end) if start < end else (end, start)
+            undirected[key] = undirected.get(key, 0) + 1
+
+    boundary = sorted(edge for edge, uses in undirected.items() if uses == 1)
+    non_manifold = sorted(edge for edge, uses in undirected.items() if uses > 2)
+    watertight = not boundary and not non_manifold
+
+    consistent = True
+    for (low, high), uses in undirected.items():
+        if uses != 2:
+            continue
+        if directed.get((low, high), 0) != 1 or directed.get((high, low), 0) != 1:
+            consistent = False
+            break
+
+    return {
+        "watertight": watertight,
+        "consistent_winding": consistent,
+        "boundary_edges": boundary,
+        "non_manifold_edges": non_manifold,
+        "is_printable": watertight and consistent,
+    }
+'''
+
+
+REFERENCES["scientific_3d_geometry_robotics-0002"] = r'''
+# Covariance of the canonical tetrahedron (0, e1, e2, e3), scaled by 1/120.
+_CANONICAL = ((2.0, 1.0, 1.0), (1.0, 2.0, 1.0), (1.0, 1.0, 2.0))
+
+
+def mesh_mass_properties(vertices, triangles, density=1.0):
+    if density <= 0:
+        raise ValueError("density must be positive")
+
+    volume = 0.0
+    moment = [0.0, 0.0, 0.0]
+    covariance = [[0.0] * 3 for _ in range(3)]
+
+    for triangle in triangles:
+        p1 = vertices[triangle[0]]
+        p2 = vertices[triangle[1]]
+        p3 = vertices[triangle[2]]
+        determinant = (
+            p1[0] * (p2[1] * p3[2] - p2[2] * p3[1])
+            - p1[1] * (p2[0] * p3[2] - p2[2] * p3[0])
+            + p1[2] * (p2[0] * p3[1] - p2[1] * p3[0])
+        )
+        tetra_volume = determinant / 6.0
+        volume += tetra_volume
+        for axis in range(3):
+            moment[axis] += tetra_volume * (p1[axis] + p2[axis] + p3[axis]) / 4.0
+
+        columns = (
+            (p1[0], p2[0], p3[0]),
+            (p1[1], p2[1], p3[1]),
+            (p1[2], p2[2], p3[2]),
+        )
+        for i in range(3):
+            for j in range(3):
+                total = 0.0
+                for a in range(3):
+                    for b in range(3):
+                        total += columns[i][a] * _CANONICAL[a][b] * columns[j][b]
+                covariance[i][j] += determinant * total / 120.0
+
+    if abs(volume) < 1e-12:
+        raise ValueError("mesh encloses no volume")
+
+    centre = [component / volume for component in moment]
+    for i in range(3):
+        for j in range(3):
+            covariance[i][j] -= volume * centre[i] * centre[j]
+
+    trace = covariance[0][0] + covariance[1][1] + covariance[2][2]
+    inertia = []
+    for i in range(3):
+        row = []
+        for j in range(3):
+            entry = trace - covariance[i][j] if i == j else -covariance[i][j]
+            row.append(density * entry)
+        inertia.append(tuple(row))
+
+    return {
+        "volume": volume,
+        "mass": density * volume,
+        "center_of_mass": tuple(centre),
+        "inertia_tensor": tuple(inertia),
+    }
+'''
+
+
+REFERENCES["scientific_3d_geometry_robotics-0003"] = r'''
+import math
+
+
+def _identity():
+    return [[1.0 if i == j else 0.0 for j in range(4)] for i in range(4)]
+
+
+def _matmul(left, right):
+    return [
+        [sum(left[i][k] * right[k][j] for k in range(4)) for j in range(4)]
+        for i in range(4)
+    ]
+
+
+def forward_kinematics(links, joint_values):
+    if len(links) != len(joint_values):
+        raise ValueError("one joint value is required per link")
+
+    pose = _identity()
+    for link, value in zip(links, joint_values):
+        kind = link.get("type")
+        if kind == "revolute":
+            theta = link["theta"] + value
+            offset = link["d"]
+        elif kind == "prismatic":
+            theta = link["theta"]
+            offset = link["d"] + value
+        else:
+            raise ValueError("unknown joint type: %r" % (kind,))
+
+        reach = link["a"]
+        twist = link["alpha"]
+        ct, st = math.cos(theta), math.sin(theta)
+        ca, sa = math.cos(twist), math.sin(twist)
+        transform = [
+            [ct, -st * ca, st * sa, reach * ct],
+            [st, ct * ca, -ct * sa, reach * st],
+            [0.0, sa, ca, offset],
+            [0.0, 0.0, 0.0, 1.0],
+        ]
+        pose = _matmul(pose, transform)
+
+    return tuple(tuple(row) for row in pose)
+'''
+
+
+REFERENCES["scientific_3d_geometry_robotics-0004"] = r'''
+import math
+
+
+def _normalise(q):
+    norm = math.sqrt(sum(float(c) * float(c) for c in q))
+    if norm < 1e-12:
+        raise ValueError("quaternion has zero magnitude")
+    return tuple(float(c) / norm for c in q)
+
+
+def quaternion_to_matrix(q):
+    w, x, y, z = _normalise(q)
+    return (
+        (1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)),
+        (2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)),
+        (2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)),
+    )
+
+
+def matrix_to_quaternion(m):
+    trace = m[0][0] + m[1][1] + m[2][2]
+    if trace > 0.0:
+        scale = math.sqrt(trace + 1.0) * 2.0
+        w = 0.25 * scale
+        x = (m[2][1] - m[1][2]) / scale
+        y = (m[0][2] - m[2][0]) / scale
+        z = (m[1][0] - m[0][1]) / scale
+    elif m[0][0] > m[1][1] and m[0][0] > m[2][2]:
+        scale = math.sqrt(1.0 + m[0][0] - m[1][1] - m[2][2]) * 2.0
+        w = (m[2][1] - m[1][2]) / scale
+        x = 0.25 * scale
+        y = (m[0][1] + m[1][0]) / scale
+        z = (m[0][2] + m[2][0]) / scale
+    elif m[1][1] > m[2][2]:
+        scale = math.sqrt(1.0 + m[1][1] - m[0][0] - m[2][2]) * 2.0
+        w = (m[0][2] - m[2][0]) / scale
+        x = (m[0][1] + m[1][0]) / scale
+        y = 0.25 * scale
+        z = (m[1][2] + m[2][1]) / scale
+    else:
+        scale = math.sqrt(1.0 + m[2][2] - m[0][0] - m[1][1]) * 2.0
+        w = (m[1][0] - m[0][1]) / scale
+        x = (m[0][2] + m[2][0]) / scale
+        y = (m[1][2] + m[2][1]) / scale
+        z = 0.25 * scale
+
+    unit = _normalise((w, x, y, z))
+    return tuple(-c for c in unit) if unit[0] < 0.0 else unit
+
+
+def slerp(q0, q1, t):
+    start = _normalise(q0)
+    end = _normalise(q1)
+    dot = sum(a * b for a, b in zip(start, end))
+    if dot < 0.0:
+        end = tuple(-c for c in end)
+        dot = -dot
+
+    if dot > 0.9995:
+        blended = tuple(start[i] + t * (end[i] - start[i]) for i in range(4))
+        return _normalise(blended)
+
+    angle = math.acos(max(-1.0, min(1.0, dot)))
+    sin_angle = math.sin(angle)
+    first = math.sin((1.0 - t) * angle) / sin_angle
+    second = math.sin(t * angle) / sin_angle
+    return tuple(first * start[i] + second * end[i] for i in range(4))
+'''
+
+
+REFERENCES["scientific_3d_geometry_robotics-0005"] = r'''
+import math
+
+EPSILON = 1e-9
+
+
+def _subtract(a, b):
+    return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+
+def _cross(a, b):
+    return (
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    )
+
+
+def _dot(a, b):
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def ray_triangle_intersection(origin, direction, v0, v1, v2):
+    if math.sqrt(_dot(direction, direction)) < 1e-12:
+        raise ValueError("direction vector has zero length")
+
+    edge1 = _subtract(v1, v0)
+    edge2 = _subtract(v2, v0)
+    pvec = _cross(direction, edge2)
+    determinant = _dot(edge1, pvec)
+    if abs(determinant) < EPSILON:
+        return None
+
+    inverse = 1.0 / determinant
+    tvec = _subtract(origin, v0)
+    u = _dot(tvec, pvec) * inverse
+    if u < -EPSILON or u > 1.0 + EPSILON:
+        return None
+
+    qvec = _cross(tvec, edge1)
+    v = _dot(direction, qvec) * inverse
+    if v < -EPSILON or u + v > 1.0 + EPSILON:
+        return None
+
+    distance = _dot(edge2, qvec) * inverse
+    if distance < -EPSILON:
+        return None
+    return distance
+'''
+
+
+REFERENCES["scientific_3d_geometry_robotics-0006"] = r'''
+def convex_hull(points):
+    unique = sorted(set(tuple(point) for point in points))
+    if len(unique) <= 2:
+        return unique
+
+    def cross(origin, first, second):
+        return ((first[0] - origin[0]) * (second[1] - origin[1])
+                - (first[1] - origin[1]) * (second[0] - origin[0]))
+
+    lower = []
+    for point in unique:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], point) <= 0:
+            lower.pop()
+        lower.append(point)
+
+    upper = []
+    for point in reversed(unique):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], point) <= 0:
+            upper.pop()
+        upper.append(point)
+
+    hull = lower[:-1] + upper[:-1]
+    if len(hull) <= 2:
+        return [unique[0], unique[-1]]
+    return hull
+'''
+
+
+REFERENCES["scientific_3d_geometry_robotics-0007"] = r'''
+def simulate_drop(mass, drag, dt, steps, height, gravity=9.81):
+    if mass <= 0:
+        raise ValueError("mass must be positive")
+    if drag < 0:
+        raise ValueError("drag must not be negative")
+    if dt <= 0:
+        raise ValueError("dt must be positive")
+    if steps < 0:
+        raise ValueError("steps must not be negative")
+
+    velocity = 0.0
+    position = float(height)
+    for _ in range(int(steps)):
+        acceleration = -gravity - (drag / mass) * velocity
+        velocity += acceleration * dt
+        position += velocity * dt
+
+    return {"velocity": velocity, "height": position}
+'''
+
+
+REFERENCES["scientific_3d_geometry_robotics-0008"] = r'''
+import math
+
+_UNIT_SCALE = {"mm": 1.0, "cm": 10.0, "m": 1000.0, "in": 25.4}
+
+
+def printability_report(vertices, triangles, units="mm",
+                        build_volume_mm=(220.0, 220.0, 250.0),
+                        overhang_limit_degrees=45.0):
+    if units not in _UNIT_SCALE:
+        raise ValueError("unknown unit: %r" % (units,))
+    scale = _UNIT_SCALE[units]
+
+    scaled = [tuple(scale * float(c) for c in vertex) for vertex in vertices]
+    if not scaled:
+        raise ValueError("mesh has no vertices")
+
+    lows = tuple(min(v[axis] for v in scaled) for axis in range(3))
+    highs = tuple(max(v[axis] for v in scaled) for axis in range(3))
+    fits = all(highs[axis] - lows[axis] <= build_volume_mm[axis] + 1e-9
+               for axis in range(3))
+
+    limit = math.cos(math.radians(overhang_limit_degrees))
+    shortest = None
+    overhangs = []
+
+    for index, triangle in enumerate(triangles):
+        a, b, c = (scaled[i] for i in triangle)
+        for start, end in ((a, b), (b, c), (c, a)):
+            length = math.sqrt(
+                sum((start[k] - end[k]) ** 2 for k in range(3))
+            )
+            if shortest is None or length < shortest:
+                shortest = length
+
+        first = tuple(b[k] - a[k] for k in range(3))
+        second = tuple(c[k] - a[k] for k in range(3))
+        normal = (
+            first[1] * second[2] - first[2] * second[1],
+            first[2] * second[0] - first[0] * second[2],
+            first[0] * second[1] - first[1] * second[0],
+        )
+        norm = math.sqrt(sum(component ** 2 for component in normal))
+        if norm < 1e-12:
+            continue
+
+        downward = -normal[2] / norm
+        on_plate = all(abs(p[2] - lows[2]) <= 1e-9 for p in (a, b, c))
+        if downward > limit and not on_plate:
+            overhangs.append(index)
+
+    return {
+        "scale_mm": scale,
+        "bounding_box_mm": (lows, highs),
+        "fits_build_volume": fits,
+        "min_edge_length_mm": 0.0 if shortest is None else shortest,
+        "overhang_triangles": sorted(overhangs),
+        "needs_support": bool(overhangs),
+    }
+'''
+
+
 MUTATIONS: dict[str, tuple[str, str]] = {
     # Sign the payload alone, so the header can be rewritten after signing
     # and the token still verifies -- the alg-confusion family.
@@ -1915,5 +2564,61 @@ MUTATIONS: dict[str, tuple[str, str]] = {
     "validation_parsing_serialization-0006": (
         'if character == "\\\\" and index + 1 < length:',
         "if False:",
+    ),
+    # Negate the translation without rotating it. Correct for a transform
+    # that only translates, wrong the moment a joint also rotates -- so it
+    # survives a bench example and inverts an assembly incorrectly.
+    "scientific_3d_geometry_robotics-0001": (
+        "offset = -sum(t[j][i] * t[j][3] for j in range(3))",
+        "offset = -t[i][3]",
+    ),
+    # Reverse the vector part, turning the Hamilton product into q2*q1.
+    # Indistinguishable whenever the two rotations commute.
+    "scientific_3d_geometry_robotics-0002": (
+        "        w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,\n"
+        "        w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,\n"
+        "        w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,\n",
+        "        w1 * x2 + x1 * w2 - y1 * z2 + z1 * y2,\n"
+        "        w1 * y2 + x1 * z2 + y1 * w2 - z1 * x2,\n"
+        "        w1 * z2 - x1 * y2 + y1 * x2 + z1 * w2,\n",
+    ),
+    # Count every directed edge instead of deduplicating to undirected ones,
+    # which doubles E and makes the characteristic of a closed solid -4.
+    "scientific_3d_geometry_robotics-0003": (
+        "            len(vertices) - len(undirected) + len(triangles),",
+        "            len(vertices) - len(directed) + len(triangles),",
+    ),
+    # Weight each tetrahedron's moment by the face centroid (a+b+c)/3
+    # instead of the solid centroid (a+b+c+origin)/4. The volume stays
+    # exactly right and only the centre of mass moves, which is the shape
+    # of the defect that unbalances a simulated part.
+    "scientific_3d_geometry_robotics-0004": (
+        "            moment[axis] += det * (a[axis] + b[axis] + c[axis]) / 24.0",
+        "            moment[axis] += det * (a[axis] + b[axis] + c[axis]) / 18.0",
+    ),
+    # Add the outer product instead of subtracting it. The diagonal is then
+    # wrong in the one direction the parallel-axis theorem leaves alone.
+    "scientific_3d_geometry_robotics-0005": (
+        "inertia[i][j] + mass * (delta - offset[i] * offset[j])",
+        "inertia[i][j] + mass * (delta + offset[i] * offset[j])",
+    ),
+    # Drop the forward-hit test, so geometry behind the camera or behind a
+    # sensor origin reports a hit at a negative parameter.
+    "scientific_3d_geometry_robotics-0006": (
+        "    if t <= 0.0:\n        return None\n    return t\n",
+        "    return t\n",
+    ),
+    # Omit the attribute byte count, making every facet record 48 bytes
+    # rather than the 50 the format fixes. Slicers reject the result.
+    "scientific_3d_geometry_robotics-0007": (
+        '        out += struct.pack("<H", 0)\n',
+        "",
+    ),
+    # Flip the sign of the link matrix's -sin(theta)cos(alpha) term. Every
+    # single-joint pose still lands correctly; only a chain with two bent
+    # joints diverges.
+    "scientific_3d_geometry_robotics-0008": (
+        "        (ct, -st * ca, st * sa, a * ct),",
+        "        (ct, st * ca, st * sa, a * ct),",
     ),
 }
