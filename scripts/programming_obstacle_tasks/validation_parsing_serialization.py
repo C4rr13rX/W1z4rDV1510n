@@ -1356,4 +1356,179 @@ for bad in (
         raise AssertionError(f'{bad!r} was accepted')
 ''',
     ),
+    task(
+        f"{FAMILY}-0017", FAMILY,
+        prompt=(
+            "Implement a Python function parse_range(header, length) that "
+            "resolves an RFC 7233 HTTP Range header against a representation "
+            "of `length` bytes. Return a list of (first, last) byte offsets, "
+            "both inclusive and both resolved to concrete positions, in the "
+            "order the header lists them. Support `bytes=first-last`, an "
+            "open-ended `bytes=first-`, and a suffix range `bytes=-n` "
+            "meaning the final n bytes. A last-byte position at or beyond "
+            "the end of the representation is clamped to the final byte, and "
+            "a suffix longer than the representation starts at byte 0. Skip "
+            "a range whose first byte lies beyond the representation and a "
+            "suffix of zero bytes. Raise ValueError for a unit other than "
+            "bytes, for a syntactically malformed spec, for a last position "
+            "before the first, and when no range in the header is "
+            "satisfiable."
+        ),
+        validator=LOAD_CANDIDATE + require("parse_range") + r'''
+assert parse_range('bytes=0-499', 10000) == [(0, 499)]
+assert parse_range('bytes=500-', 10000) == [(500, 9999)]
+assert parse_range('bytes=-500', 10000) == [(9500, 9999)]
+assert parse_range('bytes=0-0,-1', 10000) == [(0, 0), (9999, 9999)]
+assert parse_range('bytes=0-1, 5-6', 10000) == [(0, 1), (5, 6)]
+assert parse_range('BYTES=0-1', 10000) == [(0, 1)], 'the unit is case-insensitive'
+
+# A last position past the end is clamped, it is not a syntax error.
+assert parse_range('bytes=9500-10500', 10000) == [(9500, 9999)]
+assert parse_range('bytes=0-9999', 10000) == [(0, 9999)]
+
+# A suffix longer than the representation is the whole representation. A
+# reader that computes length - suffix without a floor returns a negative
+# first byte here and the caller seeks backwards past the start.
+assert parse_range('bytes=-50000', 10000) == [(0, 9999)]
+assert parse_range('bytes=-1', 1) == [(0, 0)]
+
+# An unsatisfiable member is dropped while a satisfiable one survives.
+assert parse_range('bytes=20000-,0-1', 10000) == [(0, 1)]
+assert parse_range('bytes=-0,0-1', 10000) == [(0, 1)]
+
+for bad in ('items=0-1', 'bytes=abc', 'bytes=5-2', 'bytes=-0', 'bytes=20000-',
+            'bytes=', 'bytes=-', '0-1', 'bytes=1-2-3', 'bytes=0-1,'):
+    try:
+        parse_range(bad, 10000)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f'malformed range {bad!r} was accepted')
+
+# Every returned span must be orderable and inside the representation.
+for header in ('bytes=0-499', 'bytes=-500', 'bytes=500-', 'bytes=0-0,-1'):
+    for first, last in parse_range(header, 10000):
+        assert 0 <= first <= last <= 9999, f'{header} produced ({first}, {last})'
+''',
+    ),
+    task(
+        f"{FAMILY}-0018", FAMILY,
+        prompt=(
+            "Implement a Python function decode_utf8(data) that decodes a "
+            "bytes object as UTF-8 exactly as RFC 3629 defines it and "
+            "returns a str. Accept only the shortest encoding of each code "
+            "point. Raise ValueError for an overlong encoding, for a "
+            "continuation byte where a leading byte is expected, for a "
+            "truncated sequence at any position, for the surrogate range "
+            "U+D800 to U+DFFF, and for any code point above U+10FFFF. Do not "
+            "call bytes.decode, codecs, or str() on the input to do the "
+            "work: implement the decoding yourself."
+        ),
+        validator=LOAD_CANDIDATE + require("decode_utf8") + r'''
+source = RESPONSE_TEXT
+for forbidden in ('.decode(', 'codecs', 'str(data', 'memoryview'):
+    assert forbidden not in source, f'the prompt forbids {forbidden}'
+
+assert decode_utf8(b'') == ''
+assert decode_utf8(b'hello') == 'hello'
+assert decode_utf8(b'\xc3\xa9') == '\u00e9'
+assert decode_utf8(b'\xe2\x82\xac') == '\u20ac'
+assert decode_utf8(b'\xf0\x9f\x92\xa9') == '\U0001f4a9'
+assert decode_utf8(b'a\xc3\xa9b') == 'a\u00e9b'
+
+# The boundaries either side of the surrogate block stay legal.
+assert decode_utf8(b'\xed\x9f\xbf') == '\ud7ff'
+assert decode_utf8(b'\xee\x80\x80') == '\ue000'
+assert decode_utf8(b'\xf4\x8f\xbf\xbf') == '\U0010ffff'
+assert decode_utf8(b'\xc2\x80') == '\u0080'
+assert decode_utf8(b'\xe0\xa0\x80') == '\u0800'
+assert decode_utf8(b'\xf0\x90\x80\x80') == '\U00010000'
+
+overlong = (b'\xc0\x80', b'\xc1\xbf', b'\xe0\x80\x80', b'\xe0\x9f\xbf',
+            b'\xf0\x80\x80\x80', b'\xf0\x8f\xbf\xbf')
+surrogate = (b'\xed\xa0\x80', b'\xed\xbf\xbf', b'\xed\xad\xbf')
+out_of_range = (b'\xf4\x90\x80\x80', b'\xf5\x80\x80\x80', b'\xf7\xbf\xbf\xbf',
+                b'\xf8\x88\x80\x80\x80', b'\xff')
+malformed = (b'\x80', b'\xbf', b'\xc3', b'\xe2\x82', b'\xf0\x9f\x92',
+             b'\xc3\x28', b'\xe2\x28\xa1', b'a\xc3')
+for group, label in ((overlong, 'overlong'), (surrogate, 'surrogate'),
+                     (out_of_range, 'out of range'), (malformed, 'malformed')):
+    for bad in group:
+        try:
+            decode_utf8(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f'{label} sequence {bad!r} was accepted')
+
+# Agree with the reference decoder on everything that is actually valid.
+for code in list(range(0, 0xd800, 97)) + list(range(0xe000, 0x110000, 1013)):
+    text = chr(code)
+    assert decode_utf8(text.encode('utf-8')) == text, f'U+{code:04X} mismatch'
+''',
+    ),
+    task(
+        f"{FAMILY}-0019", FAMILY,
+        prompt=(
+            "Implement a Python function decode_chunked(data) that decodes "
+            "an RFC 7230 chunked transfer-coding body. `data` is the bytes "
+            "of the encoded body. Return a tuple (body, trailers) where "
+            "body is the concatenated chunk data as bytes and trailers is a "
+            "dict of the trailer field names, lowercased, to their values "
+            "with surrounding whitespace stripped. A chunk begins with its "
+            "size in hexadecimal, optionally followed by ';' and chunk "
+            "extensions, then CRLF, then exactly that many bytes, then "
+            "CRLF. A zero-size chunk ends the body and is followed by the "
+            "trailer section and a final empty line. Raise ValueError on a "
+            "size that is not hexadecimal, on data that is truncated, and "
+            "when a chunk is not followed by CRLF."
+        ),
+        validator=LOAD_CANDIDATE + require("decode_chunked") + r'''
+body, trailers = decode_chunked(b'4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n')
+assert body == b'Wikipedia', body
+assert trailers == {}
+
+assert decode_chunked(b'0\r\n\r\n') == (b'', {})
+
+# Chunk extensions are ignored, not parsed as part of the size.
+assert decode_chunked(b'4;name=value\r\nWiki\r\n0\r\n\r\n')[0] == b'Wiki'
+assert decode_chunked(b'4 ; a=b ; c\r\nWiki\r\n0\r\n\r\n')[0] == b'Wiki'
+
+# Hexadecimal, in either case.
+assert decode_chunked(b'A\r\n0123456789\r\n0\r\n\r\n')[0] == b'0123456789'
+assert decode_chunked(b'a\r\n0123456789\r\n0\r\n\r\n')[0] == b'0123456789'
+assert decode_chunked(b'1f\r\n' + b'z' * 31 + b'\r\n0\r\n\r\n')[0] == b'z' * 31
+
+# The size is a byte count. A decoder that splits on CRLF instead of
+# counting truncates this chunk at the first embedded line break.
+assert decode_chunked(b'6\r\na\r\nb\r\n\r\n0\r\n\r\n')[0] == b'a\r\nb\r\n'
+assert decode_chunked(b'2\r\n\r\n\r\n0\r\n\r\n')[0] == b'\r\n'
+
+body, trailers = decode_chunked(b'3\r\nabc\r\n0\r\nX-Sum: 42\r\nX-B:  x \r\n\r\n')
+assert body == b'abc'
+assert trailers == {'x-sum': '42', 'x-b': 'x'}, trailers
+
+many = b''.join(b'%x\r\n%s\r\n' % (len(p), p) for p in (b'a', b'bb', b'ccc'))
+assert decode_chunked(many + b'0\r\n\r\n')[0] == b'abbccc'
+
+for bad in (b'zz\r\nab\r\n0\r\n\r\n', b'4\r\nWi\r\n0\r\n\r\n', b'4\r\nWiki',
+            b'0x4\r\nWiki\r\n0\r\n\r\n', b'-1\r\n\r\n0\r\n\r\n', b'4\r\nWiki\r\n',
+            b';a=b\r\n\r\n0\r\n\r\n', b'4\r\nWikiXX0\r\n\r\n', b'3\r\nabc\r\n0\r\nbad\r\n\r\n'):
+    try:
+        decode_chunked(bad)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f'malformed body {bad!r} was accepted')
+
+# Encode a payload the way the coding specifies and read it back.
+payload = bytes(range(256)) * 3
+encoded = bytearray()
+step = 100
+for offset in range(0, len(payload), step):
+    piece = payload[offset:offset + step]
+    encoded += b'%x\r\n' % len(piece) + piece + b'\r\n'
+encoded += b'0\r\n\r\n'
+assert decode_chunked(bytes(encoded))[0] == payload, 'round trip lost data'
+''',
+    ),
 ]

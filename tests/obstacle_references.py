@@ -5490,6 +5490,160 @@ def parse_json(text):
 '''
 
 
+REFERENCES["validation_parsing_serialization-0017"] = r'''
+def _is_number(text):
+    return bool(text) and all(character in "0123456789" for character in text)
+
+
+def parse_range(header, length):
+    if not isinstance(header, str):
+        raise ValueError("header must be a string")
+    if not isinstance(length, int) or length < 0:
+        raise ValueError("length must be a non-negative integer")
+    unit, separator, spec = header.partition("=")
+    if not separator or unit.strip().lower() != "bytes":
+        raise ValueError("only the bytes unit is supported")
+
+    ranges = []
+    for raw in spec.split(","):
+        piece = raw.strip()
+        if not piece:
+            raise ValueError("empty range spec")
+        first, dash, last = piece.partition("-")
+        if not dash:
+            raise ValueError("a range spec needs a dash")
+        first = first.strip()
+        last = last.strip()
+        if not first:
+            if not _is_number(last):
+                raise ValueError("malformed suffix range")
+            suffix = int(last)
+            if suffix == 0:
+                continue
+            start = max(0, length - suffix)
+            end = length - 1
+        else:
+            if not _is_number(first):
+                raise ValueError("malformed first-byte position")
+            start = int(first)
+            if not last:
+                end = length - 1
+            else:
+                if not _is_number(last):
+                    raise ValueError("malformed last-byte position")
+                end = int(last)
+                if end < start:
+                    raise ValueError("last-byte position precedes the first")
+            if end > length - 1:
+                end = length - 1
+        if length == 0 or start > length - 1:
+            continue
+        ranges.append((start, end))
+    if not ranges:
+        raise ValueError("no range in the header is satisfiable")
+    return ranges
+'''
+
+
+REFERENCES["validation_parsing_serialization-0018"] = r'''
+def decode_utf8(data):
+    if not isinstance(data, (bytes, bytearray)):
+        raise ValueError("data must be a bytes object")
+    out = []
+    index = 0
+    length = len(data)
+    while index < length:
+        byte = data[index]
+        if byte < 0x80:
+            out.append(chr(byte))
+            index += 1
+            continue
+        if byte < 0xc2:
+            raise ValueError("continuation byte or overlong lead byte")
+        if byte < 0xe0:
+            width = 2
+            code = byte & 0x1f
+        elif byte < 0xf0:
+            width = 3
+            code = byte & 0x0f
+        elif byte < 0xf5:
+            width = 4
+            code = byte & 0x07
+        else:
+            raise ValueError("lead byte above the Unicode range")
+        if index + width > length:
+            raise ValueError("truncated sequence")
+        for offset in range(1, width):
+            follow = data[index + offset]
+            if follow & 0xc0 != 0x80:
+                raise ValueError("malformed continuation byte")
+            code = (code << 6) | (follow & 0x3f)
+        if width == 3 and code < 0x800:
+            raise ValueError("overlong encoding")
+        if width == 4 and code < 0x10000:
+            raise ValueError("overlong encoding")
+        if 0xd800 <= code <= 0xdfff:
+            raise ValueError("surrogate code point")
+        if code > 0x10ffff:
+            raise ValueError("code point above U+10FFFF")
+        out.append(chr(code))
+        index += width
+    return "".join(out)
+'''
+
+
+REFERENCES["validation_parsing_serialization-0019"] = r'''
+_HEX_DIGITS = b"0123456789abcdefABCDEF"
+
+
+def decode_chunked(data):
+    if not isinstance(data, (bytes, bytearray)):
+        raise ValueError("data must be a bytes object")
+    data = bytes(data)
+    body = bytearray()
+    index = 0
+    while True:
+        end = data.find(b"\r\n", index)
+        if end < 0:
+            raise ValueError("chunk size line is not terminated")
+        line = data[index:end]
+        index = end + 2
+        size_text = line.split(b";", 1)[0].strip()
+        if not size_text:
+            raise ValueError("missing chunk size")
+        if any(byte not in _HEX_DIGITS for byte in size_text):
+            raise ValueError("chunk size is not hexadecimal")
+        size = int(size_text, 16)
+        if size == 0:
+            break
+        if index + size > len(data):
+            raise ValueError("chunk data is truncated")
+        body.extend(data[index:index + size])
+        index += size
+        if data[index:index + 2] != b"\r\n":
+            raise ValueError("chunk data is not followed by CRLF")
+        index += 2
+
+    trailers = {}
+    while True:
+        end = data.find(b"\r\n", index)
+        if end < 0:
+            raise ValueError("trailer section is not terminated")
+        line = data[index:end]
+        index = end + 2
+        if not line:
+            break
+        name, separator, value = line.partition(b":")
+        if not separator:
+            raise ValueError("malformed trailer field")
+        trailers[name.decode("ascii").strip().lower()] = (
+            value.decode("ascii").strip()
+        )
+    return bytes(body), trailers
+'''
+
+
+
 MUTATIONS: dict[str, tuple[str, str]] = {
     # Sign the payload alone, so the header can be rewritten after signing
     # and the token still verifies -- the alg-confusion family.
@@ -6201,5 +6355,22 @@ MUTATIONS: dict[str, tuple[str, str]] = {
     "validation_parsing_serialization-0016": (
         "        return float(raw) if floating else int(raw)",
         "        return float(raw)",
+    ),
+    # A suffix range is resolved as length - n, and n may exceed the
+    # representation. Without the floor the first byte goes negative and the
+    # caller seeks backwards past the start of the entity.
+    "validation_parsing_serialization-0017": (
+        "start = max(0, length - suffix)",
+        "start = length - suffix",
+    ),
+    "validation_parsing_serialization-0018": (
+        "if 0xd800 <= code <= 0xdfff:",
+        "if False:",
+    ),
+    # Read the whole size line as the size. Correct until a sender attaches a
+    # chunk extension, which RFC 7230 permits on every chunk.
+    "validation_parsing_serialization-0019": (
+        'size_text = line.split(b";", 1)[0].strip()',
+        "size_text = line.strip()",
     ),
 }
