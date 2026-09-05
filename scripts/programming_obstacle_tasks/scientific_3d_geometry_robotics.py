@@ -641,4 +641,667 @@ else:
     raise AssertionError('a joint-value count mismatch was accepted')
 """,
     ),
+    task(
+        f"{FAMILY}-0009", FAMILY,
+        prompt=(
+            "Implement slice_mesh(vertices, triangles, z) returning the "
+            "cross-section of a closed triangle mesh cut by the horizontal "
+            "plane at height z. triangles holds (i, j, k) index triples into "
+            "vertices. Return a list of closed contours; each contour is a "
+            "list of (x, y) tuples in order around the loop, and the first "
+            "point is not repeated at the end. Contours may be returned in "
+            "any order, may start at any point on their loop, and may run in "
+            "either direction. A plane that misses the mesh yields an empty "
+            "list. No vertex of the mesh lies exactly on the plane."
+        ),
+        validator=LOAD_CANDIDATE + require("slice_mesh") + """
+def close(a, b, tol=1e-7):
+    return abs(a - b) <= tol
+
+def area(loop):
+    total = 0.0
+    for index in range(len(loop)):
+        x0, y0 = loop[index]
+        x1, y1 = loop[(index + 1) % len(loop)]
+        total += x0 * y1 - x1 * y0
+    return abs(total) / 2.0
+
+def perimeter(loop):
+    total = 0.0
+    for index in range(len(loop)):
+        x0, y0 = loop[index]
+        x1, y1 = loop[(index + 1) % len(loop)]
+        total += ((x1 - x0) ** 2 + (y1 - y0) ** 2) ** 0.5
+    return total
+
+def box(x0, y0, z0, x1, y1, z1):
+    corners = [(x0, y0, z0), (x1, y0, z0), (x1, y1, z0), (x0, y1, z0),
+               (x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y1, z1)]
+    faces = [(0, 3, 2), (0, 2, 1), (4, 5, 6), (4, 6, 7),
+             (0, 1, 5), (0, 5, 4), (1, 2, 6), (1, 6, 5),
+             (2, 3, 7), (2, 7, 6), (3, 0, 4), (3, 4, 7)]
+    return corners, faces
+
+# A 2x2x2 cube. Every side face is split into two triangles, so a correct
+# implementation has to chain eight segments into one loop rather than
+# report eight fragments.
+cube, cube_faces = box(0.0, 0.0, 0.0, 2.0, 2.0, 2.0)
+loops = slice_mesh(cube, cube_faces, 0.5)
+assert isinstance(loops, list), 'slice_mesh did not return a list'
+assert len(loops) == 1, f'a cube has one cross-section, got {len(loops)}'
+square = loops[0]
+assert len(square) >= 3, 'the segments were not chained into a closed loop'
+assert tuple(square[0]) != tuple(square[-1]), 'the first point was repeated'
+assert close(area(square), 4.0), f'cross-section area {area(square)} is not 4'
+assert close(perimeter(square), 8.0), 'the contour is not the 2x2 square'
+
+# A prism's cross-section is height-independent, so the cube cannot detect a
+# reversed interpolation parameter. A tetrahedron sliced off-centre can.
+tetra = [(0.0, 0.0, 0.0), (4.0, 0.0, 0.0), (0.0, 4.0, 0.0), (0.0, 0.0, 4.0)]
+tetra_faces = [(0, 1, 2), (0, 1, 3), (0, 2, 3), (1, 2, 3)]
+loops = slice_mesh(tetra, tetra_faces, 1.0)
+assert len(loops) == 1, f'one contour expected at z=1, got {len(loops)}'
+triangle = loops[0]
+assert len(triangle) == 3, f'the section is a triangle, got {len(triangle)}'
+assert close(area(triangle), 4.5), (
+    f'the section at z=1 has area 4.5, got {area(triangle)}')
+
+# Two disjoint solids yield two independent contours.
+first, first_faces = box(0.0, 0.0, 0.0, 2.0, 2.0, 2.0)
+second, second_faces = box(5.0, 5.0, 0.0, 6.0, 6.0, 2.0)
+both = list(first) + list(second)
+both_faces = list(first_faces) + [
+    tuple(index + len(first) for index in face) for face in second_faces]
+loops = slice_mesh(both, both_faces, 0.5)
+assert len(loops) == 2, f'two solids give two contours, got {len(loops)}'
+areas = sorted(round(area(loop), 6) for loop in loops)
+assert areas == [1.0, 4.0], f'contour areas {areas} are not [1.0, 4.0]'
+
+for miss in (-1.0, 2.5, 7.0):
+    assert slice_mesh(cube, cube_faces, miss) == [], (
+        f'a plane at z={miss} misses the cube but returned a contour')
+""",
+    ),
+    task(
+        f"{FAMILY}-0010", FAMILY,
+        prompt=(
+            "Implement overhang_faces(vertices, triangles, "
+            "max_overhang_degrees) for a mesh printed along +z. triangles "
+            "holds (i, j, k) index triples wound counter-clockwise seen from "
+            "outside, so the right-hand rule gives each face its outward "
+            "normal. A face is downward-facing when the z component of that "
+            "unit normal is negative; its overhang angle is the angle in "
+            "degrees between the normal and straight down, (0, 0, -1), so a "
+            "flat ceiling measures 0 and a vertical wall approaches 90. "
+            "Return the sorted indices of the downward-facing faces whose "
+            "overhang angle is strictly less than max_overhang_degrees. "
+            "Raise ValueError for a degenerate triangle of zero area, and "
+            "unless max_overhang_degrees lies in (0, 90]."
+        ),
+        validator=LOAD_CANDIDATE + require("overhang_faces") + """
+import math
+
+# Normals are fixed by 3-4-5 triples so the two sloped faces sit 8.13 degrees
+# either side of the 45-degree threshold. Nothing here is decided at a
+# boundary; the boundary arithmetic itself is asserted separately below.
+vertices = [
+    (0.0, 0.0, 0.0),   # 0
+    (1.0, 0.0, 0.0),   # 1
+    (0.0, 4.0, 3.0),   # 2
+    (0.0, 3.0, 4.0),   # 3
+    (0.0, 1.0, 0.0),   # 4
+    (0.0, 0.0, 1.0),   # 5
+    (0.0, 0.0, 5.0),   # 6
+    (0.0, 1.0, 5.0),   # 7
+    (1.0, 0.0, 5.0),   # 8
+]
+triangles = [
+    (0, 2, 1),   # 0: normal (0, 3, -4)/5  -> 36.87 degrees
+    (0, 3, 1),   # 1: normal (0, 4, -3)/5  -> 53.13 degrees
+    (6, 7, 8),   # 2: normal (0, 0, -1)    -> 0 degrees, a flat ceiling
+    (0, 1, 4),   # 3: normal (0, 0, 1)     -> faces up, never supported
+    (0, 4, 5),   # 4: normal (1, 0, 0)     -> vertical wall, nz is 0
+]
+
+assert abs(math.degrees(math.acos(4.0 / 5.0)) - 36.8698976) < 1e-5
+assert abs(math.degrees(math.acos(3.0 / 5.0)) - 53.1301024) < 1e-5
+
+got = overhang_faces(vertices, triangles, 45.0)
+assert list(got) == [0, 2], f'at 45 degrees the supported set is [0, 2], got {got}'
+
+got = overhang_faces(vertices, triangles, 60.0)
+assert list(got) == [0, 1, 2], f'at 60 degrees expected [0, 1, 2], got {got}'
+
+got = overhang_faces(vertices, triangles, 30.0)
+assert list(got) == [2], f'at 30 degrees only the ceiling qualifies, got {got}'
+
+# An upward-facing facet is never an overhang, however shallow it is.
+got = overhang_faces(vertices, triangles, 90.0)
+assert 3 not in got, 'an upward-facing facet was reported as an overhang'
+assert 4 not in got, 'a vertical wall was reported as an overhang'
+
+try:
+    overhang_faces(vertices, [(0, 1, 1)], 45.0)
+except ValueError:
+    pass
+else:
+    raise AssertionError('a degenerate zero-area triangle was accepted')
+
+for bad in (0.0, -5.0, 120.0):
+    try:
+        overhang_faces(vertices, triangles, bad)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f'max_overhang_degrees={bad} was accepted')
+""",
+    ),
+    task(
+        f"{FAMILY}-0011", FAMILY,
+        prompt=(
+            "Implement inverse_kinematics(l1, l2, x, y, elbow='up') for a "
+            "planar two-link revolute arm. The first link leaves the origin "
+            "at angle theta1 from +x; the second is attached at its tip and "
+            "runs at theta1 + theta2, so the end effector sits at "
+            "(l1*cos(theta1) + l2*cos(theta1+theta2), l1*sin(theta1) + "
+            "l2*sin(theta1+theta2)). Return (theta1, theta2) in radians with "
+            "theta1 in (-pi, pi]. elbow is 'up' for the solution with theta2 "
+            ">= 0 and 'down' for theta2 <= 0. Raise ValueError when the "
+            "target lies outside the reachable annulus, when either link "
+            "length is not positive, and for any other elbow value."
+        ),
+        validator=LOAD_CANDIDATE + require("inverse_kinematics") + """
+import math
+
+def forward(l1, l2, theta1, theta2):
+    return (l1 * math.cos(theta1) + l2 * math.cos(theta1 + theta2),
+            l1 * math.sin(theta1) + l2 * math.sin(theta1 + theta2))
+
+L1, L2 = 2.0, 1.0   # reachable annulus is 1 <= radius <= 3
+
+# The expectation is recomputed from the returned angles rather than written
+# down, so the fixture and the answer cannot drift apart.
+targets = [(2.5, 0.0), (0.0, 1.5), (-1.2, 1.4), (1.0, -1.0), (-2.0, -1.5)]
+for target in targets:
+    for elbow in ('up', 'down'):
+        theta1, theta2 = inverse_kinematics(L1, L2, target[0], target[1], elbow)
+        assert -math.pi < theta1 <= math.pi + 1e-12, (
+            f'theta1={theta1} is outside (-pi, pi]')
+        if elbow == 'up':
+            assert theta2 >= -1e-12, f'elbow up gave theta2={theta2}'
+        else:
+            assert theta2 <= 1e-12, f'elbow down gave theta2={theta2}'
+        reached = forward(L1, L2, theta1, theta2)
+        assert abs(reached[0] - target[0]) < 1e-9, (
+            f'{elbow} at {target} reached x={reached[0]}')
+        assert abs(reached[1] - target[1]) < 1e-9, (
+            f'{elbow} at {target} reached y={reached[1]}')
+
+# Away from the singular fully-extended pose the two branches are distinct.
+up = inverse_kinematics(L1, L2, 2.5, 0.0, 'up')
+down = inverse_kinematics(L1, L2, 2.5, 0.0, 'down')
+assert abs(up[1] - down[1]) > 1e-6, 'both elbow branches gave the same pose'
+
+for unreachable in ((0.5, 0.0), (0.0, 0.4), (4.0, 0.0), (2.5, 2.5)):
+    try:
+        inverse_kinematics(L1, L2, unreachable[0], unreachable[1])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f'unreachable target {unreachable} was accepted')
+
+for bad_links in ((0.0, 1.0), (1.0, -2.0)):
+    try:
+        inverse_kinematics(bad_links[0], bad_links[1], 0.5, 0.0)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f'link lengths {bad_links} were accepted')
+
+try:
+    inverse_kinematics(L1, L2, 2.5, 0.0, 'sideways')
+except ValueError:
+    pass
+else:
+    raise AssertionError('an unknown elbow value was accepted')
+""",
+    ),
+    task(
+        f"{FAMILY}-0012", FAMILY,
+        prompt=(
+            "Implement fit_plane(points) over a sequence of 3D points. "
+            "Return (centroid, normal): centroid is the arithmetic mean as a "
+            "tuple of three floats, and normal is the unit vector that "
+            "minimises the sum of squared perpendicular distances from the "
+            "points to the plane through the centroid. Orient normal so that "
+            "its component of largest absolute value is positive, breaking a "
+            "tie in favour of the earlier index. Raise ValueError for fewer "
+            "than three points and when the points are collinear, because no "
+            "single best-fit plane exists then."
+        ),
+        validator=LOAD_CANDIDATE + require("fit_plane") + """
+import math
+
+def residual(points, centroid, normal):
+    total = 0.0
+    for p in points:
+        total += sum((p[i] - centroid[i]) * normal[i] for i in range(3)) ** 2
+    return total
+
+def unit(v):
+    length = math.sqrt(sum(c * c for c in v))
+    return tuple(c / length for c in v)
+
+# A plane parallel to the z axis. Fitting z = a*x + b*y + c cannot represent
+# it at all, which is the near-miss this case exists to reject.
+vertical = [(2.0, 0.0, 0.0), (2.0, 1.0, 0.0), (2.0, 0.0, 1.0),
+            (2.0, 3.0, -2.0), (2.0, -1.0, 4.0)]
+centroid, normal = fit_plane(vertical)
+assert abs(centroid[0] - 2.0) < 1e-9, f'centroid x {centroid[0]} is not 2'
+for i in range(3):
+    expected = sum(p[i] for p in vertical) / len(vertical)
+    assert abs(centroid[i] - expected) < 1e-9, 'centroid is not the mean'
+assert abs(normal[0] - 1.0) < 1e-7, f'normal {normal} is not +x'
+assert abs(normal[1]) < 1e-7 and abs(normal[2]) < 1e-7, f'normal {normal}'
+
+horizontal = [(0.0, 0.0, 5.0), (1.0, 0.0, 5.0), (0.0, 2.0, 5.0),
+              (3.0, -1.0, 5.0)]
+_, normal = fit_plane(horizontal)
+assert abs(normal[2] - 1.0) < 1e-7, f'normal {normal} is not +z'
+
+# Noisy samples about a tilted plane. The returned normal must actually be
+# the minimiser, checked against a deterministic sweep of the sphere.
+seed = 12345
+def nextf():
+    global seed
+    seed = (1103515245 * seed + 12345) % 2147483648
+    return seed / 2147483648.0 - 0.5
+
+base = unit((1.0, 2.0, 2.0))
+noisy = []
+for _ in range(60):
+    u, v = nextf() * 6.0, nextf() * 6.0
+    point = (u, v, -(base[0] * u + base[1] * v) / base[2])
+    offset = nextf() * 0.05
+    noisy.append(tuple(point[i] + offset * base[i] for i in range(3)))
+
+centroid, normal = fit_plane(noisy)
+assert abs(math.sqrt(sum(c * c for c in normal)) - 1.0) < 1e-9, 'not a unit vector'
+best = residual(noisy, centroid, normal)
+for a in range(18):
+    for b in range(36):
+        theta = math.pi * (a + 0.5) / 18.0
+        phi = 2.0 * math.pi * b / 36.0
+        candidate_normal = (math.sin(theta) * math.cos(phi),
+                            math.sin(theta) * math.sin(phi),
+                            math.cos(theta))
+        assert best <= residual(noisy, centroid, candidate_normal) + 1e-9, (
+            'a swept direction fits the points better than the returned normal')
+
+dominant = max(range(3), key=lambda i: (abs(normal[i]), -i))
+assert normal[dominant] > 0.0, f'normal {normal} is not oriented as specified'
+
+for degenerate in (
+        [(0.0, 0.0, 0.0), (1.0, 1.0, 1.0), (2.0, 2.0, 2.0), (-3.0, -3.0, -3.0)],
+        [(1.0, 0.0, 0.0), (2.0, 0.0, 0.0), (5.0, 0.0, 0.0)],
+        [(4.0, 4.0, 4.0)] * 5):
+    try:
+        fit_plane(degenerate)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('collinear points were given a unique plane')
+
+for short in ([], [(0.0, 0.0, 0.0)], [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)]):
+    try:
+        fit_plane(short)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('fewer than three points were accepted')
+""",
+    ),
+    task(
+        f"{FAMILY}-0013", FAMILY,
+        prompt=(
+            "Implement integrate(derivative, state, t0, t1, steps) advancing "
+            "an ordinary differential equation with the classical "
+            "fourth-order Runge-Kutta method at a fixed step size. state is "
+            "a sequence of floats and derivative(t, state) returns the time "
+            "derivative as a sequence of the same length. Take exactly steps "
+            "equal steps from t0 to t1 and return the final state as a tuple "
+            "of floats. Raise ValueError unless steps is a positive integer."
+        ),
+        validator=LOAD_CANDIDATE + require("integrate") + """
+import math
+
+result = integrate(lambda t, s: (s[0],), (1.0,), 0.0, 1.0, 16)
+assert isinstance(result, tuple), 'integrate did not return a tuple'
+assert len(result) == 1, f'the state changed length: {result}'
+error_fine = abs(result[0] - math.e)
+assert error_fine < 1e-4, (
+    f'exp(1) came out as {result[0]}, off by {error_fine}')
+
+# Halving the step must cut the error by about 2**4. Euler would give 2 and
+# any second-order scheme 4, so the admitted band cannot be reached by
+# accident yet is wide enough that rounding cannot push a correct answer out.
+error_coarse = abs(integrate(lambda t, s: (s[0],), (1.0,), 0.0, 1.0, 8)[0]
+                   - math.e)
+ratio = error_coarse / error_fine
+assert 10.0 <= ratio <= 22.0, (
+    f'halving the step changed the error by {ratio}x, not about 16x')
+
+# A vector field, integrated over a full period of a unit harmonic
+# oscillator. Energy is the invariant a wrong stage weighting destroys.
+state = integrate(lambda t, s: (s[1], -s[0]), (1.0, 0.0),
+                  0.0, 2.0 * math.pi, 400)
+assert len(state) == 2, f'the vector state changed length: {state}'
+energy = state[0] ** 2 + state[1] ** 2
+assert abs(energy - 1.0) < 1e-6, f'energy drifted to {energy}'
+assert abs(state[0] - 1.0) < 1e-6, f'the oscillator returned to {state[0]}'
+assert abs(state[1]) < 1e-6, f'the velocity returned to {state[1]}'
+
+# The derivative may depend on t explicitly: y' = 2t integrates to t**2.
+result = integrate(lambda t, s: (2.0 * t,), (0.0,), 0.0, 3.0, 12)
+assert abs(result[0] - 9.0) < 1e-9, f'y(3) came out as {result[0]}'
+
+for bad in (0, -3):
+    try:
+        integrate(lambda t, s: (s[0],), (1.0,), 0.0, 1.0, bad)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f'steps={bad} was accepted')
+""",
+    ),
+    task(
+        f"{FAMILY}-0014", FAMILY,
+        prompt=(
+            "Implement boxes_overlap(a, b) for two oriented bounding boxes "
+            "in 3D. Each box is a tuple (center, axes, half_extents): center "
+            "is a 3D point, axes is a tuple of three orthonormal row vectors "
+            "giving the box's local frame, and half_extents holds the three "
+            "non-negative half-widths along those axes. Return True when the "
+            "boxes share at least one point and False when a plane separates "
+            "them. Raise ValueError for a negative half extent or for axes "
+            "that are not orthonormal to within 1e-9."
+        ),
+        timeout_seconds=60.0,
+        validator=LOAD_CANDIDATE + require("boxes_overlap") + """
+import math
+import itertools
+
+# The expected verdict is computed by an algorithm unrelated to projection
+# tests: a bounded intersection of half-spaces is non-empty exactly when some
+# triple of its bounding planes meets at a feasible point. That keeps the
+# oracle independent of whatever the candidate does.
+def half_spaces(box):
+    center, axes, half = box
+    out = []
+    for i in range(3):
+        normal = axes[i]
+        offset = sum(center[k] * normal[k] for k in range(3))
+        out.append((normal, offset + half[i]))
+        out.append((tuple(-c for c in normal), half[i] - offset))
+    return out
+
+def solve3(rows, rhs):
+    def det(m):
+        return (m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+                - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+                + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]))
+    base = det(rows)
+    if abs(base) < 1e-9:
+        return None
+    out = []
+    for column in range(3):
+        swapped = [list(row) for row in rows]
+        for r in range(3):
+            swapped[r][column] = rhs[r]
+        out.append(det(swapped) / base)
+    return tuple(out)
+
+def oracle(a, b):
+    planes = half_spaces(a) + half_spaces(b)
+    for triple in itertools.combinations(range(len(planes)), 3):
+        rows = [planes[i][0] for i in triple]
+        rhs = [planes[i][1] for i in triple]
+        point = solve3(rows, rhs)
+        if point is None:
+            continue
+        if all(sum(point[k] * normal[k] for k in range(3)) <= bound + 1e-9
+               for normal, bound in planes):
+            return True
+    return False
+
+def rotation(axis, angle):
+    length = math.sqrt(sum(c * c for c in axis))
+    x, y, z = (c / length for c in axis)
+    c, s = math.cos(angle), math.sin(angle)
+    t = 1.0 - c
+    return ((t * x * x + c, t * x * y - s * z, t * x * z + s * y),
+            (t * x * y + s * z, t * y * y + c, t * y * z - s * x),
+            (t * x * z - s * y, t * y * z + s * x, t * z * z + c))
+
+IDENTITY = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+base = ((0.0, 0.0, 0.0), IDENTITY, (1.0, 1.0, 1.0))
+
+cases = []
+for angle in (0.3, 0.7854, 1.1, 2.0):
+    for axis in ((0.0, 0.0, 1.0), (1.0, 1.0, 0.0), (1.0, 1.0, 1.0)):
+        for shift in (0.6, 1.7, 2.05, 2.4, 3.1):
+            other = ((shift, shift * 0.5, shift * 0.25),
+                     rotation(axis, angle), (1.0, 1.0, 1.0))
+            cases.append((base, other))
+cases.append((base, ((0.5, 0.5, 0.5), IDENTITY, (1.0, 1.0, 1.0))))
+cases.append((base, ((0.0, 0.0, 0.0), IDENTITY, (0.2, 0.2, 0.2))))
+cases.append((base, ((3.5, 0.0, 0.0), IDENTITY, (1.0, 1.0, 1.0))))
+
+agreed = {True: 0, False: 0}
+for index, (first, second) in enumerate(cases):
+    expected = oracle(first, second)
+    got = boxes_overlap(first, second)
+    assert isinstance(got, bool), f'case {index} returned {got!r}, not a bool'
+    assert got == expected, (
+        f'case {index} answered {got} where the half-space oracle says '
+        f'{expected}')
+    assert boxes_overlap(second, first) == expected, (
+        f'case {index} is not symmetric in its arguments')
+    agreed[expected] += 1
+
+# A suite that never exercises one verdict proves nothing about it.
+assert agreed[True] >= 5 and agreed[False] >= 5, (
+    f'the fixtures are one-sided: {agreed}')
+
+try:
+    boxes_overlap(base, ((0.0, 0.0, 0.0), IDENTITY, (1.0, -1.0, 1.0)))
+except ValueError:
+    pass
+else:
+    raise AssertionError('a negative half extent was accepted')
+
+skewed = ((1.0, 0.0, 0.0), (0.5, 0.5, 0.0), (0.0, 0.0, 1.0))
+try:
+    boxes_overlap(base, ((0.0, 0.0, 0.0), skewed, (1.0, 1.0, 1.0)))
+except ValueError:
+    pass
+else:
+    raise AssertionError('a non-orthonormal frame was accepted')
+""",
+    ),
+    task(
+        f"{FAMILY}-0015", FAMILY,
+        prompt=(
+            "Implement solve(matrix, rhs) returning the solution of a dense "
+            "square linear system as a tuple of floats, using Gaussian "
+            "elimination with partial pivoting. matrix is a sequence of rows "
+            "and rhs a sequence of the same length. Raise ValueError when "
+            "the matrix is empty or not square, when rhs does not match its "
+            "size, and when the matrix is singular to working precision."
+        ),
+        validator=LOAD_CANDIDATE + require("solve") + """
+def multiply(matrix, vector):
+    return [sum(row[i] * vector[i] for i in range(len(vector)))
+            for row in matrix]
+
+def check(matrix, expected, tol=1e-9):
+    rhs = multiply(matrix, expected)
+    got = solve(matrix, rhs)
+    assert isinstance(got, tuple), 'solve did not return a tuple'
+    assert len(got) == len(expected), f'expected {len(expected)} unknowns'
+    for i in range(len(expected)):
+        assert abs(got[i] - expected[i]) < tol, (
+            f'x[{i}] came out as {got[i]}, expected {expected[i]}')
+
+# A zero in the leading position. Correct, but fatal without pivoting.
+check([[0.0, 1.0], [1.0, 0.0]], [2.0, 1.0])
+
+# Non-singular, yet the second pivot vanishes during elimination.
+check([[1.0, 2.0, 3.0], [2.0, 4.0, 5.0], [1.0, 3.0, 4.0]], [1.0, 2.0, -1.0])
+
+# Pivoting on magnitude, not on a zero test. The leading entry here is
+# 1e-5 -- far too large for any "treat this as zero and swap" rule to fire --
+# but it is thirteen orders below the rest of its column, so eliminating with
+# it loses four significant digits of the first unknown. Swapping to the
+# largest available pivot returns both unknowns exactly. Measured: a solver
+# that swaps only on a near-zero pivot is off by 1.3e-4 here for every zero
+# threshold between 1e-14 and 1e-6.
+check([[1e-5, 1e8], [1e8, 1e8]], [1.0, 1.0], tol=1e-6)
+
+check([[4.0, -2.0, 1.0, 0.0, 3.0],
+       [-2.0, 5.0, 0.0, 1.0, -1.0],
+       [1.0, 0.0, 6.0, -3.0, 2.0],
+       [0.0, 1.0, -3.0, 7.0, 1.0],
+       [3.0, -1.0, 2.0, 1.0, 8.0]],
+      [1.5, -2.25, 0.75, 3.0, -1.125])
+
+for singular in ([[1.0, 2.0], [2.0, 4.0]],
+                 [[1.0, 1.0, 1.0], [2.0, 2.0, 2.0], [0.0, 1.0, 3.0]],
+                 [[0.0, 0.0], [0.0, 0.0]]):
+    try:
+        solve(singular, [1.0] * len(singular))
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f'the singular matrix {singular} was solved')
+
+try:
+    solve([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [1.0, 2.0])
+except ValueError:
+    pass
+else:
+    raise AssertionError('a non-square matrix was accepted')
+
+try:
+    solve([[1.0, 0.0], [0.0, 1.0]], [1.0, 2.0, 3.0])
+except ValueError:
+    pass
+else:
+    raise AssertionError('a mismatched right-hand side was accepted')
+
+try:
+    solve([], [])
+except ValueError:
+    pass
+else:
+    raise AssertionError('an empty system was accepted')
+""",
+    ),
+    task(
+        f"{FAMILY}-0016", FAMILY,
+        prompt=(
+            "Implement natural_cubic_spline(xs, ys) returning a callable f "
+            "that evaluates the natural cubic spline through the knots. The "
+            "spline is a cubic on each interval, passes through every knot, "
+            "is twice continuously differentiable across the interior knots, "
+            "and has zero second derivative at both ends. Spacing between "
+            "knots is not uniform. Raise ValueError when the inputs differ "
+            "in length, when there are fewer than three knots, and when xs "
+            "is not strictly increasing; f raises ValueError outside "
+            "[xs[0], xs[-1]]."
+        ),
+        validator=LOAD_CANDIDATE + require("natural_cubic_spline") + """
+# f is a cubic on each interval, so a central difference recovers its second
+# derivative exactly and the five-point stencil its first. Both are then
+# extrapolated to the knot along the interval that owns them -- a polynomial
+# extrapolation, so it is exact too, and the one-sided limits it compares are
+# the actual definition of C1 and C2 continuity.
+def deriv1(f, x, h):
+    return (-f(x + 2 * h) + 8 * f(x + h) - 8 * f(x - h) + f(x - 2 * h)) / (12 * h)
+
+def deriv2(f, x, h):
+    return (f(x + h) - 2.0 * f(x) + f(x - h)) / (h * h)
+
+def extrapolate(samples, target):
+    total = 0.0
+    for i, (xi, yi) in enumerate(samples):
+        term = yi
+        for j, (xj, _) in enumerate(samples):
+            if i != j:
+                term *= (target - xj) / (xi - xj)
+        total += term
+    return total
+
+def limit(f, lo, hi, target, order):
+    span = hi - lo
+    h = 0.05 * span
+    fractions = (0.2, 0.5, 0.8) if order == 1 else (0.25, 0.75)
+    samples = []
+    for fraction in fractions:
+        x = lo + fraction * span
+        value = deriv1(f, x, h) if order == 1 else deriv2(f, x, h)
+        samples.append((x, value))
+    return extrapolate(samples, target)
+
+xs = [0.0, 1.0, 2.5, 3.0, 5.0]
+ys = [1.0, 3.0, -2.0, 0.5, 4.0]
+f = natural_cubic_spline(xs, ys)
+assert callable(f), 'natural_cubic_spline did not return a callable'
+
+for x, y in zip(xs, ys):
+    assert abs(f(x) - y) < 1e-9, f'f({x}) is {f(x)}, not the knot value {y}'
+
+# Natural end conditions.
+start = limit(f, xs[0], xs[1], xs[0], 2)
+end = limit(f, xs[-2], xs[-1], xs[-1], 2)
+assert abs(start) < 1e-6, f'the second derivative at the left end is {start}'
+assert abs(end) < 1e-6, f'the second derivative at the right end is {end}'
+
+for k in range(1, len(xs) - 1):
+    left1 = limit(f, xs[k - 1], xs[k], xs[k], 1)
+    right1 = limit(f, xs[k], xs[k + 1], xs[k], 1)
+    assert abs(left1 - right1) < 1e-6, (
+        f'the slope jumps at x={xs[k]}: {left1} then {right1}')
+    left2 = limit(f, xs[k - 1], xs[k], xs[k], 2)
+    right2 = limit(f, xs[k], xs[k + 1], xs[k], 2)
+    assert abs(left2 - right2) < 1e-6, (
+        f'the curvature jumps at x={xs[k]}: {left2} then {right2}')
+
+# Collinear knots have zero second derivative everywhere, so the natural
+# spline is exactly the straight line through them.
+line = natural_cubic_spline([0.0, 1.0, 3.0, 4.0], [1.0, 3.0, 7.0, 9.0])
+for x in (0.25, 1.5, 2.0, 3.75):
+    assert abs(line(x) - (1.0 + 2.0 * x)) < 1e-9, (
+        f'the spline through collinear knots bends at {x}')
+
+for outside in (-0.001, 5.001, -10.0, 12.0):
+    try:
+        f(outside)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f'f evaluated outside its range at {outside}')
+
+for bad_xs, bad_ys in (([0.0, 1.0], [1.0, 2.0]),
+                       ([0.0, 1.0, 1.0, 2.0], [1.0, 2.0, 3.0, 4.0]),
+                       ([0.0, 2.0, 1.0, 3.0], [1.0, 2.0, 3.0, 4.0]),
+                       ([0.0, 1.0, 2.0], [1.0, 2.0])):
+    try:
+        natural_cubic_spline(bad_xs, bad_ys)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f'xs={bad_xs} ys={bad_ys} was accepted')
+""",
+    ),
 ]

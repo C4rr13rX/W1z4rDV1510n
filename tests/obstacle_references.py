@@ -1970,6 +1970,352 @@ def forward_kinematics(links, joint_values):
 '''
 
 
+REFERENCES["scientific_3d_geometry_robotics-0009"] = r'''
+def _interpolate(p, q, z):
+    t = (z - p[2]) / (q[2] - p[2])
+    return (p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1]))
+
+
+def _segments(vertices, triangles, z):
+    found = []
+    for triangle in triangles:
+        corners = [vertices[index] for index in triangle]
+        crossings = []
+        for side in range(3):
+            p = corners[side]
+            q = corners[(side + 1) % 3]
+            if (p[2] - z) * (q[2] - z) < 0.0:
+                crossings.append(_interpolate(p, q, z))
+        if len(crossings) == 2:
+            found.append((crossings[0], crossings[1]))
+    return found
+
+
+def slice_mesh(vertices, triangles, z):
+    segments = _segments(vertices, triangles, z)
+    tolerance = 1e-7
+
+    def key(point):
+        return (round(point[0] / tolerance), round(point[1] / tolerance))
+
+    incident = {}
+    for index, (a, b) in enumerate(segments):
+        incident.setdefault(key(a), []).append(index)
+        incident.setdefault(key(b), []).append(index)
+
+    used = [False] * len(segments)
+    loops = []
+    for start in range(len(segments)):
+        if used[start]:
+            continue
+        used[start] = True
+        first, current = segments[start]
+        loop = [first, current]
+        while True:
+            following = None
+            for index in incident.get(key(current), ()):
+                if not used[index]:
+                    following = index
+                    break
+            if following is None:
+                break
+            used[following] = True
+            a, b = segments[following]
+            current = b if key(a) == key(current) else a
+            if key(current) == key(first):
+                break
+            loop.append(current)
+        loops.append(loop)
+    return loops
+'''
+
+
+REFERENCES["scientific_3d_geometry_robotics-0010"] = r'''
+import math
+
+
+def overhang_faces(vertices, triangles, max_overhang_degrees):
+    if not 0.0 < max_overhang_degrees <= 90.0:
+        raise ValueError("max_overhang_degrees must lie in (0, 90]")
+    flagged = []
+    for index, (i, j, k) in enumerate(triangles):
+        p, q, r = vertices[i], vertices[j], vertices[k]
+        u = (q[0] - p[0], q[1] - p[1], q[2] - p[2])
+        v = (r[0] - p[0], r[1] - p[1], r[2] - p[2])
+        normal = (u[1] * v[2] - u[2] * v[1],
+                  u[2] * v[0] - u[0] * v[2],
+                  u[0] * v[1] - u[1] * v[0])
+        length = math.sqrt(sum(c * c for c in normal))
+        if length <= 1e-12:
+            raise ValueError(f"triangle {index} has zero area")
+        unit_z = normal[2] / length
+        if unit_z >= 0.0:
+            continue
+        angle = math.degrees(math.acos(min(1.0, -unit_z)))
+        if angle < max_overhang_degrees:
+            flagged.append(index)
+    return sorted(flagged)
+'''
+
+
+REFERENCES["scientific_3d_geometry_robotics-0011"] = r'''
+import math
+
+
+def inverse_kinematics(l1, l2, x, y, elbow="up"):
+    if l1 <= 0.0 or l2 <= 0.0:
+        raise ValueError("link lengths must be positive")
+    if elbow not in ("up", "down"):
+        raise ValueError("elbow must be 'up' or 'down'")
+    distance = math.hypot(x, y)
+    if distance > l1 + l2 + 1e-9 or distance < abs(l1 - l2) - 1e-9:
+        raise ValueError("the target is outside the reachable annulus")
+    cosine = (distance * distance - l1 * l1 - l2 * l2) / (2.0 * l1 * l2)
+    theta2 = math.acos(max(-1.0, min(1.0, cosine)))
+    if elbow == "down":
+        theta2 = -theta2
+    theta1 = math.atan2(y, x) - math.atan2(
+        l2 * math.sin(theta2), l1 + l2 * math.cos(theta2))
+    theta1 = math.atan2(math.sin(theta1), math.cos(theta1))
+    return (theta1, theta2)
+'''
+
+
+REFERENCES["scientific_3d_geometry_robotics-0012"] = r'''
+import math
+
+
+def _jacobi(matrix):
+    a = [list(row) for row in matrix]
+    vectors = [[1.0 if i == j else 0.0 for j in range(3)] for i in range(3)]
+    for _ in range(100):
+        p, q, largest = 0, 1, 0.0
+        for i in range(3):
+            for j in range(i + 1, 3):
+                if abs(a[i][j]) > largest:
+                    largest, p, q = abs(a[i][j]), i, j
+        if largest <= 1e-15:
+            break
+        theta = (a[q][q] - a[p][p]) / (2.0 * a[p][q])
+        sign = 1.0 if theta >= 0.0 else -1.0
+        t = sign / (abs(theta) + math.sqrt(theta * theta + 1.0))
+        c = 1.0 / math.sqrt(t * t + 1.0)
+        s = t * c
+        for k in range(3):
+            akp, akq = a[k][p], a[k][q]
+            a[k][p], a[k][q] = c * akp - s * akq, s * akp + c * akq
+        for k in range(3):
+            apk, aqk = a[p][k], a[q][k]
+            a[p][k], a[q][k] = c * apk - s * aqk, s * apk + c * aqk
+        for k in range(3):
+            vkp, vkq = vectors[k][p], vectors[k][q]
+            vectors[k][p], vectors[k][q] = (c * vkp - s * vkq,
+                                            s * vkp + c * vkq)
+    values = [a[i][i] for i in range(3)]
+    columns = [tuple(vectors[row][col] for row in range(3))
+               for col in range(3)]
+    return values, columns
+
+
+def fit_plane(points):
+    points = [tuple(float(c) for c in point) for point in points]
+    if len(points) < 3:
+        raise ValueError("at least three points are required")
+    count = len(points)
+    centroid = tuple(sum(point[i] for point in points) / count
+                     for i in range(3))
+    covariance = [[0.0] * 3 for _ in range(3)]
+    for point in points:
+        offset = [point[i] - centroid[i] for i in range(3)]
+        for i in range(3):
+            for j in range(3):
+                covariance[i][j] += offset[i] * offset[j]
+    values, vectors = _jacobi(covariance)
+    order = sorted(range(3), key=lambda i: values[i])
+    smallest, middle = order[0], order[1]
+    scale = values[order[2]]
+    if values[middle] <= 1e-9 * scale or scale <= 0.0:
+        raise ValueError("the points are collinear, so no plane is unique")
+    normal = vectors[smallest]
+    length = math.sqrt(sum(c * c for c in normal))
+    normal = tuple(c / length for c in normal)
+    dominant = max(range(3), key=lambda i: (abs(normal[i]), -i))
+    if normal[dominant] < 0.0:
+        normal = tuple(-c for c in normal)
+    return centroid, normal
+'''
+
+
+REFERENCES["scientific_3d_geometry_robotics-0013"] = r'''
+def integrate(derivative, state, t0, t1, steps):
+    if isinstance(steps, bool) or not isinstance(steps, int) or steps < 1:
+        raise ValueError("steps must be a positive integer")
+    values = [float(v) for v in state]
+    width = len(values)
+    h = (float(t1) - float(t0)) / steps
+    t = float(t0)
+    for _ in range(steps):
+        k1 = [float(v) for v in derivative(t, tuple(values))]
+        first = tuple(values[i] + 0.5 * h * k1[i] for i in range(width))
+        k2 = [float(v) for v in derivative(t + 0.5 * h, first)]
+        second = tuple(values[i] + 0.5 * h * k2[i] for i in range(width))
+        k3 = [float(v) for v in derivative(t + 0.5 * h, second)]
+        third = tuple(values[i] + h * k3[i] for i in range(width))
+        k4 = [float(v) for v in derivative(t + h, third)]
+        values = [
+            values[i] + h * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i]) / 6.0
+            for i in range(width)
+        ]
+        t += h
+    return tuple(values)
+'''
+
+
+REFERENCES["scientific_3d_geometry_robotics-0014"] = r'''
+import math
+
+
+def _check(box):
+    center, axes, half = box
+    if any(extent < 0.0 for extent in half):
+        raise ValueError("half extents must be non-negative")
+    for i in range(3):
+        for j in range(3):
+            dot = sum(axes[i][k] * axes[j][k] for k in range(3))
+            if abs(dot - (1.0 if i == j else 0.0)) > 1e-9:
+                raise ValueError("the box frame is not orthonormal")
+    return center, axes, half
+
+
+def _radius(axes, half, direction):
+    return sum(
+        abs(half[i] * sum(axes[i][k] * direction[k] for k in range(3)))
+        for i in range(3)
+    )
+
+
+def boxes_overlap(a, b):
+    center_a, axes_a, half_a = _check(a)
+    center_b, axes_b, half_b = _check(b)
+    delta = tuple(center_b[k] - center_a[k] for k in range(3))
+
+    candidates = [tuple(axis) for axis in axes_a]
+    candidates.extend(tuple(axis) for axis in axes_b)
+    for i in range(3):
+        for j in range(3):
+            u, v = axes_a[i], axes_b[j]
+            cross = (u[1] * v[2] - u[2] * v[1],
+                     u[2] * v[0] - u[0] * v[2],
+                     u[0] * v[1] - u[1] * v[0])
+            if sum(c * c for c in cross) > 1e-12:
+                candidates.append(cross)
+
+    for direction in candidates:
+        length = math.sqrt(sum(c * c for c in direction))
+        if length <= 1e-12:
+            continue
+        unit = tuple(c / length for c in direction)
+        gap = abs(sum(delta[k] * unit[k] for k in range(3)))
+        reach = _radius(axes_a, half_a, unit) + _radius(axes_b, half_b, unit)
+        if gap > reach + 1e-12:
+            return False
+    return True
+'''
+
+
+REFERENCES["scientific_3d_geometry_robotics-0015"] = r'''
+def solve(matrix, rhs):
+    rows = [[float(value) for value in row] for row in matrix]
+    size = len(rows)
+    if size == 0 or any(len(row) != size for row in rows):
+        raise ValueError("the matrix must be square and non-empty")
+    vector = [float(value) for value in rhs]
+    if len(vector) != size:
+        raise ValueError("the right-hand side must match the matrix")
+
+    scale = max(abs(value) for row in rows for value in row)
+    tolerance = 1e-14 * scale if scale > 0.0 else 1e-14
+
+    for k in range(size):
+        pivot = max(range(k, size), key=lambda r: abs(rows[r][k]))
+        if abs(rows[pivot][k]) <= tolerance:
+            raise ValueError("the matrix is singular to working precision")
+        if pivot != k:
+            rows[k], rows[pivot] = rows[pivot], rows[k]
+            vector[k], vector[pivot] = vector[pivot], vector[k]
+        for r in range(k + 1, size):
+            factor = rows[r][k] / rows[k][k]
+            if factor == 0.0:
+                continue
+            for c in range(k, size):
+                rows[r][c] -= factor * rows[k][c]
+            vector[r] -= factor * vector[k]
+
+    answer = [0.0] * size
+    for k in range(size - 1, -1, -1):
+        total = vector[k] - sum(rows[k][c] * answer[c]
+                                for c in range(k + 1, size))
+        answer[k] = total / rows[k][k]
+    return tuple(answer)
+'''
+
+
+REFERENCES["scientific_3d_geometry_robotics-0016"] = r'''
+def natural_cubic_spline(xs, ys):
+    xs = [float(value) for value in xs]
+    ys = [float(value) for value in ys]
+    if len(xs) != len(ys):
+        raise ValueError("xs and ys must have the same length")
+    count = len(xs)
+    if count < 3:
+        raise ValueError("a natural cubic spline needs at least three knots")
+    for i in range(count - 1):
+        if not xs[i] < xs[i + 1]:
+            raise ValueError("xs must be strictly increasing")
+
+    widths = [xs[i + 1] - xs[i] for i in range(count - 1)]
+    alpha = [0.0] * count
+    for i in range(1, count - 1):
+        alpha[i] = 3.0 * ((ys[i + 1] - ys[i]) / widths[i]
+                          - (ys[i] - ys[i - 1]) / widths[i - 1])
+
+    diagonal = [1.0] + [0.0] * (count - 1)
+    mu = [0.0] * count
+    z = [0.0] * count
+    for i in range(1, count - 1):
+        diagonal[i] = (2.0 * (xs[i + 1] - xs[i - 1])
+                       - widths[i - 1] * mu[i - 1])
+        mu[i] = widths[i] / diagonal[i]
+        z[i] = (alpha[i] - widths[i - 1] * z[i - 1]) / diagonal[i]
+
+    c = [0.0] * count
+    b = [0.0] * (count - 1)
+    d = [0.0] * (count - 1)
+    for j in range(count - 2, -1, -1):
+        c[j] = z[j] - mu[j] * c[j + 1]
+        b[j] = ((ys[j + 1] - ys[j]) / widths[j]
+                - widths[j] * (c[j + 1] + 2.0 * c[j]) / 3.0)
+        d[j] = (c[j + 1] - c[j]) / (3.0 * widths[j])
+
+    def evaluate(x):
+        x = float(x)
+        if x < xs[0] or x > xs[-1]:
+            raise ValueError("x lies outside the interpolation range")
+        low, high = 0, count - 2
+        while low < high:
+            middle = (low + high + 1) // 2
+            if xs[middle] <= x:
+                low = middle
+            else:
+                high = middle - 1
+        step = x - xs[low]
+        return (ys[low] + b[low] * step + c[low] * step * step
+                + d[low] * step * step * step)
+
+    return evaluate
+'''
+
+
 REFERENCES["reliability_observability_performance-0001"] = r'''
 import math
 
@@ -7877,6 +8223,63 @@ MUTATIONS: dict[str, tuple[str, str]] = {
     "scientific_3d_geometry_robotics-0008": (
         "        (ct, -st * ca, st * sa, a * ct),",
         "        (ct, st * ca, st * sa, a * ct),",
+    ),
+    # Reflect the crossing point along its edge. A prism cannot see this --
+    # its cross-section is the same at every height -- so only the
+    # off-centre cut through the tetrahedron reports it.
+    "scientific_3d_geometry_robotics-0009": (
+        "    t = (z - p[2]) / (q[2] - p[2])",
+        "    t = (q[2] - z) / (q[2] - p[2])",
+    ),
+    # Measure the overhang from the build direction instead of from straight
+    # down. Every angle becomes its supplement, so the ceiling that most
+    # needs support is the face reported as safest.
+    "scientific_3d_geometry_robotics-0010": (
+        "        angle = math.degrees(math.acos(min(1.0, -unit_z)))",
+        "        angle = math.degrees(math.acos(min(1.0, unit_z)))",
+    ),
+    # Add the shoulder correction instead of subtracting it. The arm still
+    # reaches the right distance from the origin, on the wrong side of it.
+    "scientific_3d_geometry_robotics-0011": (
+        "    theta1 = math.atan2(y, x) - math.atan2(",
+        "    theta1 = math.atan2(y, x) + math.atan2(",
+    ),
+    # Take the eigenvector of the largest eigenvalue. That is the direction
+    # the points spread along, not the one they spread least along, so the
+    # answer is a vector lying IN the plane rather than normal to it.
+    "scientific_3d_geometry_robotics-0012": (
+        "    smallest, middle = order[0], order[1]",
+        "    smallest, middle = order[2], order[1]",
+    ),
+    # Advance the third stage by a whole step rather than a half. Every
+    # weight still sums to one and the answer still looks convergent, but the
+    # second-order condition now fails and the method is first order.
+    "scientific_3d_geometry_robotics-0013": (
+        "        second = tuple(values[i] + 0.5 * h * k2[i] "
+        "for i in range(width))",
+        "        second = tuple(values[i] + h * k2[i] for i in range(width))",
+    ),
+    # Test only the six face normals. Correct whenever a face plane
+    # separates the boxes, and it misses every configuration whose only
+    # separating plane is spanned by one edge from each box.
+    "scientific_3d_geometry_robotics-0014": (
+        "                candidates.append(cross)",
+        "                pass",
+    ),
+    # Pivot on the smallest magnitude instead of the largest -- the exact
+    # inversion of the rule. It either calls a solvable system singular or
+    # eliminates with the worst available pivot, losing the significant
+    # digits that choosing the largest one exists to protect.
+    "scientific_3d_geometry_robotics-0015": (
+        "        pivot = max(range(k, size), key=lambda r: abs(rows[r][k]))",
+        "        pivot = max(range(k, size), key=lambda r: -abs(rows[r][k]))",
+    ),
+    # Scale the divided-difference right-hand side by two rather than three.
+    # The knots are still interpolated and the ends are still natural, and
+    # the slope now jumps at every interior knot.
+    "scientific_3d_geometry_robotics-0016": (
+        "        alpha[i] = 3.0 * ((ys[i + 1] - ys[i]) / widths[i]",
+        "        alpha[i] = 2.0 * ((ys[i + 1] - ys[i]) / widths[i]",
     ),
     # Floor the bucket index instead of ceiling it. Memory stays bounded and
     # every quantile still looks plausible, but the representative now sits
