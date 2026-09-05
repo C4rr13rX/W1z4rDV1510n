@@ -281,6 +281,39 @@ for spans in intervals.values():
 # --- admission + memory metrics -------------------------------------------
 # Every one of these was green for 16 h while nothing admitted, so the probe
 # must report the ones that actually distinguish progress from motion.
+#
+# WHEN an admission happened is the ledger's answer, not the health log's.
+# `deferred_replay_admitted` is appended several steps AFTER the interval is
+# durably marked resolved -- after `accept_last_good_guard`, which raises --
+# so a completed admission can leave a resolved row behind and never emit its
+# event. Measured 2026-09-05: three intervals resolved 71.8 h, 89.9 h and
+# 112.1 h ago, each reading "final-brain deferred replay passed comprehensive
+# admission" and each backed by an enterprise gate artifact reading
+# passed=True, while the newest event was 351.7 h old. Reporting the event
+# age as the drought overstated it fivefold and woke the agent for a stall
+# that had ended three days earlier.
+#
+# Both are reported. Their divergence is not noise: it means an admission
+# committed whose event did not fire, which is worth seeing on its own.
+resolved_unix = 0.0
+resolved_reason = ''
+try:
+    with (runtime / 'curriculum-deferred-intervals.jsonl').open(
+            encoding='utf-8', errors='replace') as stream:
+        for line in stream:
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if row.get('status') != 'resolved':
+                continue
+            when = float(row.get('updated_unix') or 0.0)
+            if when >= resolved_unix:
+                resolved_unix = when
+                resolved_reason = str(row.get('reason') or '')[:120]
+except OSError:
+    pass
+
 health = runtime / 'curriculum-health.jsonl'
 kinds = {{}}
 admitted_unix = 0.0
@@ -397,8 +430,12 @@ print(json.dumps({{
     'curriculum': curriculum,
     'admissions': {{
         'event_counts': kinds,
-        'last_admitted_unix': admitted_unix,
+        'last_admitted_unix': resolved_unix or admitted_unix,
         'hours_since_admission': (
+            round((time.time() - resolved_unix) / 3600.0, 1)
+            if resolved_unix else None),
+        'last_resolved_reason': resolved_reason,
+        'hours_since_admission_event': (
             round((time.time() - admitted_unix) / 3600.0, 1)
             if admitted_unix else None),
         'gate_artifacts': gate_artifacts,
