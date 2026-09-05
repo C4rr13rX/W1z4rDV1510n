@@ -1970,6 +1970,352 @@ def forward_kinematics(links, joint_values):
 '''
 
 
+REFERENCES["reliability_observability_performance-0001"] = r'''
+import math
+
+
+class LatencyHistogram:
+    def __init__(self, relative_error=0.01):
+        if not 0 < relative_error < 1:
+            raise ValueError("relative_error must be in (0, 1)")
+        self.relative_error = relative_error
+        self._gamma = (1 + relative_error) / (1 - relative_error)
+        self._log_gamma = math.log(self._gamma)
+        self._buckets = {}
+        self._count = 0
+
+    def record(self, value):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("value must be a number")
+        if value <= 0:
+            raise ValueError("value must be positive")
+        index = math.ceil(math.log(value) / self._log_gamma)
+        self._buckets[index] = self._buckets.get(index, 0) + 1
+        self._count += 1
+
+    def count(self):
+        return self._count
+
+    def bucket_count(self):
+        return len(self._buckets)
+
+    def quantile(self, q):
+        if isinstance(q, bool) or not isinstance(q, (int, float)):
+            raise ValueError("q must be a number")
+        if q < 0 or q > 1:
+            raise ValueError("q must be in [0, 1]")
+        if self._count == 0:
+            raise ValueError("the histogram is empty")
+        target = max(1, math.ceil(q * self._count))
+        seen = 0
+        for index in sorted(self._buckets):
+            seen += self._buckets[index]
+            if seen >= target:
+                return 2 * self._gamma ** index / (self._gamma + 1)
+        raise ValueError("the histogram is empty")
+'''
+
+
+REFERENCES["reliability_observability_performance-0002"] = r'''
+import hashlib
+
+
+def should_sample(trace_id, rate):
+    if not isinstance(trace_id, str):
+        raise ValueError("trace_id must be a string")
+    if isinstance(rate, bool) or not isinstance(rate, (int, float)):
+        raise ValueError("rate must be a number")
+    if rate < 0 or rate > 1:
+        raise ValueError("rate must be in [0, 1]")
+    digest = hashlib.sha256(trace_id.encode("utf-8")).digest()
+    value = int.from_bytes(digest[:8], "big")
+    return value < rate * 2 ** 64
+'''
+
+
+REFERENCES["reliability_observability_performance-0003"] = r'''
+import math
+
+
+class SlidingWindowCounter:
+    def __init__(self, window_seconds, bucket_count):
+        if isinstance(window_seconds, bool) or not isinstance(
+                window_seconds, (int, float)) or window_seconds <= 0:
+            raise ValueError("window_seconds must be positive")
+        if isinstance(bucket_count, bool) or not isinstance(
+                bucket_count, int) or bucket_count < 1:
+            raise ValueError("bucket_count must be at least 1")
+        self.window_seconds = float(window_seconds)
+        self.bucket_count = bucket_count
+        self._width = self.window_seconds / bucket_count
+        self._buckets = {}
+        self._newest = None
+
+    def _index(self, now):
+        return math.floor(now / self._width)
+
+    def _evict(self, reference):
+        oldest = self._index(reference) - self.bucket_count
+        for index in [key for key in self._buckets if key <= oldest]:
+            del self._buckets[index]
+
+    def record(self, now, amount=1):
+        if isinstance(amount, bool) or not isinstance(amount, (int, float)):
+            raise ValueError("amount must be a number")
+        if amount <= 0:
+            raise ValueError("amount must be positive")
+        self._newest = now if self._newest is None else max(self._newest, now)
+        self._evict(self._newest)
+        index = self._index(now)
+        if index <= self._index(self._newest) - self.bucket_count:
+            return False
+        self._buckets[index] = self._buckets.get(index, 0) + amount
+        return True
+
+    def total(self, now):
+        self._newest = now if self._newest is None else max(self._newest, now)
+        self._evict(self._newest)
+        return sum(self._buckets.values())
+
+    def resident_buckets(self):
+        return len(self._buckets)
+'''
+
+
+REFERENCES["reliability_observability_performance-0004"] = r'''
+_VALID_STATUSES = ("up", "degraded", "down")
+
+
+def aggregate_health(checks):
+    if not isinstance(checks, (list, tuple)) or not checks:
+        raise ValueError("at least one check is required")
+    seen = set()
+    down = []
+    degraded = []
+    critical_down = False
+    for check in checks:
+        if not isinstance(check, dict):
+            raise ValueError("each check must be a mapping")
+        for key in ("name", "status", "critical"):
+            if key not in check:
+                raise ValueError("a check is missing " + key)
+        name = check["name"]
+        status = check["status"]
+        critical = check["critical"]
+        if not isinstance(name, str) or not name:
+            raise ValueError("name must be a non-empty string")
+        if status not in _VALID_STATUSES:
+            raise ValueError("unknown status " + repr(status))
+        if not isinstance(critical, bool):
+            raise ValueError("critical must be a bool")
+        if name in seen:
+            raise ValueError("duplicate name " + repr(name))
+        seen.add(name)
+        if status == "down":
+            down.append(name)
+            critical_down = critical_down or critical
+        elif status == "degraded":
+            degraded.append(name)
+    if critical_down:
+        status = "unhealthy"
+    elif down or degraded:
+        status = "degraded"
+    else:
+        status = "healthy"
+    return {"status": status, "down": sorted(down),
+            "degraded": sorted(degraded)}
+'''
+
+
+REFERENCES["reliability_observability_performance-0005"] = r'''
+_REQUIRED_WINDOWS = ("5m", "1h", "30m", "6h")
+
+
+def evaluate_error_budget(objective, windows):
+    if isinstance(objective, bool) or not isinstance(objective, (int, float)):
+        raise ValueError("objective must be a number")
+    if not 0 < objective < 1:
+        raise ValueError("objective must be in (0, 1)")
+    if not isinstance(windows, dict):
+        raise ValueError("windows must be a mapping")
+    budget = 1.0 - objective
+    burn_rates = {}
+    for name in _REQUIRED_WINDOWS:
+        if name not in windows:
+            raise ValueError("missing window " + repr(name))
+        entry = windows[name]
+        if not isinstance(entry, dict):
+            raise ValueError("window " + repr(name) + " must be a mapping")
+        if "total" not in entry or "failed" not in entry:
+            raise ValueError("window " + repr(name) + " needs total/failed")
+        total = entry["total"]
+        failed = entry["failed"]
+        if isinstance(total, bool) or not isinstance(total, int) or total <= 0:
+            raise ValueError("window " + repr(name) + " has a bad total")
+        if isinstance(failed, bool) or not isinstance(failed, int):
+            raise ValueError("window " + repr(name) + " has a bad failed")
+        if failed < 0 or failed > total:
+            raise ValueError("window " + repr(name) + " has a bad failed")
+        burn_rates[name] = (failed / total) / budget
+    if burn_rates["1h"] >= 14.4 and burn_rates["5m"] >= 14.4:
+        severity = "page"
+    elif burn_rates["6h"] >= 6 and burn_rates["30m"] >= 6:
+        severity = "ticket"
+    else:
+        severity = None
+    return {"burn_rates": burn_rates, "severity": severity}
+'''
+
+
+REFERENCES["reliability_observability_performance-0006"] = r'''
+import math
+
+
+class EventThrottle:
+    def __init__(self, window_seconds, max_per_window):
+        if isinstance(window_seconds, bool) or not isinstance(
+                window_seconds, (int, float)) or window_seconds <= 0:
+            raise ValueError("window_seconds must be positive")
+        if isinstance(max_per_window, bool) or not isinstance(
+                max_per_window, int) or max_per_window < 1:
+            raise ValueError("max_per_window must be at least 1")
+        self.window_seconds = float(window_seconds)
+        self.max_per_window = max_per_window
+        # key -> [window index, emitted in window, suppressed since emission]
+        self._state = {}
+        self._newest_window = None
+
+    def _forget(self, window):
+        stale = [key for key, entry in self._state.items()
+                 if entry[0] < window - 1]
+        for key in stale:
+            del self._state[key]
+
+    def offer(self, now, key, message):
+        window = math.floor(now / self.window_seconds)
+        if self._newest_window is None:
+            self._newest_window = window
+        else:
+            self._newest_window = max(self._newest_window, window)
+        self._forget(self._newest_window)
+        entry = self._state.get(key)
+        if entry is None:
+            entry = [window, 0, 0]
+            self._state[key] = entry
+        elif entry[0] != window:
+            entry = [window, 0, entry[2]]
+            self._state[key] = entry
+        if entry[1] < self.max_per_window:
+            entry[1] += 1
+            suppressed = entry[2]
+            entry[2] = 0
+            return {"key": key, "message": message, "suppressed": suppressed}
+        entry[2] += 1
+        return None
+
+    def tracked_keys(self):
+        return len(self._state)
+'''
+
+
+REFERENCES["reliability_observability_performance-0007"] = r'''
+class FrequentItems:
+    def __init__(self, capacity):
+        if isinstance(capacity, bool) or not isinstance(capacity, int):
+            raise ValueError("capacity must be an integer")
+        if capacity < 1:
+            raise ValueError("capacity must be at least 1")
+        self.capacity = capacity
+        self._counts = {}
+
+    def offer(self, item):
+        if item in self._counts:
+            self._counts[item] += 1
+        elif len(self._counts) < self.capacity:
+            self._counts[item] = 1
+        else:
+            for key in list(self._counts):
+                self._counts[key] -= 1
+                if self._counts[key] == 0:
+                    del self._counts[key]
+
+    def tracked(self):
+        return len(self._counts)
+
+    def top(self, k):
+        if isinstance(k, bool) or not isinstance(k, int):
+            raise ValueError("k must be an integer")
+        if k < 0:
+            raise ValueError("k must be non-negative")
+        ordered = sorted(self._counts.items(),
+                         key=lambda pair: (-pair[1], pair[0]))
+        return ordered[:k]
+'''
+
+
+REFERENCES["reliability_observability_performance-0008"] = r'''
+def critical_path(spans):
+    if not isinstance(spans, (list, tuple)) or not spans:
+        raise ValueError("at least one span is required")
+    by_id = {}
+    for span in spans:
+        if not isinstance(span, dict):
+            raise ValueError("each span must be a mapping")
+        for key in ("span_id", "parent_id", "name", "start_ms", "end_ms"):
+            if key not in span:
+                raise ValueError("a span is missing " + key)
+        span_id = span["span_id"]
+        if span_id in by_id:
+            raise ValueError("duplicate span_id " + repr(span_id))
+        if span["end_ms"] < span["start_ms"]:
+            raise ValueError("span " + repr(span_id) + " ends before it starts")
+        by_id[span_id] = span
+
+    roots = [span for span in by_id.values() if span["parent_id"] is None]
+    if len(roots) != 1:
+        raise ValueError("expected exactly one root, found " + str(len(roots)))
+
+    children = {span_id: [] for span_id in by_id}
+    for span in by_id.values():
+        parent_id = span["parent_id"]
+        if parent_id is None:
+            continue
+        if parent_id not in by_id:
+            raise ValueError("parent " + repr(parent_id) + " names no span")
+        parent = by_id[parent_id]
+        if (span["start_ms"] < parent["start_ms"]
+                or span["end_ms"] > parent["end_ms"]):
+            raise ValueError("span " + repr(span["span_id"])
+                             + " escapes its parent")
+        children[parent_id].append(span)
+
+    # Anything the root cannot reach is in a cycle, which no traversal from
+    # the root would otherwise visit.
+    root = roots[0]
+    seen = set()
+    stack = [root["span_id"]]
+    while stack:
+        current = stack.pop()
+        if current in seen:
+            raise ValueError("the parent links form a cycle")
+        seen.add(current)
+        stack.extend(child["span_id"] for child in children[current])
+    if len(seen) != len(by_id):
+        raise ValueError("the parent links form a cycle")
+
+    path = []
+    node = root
+    while True:
+        path.append(node["name"])
+        kids = children[node["span_id"]]
+        if not kids:
+            break
+        node = min(kids, key=lambda span: (-(span["end_ms"] - span["start_ms"]),
+                                           span["start_ms"], span["span_id"]))
+    return {"path": path, "duration_ms": root["end_ms"] - root["start_ms"]}
+'''
+
+
 MUTATIONS: dict[str, tuple[str, str]] = {
     # Sign the payload alone, so the header can be rewritten after signing
     # and the token still verifies -- the alg-confusion family.
@@ -2273,5 +2619,63 @@ MUTATIONS: dict[str, tuple[str, str]] = {
     "scientific_3d_geometry_robotics-0008": (
         "        (ct, -st * ca, st * sa, a * ct),",
         "        (ct, st * ca, st * sa, a * ct),",
+    ),
+    # Floor the bucket index instead of ceiling it. Memory stays bounded and
+    # every quantile still looks plausible, but the representative now sits
+    # below its bucket's range, so the error reaches 3% against a 1% promise.
+    "reliability_observability_performance-0001": (
+        "index = math.ceil(math.log(value) / self._log_gamma)",
+        "index = math.floor(math.log(value) / self._log_gamma)",
+    ),
+    # Derive the decision from the built-in hash. Python salts str hashing per
+    # process, so every service in the trace samples a different subset and
+    # the trace is never complete anywhere.
+    "reliability_observability_performance-0002": (
+        'digest = hashlib.sha256(trace_id.encode("utf-8")).digest()\n'
+        '    value = int.from_bytes(digest[:8], "big")',
+        "value = hash(trace_id) % 2 ** 64",
+    ),
+    # Never evict. Totals are right for a while and residency grows with the
+    # stream, which is the leak that survives every short test.
+    "reliability_observability_performance-0003": (
+        "        for index in [key for key in self._buckets if key <= oldest]:\n"
+        "            del self._buckets[index]",
+        "        return",
+    ),
+    # Report healthy while a non-critical dependency is down -- the aggregate
+    # that keeps a broken subsystem invisible until a user reports it.
+    "reliability_observability_performance-0004": (
+        "    elif down or degraded:",
+        "    elif degraded:",
+    ),
+    # Alert on the long window alone. The short-window veto is what stops an
+    # incident that already stopped from paging, so removing it pages on
+    # history.
+    "reliability_observability_performance-0005": (
+        'if burn_rates["1h"] >= 14.4 and burn_rates["5m"] >= 14.4:',
+        'if burn_rates["1h"] >= 14.4:',
+    ),
+    # Keep every key forever. Throttling still works; the process now leaks
+    # one entry per distinct key it has ever seen.
+    "reliability_observability_performance-0006": (
+        "        stale = [key for key, entry in self._state.items()\n"
+        "                 if entry[0] < window - 1]",
+        "        stale = []",
+    ),
+    # Track a new item instead of decrementing, abandoning the counter bound:
+    # the summary becomes an exact tally the size of the stream.
+    "reliability_observability_performance-0007": (
+        "            for key in list(self._counts):\n"
+        "                self._counts[key] -= 1\n"
+        "                if self._counts[key] == 0:\n"
+        "                    del self._counts[key]",
+        "            self._counts[item] = 1",
+    ),
+    # Descend into the latest-starting child rather than the longest-running
+    # one, which reports the last thing that happened as the cause of the
+    # trace's duration.
+    "reliability_observability_performance-0008": (
+        '-(span["end_ms"] - span["start_ms"]),',
+        '-span["start_ms"],',
     ),
 }
