@@ -299,49 +299,153 @@ def boost_priority() -> None:
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 
-def find_processes(name_substr: str, cmd_substr: str = "") -> list[int]:
-    """Return PIDs of processes whose image name contains `name_substr`
-    and (optionally) whose command line contains `cmd_substr`.  Uses
-    WMIC on Windows, ps on POSIX."""
+class ProcessScanUnavailable(RuntimeError):
+    """Process enumeration itself failed, so presence is unknown.
+
+    Deliberately distinct from "the scan ran and matched nothing". Callers
+    treat an empty result as unambiguous proof a process is gone and act on
+    it immediately -- relaunching the node, bypassing the health-miss budget,
+    cutting the warmup short. A scan that cannot run must therefore never be
+    able to look like an empty scan.
+
+    This is the failure that made the distinction necessary: `find_processes`
+    shelled out to `wmic`, swallowed every exception, and returned `[]`.
+    Windows 11 removed `wmic`, so on this host the helper reported "no such
+    process" for *every* query, forever -- while each caller read that as
+    certainty.
+    """
+
+
+def _scan_processes_psutil(name_substr: str, cmd_substr: str) -> list[int]:
+    """Enumerate in-process: no console window, no console handles needed.
+
+    Shelling out is what made the previous implementations fragile. Under
+    pythonw.exe from a Scheduled Task there is no console to inherit, so a
+    child's std handles are invalid and it returns nothing; and any external
+    tool can simply be removed by an OS upgrade, as `wmic` was.
+    """
+    import psutil
+
+    needle = name_substr.casefold()
+    command_needle = cmd_substr.casefold()
     pids: list[int] = []
-    if os.name == "nt":
+    seen_any = False
+    for process in psutil.process_iter(["pid", "name", "cmdline"]):
+        seen_any = True
         try:
-            out = subprocess.run(
-                ["wmic", "process", "where",
-                 f"name like '%{name_substr}%'",
-                 "get", "ProcessId,CommandLine", "/format:csv"],
-                capture_output=True, text=True, timeout=10,
-                # Without this, every probe flashes a console window on the
-                # user's desktop. The poll loop calls this once per node check
-                # (~10s), so the effect is a window opening and closing like
-                # clockwork, forever. The other wmic call in this file already
-                # passes the flag; this one was simply missed.
-                creationflags=CREATE_NO_WINDOW,
-            )
-            for line in out.stdout.splitlines():
-                parts = line.strip().split(",", 2)
-                if len(parts) < 3: continue
-                _node, cmdline, pid = parts
-                if cmd_substr and cmd_substr.lower() not in cmdline.lower():
+            info = process.info
+            name = (info.get("name") or "").casefold()
+            if needle not in name:
+                continue
+            if command_needle:
+                command = " ".join(info.get("cmdline") or []).casefold()
+                if command_needle not in command:
                     continue
-                try: pids.append(int(pid))
-                except ValueError: continue
-        except Exception:
-            pass
-    else:
-        try:
-            out = subprocess.run(["ps", "-eo", "pid,command"],
-                                  capture_output=True, text=True, timeout=10)
-            for line in out.stdout.splitlines()[1:]:
-                line = line.strip()
-                if name_substr not in line: continue
-                if cmd_substr and cmd_substr not in line: continue
-                pid = line.split(None, 1)[0]
-                try: pids.append(int(pid))
-                except ValueError: continue
-        except Exception:
-            pass
+            pids.append(int(info["pid"]))
+        except (psutil.Error, TypeError, ValueError):
+            # One unreadable process must not abort the whole scan.
+            continue
+    if not seen_any:
+        # The scan yielded no processes at all, which cannot be true of a
+        # running system: the backend is broken, not the machine empty.
+        raise ProcessScanUnavailable("psutil enumerated no processes at all")
     return pids
+
+
+def _scan_processes_powershell(name_substr: str, cmd_substr: str) -> list[int]:
+    """Fallback for hosts without psutil. Never uses the removed `wmic`."""
+    out = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+         "Get-CimInstance Win32_Process | ForEach-Object "
+         "{ \"$($_.ProcessId)`t$($_.Name)`t$($_.CommandLine)\" }"],
+        capture_output=True, text=True, timeout=30,
+        encoding="utf-8", errors="replace",
+        stdin=subprocess.DEVNULL,
+        # Without this, every probe flashes a console window on the user's
+        # desktop; the poll loop runs one check per node every ~10s.
+        creationflags=CREATE_NO_WINDOW,
+    )
+    rows = [line for line in out.stdout.splitlines() if line.strip()]
+    if not rows:
+        raise ProcessScanUnavailable(
+            f"powershell process scan returned nothing (rc={out.returncode})"
+        )
+    needle = name_substr.casefold()
+    command_needle = cmd_substr.casefold()
+    pids: list[int] = []
+    for row in rows:
+        parts = row.split("\t", 2)
+        if len(parts) < 2:
+            continue
+        pid, name = parts[0], parts[1]
+        command = parts[2] if len(parts) > 2 else ""
+        if needle not in name.casefold():
+            continue
+        if command_needle and command_needle not in command.casefold():
+            continue
+        try:
+            pids.append(int(pid.strip()))
+        except ValueError:
+            continue
+    return pids
+
+
+def _scan_processes_ps(name_substr: str, cmd_substr: str) -> list[int]:
+    out = subprocess.run(["ps", "-eo", "pid,command"],
+                         capture_output=True, text=True, timeout=10)
+    lines = out.stdout.splitlines()[1:]
+    if not lines:
+        raise ProcessScanUnavailable(
+            f"ps returned no processes (rc={out.returncode})"
+        )
+    pids: list[int] = []
+    for line in lines:
+        line = line.strip()
+        if name_substr not in line:
+            continue
+        if cmd_substr and cmd_substr not in line:
+            continue
+        try:
+            pids.append(int(line.split(None, 1)[0]))
+        except (ValueError, IndexError):
+            continue
+    return pids
+
+
+def find_processes(name_substr: str, cmd_substr: str = "") -> list[int]:
+    """PIDs whose image name contains `name_substr` (and command line
+    `cmd_substr`).
+
+    Raises `ProcessScanUnavailable` when no backend could enumerate, rather
+    than returning an empty list that a caller would read as proof of absence.
+    """
+    backends = ((_scan_processes_psutil, _scan_processes_powershell)
+                if os.name == "nt" else (_scan_processes_psutil,
+                                         _scan_processes_ps))
+    failures: list[str] = []
+    for backend in backends:
+        try:
+            return backend(name_substr, cmd_substr)
+        except Exception as exc:
+            failures.append(f"{backend.__name__}: {exc!r}")
+    raise ProcessScanUnavailable("; ".join(failures) or "no backend available")
+
+
+def process_absent(name_substr: str, log, what: str,
+                   cmd_substr: str = "") -> bool:
+    """True only when a scan actually ran and found nothing.
+
+    When enumeration is unavailable the answer is "unknown", and unknown must
+    resolve to *not absent*: every caller uses absence to justify an
+    immediate, budget-bypassing relaunch, so guessing "gone" turns a broken
+    probe into a restart loop against a perfectly healthy node.
+    """
+    try:
+        return not find_processes(name_substr, cmd_substr)
+    except ProcessScanUnavailable as exc:
+        log.error(f"cannot enumerate processes ({exc}); "
+                  f"treating {what} presence as unknown, not absent")
+        return False
 
 
 # ── Node management ────────────────────────────────────────────────────────
@@ -845,8 +949,18 @@ def check_crypto_stack(cfg: dict, log: Logger, last_start: dict[str, float]) -> 
 
 
 def training_running() -> bool:
-    return bool(find_processes("bash", "run_all_training.sh") or
-                find_processes("bash.exe", "run_all_training.sh"))
+    """Whether a training shell is live.
+
+    An unavailable scan reports "running" so the caller does not launch a
+    second curriculum alongside a first one it merely failed to see. Two
+    concurrent trainers corrupt shared state; a missed relaunch only delays
+    one, and the next poll retries.
+    """
+    try:
+        return bool(find_processes("bash", "run_all_training.sh") or
+                    find_processes("bash.exe", "run_all_training.sh"))
+    except ProcessScanUnavailable:
+        return True
 
 
 def find_git_bash() -> str | None:
@@ -970,8 +1084,8 @@ def run_supervisor(cfg: dict, log: Logger, once: bool = False) -> int:
             #
             # An absent process is unambiguous, so relaunch at once and keep
             # the budget for the ambiguous case.
-            node_absent = not find_processes(
-                pathlib.Path(cfg["node"]["binary"]).name)
+            node_absent = process_absent(
+                pathlib.Path(cfg["node"]["binary"]).name, log, "node")
             if node_absent:
                 log.error("node process is not running; relaunching now")
             if node_absent or miss_count >= cfg["node"]["health_misses_before_restart"]:
@@ -996,7 +1110,7 @@ def run_supervisor(cfg: dict, log: Logger, once: bool = False) -> int:
                 node_binary = pathlib.Path(cfg["node"]["binary"]).name
                 while time.time() < warmup_deadline:
                     time.sleep(min(10.0, max(1.0, warmup_deadline - time.time())))
-                    if not find_processes(node_binary):
+                    if process_absent(node_binary, log, "node"):
                         log.error("node exited during warmup; relaunching")
                         break
                 if once: return 0

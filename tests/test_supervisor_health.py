@@ -196,3 +196,84 @@ def test_an_absent_node_is_relaunched_without_burning_the_miss_budget():
     assert find_processes("definitely-not-a-real-process-xyz.exe") == []
     # And the helper really does find something that is running.
     assert find_processes("python.exe"), "expected to find the test runner"
+
+
+def test_a_scan_that_cannot_run_is_not_reported_as_absence():
+    """"Cannot tell" must never resolve to "gone".
+
+    Measured 2026-09-05: `find_processes` shelled out to `wmic`, which
+    Windows 11 has removed, and swallowed the resulting exception into an
+    empty list. Every caller reads an empty list as proof the process is
+    gone, so on this host the supervisor believed the node was missing on
+    every single poll -- bypassing the health-miss budget that exists for a
+    slow node and cutting the warmup short on its first tick, which is a
+    relaunch loop against a perfectly healthy node.
+    """
+    class _Log:
+        def __init__(self):
+            self.errors = []
+
+        def error(self, message):
+            self.errors.append(message)
+
+    log = _Log()
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(sup, "find_processes", lambda *a, **k: (_ for _ in ()).throw(
+            sup.ProcessScanUnavailable("no backend")))
+        assert sup.process_absent("node.exe", log, "node") is False
+        assert sup.training_running() is True
+    assert any("unknown, not absent" in message for message in log.errors)
+
+    # A scan that genuinely runs still reports absence, or the guard above
+    # would make absence undetectable in the other direction.
+    log = _Log()
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(sup, "find_processes", lambda *a, **k: [])
+        assert sup.process_absent("node.exe", log, "node") is True
+        patch.setattr(sup, "find_processes", lambda *a, **k: [123])
+        assert sup.process_absent("node.exe", log, "node") is False
+    assert log.errors == []
+
+
+def test_an_empty_process_table_is_treated_as_a_broken_backend():
+    """No running system has zero processes, so zero means the scan failed."""
+    class _FakePsutil:
+        Error = RuntimeError
+
+        @staticmethod
+        def process_iter(_fields):
+            return iter(())
+
+    import sys
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setitem(sys.modules, "psutil", _FakePsutil)
+        with pytest.raises(sup.ProcessScanUnavailable):
+            sup._scan_processes_psutil("anything", "")
+
+
+def test_the_scan_matches_on_name_and_command_line():
+    """Both filters must work, or a shared image name matches every service."""
+    import sys
+
+    class _Proc:
+        def __init__(self, pid, name, cmdline):
+            self.info = {"pid": pid, "name": name, "cmdline": cmdline}
+
+    class _FakePsutil:
+        Error = RuntimeError
+
+        @staticmethod
+        def process_iter(_fields):
+            return iter([
+                _Proc(1, "python.exe", ["python.exe", "run_all_training.sh"]),
+                _Proc(2, "python.exe", ["python.exe", "other.py"]),
+                _Proc(3, "node.exe", ["node.exe"]),
+            ])
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setitem(sys.modules, "psutil", _FakePsutil)
+        assert sup._scan_processes_psutil("python", "") == [1, 2]
+        assert sup._scan_processes_psutil("python", "run_all_training") == [1]
+        assert sup._scan_processes_psutil("node", "") == [3]
+        # A name that is not running is genuinely empty, not an error.
+        assert sup._scan_processes_psutil("absent-service", "") == []
