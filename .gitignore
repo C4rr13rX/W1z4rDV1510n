@@ -59,6 +59,8 @@
 *.log
 *.tmp
 /scripts/aws/_tmp_ssm*.json
+# Written by admission_watchdog.py on every run.
+/scripts/aws/_watchdog_probe.sh
 # Git Bash creates a file named 'null' in CWD when a Windows EXE is run as a
 # background job (&) without explicit stdout redirection.
 /null
