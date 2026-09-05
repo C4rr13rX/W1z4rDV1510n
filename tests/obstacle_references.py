@@ -7207,6 +7207,223 @@ def lapsed_customers(connection, since):
 '''
 
 
+REFERENCES["reliability_observability_performance-0009"] = r'''
+REDACTED = "[redacted]"
+
+
+def redact_record(record, secret_keys):
+    lowered = {str(key).lower() for key in secret_keys}
+
+    def walk(value, seen):
+        if isinstance(value, (dict, list)):
+            if id(value) in seen:
+                raise ValueError("record contains a reference cycle")
+            seen = seen | {id(value)}
+        if isinstance(value, dict):
+            result = {}
+            for key, item in value.items():
+                if str(key).lower() in lowered:
+                    result[key] = REDACTED
+                else:
+                    result[key] = walk(item, seen)
+            return result
+        if isinstance(value, list):
+            return [walk(item, seen) for item in value]
+        return value
+
+    return walk(record, frozenset())
+'''
+
+REFERENCES["reliability_observability_performance-0010"] = r'''
+class BoundedLabelRegistry:
+    OVERFLOW = "__other__"
+
+    def __init__(self, max_series):
+        if isinstance(max_series, bool) or not isinstance(max_series, int):
+            raise ValueError("max_series must be a positive integer")
+        if max_series <= 0:
+            raise ValueError("max_series must be a positive integer")
+        self._max = max_series
+        self._series = {}
+
+    @staticmethod
+    def _key(labels):
+        return ",".join(f"{name}={labels[name]}" for name in sorted(labels))
+
+    def observe(self, labels, value):
+        key = self._key(labels)
+        if key not in self._series:
+            if len(self._series) >= self._max:
+                key = self.OVERFLOW
+        self._series[key] = self._series.get(key, 0) + value
+
+    def series(self):
+        return dict(self._series)
+'''
+
+REFERENCES["reliability_observability_performance-0011"] = r'''
+def reservoir_sample(stream, size, random_below):
+    if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+        raise ValueError("size must be a positive integer")
+    reservoir = []
+    for index, item in enumerate(stream):
+        if index < size:
+            reservoir.append(item)
+            continue
+        slot = random_below(index + 1)
+        if slot < size:
+            reservoir[slot] = item
+    return reservoir
+'''
+
+REFERENCES["reliability_observability_performance-0012"] = r'''
+class DecayingCounter:
+    def __init__(self, half_life_seconds, clock):
+        if isinstance(half_life_seconds, bool) or not isinstance(
+            half_life_seconds, (int, float)
+        ):
+            raise ValueError("half_life_seconds must be a positive number")
+        if half_life_seconds <= 0:
+            raise ValueError("half_life_seconds must be a positive number")
+        self._half_life = float(half_life_seconds)
+        self._clock = clock
+        self._value = 0.0
+        self._at = float(clock())
+
+    def _decayed(self, now):
+        elapsed = float(now) - self._at
+        if elapsed <= 0.0:
+            return self._value
+        return self._value * (0.5 ** (elapsed / self._half_life))
+
+    def add(self, amount):
+        now = float(self._clock())
+        self._value = self._decayed(now) + float(amount)
+        self._at = now
+
+    def value(self):
+        return self._decayed(float(self._clock()))
+'''
+
+REFERENCES["reliability_observability_performance-0013"] = r'''
+MARKER = "..."
+
+
+def clip_message(text, budget_bytes):
+    if isinstance(budget_bytes, bool) or not isinstance(budget_bytes, int):
+        raise ValueError("budget_bytes must be an integer of at least 3")
+    if budget_bytes < 3:
+        raise ValueError("budget_bytes must be an integer of at least 3")
+    raw = text.encode("utf-8")
+    if len(raw) <= budget_bytes:
+        return text
+    room = budget_bytes - len(MARKER.encode("utf-8"))
+    kept = []
+    used = 0
+    for character in text:
+        width = len(character.encode("utf-8"))
+        if used + width > room:
+            break
+        kept.append(character)
+        used += width
+    return "".join(kept) + MARKER
+'''
+
+REFERENCES["reliability_observability_performance-0014"] = r'''
+def counter_rate(samples):
+    if len(samples) < 2:
+        raise ValueError("at least two samples are required")
+    timestamps = [float(item[0]) for item in samples]
+    values = [float(item[1]) for item in samples]
+    if any(value < 0 for value in values):
+        raise ValueError("counter values must be non-negative")
+    for earlier, later in zip(timestamps, timestamps[1:]):
+        if later <= earlier:
+            raise ValueError("timestamps must be strictly increasing")
+    span = timestamps[-1] - timestamps[0]
+    if span <= 0:
+        raise ValueError("the first and last timestamps must differ")
+    total = 0.0
+    for previous, current in zip(values, values[1:]):
+        total += current - previous if current >= previous else current
+    return total / span
+'''
+
+REFERENCES["reliability_observability_performance-0015"] = r'''
+from collections import deque
+
+
+class LogTail:
+    def __init__(self, max_bytes):
+        if isinstance(max_bytes, bool) or not isinstance(max_bytes, int):
+            raise ValueError("max_bytes must be a positive integer")
+        if max_bytes <= 0:
+            raise ValueError("max_bytes must be a positive integer")
+        self._max = max_bytes
+        self._lines = deque()
+        self._sizes = deque()
+        self._total = 0
+
+    def append(self, line):
+        size = len(line.encode("utf-8"))
+        if size > self._max:
+            raise ValueError("line does not fit the buffer")
+        self._lines.append(line)
+        self._sizes.append(size)
+        self._total += size
+        while self._total > self._max:
+            self._total -= self._sizes.popleft()
+            self._lines.popleft()
+
+    def lines(self):
+        return list(self._lines)
+'''
+
+REFERENCES["reliability_observability_performance-0016"] = r'''
+class BatchFlusher:
+    def __init__(self, max_items, max_age_seconds, clock, sink):
+        if (
+            isinstance(max_items, bool)
+            or not isinstance(max_items, int)
+            or max_items <= 0
+        ):
+            raise ValueError("max_items must be a positive integer")
+        if (
+            isinstance(max_age_seconds, bool)
+            or not isinstance(max_age_seconds, (int, float))
+            or max_age_seconds <= 0
+        ):
+            raise ValueError("max_age_seconds must be a positive number")
+        self._max_items = max_items
+        self._max_age = float(max_age_seconds)
+        self._clock = clock
+        self._sink = sink
+        self._buffer = []
+        self._oldest = None
+
+    def add(self, item):
+        if not self._buffer:
+            self._oldest = float(self._clock())
+        self._buffer.append(item)
+        if len(self._buffer) >= self._max_items:
+            self.flush()
+
+    def tick(self):
+        if not self._buffer:
+            return
+        if float(self._clock()) - self._oldest >= self._max_age:
+            self.flush()
+
+    def flush(self):
+        if not self._buffer:
+            return
+        batch = self._buffer
+        self._buffer = []
+        self._oldest = None
+        self._sink(batch)
+'''
+
+
 MUTATIONS: dict[str, tuple[str, str]] = {
     # Interpolate the value into the SQL text instead of parameterising it.
     # Every ordinary value still works, which is why this ships.
@@ -8190,5 +8407,56 @@ MUTATIONS: dict[str, tuple[str, str]] = {
     "architecture_multifile_integration-0011": (
         '    return f"charge:{reference}"',
         '    return f"charge:{reference}:{attempt}"',
+    ),
+    # Match secret keys case-sensitively, so the "Password" a neighbouring
+    # service sends ships its value to the log pipeline in clear text.
+    "reliability_observability_performance-0009": (
+        'if str(key).lower() in lowered:',
+        'if key in secret_keys:',
+    ),
+    # Drop the cardinality cap. Every distinct request id becomes its own
+    # series and the registry grows without limit -- correct on a demo,
+    # fatal on the process that meets real traffic.
+    "reliability_observability_performance-0010": (
+        "            if len(self._series) >= self._max:\n"
+        "                key = self.OVERFLOW\n",
+        "            pass\n",
+    ),
+    # Never replace an initial element, which pins the sample to the first
+    # `size` items of the stream and makes it not a uniform sample at all.
+    "reliability_observability_performance-0011": (
+        "        if slot < size:",
+        "        if False:",
+    ),
+    # Decay from the epoch rather than from the last update, so every add
+    # after the first is discounted by the counter's whole lifetime.
+    "reliability_observability_performance-0012": (
+        "        elapsed = float(now) - self._at",
+        "        elapsed = float(now)",
+    ),
+    # Measure the budget in characters. On non-ASCII text the result
+    # overruns the byte limit it exists to enforce.
+    "reliability_observability_performance-0013": (
+        '        width = len(character.encode("utf-8"))',
+        "        width = 1",
+    ),
+    # Treat a counter reset as a negative delta, which cancels out the
+    # traffic recorded before the restart and can report a negative rate.
+    "reliability_observability_performance-0014": (
+        "        total += current - previous if current >= previous else current",
+        "        total += current - previous",
+    ),
+    # Size the tail in characters, so a buffer of multi-byte text holds up
+    # to four times the bytes it promised.
+    "reliability_observability_performance-0015": (
+        '        size = len(line.encode("utf-8"))',
+        "        size = len(line)",
+    ),
+    # Restart the age clock on every add. A buffer that keeps receiving
+    # items never reaches max_age and holds its data indefinitely.
+    "reliability_observability_performance-0016": (
+        "        if not self._buffer:\n"
+        "            self._oldest = float(self._clock())",
+        "        self._oldest = float(self._clock())",
     ),
 }

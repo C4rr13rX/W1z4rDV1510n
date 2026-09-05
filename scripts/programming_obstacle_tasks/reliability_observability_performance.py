@@ -702,4 +702,629 @@ for bad in ([], cyclic, orphan, duplicate, two_roots, inverted, escaping,
         raise AssertionError(f"a malformed trace was accepted: {bad!r}")
 ''',
     ),
+    task(
+        f"{FAMILY}-0009", FAMILY,
+        prompt=(
+            "Implement a Python function redact_record(record, secret_keys) "
+            "that scrubs sensitive values out of a structured log record "
+            "before it is shipped. `record` is a JSON-shaped value: nested "
+            "dicts, lists, and scalars. `secret_keys` is a collection of "
+            "key names. Return a NEW structure in which the value of every "
+            "dict key matching a secret key -- compared case-insensitively, "
+            "because 'Password' and 'password' arrive from different "
+            "services -- is replaced by the string '[redacted]', whatever "
+            "that value is. A dict or list under a secret key is replaced "
+            "whole rather than descended into, since redacting only its "
+            "leaves would still ship its structure. Descend through every "
+            "other dict and list at any depth. The input must not be "
+            "mutated: the caller still needs the real values. A record "
+            "containing a reference cycle must raise ValueError rather than "
+            "exhaust the stack, because a logging path that crashes the "
+            "process is worse than one that drops a record."
+        ),
+        validator=LOAD_CANDIDATE + require("redact_record") + r'''
+import copy
+
+original = {
+    "user": "ada",
+    "Password": "hunter2",
+    "nested": {"api_key": {"primary": "x", "backup": "y"}, "keep": 1},
+    "items": [{"token": "t1"}, {"token": "t2"}, {"ok": "v"}],
+}
+snapshot = copy.deepcopy(original)
+secrets = {"password", "api_key", "token"}
+
+out = redact_record(original, secrets)
+assert original == snapshot, "the input record was mutated"
+
+assert out["user"] == "ada"
+assert out["Password"] == "[redacted]", "key matching is not case-insensitive"
+assert out["nested"]["api_key"] == "[redacted]", (
+    "a dict under a secret key must be replaced whole, not descended into"
+)
+assert out["nested"]["keep"] == 1
+assert [item.get("token", item.get("ok")) for item in out["items"]] == [
+    "[redacted]", "[redacted]", "v"
+]
+
+# Depth is not a limit: a secret nested ten levels down is still a secret.
+deep = current = {}
+for _ in range(10):
+    current["child"] = {}
+    current = current["child"]
+current["token"] = "deep-secret"
+assert "deep-secret" not in repr(redact_record(deep, secrets))
+
+# A cycle is reported, not crashed on.
+cyclic = {"a": {}}
+cyclic["a"]["self"] = cyclic
+try:
+    redact_record(cyclic, secrets)
+except ValueError:
+    pass
+else:
+    raise AssertionError("a reference cycle must raise ValueError")
+
+# A list that repeats the SAME child twice is not a cycle.
+shared = {"x": 1}
+assert redact_record([shared, shared], secrets) == [{"x": 1}, {"x": 1}]
+
+# Scalars pass straight through.
+assert redact_record(5, secrets) == 5
+assert redact_record(None, secrets) is None
+assert redact_record([1, "a", None], secrets) == [1, "a", None]
+
+# An empty secret set still returns a copy rather than the original object.
+data = {"a": [1, 2]}
+copied = redact_record(data, set())
+assert copied == data and copied["a"] is not data["a"], (
+    "nested containers must be copied, not shared with the input"
+)
+'''),
+    task(
+        f"{FAMILY}-0010", FAMILY,
+        prompt=(
+            "Implement a Python class BoundedLabelRegistry(max_series) that "
+            "accumulates a labelled counter without unbounded cardinality. "
+            "observe(labels, value) takes a mapping of string label names "
+            "to string values and adds value to that series. series() "
+            "returns a dict mapping a canonical series key to its total, "
+            "where the canonical key is ','.join(f'{name}={value}') over "
+            "the label names in sorted order -- so the same labels supplied "
+            "in a different order are one series, not two. Once max_series "
+            "distinct series exist, a NEW label combination must not create "
+            "another one: add its value to a single overflow series keyed "
+            "'__other__' instead. Series that already exist keep "
+            "accumulating normally after the cap is reached. This is the "
+            "whole point: a label carrying a user id or a request path "
+            "would otherwise grow the registry without limit and exhaust "
+            "the process, so series() must never return more than "
+            "max_series + 1 entries no matter what it is fed. Raise "
+            "ValueError when max_series is not a positive integer."
+        ),
+        validator=LOAD_CANDIDATE + require("BoundedLabelRegistry") + r'''
+registry = BoundedLabelRegistry(3)
+registry.observe({"route": "/a"}, 1)
+registry.observe({"route": "/b"}, 2)
+registry.observe({"route": "/a"}, 3)
+assert registry.series() == {"route=/a": 4, "route=/b": 2}, registry.series()
+
+registry.observe({"route": "/c"}, 1)
+registry.observe({"route": "/d"}, 5)
+series = registry.series()
+assert "route=/d" not in series, "a new series was created past the cap"
+assert series["__other__"] == 5
+assert series["route=/c"] == 1
+
+# Existing series keep working after the cap.
+registry.observe({"route": "/a"}, 10)
+assert registry.series()["route=/a"] == 14
+registry.observe({"route": "/e"}, 1)
+assert registry.series()["__other__"] == 6
+
+# Label order is not part of the identity.
+ordered = BoundedLabelRegistry(5)
+ordered.observe({"a": "1", "b": "2"}, 1)
+ordered.observe({"b": "2", "a": "1"}, 1)
+assert ordered.series() == {"a=1,b=2": 2}, ordered.series()
+
+# The ceiling holds against a deliberately unbounded label.
+flood = BoundedLabelRegistry(10)
+for index in range(50000):
+    flood.observe({"request_id": str(index)}, 1)
+result = flood.series()
+assert len(result) <= 11, f"{len(result)} series retained past a cap of 10"
+assert result["__other__"] == 49990, result["__other__"]
+assert sum(result.values()) == 50000, "observations were lost at the cap"
+
+# An empty label set is a legitimate single series.
+empty = BoundedLabelRegistry(2)
+empty.observe({}, 7)
+assert empty.series() == {"": 7}, empty.series()
+
+for bad in (0, -1, 1.5, "3", None):
+    try:
+        BoundedLabelRegistry(bad)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"max_series {bad!r} must raise ValueError")
+'''),
+    task(
+        f"{FAMILY}-0011", FAMILY,
+        prompt=(
+            "Implement a Python function reservoir_sample(stream, size, "
+            "random_below) drawing a uniform sample from a stream of "
+            "unknown length in fixed memory. `stream` is any iterable and "
+            "must be consumed exactly once, so its length cannot be "
+            "measured up front and it must not be materialised into a "
+            "list. `random_below(n)` returns an integer in [0, n) and is "
+            "injected so the result is reproducible. Use Algorithm R: keep "
+            "the first `size` items; then for the item at zero-based index "
+            "i >= size, draw j = random_below(i + 1) and, when j < size, "
+            "replace reservoir slot j with that item. Return the reservoir "
+            "as a list. A stream shorter than `size` returns all of its "
+            "items in arrival order. Raise ValueError when size is not a "
+            "positive integer. Draw exactly once per item past the first "
+            "`size` and never otherwise -- a caller reasoning about "
+            "reproducibility or entropy cost depends on that count."
+        ),
+        validator=LOAD_CANDIDATE + require("reservoir_sample") + r'''
+def source_factory(seed):
+    state = {"v": seed}
+    calls = {"n": 0}
+    def source(n):
+        calls["n"] += 1
+        state["v"] = (state["v"] * 1103515245 + 12345) % (2 ** 31)
+        return state["v"] % n
+    source.calls = calls
+    return source
+
+items = list(range(20))
+source = source_factory(7)
+out = reservoir_sample(iter(items), 5, source)
+assert len(out) == 5, f"reservoir holds {len(out)} items"
+assert len(set(out)) == 5, "an item was sampled twice"
+assert set(out) <= set(items)
+assert source.calls["n"] == 15, (
+    f"expected one draw per item past the first 5, got {source.calls['n']}"
+)
+
+# Reproducible: the same injected source gives the same sample.
+assert reservoir_sample(iter(items), 5, source_factory(7)) == out
+
+# Short streams come back whole and in order.
+assert reservoir_sample(iter([1, 2]), 5, source_factory(1)) == [1, 2]
+assert reservoir_sample(iter([]), 5, source_factory(1)) == []
+short = source_factory(1)
+reservoir_sample(iter([1, 2]), 5, short)
+assert short.calls["n"] == 0, "a stream shorter than size must draw nothing"
+
+# The stream is consumed exactly once and lazily.
+consumed = {"n": 0}
+def big():
+    for value in range(200000):
+        consumed["n"] += 1
+        yield value
+sample = reservoir_sample(big(), 10, source_factory(3))
+assert consumed["n"] == 200000, "the stream was not consumed exactly once"
+assert len(sample) == 10 and len(set(sample)) == 10
+
+# Later items must actually be able to enter the reservoir.
+replaced = False
+for seed in range(1, 60):
+    drawn = reservoir_sample(iter(range(200)), 3, source_factory(seed))
+    if any(value >= 3 for value in drawn):
+        replaced = True
+        break
+assert replaced, (
+    "no seed ever replaced an initial element, so the first `size` items "
+    "are pinned and the sample is not uniform"
+)
+
+for bad in (0, -1, 1.5, "3", None):
+    try:
+        reservoir_sample(iter([1]), bad, source_factory(1))
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"size {bad!r} must raise ValueError")
+'''),
+    task(
+        f"{FAMILY}-0012", FAMILY,
+        prompt=(
+            "Implement a Python class DecayingCounter(half_life_seconds, "
+            "clock) tracking a recent-activity total that fades rather than "
+            "accumulating forever. `clock` is a zero-argument callable "
+            "returning a float number of seconds, injected so the class is "
+            "testable without waiting. add(amount) records an amount at the "
+            "current clock reading. value() returns the total of everything "
+            "added, each contribution multiplied by 0.5 ** (elapsed / "
+            "half_life_seconds) where elapsed is the time since it was "
+            "added. Keep O(1) state: the decay is multiplicative, so a "
+            "single running value and the timestamp it was last decayed to "
+            "are sufficient, and retaining one entry per add is exactly the "
+            "unbounded-memory defect this class exists to avoid. A long "
+            "idle gap must be handled by one exponentiation, not by "
+            "stepping through it. Raise ValueError when half_life_seconds "
+            "is not a positive number."
+        ),
+        validator=LOAD_CANDIDATE + require("DecayingCounter") + r'''
+now = {"t": 0.0}
+clock = lambda: now["t"]
+
+counter = DecayingCounter(10.0, clock)
+counter.add(100)
+assert abs(counter.value() - 100.0) < 1e-9, counter.value()
+
+now["t"] = 10.0
+assert abs(counter.value() - 50.0) < 1e-9, counter.value()
+now["t"] = 20.0
+assert abs(counter.value() - 25.0) < 1e-9, counter.value()
+
+# A later add composes with what has already decayed.
+counter.add(25)
+assert abs(counter.value() - 50.0) < 1e-9, counter.value()
+now["t"] = 30.0
+assert abs(counter.value() - 25.0) < 1e-9, counter.value()
+
+# value() must not itself advance the decay: reading twice is the same.
+assert abs(counter.value() - counter.value()) < 1e-12
+now["t"] = 30.0
+assert abs(counter.value() - 25.0) < 1e-9, "value() mutated the state"
+
+# Fractional half-lives.
+now["t"] = 35.0
+assert abs(counter.value() - 25.0 * (0.5 ** 0.5)) < 1e-9, counter.value()
+
+# A very long gap is one exponentiation, and must not hang or overflow.
+now["t"] = 1e9
+assert counter.value() >= 0.0
+assert counter.value() < 1e-9
+
+# O(1) state under a large number of adds.
+fast = DecayingCounter(1.0, clock)
+now["t"] = 0.0
+for index in range(200000):
+    now["t"] = index * 0.001
+    fast.add(1)
+retained = [
+    len(item) for item in vars(fast).values()
+    if isinstance(item, (list, dict, set, tuple, bytearray))
+]
+assert all(size <= 8 for size in retained), (
+    f"per-add state was retained: container sizes {retained}"
+)
+assert fast.value() > 0.0
+
+# Zero and negative amounts are legitimate corrections.
+signed = DecayingCounter(10.0, clock)
+now["t"] = 0.0
+signed.add(10)
+signed.add(-4)
+assert abs(signed.value() - 6.0) < 1e-9, signed.value()
+
+for bad in (0, -1, "10", None):
+    try:
+        DecayingCounter(bad, clock)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"half_life_seconds {bad!r} must raise ValueError")
+'''),
+    task(
+        f"{FAMILY}-0013", FAMILY,
+        prompt=(
+            "Implement a Python function clip_message(text, budget_bytes) "
+            "that fits a log message into a byte budget. Log pipelines "
+            "reject or silently truncate records over a size limit, and "
+            "that limit is counted in BYTES of UTF-8, not characters. "
+            "Return text unchanged when its UTF-8 encoding is at most "
+            "budget_bytes. Otherwise return the longest prefix of text such "
+            "that the prefix plus the three-byte marker '...' still fits "
+            "within budget_bytes, followed by that marker. Never split a "
+            "multi-byte character: the result must always be valid UTF-8 "
+            "that round-trips, since a truncated code point turns into a "
+            "replacement character or an outright decode error downstream. "
+            "Raise ValueError when budget_bytes is not an integer of at "
+            "least 3, because a budget smaller than the marker cannot be "
+            "satisfied."
+        ),
+        validator=LOAD_CANDIDATE + require("clip_message") + r'''
+assert clip_message("hello", 10) == "hello"
+assert clip_message("hello", 5) == "hello", "an exact fit must not be clipped"
+assert clip_message("", 3) == ""
+
+clipped = clip_message("hello world", 8)
+assert clipped == "hello..." , repr(clipped)
+assert len(clipped.encode("utf-8")) == 8
+
+# Two-byte characters: the budget is bytes, so fewer characters survive.
+text = "é" * 10
+assert len(text.encode("utf-8")) == 20
+out = clip_message(text, 9)
+assert len(out.encode("utf-8")) <= 9, f"{len(out.encode('utf-8'))} bytes"
+assert out == "ééé...", repr(out)
+
+# Four-byte characters must not be cut in half.
+emoji = "\U0001F600" * 5
+assert len(emoji.encode("utf-8")) == 20
+out = clip_message(emoji, 10)
+assert len(out.encode("utf-8")) <= 10
+assert out == "\U0001F600...", repr(out)
+
+# Everything returned must round-trip as UTF-8 with no replacement chars.
+for budget in range(3, 21):
+    for candidate in (text, emoji, "hello world", "aéb\U0001F600c"):
+        result = clip_message(candidate, budget)
+        raw = result.encode("utf-8")
+        assert len(raw) <= budget, (
+            f"{candidate!r} at budget {budget} produced {len(raw)} bytes"
+        )
+        assert raw.decode("utf-8") == result
+        assert "�" not in result
+
+# A budget of exactly the marker leaves room for no text at all.
+assert clip_message("abcdef", 3) == "..."
+
+# A single character too wide for the remaining room is dropped whole.
+# At budget 5 the marker leaves 2 bytes, and the leading emoji needs 4.
+assert clip_message("\U0001F600ab", 5) == "..."
+
+for bad in (2, 0, -1, 3.5, "3", None):
+    try:
+        clip_message("hello world", bad)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"budget_bytes {bad!r} must raise ValueError")
+'''),
+    task(
+        f"{FAMILY}-0014", FAMILY,
+        prompt=(
+            "Implement a Python function counter_rate(samples) computing "
+            "the per-second rate of a monotonically increasing counter that "
+            "may reset. `samples` is a list of (timestamp, value) pairs, "
+            "timestamps being floats in seconds and values non-negative "
+            "numbers. A process restart sets the counter back to zero, so a "
+            "sample LOWER than its predecessor is a reset, not a negative "
+            "delta: count the new value in full as the increase since the "
+            "reset, because the counter climbed from zero to it. Sum every "
+            "increase across the samples and divide by the elapsed time "
+            "between the first and last timestamp. Raise ValueError when "
+            "fewer than two samples are supplied, when the timestamps are "
+            "not strictly increasing, when the first and last timestamps "
+            "are equal, or when any value is negative. Treating a reset as "
+            "a negative delta is the classic version of this bug: it "
+            "reports a negative rate, or silently cancels out real traffic."
+        ),
+        validator=LOAD_CANDIDATE + require("counter_rate") + r'''
+assert counter_rate([(0.0, 0.0), (10.0, 100.0)]) == 10.0
+assert counter_rate([(0.0, 50.0), (10.0, 150.0)]) == 10.0
+
+# A reset: 100 -> 5 means the counter restarted and climbed to 5.
+# Total increase is 100 + 5 = 105 over 20 seconds.
+assert counter_rate([(0.0, 0.0), (10.0, 100.0), (20.0, 5.0)]) == 5.25
+
+# Two resets in one window.
+value = counter_rate([(0.0, 0.0), (1.0, 10.0), (2.0, 3.0), (3.0, 1.0)])
+assert value == (10.0 + 3.0 + 1.0) / 3.0, value
+
+# A flat counter has a rate of zero, not an error.
+assert counter_rate([(0.0, 7.0), (5.0, 7.0)]) == 0.0
+
+# A reset to exactly zero contributes nothing but is still not negative.
+assert counter_rate([(0.0, 0.0), (10.0, 100.0), (20.0, 0.0)]) == 5.0
+
+# Fractional timestamps.
+assert abs(counter_rate([(0.5, 0.0), (1.0, 4.0)]) - 8.0) < 1e-9
+
+# The rate can never come out negative, whatever the reset pattern.
+for series in (
+    [(0.0, 1000.0), (1.0, 1.0)],
+    [(0.0, 5.0), (1.0, 0.0), (2.0, 0.0)],
+    [(0.0, 0.0), (1.0, 1e9), (2.0, 1.0)],
+):
+    assert counter_rate(series) >= 0.0, f"negative rate for {series}"
+
+for bad in (
+    [],
+    [(0.0, 1.0)],
+    [(0.0, 1.0), (0.0, 2.0)],
+    [(1.0, 1.0), (0.0, 2.0)],
+    [(0.0, 1.0), (1.0, -2.0)],
+    [(0.0, -1.0), (1.0, 2.0)],
+):
+    try:
+        counter_rate(bad)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"samples {bad!r} must raise ValueError")
+'''),
+    task(
+        f"{FAMILY}-0015", FAMILY,
+        prompt=(
+            "Implement a Python class LogTail(max_bytes) retaining only the "
+            "most recent log lines that fit in a fixed byte budget. "
+            "append(line) adds a line; lines() returns the retained lines "
+            "oldest first. The budget is the total UTF-8 byte length of the "
+            "retained lines, and it is a hard ceiling: after any append, "
+            "that total must be at most max_bytes. Make room by dropping "
+            "whole lines from the FRONT, never by truncating one, because a "
+            "half line in a crash dump is worse than an absent one. A "
+            "single line whose own encoding exceeds max_bytes cannot be "
+            "stored under that rule, so raise ValueError and leave the "
+            "buffer untouched. Raise ValueError when max_bytes is not a "
+            "positive integer. Count bytes rather than characters: a buffer "
+            "sized in characters overruns its real limit by a factor of "
+            "four on non-ASCII text, which is exactly when a crash dump "
+            "matters."
+        ),
+        validator=LOAD_CANDIDATE + require("LogTail") + r'''
+tail = LogTail(20)
+for line in ("aaaa", "bbbb", "cccc", "dddd", "eeee"):
+    tail.append(line)
+assert tail.lines() == ["aaaa", "bbbb", "cccc", "dddd", "eeee"]
+
+tail.append("ffff")
+assert tail.lines() == ["bbbb", "cccc", "dddd", "eeee", "ffff"], tail.lines()
+
+# Dropping is by whole lines, and enough of them to fit.
+tail.append("gggggggggg")
+assert tail.lines() == ["eeee", "ffff", "gggggggggg"], tail.lines()
+assert sum(len(item.encode("utf-8")) for item in tail.lines()) <= 20
+
+# The budget counts bytes, not characters.
+wide = LogTail(10)
+wide.append("ééé")
+wide.append("ééé")
+assert wide.lines() == ["ééé"], wide.lines()
+assert sum(len(item.encode("utf-8")) for item in wide.lines()) == 6
+
+# A line that cannot ever fit is refused, and changes nothing.
+before = wide.lines()
+try:
+    wide.append("x" * 11)
+except ValueError:
+    pass
+else:
+    raise AssertionError("a line larger than max_bytes must raise ValueError")
+assert wide.lines() == before, "a refused line disturbed the buffer"
+
+# Exactly max_bytes is allowed.
+exact = LogTail(4)
+exact.append("abcd")
+assert exact.lines() == ["abcd"]
+exact.append("efgh")
+assert exact.lines() == ["efgh"]
+
+# Empty lines are real lines and cost nothing.
+empties = LogTail(4)
+for _ in range(100):
+    empties.append("")
+assert empties.lines()[-1] == ""
+
+# The ceiling holds over a long stream, keeping the newest lines.
+stream = LogTail(1000)
+for index in range(100000):
+    stream.append(f"line-{index}")
+retained = stream.lines()
+assert sum(len(item.encode("utf-8")) for item in retained) <= 1000
+assert retained[-1] == "line-99999"
+assert retained == sorted(retained, key=lambda item: int(item.split("-")[1]))
+
+for bad in (0, -1, 1.5, "10", None):
+    try:
+        LogTail(bad)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"max_bytes {bad!r} must raise ValueError")
+'''),
+    task(
+        f"{FAMILY}-0016", FAMILY,
+        prompt=(
+            "Implement a Python class BatchFlusher(max_items, "
+            "max_age_seconds, clock, sink) that batches telemetry without "
+            "losing or stalling it. `clock` is a zero-argument callable "
+            "returning seconds and `sink` is called with a list of items. "
+            "add(item) buffers the item and, when the buffer reaches "
+            "max_items, immediately flushes. tick() flushes when the OLDEST "
+            "buffered item has been waiting at least max_age_seconds, which "
+            "is what stops a low-traffic buffer from sitting on data "
+            "forever. flush() forces a flush. Every flush passes the "
+            "buffered items to sink as one list in arrival order and then "
+            "empties the buffer. Never call sink with an empty list: a "
+            "downstream that bills per request should not be charged for "
+            "nothing. The age is measured from when the oldest item still "
+            "in the buffer was added, not from the last flush. Raise "
+            "ValueError when max_items is not a positive integer or "
+            "max_age_seconds is not a positive number."
+        ),
+        validator=LOAD_CANDIDATE + require("BatchFlusher") + r'''
+now = {"t": 0.0}
+clock = lambda: now["t"]
+flushed = []
+
+flusher = BatchFlusher(3, 10.0, clock, flushed.append)
+
+flusher.add("a")
+flusher.add("b")
+assert flushed == [], "flushed before reaching max_items or max_age"
+
+flusher.add("c")
+assert flushed == [["a", "b", "c"]], flushed
+assert flusher.flush() is None or True
+del flushed[:]
+
+# An empty buffer never reaches the sink.
+flusher.tick()
+flusher.flush()
+now["t"] = 1000.0
+flusher.tick()
+assert flushed == [], "the sink was called with an empty batch"
+
+# Age is measured from the oldest buffered item.
+now["t"] = 1000.0
+flusher.add("d")
+now["t"] = 1005.0
+flusher.add("e")
+flusher.tick()
+assert flushed == [], "flushed before the oldest item was old enough"
+
+now["t"] = 1010.0
+flusher.tick()
+assert flushed == [["d", "e"]], flushed
+del flushed[:]
+
+# After a flush the age restarts from the next item added, not from now.
+now["t"] = 1011.0
+flusher.add("f")
+now["t"] = 1020.0
+flusher.tick()
+assert flushed == [], "flushed 9 seconds into a 10 second window"
+now["t"] = 1021.0
+flusher.tick()
+assert flushed == [["f"]], flushed
+del flushed[:]
+
+# Order is arrival order across a batch boundary.
+for item in ("g", "h", "i", "j"):
+    flusher.add(item)
+assert flushed == [["g", "h", "i", "j"][:3]], flushed
+flusher.flush()
+assert flushed == [["g", "h", "i"], ["j"]], flushed
+del flushed[:]
+
+# Exactly at the threshold counts as old enough.
+now["t"] = 2000.0
+flusher.add("k")
+now["t"] = 2010.0
+flusher.tick()
+assert flushed == [["k"]], flushed
+del flushed[:]
+
+# Nothing is ever lost: every item added comes out exactly once.
+sent = []
+counting = BatchFlusher(7, 5.0, clock, sent.extend)
+for index in range(1000):
+    now["t"] = 3000.0 + index * 0.5
+    counting.add(index)
+    counting.tick()
+counting.flush()
+assert sent == list(range(1000)), (
+    f"{len(sent)} items came out of 1000 added"
+)
+
+for bad_items, bad_age in ((0, 1.0), (-1, 1.0), ("3", 1.0), (3, 0), (3, -1)):
+    try:
+        BatchFlusher(bad_items, bad_age, clock, flushed.append)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(
+            f"BatchFlusher({bad_items!r}, {bad_age!r}) must raise ValueError"
+        )
+'''),
 ]
