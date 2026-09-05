@@ -358,6 +358,81 @@ def test_a_deployed_fix_that_was_never_loaded_is_a_fault() -> None:
     assert not any(f.startswith("stale_code:") for f in absent), absent
 
 
+def test_a_frozen_status_file_is_not_a_wedge_while_the_replay_advances() -> None:
+    """`status_stale` matched state NAMES, so it fired on a healthy pass.
+
+    The supervisor writes its status only at state transitions, so it freezes
+    in whatever state preceded the pass. `resource_node_recycled` is the usual
+    one and was not in the allow-list. Measured 2026-09-05: the fault fired at
+    `status_age 3610s` on a host whose progress file was 4 s old and whose
+    tick advanced 312-336 per poll.
+    """
+    from scripts.aws.admission_watchdog import faults
+
+    base = {
+        "unit": "active", "brain_up": True, "failed_since_deploy": 0,
+        "last_admission_age": 10, "deferred": 3, "disk_free_gb": 200,
+        "mem_free_gb": 9, "state": "resource_node_recycled",
+        "status_age": 3610, "supervisor_busy": True,
+    }
+
+    converging = faults({**base, "progress_age": 4, "tick_delta": 312},
+                        baseline_deferred=3)
+    assert not any(f.startswith("status_stale:") for f in converging), converging
+
+    # A moving tick alone is enough, even with no progress file.
+    ticking = faults({**base, "progress_age": 10 ** 9, "tick_delta": 312},
+                     baseline_deferred=3)
+    assert not any(f.startswith("status_stale:") for f in ticking), ticking
+
+    # Nothing alive at all is the wedge the fault exists to catch, and it must
+    # still fire -- otherwise this change trades one blind spot for another.
+    wedged = faults({**base, "progress_age": 7200, "tick_delta": 0},
+                    baseline_deferred=3)
+    assert any(f.startswith("status_stale:") for f in wedged), wedged
+
+
+def test_a_stale_deploy_names_what_restarting_would_cost() -> None:
+    """A restart mid-replay is not free; it rolls the interval back.
+
+    `run_deferred_replays` publishes `deferred-replay-active.json` with
+    `state: "training"` before its first pass, and on startup
+    `recover_interrupted_deferred_replay` rolls back any marker that is not
+    `admitted`. Measured 2026-09-05 the marker was 6,762 s old with
+    `durable_next_row` at 78,168 of 131,072, so the unconditional advice to
+    "restart the unit" would have destroyed ~2 h of billed compute to load an
+    observability fix.
+    """
+    from scripts.aws.admission_watchdog import faults
+
+    base = {
+        "unit": "active", "brain_up": True, "failed_since_deploy": 0,
+        "last_admission_age": 10, "tick_delta": 5, "deferred": 3,
+        "disk_free_gb": 200, "mem_free_gb": 9, "progress_age": 4,
+        "status_age": 30, "state": "deferred_replay_training",
+        "stale_code_lag": 850,
+    }
+
+    mid = faults({**base, "replay_marker_state": "training",
+                  "replay_marker_interval": "jupyter-scientific-full:0:131072"},
+                 baseline_deferred=3)
+    stale_line = next(f for f in mid if f.startswith("stale_code:"))
+    assert "rolls it back to its start row" in stale_line
+    assert "jupyter-scientific-full:0:131072" in stale_line
+    assert "so restart the unit" not in stale_line
+
+    # An already-committed marker is recovered on startup, not rolled back.
+    committed = faults({**base, "replay_marker_state": "admitted"},
+                       baseline_deferred=3)
+    assert "restart the unit" in next(
+        f for f in committed if f.startswith("stale_code:"))
+
+    # No marker at all means no interval is at risk.
+    idle = faults(base, baseline_deferred=3)
+    assert "restart the unit" in next(
+        f for f in idle if f.startswith("stale_code:"))
+
+
 def test_the_probe_measures_the_process_not_just_the_file() -> None:
     """The fault above is only reachable if the probe actually reports the
     lag; a fault keyed to a field nothing populates is a vacuous zero."""
@@ -370,6 +445,10 @@ def test_the_probe_measures_the_process_not_just_the_file() -> None:
     # the file for the fix, which is what read as healthy on 2026-09-05.
     assert 'os.path.getmtime(f"/proc/{pid}")' in source
     assert "programming_curriculum_supervisor.py" in source
+    # Same rule for the marker the remedy is conditioned on: a fault that
+    # branches on a field nothing populates always takes one branch.
+    assert 'out["replay_marker_state"]' in source
+    assert "deferred-replay-active.json" in source
 
 
 def test_a_drought_is_only_a_fault_when_the_queue_is_not_converging() -> None:

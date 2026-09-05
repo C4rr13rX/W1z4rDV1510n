@@ -244,6 +244,29 @@ try:
 except Exception:
     pass
 
+# What a restart would COST is a different question from whether one is owed.
+#
+# `run_deferred_replays` publishes `deferred-replay-active.json` with
+# `state: "training"` before its first pass, and on startup
+# `recover_interrupted_deferred_replay` rolls back any marker that is not
+# `admitted` -- discarding every row the interval has trained. Measured
+# 2026-09-05, the marker was 6,762 s old with `durable_next_row` at 78,168 of
+# 131,072: telling an agent to "restart the unit" then would have destroyed
+# about two hours of billed compute to load an observability fix.
+#
+# So report the marker beside the lag. A stale deploy still has to be
+# resolved; whether it is resolved by restarting NOW or at the next interval
+# boundary depends entirely on this field.
+out["replay_marker_state"] = None
+out["replay_marker_interval"] = None
+try:
+    with open(R + "/deferred-replay-active.json") as handle:
+        marker = json.load(handle)
+    out["replay_marker_state"] = marker.get("state")
+    out["replay_marker_interval"] = marker.get("interval_id")
+except Exception:
+    pass
+
 # --- brain -----------------------------------------------------------------
 # Three tries before calling the brain down. A single 15-second timeout
 # fired twice on a brain that was up the whole time -- it was busy, not
@@ -405,11 +428,30 @@ def faults(now: dict, baseline_deferred: int) -> list[str]:
             f"{now['progress_age']}s and the tick is frozen -- "
             f"process alive, not working")
 
-    if now.get("status_age", 0) > 3600 and now.get("state") not in (
-            "deferred_replay_training", "continuous_canary", "running"):
+    # An allow-list of state NAMES cannot cover this, and trying is how it
+    # keeps false-alarming. The supervisor writes its status only at state
+    # transitions, so it legitimately freezes in whatever state preceded the
+    # pass -- `resource_node_recycled` for the whole of a ~3,900 s replay
+    # pass, which is not in the list and looks exactly like a wedge.
+    #
+    # Measured 2026-09-05: this fired `status_stale: no status written for
+    # 3610s in state 'resource_node_recycled'` on a host whose progress file
+    # was 4 s old and whose tick was advancing 312-336 per poll. The check
+    # directly above it already gets this right by asking for evidence rather
+    # than matching a name.
+    #
+    # So require the status file to be stale AND nothing else to be alive. A
+    # fresh progress heartbeat or a moving tick is proof of control, whatever
+    # the status file last happened to say.
+    alive = now.get("progress_age", 10 ** 9) < 600 or bool(now.get("tick_delta"))
+    if (now.get("status_age", 0) > 3600
+            and not alive
+            and now.get("state") not in (
+                "deferred_replay_training", "continuous_canary", "running")):
         found.append(
             f"status_stale: no status written for {now['status_age']}s "
-            f"in state {now.get('state')!r}")
+            f"in state {now.get('state')!r}, with no replay progress for "
+            f"{now.get('progress_age')}s and a frozen tick")
 
     # A deployed fix that was never loaded is indistinguishable from a fix
     # that does not work, and it fails in the more expensive direction: the
@@ -423,9 +465,20 @@ def faults(now: dict, baseline_deferred: int) -> list[str]:
     # outside a deploy-then-restart.
     lag = now.get("stale_code_lag")
     if lag is not None and lag > 300:
+        # Name the cost of the remedy, not just the fault. A restart while an
+        # interval is mid-replay rolls it back to `start_row`; measured
+        # 2026-09-05 that was 78,168 of 131,072 rows, ~2 h of billed compute.
+        marker = now.get("replay_marker_state")
+        cost = (
+            f" -- but {now.get('replay_marker_interval')} is mid-replay, so "
+            f"restarting now rolls it back to its start row; deploy and load "
+            f"it at the next interval boundary"
+            if marker == "training" else
+            " -- no interval is mid-replay, so restart the unit"
+        )
         found.append(
             f"stale_code: supervisor source is {lag}s newer than the running "
-            f"process -- the deployed fix is not loaded; restart the unit")
+            f"process; the deployed fix is not loaded{cost}")
 
     error = now.get("status_error") or ""
     if error and error != "none":
