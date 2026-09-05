@@ -466,6 +466,54 @@ The rule: if you cannot say *which assertion* catches the mutation and why it
 must, the mutation is not yet a probe. Prefer a defect whose signature is a
 consequence of the format's arithmetic over one that depends on the bytes.
 
+### The mutation lands on the first match, not on the one you meant
+
+`test_a_broken_solution_fails_its_validator` applies the mutation with
+`reference.replace(find, replace, 1)`. The count of `1` makes the edit
+deterministic, and it is easy to read that as "edits the line I wrote down".
+It does not. It edits the **first** occurrence, and a `find` string that
+appears more than once in the reference silently mutates a different site than
+the author was reasoning about.
+
+The staleness guard does not catch this. `assert find in reference` only
+establishes that the string is present somewhere, so a duplicated `find`
+passes it, produces a genuinely different program, and the test then asks
+whether that unintended program fails — a question nobody meant to ask.
+
+Measured while writing `architecture_multifile_integration-0010`. The intended
+mutation was "the shadow returns the modern pricer's result instead of the
+legacy one", whose natural `find` is `return legacy_result`. That statement
+appears twice in the reference: once at the end of `_shadow`, and once inside
+the `except pricers.PricingError` arm that swallows a modern failure. The
+first occurrence is the one in the `except` arm, where `modern_result` was
+never bound — the pricer raised before the assignment. Mutating there does not
+produce a wrong price; it produces `NameError` in candidate code, which the
+runner scores `VALIDATOR_ERROR` rather than `FAILED`. The mutation test would
+have failed while asserting the opposite of the truth: the validator does
+probe that axis, and the probe never reached it.
+
+Two rules follow, and the second matters more:
+
+- **Anchor on a span that is unique.** Widen the `find` until it can only
+  match once — for -0010 that meant carrying the preceding `if` and its
+  `_on_event` call along with the `return`, so the anchor names the site
+  instead of the statement. Uniqueness is a property of the reference, so it
+  has to be re-checked whenever the reference is edited, not once at authoring
+  time.
+- **Prefer a mutation that trips an assertion over one that raises.** A
+  mutated reference that crashes inside candidate code is scored
+  `VALIDATOR_ERROR` and *blocks admission* rather than counting as a failure,
+  so the two directions the mutation test exists to separate collapse into one
+  ambiguous outcome. When a candidate mutation's failure mode is an exception
+  rather than a wrong answer, that is a signal to move the anchor to a site
+  where the wrong value is computed and then asserted against — not a signal
+  to accept the crash as evidence.
+
+The general form: the mutation test proves the validator discriminates, and it
+can only do that if the mutation is the one the author reasoned about. A
+`find` that matches twice makes the test's verdict unattributable in exactly
+the way `validator_error` exists to prevent elsewhere.
+
 ### A standard-library predicate is rarely the predicate you meant
 
 `ipaddress` exposes `is_private`, `is_global`, `is_reserved`, `is_loopback`

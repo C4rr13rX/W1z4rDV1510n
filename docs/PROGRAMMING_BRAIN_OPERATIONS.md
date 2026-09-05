@@ -527,6 +527,65 @@ whose payload is missing `hours_since_admission_event`, `gate_rejections`,
 `replay_failures_at_gate` and `replay_failures_before_gate` as a statement
 about the watcher rather than about the curriculum.
 
+### Sustained, seven yields later: what the repaired loop actually costs
+
+The confirmation above is one interval. Measured later the same day, across a
+supervisor generation 1.45 h old (PID 1921673, started 1788641111) that had by
+then taken **seven** yield/recycle cycles:
+
+```
+event kinds since supervisor start:
+  settled_node_memory_recycle 7   deferred_replay_resource_yield 7
+  deferred_replay_failed      0   protected_route_preflight      1
+
+seconds between yields:  1652 1634 2296 1481 1429 1362
+```
+
+Zero `deferred_replay_failed` against seven yields is the repair holding at
+steady state rather than once. Two intervals resolved inside the window
+(`…:0:131072` at 1788633431, `…:131072:201344` at 1788641100), and the running
+worker's own argv is the direct evidence that a yield no longer discards a
+pass:
+
+```
+drive_corpora_brain … --start-row 246576 --limit-rows 15568
+                      --durable-start-row 246576
+```
+
+The throughput this buys, which is the number to plan with:
+
+| Measure | Value |
+|---|---|
+| rows/s while the worker runs | 9.72 (60 s sample) |
+| rows/s averaged over yields and recycles | 8.4 (46,928 rows / 5,586 s) |
+| duty cycle | ~86% |
+| yield period | ~27 min |
+
+So the recycle overhead is **14%, not a stall** — worth knowing, because a
+yield every 27 minutes reads alarmingly in an event feed and the instinct is
+to go looking for headroom. There is none to find: the host is 15.26 GB with
+`swap_total_gb 0.0`, the brain settles around 11.45 GB, and the 3.0 GB floor
+is what triggers the yield. **Do not add swap to buy a longer period.** That
+converts a 14% bounded cost into the `crypto_node_memory_wedge` failure, where
+`/health` answers for days while every write route deadlocks on paging.
+
+With 8.4 rows/s sustained, the remaining quarantine is countable rather than
+open-ended — 2,782,556 unresolved rows across 26 intervals is ≈3.8 days of
+replay plus per-interval gate time:
+
+```
+jupyter-scientific-para4     17 intervals  2,105,136 rows
+jupyter-scientific-full       4 intervals    454,016 rows
+jupyter-scientific-partial    2 intervals    206,948 rows
+metamathqa-domain-safe        1 interval      16,384 rows
+webstack-units / -projects    2 intervals         72 rows
+```
+
+That arithmetic is the useful form of "is it healthy". `quarantine_ready` with
+`forward_remaining_rows: 0` is the expected state at this stage and says
+nothing about convergence; seven yields with zero failures and a resume row
+advancing across them does.
+
 ## The failure ledger is older than the process that will be blamed for it
 
 The section on deploying a fix warns that the running process can be older
@@ -801,6 +860,46 @@ This is the "sample repeatedly; one probe is not verification" rule in
 wearing a disguise. Before attributing a slowdown to architecture, hold the
 measurement for five minutes and check whether an independent counter agrees.
 
+## `pgrep -f w1z4rd_brain_server` matches the supervisor, not only the brain
+
+A probe that measures "the brain" by taking the first PID out of
+`pgrep -f w1z4rd_brain_server` measures the **supervisor**. The supervisor's
+own command line carries `--node-bin
+/srv/wizard/project/target/release/w1z4rd_brain_server`, so `-f` — which
+matches the full argument list — matches it too, and it usually sorts first
+because it started earlier.
+
+The failure mode is not a missing number, it is a plausible wrong one.
+Measured 2026-09-05: the probe reported `VmRSS 30444 kB` for the brain. Thirty
+megabytes against a multi-gigabyte store is the exact signature of
+`brain_server_not_hydrating` — the documented catastrophic case where the
+server comes up holding nothing, every recall returns empty, and no gate can
+pass. On that reading the correct response is to stop training and
+investigate. The real brain was `1925586`, resident at **11.45 GB**, with
+`/stats` reporting 4.79M neurons and 426M terminals and `/health` returning
+`ok`.
+
+Two rules, because the first one alone is not enough:
+
+- **Anchor on the binary path, not the binary name.** `pgrep -f
+  'target/release/w1z4rd_brain_server'` still matches both, since the
+  supervisor's `--node-bin` is that same path. What actually discriminates is
+  matching the process's `comm` or argv[0] rather than its whole command line
+  — or simply listing `ps -eo pid,rss,args --sort=-rss` and reading which row
+  is the server. A one-line probe that cannot distinguish a 30 MB Python
+  supervisor from an 11 GB Rust server is not measuring what its variable is
+  named.
+- **A catastrophic reading is a reason to re-measure, not to act.** This
+  repository's expensive mistakes are mostly confident stories built on one
+  probe. The cheap confirmation here — one `ps` and one `curl /stats` — cost
+  a single SSM round trip and turned a shutdown-grade conclusion into a probe
+  bug. Any number that would justify halting training earns that round trip
+  first.
+
+The general shape is the same as `vacuous_zero_signals`: a query that cannot
+distinguish two cases reports one of them forever, and the danger is highest
+when the answer it happens to give is the alarming one.
+
 ## Two agents share one index
 
 A watchdog wake-up does not mean you are alone in the repository — on this
@@ -810,6 +909,35 @@ or `git commit` with no pathspec, sweeps whatever you have staged into a commit
 whose message describes something else. That happened on 2026-09-05; 106 lines
 of an admission fix landed inside a commit about obstacle-course duplicate
 guards.
+
+### Telling your red from theirs
+
+A concurrent session authoring a family leaves the suite red in a way that
+looks like your own breakage. On 2026-09-05 a baseline run showed 32 failures
+before a line had been written this session; forty minutes later a different
+20 failures, in a different family, on a tree whose HEAD had moved twice.
+
+Both were a second session mid-family: tasks added to a family module, with
+their `REFERENCES`/`MUTATIONS` entries not yet written, so both directions of
+every new task fail together. The signature is specific and worth recognising
+— **failures arrive in contiguous id runs within one family, exactly two per
+task id** (`test_reference_solution_passes_its_validator` and
+`test_a_broken_solution_fails_its_validator`), and every structural test still
+passes. A defect of your own does not distribute itself that way.
+
+What that implies for the working loop:
+
+- Take the baseline *before* editing, and group failures by family. A red
+  suite you did not cause is information about who else is working, not a
+  thing to fix — repairing it races their writes, and the entries you would
+  add are the ones they are about to add.
+- Verify your own work family-scoped (`pytest -k <family>`), because the
+  whole-suite verdict belongs partly to somebody else.
+- Before committing, check that the shared files carry only your additions:
+  `git diff --unified=0 tests/obstacle_references.py` filtered to the
+  assignment lines names every task id the commit would capture. That is what
+  distinguishes "my two files" from "my two files plus half of theirs", and it
+  is the check that would have prevented `fc050a8`.
 
 Use `git commit -m ... -- <paths>`, which commits exactly those paths and
 ignores the rest of the index. Do not rewrite the shared branch to tidy the
