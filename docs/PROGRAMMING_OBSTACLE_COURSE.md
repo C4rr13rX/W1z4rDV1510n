@@ -394,6 +394,86 @@ assertions. Every one of those is correct on the example a prompt would quote
 and wrong in an assembly, which is the same reason the contract asks for
 standard-specified behaviour rather than reproduced examples.
 
+### A mutation must fail every time, not merely usually
+
+The mutation test is deterministic in form — one `find`, one `replace`, one
+run — which makes it easy to miss that the *verdict* can be probabilistic.
+
+Measured while writing the PKCE task. The honest mutation for "encode the
+SHA-256 digest with base64url" is to encode it with standard base64 instead,
+which is exactly the defect a real implementation ships. But the two
+alphabets differ only at indices 62 and 63, so the mutation is visible only
+when the digest happens to contain a byte group landing there. For a single
+43-character challenge that is about a 74% chance. The suite would have
+passed, and would have kept passing, until some later edit changed a verifier
+string and the task began failing for no reason anyone could attribute.
+
+Counting the assertions does not rescue it. Four independent digests take the
+miss probability to roughly 0.4% — small, but it is a fixed property of the
+constants chosen, not a risk that decays. It either always fires or never
+does, and which one you got is unknown until it bites.
+
+Pick a mutation whose detection is structural. Here, leaving the base64
+padding on is equally realistic — a padded challenge matches no conformant
+client — and a SHA-256 digest is 32 bytes, so the encoding always carries
+exactly one `=`. The assertion fires on every input, forever.
+
+The rule: if you cannot say *which assertion* catches the mutation and why it
+must, the mutation is not yet a probe. Prefer a defect whose signature is a
+consequence of the format's arithmetic over one that depends on the bytes.
+
+### A standard-library predicate is rarely the predicate you meant
+
+`ipaddress` exposes `is_private`, `is_global`, `is_reserved`, `is_loopback`
+and more, and the names invite the assumption that one of them means "safe to
+fetch". None of them does, and the two obvious candidates fail in opposite
+directions:
+
+- `is_private` is **False** for `100.64.0.1`. CGNAT shared address space
+  (RFC 6598, `100.64.0.0/10`) is neither private nor globally routable, and
+  CPython models that honestly by making it neither. An SSRF guard built on
+  `is_private` alone waves through a whole `/10` that routes to carrier
+  infrastructure.
+- `is_global` is **True** for `224.0.0.1`. For IPv4 it is defined as *not in
+  `100.64.0.0/10` and not private*, and multicast is not in the private
+  table, so a guard built on `is_global` alone accepts multicast.
+
+The reference solution needs `is_global` **and** the explicit disqualifiers,
+because each covers a range the other misses. That was found by the reference
+test failing on exactly one of the fourteen rejection cases — which is the
+whole reason a family carries a reference at all. Had the task shipped with
+only the assertions its author was confident about, it would have encoded the
+wrong rule and then graded the brain against it.
+
+The generalisation for authoring: when a validator's rule is expressible as a
+single stdlib predicate, that is the moment to check the predicate's actual
+definition rather than its name. Write the boundary cases the name does not
+obviously cover — the shared block, the broadcast address, the IPv4-mapped
+IPv6 spelling — and let the reference tell you which predicate you needed.
+
+### Unpadded base64 is malleable in its final group
+
+A tamper-evidence validator that mutates every character position and expects
+every edit to be rejected is a strong test, and it is unsound against an
+unpadded base64 token unless the decoder rejects non-canonical encodings.
+
+When the encoded byte string's length is not a multiple of three, the final
+base64 character carries unused low-order bits. Several distinct characters
+therefore decode to identical bytes, so those edits are genuinely undetectable
+by any downstream signature check — the signature never sees a difference.
+
+Whether that bites depends on the payload length modulo three, which for the
+pagination-cursor task is a function of the JSON serialisation of the test
+state. It happened to be 93 bytes, giving no padding and no malleability, so
+the test passed for a reason that had nothing to do with the implementation
+and would have changed with one more field in the fixture.
+
+The fix belongs in the decoder, not the test: re-encode the decoded bytes and
+require the result to equal the input. That is a real requirement — a cursor
+has exactly one canonical spelling — and it makes the every-position sweep
+sound for any payload length. Assert the sweep detects *all* `len(cursor)`
+edits, not merely most of them, so a regression here cannot pass quietly.
+
 ### A validator that runs candidate output owns the attribution
 
 `_blames_candidate` decides `failed` versus `validator_error` by walking the

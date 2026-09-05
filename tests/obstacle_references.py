@@ -5644,7 +5644,722 @@ def decode_chunked(data):
 
 
 
+REFERENCES["http_apis_authn_appsec-0009"] = r'''
+class RateLimiter:
+    def __init__(self, capacity, refill_per_second):
+        self.capacity = float(capacity)
+        self.rate = float(refill_per_second)
+        self._buckets = {}
+
+    def allow(self, key, now):
+        tokens, last = self._buckets.get(key, (self.capacity, now))
+        elapsed = max(0.0, now - last)
+        tokens = min(self.capacity, tokens + elapsed * self.rate)
+        if tokens >= 1.0:
+            self._buckets[key] = (tokens - 1.0, now)
+            return True
+        self._buckets[key] = (tokens, now)
+        return False
+'''
+
+
+REFERENCES["http_apis_authn_appsec-0010"] = r'''
+def negotiate(accept, available):
+    available = list(available)
+    if not available:
+        return None
+    if not isinstance(accept, str) or not accept.strip():
+        return available[0]
+
+    ranges = []
+    for part in accept.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        bits = [bit.strip() for bit in part.split(";")]
+        media = bits[0].lower()
+        if "/" not in media:
+            continue
+        quality = 1.0
+        usable = True
+        for param in bits[1:]:
+            name, _, value = param.partition("=")
+            if name.strip().lower() != "q":
+                continue
+            try:
+                quality = float(value.strip())
+            except ValueError:
+                usable = False
+            else:
+                if not 0.0 <= quality <= 1.0:
+                    usable = False
+            break
+        if not usable:
+            continue
+        mtype, _, msub = media.partition("/")
+        ranges.append((mtype, msub, quality))
+
+    best = None
+    for index, candidate in enumerate(available):
+        ctype, _, csub = candidate.lower().partition("/")
+        chosen = None
+        for mtype, msub, quality in ranges:
+            if mtype == "*" and msub == "*":
+                specificity = 0
+            elif mtype == ctype and msub == "*":
+                specificity = 1
+            elif mtype == ctype and msub == csub:
+                specificity = 2
+            else:
+                continue
+            if chosen is None or specificity > chosen[0]:
+                chosen = (specificity, quality)
+        if chosen is None or chosen[1] <= 0.0:
+            continue
+        key = (chosen[1], -index)
+        if best is None or key > best[0]:
+            best = (key, candidate)
+    return best[1] if best else None
+'''
+
+
+REFERENCES["http_apis_authn_appsec-0011"] = r'''
+from email.utils import parsedate_to_datetime
+
+
+def conditional_status(method, headers, etag, last_modified):
+    lookup = {name.lower(): value for name, value in headers.items()}
+    safe = method in ("GET", "HEAD")
+
+    def tags(raw):
+        return [item.strip() for item in raw.split(",") if item.strip()]
+
+    def weak_key(tag):
+        return tag[2:] if tag.startswith("W/") else tag
+
+    if "if-none-match" in lookup:
+        raw = lookup["if-none-match"].strip()
+        if raw == "*":
+            matched = True
+        else:
+            matched = any(
+                weak_key(tag) == weak_key(etag) for tag in tags(raw)
+            )
+        if matched:
+            return 304 if safe else 412
+        return 200
+
+    if "if-match" in lookup:
+        raw = lookup["if-match"].strip()
+        if raw == "*":
+            matched = True
+        else:
+            matched = any(
+                tag == etag and not tag.startswith("W/")
+                for tag in tags(raw)
+            )
+        return 200 if matched else 412
+
+    if safe and "if-modified-since" in lookup:
+        try:
+            since = parsedate_to_datetime(lookup["if-modified-since"])
+            modified = parsedate_to_datetime(last_modified)
+        except (TypeError, ValueError):
+            return 200
+        if since is None or modified is None:
+            return 200
+        return 304 if modified <= since else 200
+
+    return 200
+'''
+
+
+REFERENCES["http_apis_authn_appsec-0012"] = r'''
+def preflight(origin, method, request_headers, config):
+    if not isinstance(origin, str) or not origin:
+        return None
+
+    allowed_origins = config["allowed_origins"]
+    allowed_methods = config["allowed_methods"]
+    allowed_headers = {name.lower() for name in config["allowed_headers"]}
+    credentials = bool(config.get("allow_credentials"))
+    wildcard = "*" in allowed_origins
+
+    if wildcard and credentials:
+        return None
+    if not wildcard and origin not in allowed_origins:
+        return None
+    if method not in allowed_methods:
+        return None
+
+    requested = [name.lower() for name in (request_headers or [])]
+    if any(name not in allowed_headers for name in requested):
+        return None
+
+    response = {
+        "Access-Control-Allow-Origin": origin,
+        "Access-Control-Allow-Methods": method,
+        "Access-Control-Allow-Headers": ", ".join(sorted(set(requested))),
+        "Access-Control-Max-Age": str(config["max_age"]),
+        "Vary": "Origin",
+    }
+    if credentials:
+        response["Access-Control-Allow-Credentials"] = "true"
+    return response
+'''
+
+
+REFERENCES["http_apis_authn_appsec-0013"] = r'''
+import ipaddress
+from urllib.parse import urlsplit
+
+RESERVED_SUFFIXES = ("localhost", "local", "internal")
+
+
+def is_safe_url(url):
+    if not isinstance(url, str) or not url:
+        return False
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    if parts.scheme.lower() not in ("http", "https"):
+        return False
+    try:
+        if parts.username is not None or parts.password is not None:
+            return False
+        host = parts.hostname
+    except ValueError:
+        return False
+    if not host:
+        return False
+    host = host.strip(".").lower()
+    if not host:
+        return False
+
+    literal = None
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        if host.isdigit():
+            try:
+                literal = ipaddress.ip_address(int(host))
+            except ValueError:
+                return False
+    if literal is not None:
+        mapped = getattr(literal, "ipv4_mapped", None)
+        if mapped is not None:
+            literal = mapped
+        # `is_global` is the primary predicate because it is the one that
+        # covers shared address space (100.64.0.0/10), which is neither
+        # private nor globally routable. It does not imply the rest:
+        # multicast is `is_global` under CPython's definition, so the
+        # explicit disqualifiers stay.
+        return literal.is_global and not (
+            literal.is_private
+            or literal.is_loopback
+            or literal.is_link_local
+            or literal.is_multicast
+            or literal.is_unspecified
+            or literal.is_reserved
+        )
+
+    return host.split(".")[-1] not in RESERVED_SUFFIXES
+'''
+
+
+REFERENCES["http_apis_authn_appsec-0014"] = r'''
+import hashlib
+import hmac
+
+
+def verify_webhook(body, header, secret, now, tolerance):
+    if not isinstance(header, str):
+        return False
+    if not isinstance(body, (bytes, bytearray)):
+        return False
+
+    timestamp = None
+    signatures = []
+    for part in header.split(","):
+        name, sep, value = part.partition("=")
+        if not sep:
+            return False
+        name = name.strip()
+        value = value.strip()
+        if name == "t":
+            if timestamp is not None or not value.isdigit():
+                return False
+            timestamp = int(value)
+        elif name == "v1":
+            signatures.append(value)
+
+    if timestamp is None or not signatures:
+        return False
+    if abs(int(now) - timestamp) > tolerance:
+        return False
+
+    payload = f"{timestamp}.".encode("ascii") + bytes(body)
+    expected = hmac.new(bytes(secret), payload, hashlib.sha256).hexdigest()
+    return any(
+        hmac.compare_digest(expected, presented) for presented in signatures
+    )
+'''
+
+
+REFERENCES["http_apis_authn_appsec-0015"] = r'''
+import secrets
+
+
+class SessionStore:
+    def __init__(self):
+        self._sessions = {}
+        self._issued = set()
+
+    def _new_id(self):
+        while True:
+            sid = secrets.token_urlsafe(32)
+            if sid not in self._issued:
+                self._issued.add(sid)
+                return sid
+
+    def create(self):
+        sid = self._new_id()
+        self._sessions[sid] = {}
+        return sid
+
+    def get(self, sid):
+        data = self._sessions.get(sid)
+        return None if data is None else dict(data)
+
+    def set(self, sid, key, value):
+        if sid in self._sessions:
+            self._sessions[sid][key] = value
+
+    def authenticate(self, sid, user):
+        data = self._sessions.pop(sid, None)
+        if data is None:
+            return None
+        rotated = self._new_id()
+        data["user"] = user
+        self._sessions[rotated] = data
+        return rotated
+
+    def logout(self, sid):
+        return self._sessions.pop(sid, None) is not None
+'''
+
+
+REFERENCES["http_apis_authn_appsec-0016"] = r'''
+def has_scope(granted, required):
+    if not isinstance(granted, str) or not isinstance(required, str):
+        return False
+    wanted = required.strip()
+    if not wanted:
+        return False
+    target = wanted.split(":")
+
+    for scope in granted.split():
+        segments = scope.split(":")
+        if segments[-1] == "*":
+            prefix = segments[:-1]
+            covered = (
+                len(target) > len(prefix) and target[:len(prefix)] == prefix
+            )
+            if covered:
+                return True
+            continue
+        if segments == target:
+            return True
+    return False
+'''
+
+
+REFERENCES["http_apis_authn_appsec-0017"] = r'''
+class IdempotencyConflict(Exception):
+    pass
+
+
+class IdempotentStore:
+    def __init__(self):
+        self._records = {}
+
+    def execute(self, key, fingerprint, fn):
+        if not key:
+            return fn()
+        if key in self._records:
+            stored, result = self._records[key]
+            if stored != fingerprint:
+                raise IdempotencyConflict(
+                    f"key {key!r} was first used for a different request"
+                )
+            return result
+        result = fn()
+        self._records[key] = (fingerprint, result)
+        return result
+'''
+
+
+REFERENCES["http_apis_authn_appsec-0018"] = r'''
+import base64
+import binascii
+
+
+def parse_basic_auth(header):
+    if not isinstance(header, str):
+        return None
+    parts = header.strip().split()
+    if len(parts) != 2:
+        return None
+    scheme, token = parts
+    if scheme.lower() != "basic":
+        return None
+    try:
+        raw = base64.b64decode(token, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    try:
+        decoded = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    username, sep, password = decoded.partition(":")
+    if not sep:
+        return None
+    return (username, password)
+'''
+
+
+REFERENCES["http_apis_authn_appsec-0019"] = r'''
+import re
+
+KEYWORDS = {
+    "self", "none", "unsafe-inline", "unsafe-eval", "strict-dynamic",
+    "unsafe-hashes", "report-sample",
+}
+HASH_PREFIXES = ("nonce-", "sha256-", "sha384-", "sha512-")
+DIRECTIVE_NAME = re.compile(r"^[a-z][a-z0-9-]*$")
+
+
+def build_csp(policy):
+    if not isinstance(policy, dict) or "default-src" not in policy:
+        raise ValueError("a policy must declare default-src")
+
+    rendered = []
+    for name in sorted(policy):
+        if not isinstance(name, str) or not DIRECTIVE_NAME.match(name):
+            raise ValueError(f"invalid directive name: {name!r}")
+        sources = list(policy[name])
+        if not sources:
+            raise ValueError(f"directive {name} has no sources")
+
+        cleaned = []
+        for source in sources:
+            if not isinstance(source, str):
+                raise ValueError(f"invalid source in {name}: {source!r}")
+            if any(ch.isspace() for ch in source) or ";" in source \
+                    or "," in source:
+                raise ValueError(f"unsafe source in {name}: {source!r}")
+            bare = source.strip("'")
+            if bare in KEYWORDS or bare.startswith(HASH_PREFIXES):
+                cleaned.append(f"'{bare}'")
+            else:
+                cleaned.append(source)
+
+        bares = [item.strip("'") for item in cleaned]
+        if "none" in bares and len(bares) > 1:
+            raise ValueError(f"'none' must be the only source in {name}")
+        rendered.append(f"{name} {' '.join(cleaned)}")
+    return "; ".join(rendered)
+'''
+
+
+REFERENCES["http_apis_authn_appsec-0020"] = r'''
+import base64
+import binascii
+import hashlib
+import hmac
+import json
+
+VERSION = b"v1."
+
+
+def _canonical(state):
+    return json.dumps(
+        state, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+
+
+def _b64(raw):
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def encode_cursor(state, key):
+    payload = VERSION + _canonical(state)
+    digest = hmac.new(key, payload, hashlib.sha256).digest()
+    return _b64(payload + b"." + digest)
+
+
+def decode_cursor(cursor, key):
+    if not isinstance(cursor, str) or not cursor:
+        raise ValueError("not a cursor")
+    try:
+        raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
+    except (binascii.Error, ValueError):
+        raise ValueError("not a cursor")
+    # Reject any non-canonical encoding of the same bytes. Without this the
+    # unused bits of a final base64 group make several distinct cursor
+    # strings decode identically, so an edit there would go unnoticed.
+    if _b64(raw) != cursor:
+        raise ValueError("not a cursor")
+    if len(raw) < len(VERSION) + 33:
+        raise ValueError("not a cursor")
+
+    payload, digest = raw[:-32], raw[-32:]
+    if not payload.endswith(b"."):
+        raise ValueError("not a cursor")
+    payload = payload[:-1]
+
+    expected = hmac.new(key, payload, hashlib.sha256).digest()
+    if not hmac.compare_digest(expected, digest):
+        raise ValueError("cursor signature does not verify")
+    if not payload.startswith(VERSION):
+        raise ValueError("unsupported cursor version")
+    try:
+        return json.loads(payload[len(VERSION):].decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise ValueError("not a cursor")
+'''
+
+
+REFERENCES["http_apis_authn_appsec-0021"] = r'''
+import base64
+import hashlib
+import hmac
+import re
+
+VERIFIER = re.compile(r"[A-Za-z0-9\-._~]{43,128}")
+
+
+def _check(verifier):
+    if not isinstance(verifier, str) or not VERIFIER.fullmatch(verifier):
+        raise ValueError("code verifier is not 43-128 unreserved characters")
+
+
+def make_challenge(verifier, method="S256"):
+    _check(verifier)
+    if method == "S256":
+        digest = hashlib.sha256(verifier.encode("ascii")).digest()
+        return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+    if method == "plain":
+        return verifier
+    raise ValueError(f"unsupported code challenge method: {method!r}")
+
+
+def verify_pkce(verifier, challenge, method):
+    expected = make_challenge(verifier, method)
+    if not isinstance(challenge, str):
+        return False
+    return hmac.compare_digest(expected, challenge)
+'''
+
+
+REFERENCES["http_apis_authn_appsec-0022"] = r'''
+UNRESERVED = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "abcdefghijklmnopqrstuvwxyz"
+    "0123456789-._~"
+)
+
+
+def _encode(text):
+    out = []
+    for byte in text.encode("utf-8"):
+        char = chr(byte)
+        if char in UNRESERVED:
+            out.append(char)
+        else:
+            out.append(f"%{byte:02X}")
+    return "".join(out)
+
+
+def canonical_query(pairs):
+    encoded = sorted((_encode(key), _encode(value)) for key, value in pairs)
+    return "&".join(f"{key}={value}" for key, value in encoded)
+'''
+
+
+REFERENCES["http_apis_authn_appsec-0023"] = r'''
+OVERRIDABLE = {"PUT", "PATCH", "DELETE"}
+OVERRIDE_HEADER = "x-http-method-override"
+
+
+def effective_method(method, headers, form):
+    actual = method.upper() if isinstance(method, str) else method
+    if actual != "POST":
+        return actual
+
+    requested = None
+    for name, value in (headers or {}).items():
+        if isinstance(name, str) and name.lower() == OVERRIDE_HEADER:
+            requested = value
+            break
+    if requested is None:
+        requested = (form or {}).get("_method")
+
+    if not isinstance(requested, str):
+        return actual
+    target = requested.strip().upper()
+    return target if target in OVERRIDABLE else actual
+'''
+
+
+REFERENCES["http_apis_authn_appsec-0024"] = r'''
+def request_framing(headers):
+    lengths = []
+    codings = []
+    for name, value in headers:
+        lowered = name.lower()
+        if lowered == "content-length":
+            lengths.append(value)
+        elif lowered == "transfer-encoding":
+            codings.extend(item.strip().lower() for item in value.split(","))
+
+    if lengths and codings:
+        raise ValueError("Content-Length and Transfer-Encoding both present")
+    if len(lengths) > 1:
+        raise ValueError("Content-Length appears more than once")
+
+    if codings:
+        if any(not item for item in codings):
+            raise ValueError("empty transfer coding")
+        if codings[-1] != "chunked":
+            raise ValueError("the final transfer coding must be chunked")
+        if codings.count("chunked") != 1:
+            raise ValueError("chunked applied more than once")
+        return ("chunked", None)
+
+    if not lengths:
+        return ("length", 0)
+    raw = lengths[0].strip(" \t")
+    if not raw or not raw.isascii() or not raw.isdigit():
+        raise ValueError(f"malformed Content-Length: {lengths[0]!r}")
+    return ("length", int(raw))
+'''
+
+
 MUTATIONS: dict[str, tuple[str, str]] = {
+    # Drop the cap on accrued tokens. The steady state is unchanged, so the
+    # limiter looks correct until a client goes quiet and returns with a
+    # burst proportional to how long it waited.
+    "http_apis_authn_appsec-0009": (
+        "tokens = min(self.capacity, tokens + elapsed * self.rate)",
+        "tokens = tokens + elapsed * self.rate",
+    ),
+    # Treat q=0 as merely the lowest preference rather than a refusal, so a
+    # type the client explicitly rejected is still served.
+    "http_apis_authn_appsec-0010": (
+        "if chosen is None or chosen[1] <= 0.0:",
+        "if chosen is None:",
+    ),
+    # Compare entity tags strongly in If-None-Match. Every cache that stores
+    # a weak validator now revalidates to a full 200 instead of a 304.
+    "http_apis_authn_appsec-0011": (
+        "weak_key(tag) == weak_key(etag) for tag in tags(raw)",
+        "tag == weak_key(etag) for tag in tags(raw)",
+    ),
+    # Reflect a wildcard origin even when credentials are allowed, which
+    # grants every site on the internet authenticated access.
+    "http_apis_authn_appsec-0012": (
+        "    if wildcard and credentials:\n        return None\n",
+        "    if wildcard and not credentials and False:\n        return None\n",
+    ),
+    # Only recognise dotted-quad literals, so the loopback address written
+    # in decimal walks straight through to the metadata service.
+    "http_apis_authn_appsec-0013": (
+        "        if host.isdigit():\n"
+        "            try:\n"
+        "                literal = ipaddress.ip_address(int(host))\n"
+        "            except ValueError:\n"
+        "                return False\n",
+        "        literal = None\n",
+    ),
+    # Sign the body alone. The timestamp is then unauthenticated, so a
+    # captured request can be replayed forever by rewriting t.
+    "http_apis_authn_appsec-0014": (
+        'payload = f"{timestamp}.".encode("ascii") + bytes(body)',
+        "payload = bytes(body)",
+    ),
+    # Keep the pre-login session id. An attacker who plants a known id in the
+    # victim's browser holds a valid authenticated session after they log in.
+    "http_apis_authn_appsec-0015": (
+        "        data = self._sessions.pop(sid, None)\n"
+        "        if data is None:\n"
+        "            return None\n"
+        "        rotated = self._new_id()\n",
+        "        data = self._sessions.get(sid)\n"
+        "        if data is None:\n"
+        "            return None\n"
+        "        rotated = sid\n",
+    ),
+    # Match the granted scope as a text prefix. repo:read then authorises
+    # repo:read_write, which is a different and larger permission.
+    "http_apis_authn_appsec-0016": (
+        "        if segments == target:\n            return True\n",
+        "        if wanted.startswith(scope):\n            return True\n",
+    ),
+    # Ignore the fingerprint, so a client reusing a key for a genuinely
+    # different request silently receives the earlier result.
+    "http_apis_authn_appsec-0017": (
+        "if stored != fingerprint:",
+        "if False:",
+    ),
+    # Split the credentials at the last colon instead of the first, which
+    # silently truncates every password that contains one.
+    "http_apis_authn_appsec-0018": (
+        'username, sep, password = decoded.partition(":")',
+        'username, sep, password = decoded.rpartition(":")',
+    ),
+    # Emit keywords unquoted. `self` is then a hostname, and the policy
+    # quietly stops restricting anything to the document's own origin.
+    "http_apis_authn_appsec-0019": (
+        '                cleaned.append(f"\'{bare}\'")',
+        "                cleaned.append(bare)",
+    ),
+    # Skip the signature check. The cursor still round-trips, so paging
+    # works, while a client may now edit the state it pages with.
+    "http_apis_authn_appsec-0020": (
+        "    if not hmac.compare_digest(expected, digest):\n"
+        '        raise ValueError("cursor signature does not verify")\n',
+        "    if not hmac.compare_digest(expected, digest) and False:\n"
+        '        raise ValueError("cursor signature does not verify")\n',
+    ),
+    # Leave the base64 padding on the challenge, which no RFC-conformant
+    # client sends, so every real authorization code exchange fails.
+    "http_apis_authn_appsec-0021": (
+        'return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")',
+        'return base64.urlsafe_b64encode(digest).decode("ascii")',
+    ),
+    # Encode a space as '+' in the form-encoding style. Signer and verifier
+    # then disagree on every request whose parameters contain a space.
+    "http_apis_authn_appsec-0022": (
+        "        if char in UNRESERVED:\n            out.append(char)\n",
+        "        if char in UNRESERVED:\n            out.append(char)\n"
+        '        elif char == " ":\n            out.append("+")\n',
+    ),
+    # Honour the override on GET as well as POST, so an <img> tag pointing
+    # at a URL performs a DELETE.
+    "http_apis_authn_appsec-0023": (
+        '    if actual != "POST":\n        return actual\n',
+        '    if actual not in ("POST", "GET"):\n        return actual\n',
+    ),
+    # Accept Content-Length beside Transfer-Encoding. Whichever header the
+    # front end and the back end each prefer is the smuggling primitive.
+    "http_apis_authn_appsec-0024": (
+        "    if lengths and codings:\n"
+        '        raise ValueError("Content-Length and Transfer-Encoding both present")\n',
+        "    if lengths and codings and False:\n"
+        '        raise ValueError("Content-Length and Transfer-Encoding both present")\n',
+    ),
     # Sign the payload alone, so the header can be rewritten after signing
     # and the token still verifies -- the alg-confusion family.
     "http_apis_authn_appsec-0001": (
