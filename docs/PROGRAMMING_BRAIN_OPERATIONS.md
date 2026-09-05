@@ -139,3 +139,94 @@ Only a rising `deferred_replay_admitted` count and the presence of gate
 artifacts mean anything. Size every per-pass work unit to fit **inside**
 the resource window with room for the verification that follows it
 (`--replay-rows-per-pass`), or the verification silently never happens.
+
+## A silent WAL reader loses the training a crash was supposed to protect
+
+`read_framed_event` read each frame with `Read::read` and treated any short
+read as a torn tail: it returned `Ok(None)`, which the caller reads as a
+clean end-of-log. Replay stopped there and **reported success**, so nothing
+downstream could distinguish "the log ended" from "we stopped reading it".
+
+Measured 2026-09-05: replay stopped mid-body, so the next length prefix came
+out of event payload and surfaced as
+
+    WAL replay failed; continuing from brain.bin
+    error=invalid value: integer `36`, expected variant index 0 <= i < 8
+
+`WalEvent` has 8 variants; 36 was a label byte read as a discriminant. The
+brain fell back to a checkpoint from Aug 19, that failed too, and it came up
+empty — 0.08 GB resident against a 15 GB container, answering every query
+with "outcome steady" at ~0.01 confidence.
+
+**Compaction was accused and is innocent.** The first fix rewrote
+`compact_after_checkpoint`, blaming `set_len` through `get_mut()` against a
+seek through the `BufWriter`. Those positions never disagree:
+`<BufWriter as Seek>::seek` flushes before seeking, and compaction flushes
+first anyway. Both forms pass `compaction_framing_tests`, including at an
+offset several 64 KiB buffers past the header. Re-deriving that story costs a
+session; the writer change survives only as hardening.
+
+**The prefix had the same defect as the body and outlived the first fix.**
+The body was moved to `read_exact`; the four length bytes in front of it kept
+bare `read`. The existing test could not see it — its `ChunkedReader` fills a
+4-byte request in one call at `chunk` 7, so only bodies ever came back short.
+At `chunk` 1 replay recovers **zero** events, including the complete one in
+front of the tear. Test short reads at 1, 2 and 3 bytes, not just at a
+plausible buffer size.
+
+Verify the fix is in the process that is running, not just on disk:
+
+```bash
+PID=$(pgrep -x w1z4rd_brain_se)
+grep -qa "WAL replay: torn body at tail; stopping replay" /proc/$PID/exe \
+  && echo fixed || echo STALE
+```
+
+An independent framing scan is the other half — walk `brain.wal` prefix by
+prefix and require it to land exactly on EOF. A file that scans clean to its
+last byte has never been written unframed, whatever a comment claims.
+
+## A pass that only checkpoints at the end has nothing to resume from
+
+The deferred-replay resume row was recorded once per **completed** pass, so
+anything that ended a pass early discarded every row it had trained and began
+the interval again at row 0. Measured 2026-09-05: two supervisor restarts
+inside one hour threw away 29,552 and then 1,776 already-WAL-durable
+episodes. At ~13 rows/s a 49,152-row pass is an hour of billed compute.
+
+The boundary was always available — the worker publishes `durable_next_row`
+continuously under `--wal-durable`, and the supervisor already polls every two
+seconds. `checkpoint_replay_resume` now writes it as the pass runs, never
+lowering the recorded row and never recording past `end_row`.
+
+This is sound **only because the WAL reader is correct**. `durable_next_row`
+advances behind a WAL flush, so an unclean death recovers exactly those rows —
+if replay reads them. Do not port mid-pass resume to a binary without the
+reader fix above; it would resume past rows the brain no longer holds.
+
+**A yield that won nothing is still not a verdict.** The yield path refuses to
+"convert host pressure into a semantic failure", and then the no-progress
+check did exactly that: with the floor already breached at pass start, the
+worker was stopped before its first durable batch and the interval — untouched
+and unjudged — was marked failed. The recycle that follows a yield frees the
+window (measured 2.99 GB → 14.66 GB), so the retry gets room this pass never
+had. Tolerated up to `MAX_BARREN_REPLAY_YIELDS`, because a recycle that stops
+buying a window is a real fault that must surface.
+
+## A retention suite is only as good as the path that trained it
+
+`/brain/observe` + `/brain/tick` cannot form a binding for a long response:
+recall via the observe path is exact below ~80 bytes and empty above it. A
+suite whose responses exceed that trains rows nothing can retrieve, then fails
+its own paraphrase check while reporting `trained` at full marks.
+
+That signature — **`trained` perfect, `paraphrase` empty** — means the
+training path, not the capability. `programming_typescript_enterprise.py`
+carried it after its three siblings were converted in 4e790fb: responses of
+379 B, 560 B and 799 B, `optimistic_store` recorded `trained 3/3,
+paraphrase 2/3` on every gate from 2026-09-03 10:13 to 2026-09-04 18:32, and
+8 intervals were rejected for it. Train through `/brain/pretrain_binding`.
+
+Changing the suite is not enough on its own: the supervisor only ever invokes
+these suites with `--no-train`, so the bindings must be re-seeded once through
+the new path before the gate can pass.
