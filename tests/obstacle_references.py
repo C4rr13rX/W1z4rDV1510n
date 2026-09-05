@@ -1152,7 +1152,302 @@ class ReadWriteLock:
 '''
 
 
+REFERENCES["databases_migrations_transactions-0001"] = r'''
+import hashlib
+
+
+def _checksum(sql):
+    return hashlib.sha256(sql.encode("utf-8")).hexdigest()
+
+
+def apply_migrations(connection, migrations):
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS schema_migrations ("
+        "version INTEGER PRIMARY KEY, name TEXT NOT NULL, checksum TEXT NOT NULL)"
+    )
+    applied = {
+        int(version): checksum
+        for version, checksum in connection.execute(
+            "SELECT version, checksum FROM schema_migrations"
+        )
+    }
+    highest = max(applied) if applied else None
+    pending = []
+    for version, name, sql in sorted(migrations, key=lambda item: int(item[0])):
+        version = int(version)
+        digest = _checksum(sql)
+        if version in applied:
+            if applied[version] != digest:
+                raise ValueError(f"migration {version} changed after being applied")
+            continue
+        if highest is not None and version <= highest:
+            raise ValueError(f"migration {version} is out of order")
+        pending.append((version, name, sql, digest))
+    done = []
+    for version, name, sql, digest in pending:
+        connection.execute("BEGIN")
+        try:
+            connection.execute(sql)
+            connection.execute(
+                "INSERT INTO schema_migrations (version, name, checksum) "
+                "VALUES (?, ?, ?)",
+                (version, name, digest),
+            )
+        except Exception:
+            connection.execute("ROLLBACK")
+            raise
+        connection.execute("COMMIT")
+        done.append(version)
+    return done
+'''
+
+
+REFERENCES["databases_migrations_transactions-0002"] = r'''
+ALLOWED = ("title", "body")
+
+
+def update_document(connection, doc_id, expected_version, fields):
+    if not fields:
+        raise ValueError("fields must not be empty")
+    for key in fields:
+        if key not in ALLOWED:
+            raise ValueError(f"unknown column {key!r}")
+    assignments = ", ".join(f"{key} = ?" for key in fields)
+    parameters = list(fields.values()) + [doc_id, expected_version]
+    cursor = connection.execute(
+        f"UPDATE documents SET {assignments}, version = version + 1 "
+        "WHERE id = ? AND version = ?",
+        parameters,
+    )
+    if cursor.rowcount == 0:
+        return None
+    return int(expected_version) + 1
+'''
+
+
+REFERENCES["databases_migrations_transactions-0003"] = r'''
+def record_order(connection, order, event):
+    connection.execute("BEGIN")
+    try:
+        cursor = connection.execute(
+            "INSERT INTO outbox (topic, payload) VALUES (?, ?)",
+            (event["topic"], event["payload"]),
+        )
+        event_id = int(cursor.lastrowid)
+        connection.execute(
+            "INSERT INTO orders (id, customer, total_cents) VALUES (?, ?, ?)",
+            (order["id"], order["customer"], order["total_cents"]),
+        )
+    except Exception:
+        connection.execute("ROLLBACK")
+        raise
+    connection.execute("COMMIT")
+    return event_id
+'''
+
+
+REFERENCES["databases_migrations_transactions-0004"] = r'''
+def page_after(connection, cursor, limit):
+    if cursor is None:
+        rows = connection.execute(
+            "SELECT id, created_at, title FROM posts "
+            "ORDER BY created_at, id LIMIT ?",
+            (limit,),
+        ).fetchall()
+    else:
+        created_at, row_id = cursor
+        rows = connection.execute(
+            "SELECT id, created_at, title FROM posts "
+            "WHERE created_at > ? OR (created_at = ? AND id > ?) "
+            "ORDER BY created_at, id LIMIT ?",
+            (created_at, created_at, row_id, limit),
+        ).fetchall()
+    rows = [tuple(row) for row in rows]
+    if not rows:
+        return [], None
+    last = rows[-1]
+    return rows, (last[1], last[0])
+'''
+
+
+REFERENCES["databases_migrations_transactions-0005"] = r'''
+def apply_batch(connection, items):
+    applied = []
+    rejected = []
+    connection.execute("BEGIN")
+    try:
+        for index, item in enumerate(items):
+            connection.execute(f"SAVEPOINT item_{index}")
+            try:
+                connection.execute(
+                    "INSERT INTO accounts (id, owner) VALUES (?, ?)",
+                    (item["id"], item["owner"]),
+                )
+                connection.execute(
+                    "INSERT INTO audit (account_id, amount) VALUES (?, ?)",
+                    (item["id"], item["amount"]),
+                )
+            except Exception as exc:
+                connection.execute(f"ROLLBACK TO item_{index}")
+                connection.execute(f"RELEASE item_{index}")
+                rejected.append((item["id"], type(exc).__name__))
+            else:
+                connection.execute(f"RELEASE item_{index}")
+                applied.append(item["id"])
+    except Exception:
+        connection.execute("ROLLBACK")
+        raise
+    connection.execute("COMMIT")
+    return applied, rejected
+'''
+
+
+REFERENCES["databases_migrations_transactions-0006"] = r'''
+COLUMNS = ("display_name", "email", "locale")
+
+
+def merge_record(connection, record):
+    if "id" not in record:
+        raise ValueError("record must carry an id")
+    for key in record:
+        if key != "id" and key not in COLUMNS:
+            raise ValueError(f"unknown column {key!r}")
+    row_id = record["id"]
+    supplied = {
+        key: record[key]
+        for key in COLUMNS
+        if record.get(key) is not None
+    }
+    exists = connection.execute(
+        "SELECT 1 FROM profiles WHERE id = ?", (row_id,)
+    ).fetchone()
+    if exists is None:
+        columns = ["id"] + list(supplied)
+        placeholders = ", ".join("?" for _ in columns)
+        connection.execute(
+            f"INSERT INTO profiles ({', '.join(columns)}) VALUES ({placeholders})",
+            [row_id] + list(supplied.values()),
+        )
+        return "inserted"
+    if supplied:
+        assignments = ", ".join(f"{key} = ?" for key in supplied)
+        connection.execute(
+            f"UPDATE profiles SET {assignments} WHERE id = ?",
+            list(supplied.values()) + [row_id],
+        )
+    return "updated"
+'''
+
+
+REFERENCES["databases_migrations_transactions-0007"] = r'''
+import sqlite3
+
+
+def delete_customer(connection, customer_id):
+    connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute("BEGIN")
+    try:
+        cursor = connection.execute(
+            "DELETE FROM customers WHERE id = ?", (customer_id,)
+        )
+        deleted = cursor.rowcount
+    except sqlite3.IntegrityError:
+        connection.execute("ROLLBACK")
+        return False
+    except Exception:
+        connection.execute("ROLLBACK")
+        raise
+    connection.execute("COMMIT")
+    return deleted > 0
+'''
+
+
+REFERENCES["databases_migrations_transactions-0008"] = r'''
+def process_payment(connection, idempotency_key, amount_cents):
+    if isinstance(amount_cents, bool) or not isinstance(amount_cents, int):
+        raise ValueError("amount_cents must be an integer")
+    if amount_cents <= 0:
+        raise ValueError("amount_cents must be positive")
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        row = connection.execute(
+            "SELECT charge_id, amount_cents FROM payments WHERE idempotency_key = ?",
+            (idempotency_key,),
+        ).fetchone()
+        if row is not None:
+            connection.execute("COMMIT")
+            return {
+                "charge_id": int(row[0]),
+                "amount_cents": int(row[1]),
+                "replayed": True,
+            }
+        cursor = connection.execute(
+            "INSERT INTO payments (idempotency_key, amount_cents) VALUES (?, ?)",
+            (idempotency_key, amount_cents),
+        )
+        charge_id = int(cursor.lastrowid)
+    except Exception:
+        connection.execute("ROLLBACK")
+        raise
+    connection.execute("COMMIT")
+    return {
+        "charge_id": charge_id,
+        "amount_cents": int(amount_cents),
+        "replayed": False,
+    }
+'''
+
+
 MUTATIONS: dict[str, tuple[str, str]] = {
+    # Keep the account row a failed item already wrote by releasing its
+    # savepoint instead of rolling back to it: the batch then commits half
+    # of a row it reported as rejected.
+    "databases_migrations_transactions-0005": (
+        '                connection.execute(f"ROLLBACK TO item_{index}")\n'
+        '                connection.execute(f"RELEASE item_{index}")\n',
+        '                connection.execute(f"RELEASE item_{index}")\n',
+    ),
+    # Trust the recorded version without comparing checksums, so a migration
+    # edited after it was applied is silently accepted as already done.
+    "databases_migrations_transactions-0001": (
+        "if applied[version] != digest:",
+        "if False:",
+    ),
+    # Match the row on id alone. The update still succeeds and still bumps
+    # the version, so only a concurrent writer's lost edit reveals it.
+    "databases_migrations_transactions-0002": (
+        '"WHERE id = ? AND version = ?",',
+        '"WHERE id = ? AND version >= ?",',
+    ),
+    # Commit the work already done instead of unwinding it, publishing an
+    # outbox event for an order that never committed.
+    "databases_migrations_transactions-0003": (
+        '    except Exception:\n        connection.execute("ROLLBACK")\n        raise',
+        '    except Exception:\n        connection.execute("COMMIT")\n        raise',
+    ),
+    # Compare the timestamp alone, which skips every row that shares the
+    # boundary row's created_at value.
+    "databases_migrations_transactions-0004": (
+        '"WHERE created_at > ? OR (created_at = ? AND id > ?) "',
+        '"WHERE created_at > ? OR (created_at = ? AND id > ? AND 0) "',
+    ),
+    # Treat a supplied None as a value to store, erasing the column the
+    # caller only meant to leave alone.
+    "databases_migrations_transactions-0006": (
+        "if record.get(key) is not None",
+        "if key in record",
+    ),
+    # Enable foreign keys after the transaction opens, where the pragma is
+    # a silent no-op -- so the delete orphans the orders instead of failing.
+    "databases_migrations_transactions-0007": (
+        '    connection.execute("PRAGMA foreign_keys = ON")\n    connection.execute("BEGIN")',
+        '    connection.execute("BEGIN")\n    connection.execute("PRAGMA foreign_keys = ON")',
+    ),
+    # Ignore the stored charge and bill again on every retry.
+    "databases_migrations_transactions-0008": (
+        "if row is not None:",
+        "if False:",
+    ),
     # Let the bucket accumulate while idle, so a long quiet period buys a
     # burst the rate limit was supposed to forbid.
     "concurrency_async_distributed-0001": (
