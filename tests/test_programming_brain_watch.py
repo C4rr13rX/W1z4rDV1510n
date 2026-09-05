@@ -318,3 +318,54 @@ def test_watcher_runs_claude_on_opus_at_xhigh_with_permissions_bypassed() -> Non
     assert '"--output-format", "stream-json"' in source
     # A stale session id must not swallow the alarm.
     assert "retrying as a fresh" in source
+
+
+def test_a_deployed_fix_that_was_never_loaded_is_a_fault() -> None:
+    """Deploying a fix is not applying it.
+
+    Measured 2026-09-05: the fix that stops a memory yield being scored as a
+    semantic failure was committed and deployed byte-identical to the host,
+    then left unloaded because nothing restarted the unit. Python compiles a
+    module at import, so the supervisor kept running the previous one for
+    another 850 s. Every check that grepped the FILE reported the fix present
+    while the process converted 19 of 19 resource yields into
+    `deferred_replay_failed` and admitted nothing for 349 hours.
+    """
+    from scripts.aws.admission_watchdog import faults
+
+    healthy = {
+        "unit": "active", "brain_up": True, "failed_since_deploy": 0,
+        "last_admission_age": 10, "tick_delta": 5, "deferred": 3,
+        "disk_free_gb": 200, "mem_free_gb": 9, "progress_age": 4,
+        "status_age": 30, "state": "deferred_replay_training",
+    }
+
+    # Source newer than the process: the deploy looks finished and changed
+    # nothing. This is the only signal that separates the two.
+    stale = faults({**healthy, "stale_code_lag": 850}, baseline_deferred=3)
+    assert any(f.startswith("stale_code:") for f in stale), stale
+    assert "restart the unit" in " ".join(stale)
+
+    # A deploy that restarts promptly writes the source seconds before the
+    # new process starts. Alarming there would fire on every correct deploy.
+    for lag in (300, 12, 0, -1, -850):
+        clean = faults({**healthy, "stale_code_lag": lag}, baseline_deferred=3)
+        assert not any(f.startswith("stale_code:") for f in clean), (lag, clean)
+
+    # A host that could not be measured must not manufacture a fault.
+    absent = faults({**healthy, "stale_code_lag": None}, baseline_deferred=3)
+    assert not any(f.startswith("stale_code:") for f in absent), absent
+
+
+def test_the_probe_measures_the_process_not_just_the_file() -> None:
+    """The fault above is only reachable if the probe actually reports the
+    lag; a fault keyed to a field nothing populates is a vacuous zero."""
+    source = (
+        __import__("pathlib").Path(__file__).parents[1]
+        / "scripts/aws/admission_watchdog.py"
+    ).read_text(encoding="utf-8")
+    assert 'out["stale_code_lag"]' in source
+    # Process start time, compared against the source mtime -- not a grep of
+    # the file for the fix, which is what read as healthy on 2026-09-05.
+    assert 'os.path.getmtime(f"/proc/{pid}")' in source
+    assert "programming_curriculum_supervisor.py" in source

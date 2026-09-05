@@ -269,3 +269,55 @@ when an interval is **admitted** and `accept_last_good_guard` releases the
 guard. After any `deferred_replay_failed` that follows a re-seed, re-run the
 suite with `--no-train` before assuming the repair still holds; if its
 paraphrase count dropped back, re-seed again rather than re-diagnosing.
+
+## Deploying a fix is not applying it
+
+Python compiles a module once, at import. A source file written **after** a
+process started is not in that process and never will be, no matter how many
+times you read it back and confirm the fix is there.
+
+Measured 2026-09-05. The two fixes above — mid-pass resume, and not scoring a
+resource yield as a semantic failure — were committed, then copied to the host
+byte-identical to `HEAD` (203,558 bytes, matching the 208,237-byte working
+copy exactly once its 4,679 CRLFs are stripped). Nothing restarted the unit.
+The supervisor kept running the previous module for another 850 s, so on the
+host the old branch was still live:
+
+```python
+worker = run_deferred_replay_worker(..., stdout, stderr)   # no resume_row
+if worker.returncode != 0:                                  # no yield check
+    raise RuntimeError(f"deferred replay worker exited {worker.returncode}")
+```
+
+The memory guard stops the worker with `SIGTERM`, so **every** yield arrives
+here as `-15` and is raised as a semantic rejection. The ledger shows the
+signature plainly — three seconds apart, four times in twelve hours:
+
+```
+settled_node_memory_recycle      age 24826   available 2.99 GB -> 14.66 GB
+deferred_replay_resource_yield   age 24826   para4:786432:917504
+deferred_replay_failed           age 24823   "worker exited -15"
+```
+
+19 yields, 19 failures, 288 `deferred_replay_failed` in total, 13 passes on
+one interval each restarting at row 0, and nothing admitted for 349 hours on a
+billed host.
+
+What makes this expensive is that every check pointed the wrong way. Grepping
+the deployed file for `def checkpoint_replay_resume` returned true. The unit
+was `active`, the brain answered `/health`, the tick advanced, the worker held
+a live PID and the progress file was 0 s old. All of it was true and none of
+it was the question, which is whether the **process** is the code.
+
+So measure the process, not the artifact. `admission_watchdog.py` now reports
+`stale_code_lag` — the supervisor source mtime minus the running process start
+time, read from `/proc/<pid>` — and faults above 300 s, wide enough to ignore
+a deploy that restarts promptly and far inside the ~4,900 s pass it otherwise
+costs. The confirmation after a restart is not that the unit came back up; it
+is that `deferred-replay-<digest>.resume.json` **exists and advances**. Before
+the restart no such file existed anywhere in the runtime; ninety seconds
+after, it read `durable_next_row: 544` against a progress file at 552.
+
+This generalises past this repo. A remote fix has two failure points — did the
+bytes land, and did anything reload them — and only the first one leaves an
+artifact you can grep.

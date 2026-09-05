@@ -205,6 +205,33 @@ try:
 except Exception:
     pass
 
+# --- is the running supervisor running the code on disk? -------------------
+# Deploying a fix is not applying it. Python compiles a module once, at
+# import: a source file written after the process started is not in that
+# process and never will be.
+#
+# Measured 2026-09-05. The fix that stops a memory yield being scored as a
+# semantic failure was committed, deployed byte-identical to the host, and
+# left unloaded because nothing restarted the unit. The supervisor kept
+# running the previous module for another 850 s, and every probe that
+# grepped the FILE for the fix -- as this watchdog's operator did -- read
+# `has_checkpoint_fix: true` and concluded it was live. It was not: the run
+# had converted 19 of 19 resource yields into `deferred_replay_failed` and
+# admitted nothing for 349 hours.
+#
+# So compare the artifact against the effect. A positive lag means source
+# newer than process, which is exactly the window in which a deploy looks
+# finished and changes nothing.
+out["stale_code_lag"] = None
+try:
+    if pids:
+        source_mtime = os.path.getmtime(
+            "/srv/wizard/project/scripts/programming_curriculum_supervisor.py")
+        newest_start = max(os.path.getmtime(f"/proc/{pid}") for pid in pids)
+        out["stale_code_lag"] = round(source_mtime - newest_start)
+except Exception:
+    pass
+
 # --- brain -----------------------------------------------------------------
 # Three tries before calling the brain down. A single 15-second timeout
 # fired twice on a brain that was up the whole time -- it was busy, not
@@ -351,6 +378,22 @@ def faults(now: dict, baseline_deferred: int) -> list[str]:
         found.append(
             f"status_stale: no status written for {now['status_age']}s "
             f"in state {now.get('state')!r}")
+
+    # A deployed fix that was never loaded is indistinguishable from a fix
+    # that does not work, and it fails in the more expensive direction: the
+    # operator stops looking. Measured 2026-09-05 at a lag of 850 s, during
+    # which the host billed a full yield/recycle cycle and threw the
+    # interval away under the exact bug the deployed file already fixed.
+    #
+    # A few seconds of lag is just the write that a restart is about to
+    # follow, so only alarm once the window is wide enough to have cost a
+    # pass. A replay pass is ~4,900 s; 300 s is well inside it and well
+    # outside a deploy-then-restart.
+    lag = now.get("stale_code_lag")
+    if lag is not None and lag > 300:
+        found.append(
+            f"stale_code: supervisor source is {lag}s newer than the running "
+            f"process -- the deployed fix is not loaded; restart the unit")
 
     error = now.get("status_error") or ""
     if error and error != "none":
