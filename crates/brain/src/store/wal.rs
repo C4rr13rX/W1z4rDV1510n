@@ -90,8 +90,27 @@ fn write_framed_event<W: Write>(w: &mut W, event: &WalEvent) -> io::Result<usize
 /// read OK but body short) — partial frames at log tail are recovered
 /// by truncation.
 fn read_framed_event<R: Read>(r: &mut R) -> io::Result<Option<WalEvent>> {
+    // FILL THE PREFIX, DO NOT ASSUME ONE READ FILLS IT.
+    //
+    // This is the same defect the body read below had, on the four bytes in
+    // front of it: a single `read` may legally return 1..=3 bytes, and the
+    // old code called that a torn tail and ended replay. Every event after
+    // that point was silently discarded -- no error, no log line above warn,
+    // just a brain that came back smaller than it went down.
+    //
+    // Clean EOF and a torn prefix are different outcomes and `read_exact`
+    // collapses both into UnexpectedEof, so fill the buffer by hand and let
+    // the count say which happened: zero bytes is the end of the log, one to
+    // three is a genuinely torn tail.
     let mut len_buf = [0u8; 4];
-    match r.read(&mut len_buf)? {
+    let mut filled = 0usize;
+    while filled < len_buf.len() {
+        match r.read(&mut len_buf[filled..])? {
+            0 => break,
+            n => filled += n,
+        }
+    }
+    match filled {
         0 => return Ok(None),
         4 => {}
         n => {
@@ -625,6 +644,73 @@ mod short_read_replay_tests {
             .expect("a torn tail is an end-of-log, not an error");
 
         assert_eq!(replayed.len(), 1, "the complete event must survive");
+    }
+
+    /// The four-byte length prefix must survive being split across reads too.
+    ///
+    /// The body fix left this half undone. A `chunk` of 7 never exposes it:
+    /// a 4-byte request returns all 4, so the prefix is always filled in one
+    /// call and only bodies ever came back short. Below 4 the prefix itself
+    /// splits, which is the case that silently ended replay -- and reported a
+    /// clean end-of-log while doing it, so nothing downstream could tell the
+    /// difference between "the log ended" and "we stopped reading it".
+    #[test]
+    fn a_length_prefix_split_across_reads_still_replays() {
+        let events: Vec<WalEvent> = (0..16)
+            .map(|i| WalEvent::AtomCreated {
+                pool_id: 0,
+                id: i,
+                kind: NeuronKind::Excitatory,
+                label: format!("label-{i}-with-some-length-to-it"),
+                born_tick: 0,
+            })
+            .collect();
+        let bytes = framed(&events);
+
+        // One, two and three bytes per read: every prefix is split, and at
+        // chunk 3 the split lands at a different offset within each prefix.
+        for chunk in 1..=3 {
+            let reader = ChunkedReader { data: &bytes, pos: 0, chunk };
+            let replayed: Vec<_> = WalReader::new(reader)
+                .collect::<io::Result<Vec<_>>>()
+                .unwrap_or_else(|e| panic!("chunk {chunk} failed replay: {e}"));
+
+            assert_eq!(
+                replayed.len(),
+                events.len(),
+                "chunk {chunk} dropped events: got {} of {}",
+                replayed.len(),
+                events.len()
+            );
+        }
+    }
+
+    /// A torn prefix at the very tail is still an end-of-log, not an error.
+    #[test]
+    fn a_torn_length_prefix_at_the_tail_stops_cleanly() {
+        let events = vec![WalEvent::AtomCreated {
+            pool_id: 0,
+            id: 1,
+            kind: NeuronKind::Excitatory,
+            label: "complete".into(),
+            born_tick: 0,
+        }];
+        let mut bytes = framed(&events);
+
+        // Two bytes of a four-byte prefix: a process died mid-append.
+        bytes.extend_from_slice(&[0x11, 0x22]);
+
+        for chunk in [1usize, 3, 7] {
+            let reader = ChunkedReader { data: &bytes, pos: 0, chunk };
+            let replayed: Vec<_> = WalReader::new(reader)
+                .collect::<io::Result<Vec<_>>>()
+                .expect("a torn prefix is an end-of-log, not an error");
+            assert_eq!(
+                replayed.len(),
+                1,
+                "chunk {chunk}: the complete event must survive"
+            );
+        }
     }
 }
 
