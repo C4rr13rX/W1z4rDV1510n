@@ -144,6 +144,69 @@ a `scaled` argument, and `math.isclose` failed NaN-matches-NaN.
 A task whose near-miss passes is not measuring the capability its prompt
 names, however elaborate its assertions look.
 
+### The near-miss that passes: a task measuring a weaker capability
+
+That last sentence stopped being hypothetical on 2026-09-05.
+`scientific_3d_geometry_robotics-0015` asks for Gaussian elimination **with
+partial pivoting** and drove the numerical case with `[[1e-16, 1], [1, 1]]` —
+the textbook fixture. Its reference passed, its mutation failed, and its
+near-miss, a solver that swaps rows only when the pivot is within `1e-14` of
+zero, **passed too**.
+
+The fixture and the near-miss were both correct; the task was not. `1e-16`
+sits *below* every plausible "treat this as zero and swap" threshold, so the
+near-miss swapped, got the right answer, and never exercised pivoting at all.
+The task measured zero-pivot handling — a strictly weaker capability than its
+prompt names, and one the two adjacent fixtures already covered. Nothing in
+the reference/mutation pair could see this: both directions were behaving
+exactly as designed.
+
+The repair is to separate the two capabilities in the fixture. The leading
+entry is now `1e-5` in `[[1e-5, 1e8], [1e8, 1e8]]`: far too large for any zero
+test to fire, yet thirteen orders below the rest of its column, so eliminating
+with it costs four significant digits. Measured, a swap-on-zero solver is off
+by `1.3e-4` there for every zero threshold from `1e-14` to `1e-6`, while
+pivoting on magnitude returns both unknowns exactly.
+
+Two rules follow.
+
+**When a prompt names a technique rather than a result, ask which fixture
+would fail if the candidate used the neighbouring technique instead.** If no
+fixture distinguishes them, the task is scoring the neighbour. "With partial
+pivoting", "in constant space", "without buffering the whole response" and
+"in a single pass" are all claims of this shape.
+
+**Pick the discriminating margin by measurement, not by estimate.** The
+replacement fixture was found by sweeping the small entry across seven decades
+and printing the error for each candidate zero threshold. The first
+hand-estimated replacement — `1e-11`, reasoned to be off by `1e-5` — is off by
+`8.3e-8` in reality, comfortably inside the tolerance, and would have shipped
+the same defect a second time. The error is not even monotonic in the small
+entry, because forming the right-hand side rounds away the very quantity the
+first unknown depends on. Three lines of arithmetic in a scratch script settle
+in seconds what an argument gets wrong.
+
+### Compute the expectation with an unrelated algorithm, not a better one
+
+The rule above — stop hand-writing expected values — has a sharper form when
+the task's own subject is an algorithm. Recomputing the answer *with the
+algorithm under test* proves only self-agreement.
+
+`scientific_3d_geometry_robotics-0014` asks whether two oriented boxes
+overlap, whose standard answer is the separating-axis theorem over fifteen
+candidate axes. Its validator does not implement that. It decides each case by
+enumerating vertices of the intersection of the two boxes' twelve half-spaces:
+a bounded intersection is non-empty exactly when some triple of its bounding
+planes meets at a feasible point. The oracle shares no reasoning with a
+projection test, so it has no way to inherit the classic defect — checking the
+six face normals and skipping the nine edge-edge cross products — and the
+sixty-six swept configurations then need no hand-computed verdicts at all.
+
+That is what made the task's controls meaningful: both the mutation (drop the
+cross-product axes) and an independent near-miss (test each box's world-space
+axis-aligned bounds) were caught by the oracle disagreeing on a specific
+rotated configuration, not by an expectation anyone wrote down.
+
 ### Never pin a verdict to a decimal that looks exact
 
 There is a third way to be unsatisfiable, and the reference test catches it
