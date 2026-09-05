@@ -17,17 +17,22 @@ remember.
 
 ## Current state
 
-**The course is not built.** As of 2026-09-05 there are 14 authored tasks
-against a required 1,000:
+**The course is not built.** Authoring is in progress against a required
+1,000, family by family.
 
-```
-algorithms_data_structures            8 / 70
-validation_parsing_serialization      6 / 70
-(eleven other families)               0 / 860
+Deliberately no count is quoted here. Families land several times an hour
+while the course is being written, so a number in this file is stale before
+the commit that adds it finishes, and a reader who trusts it is reading
+history. Ask the tool instead:
+
+```bash
+python scripts/programming_obstacle_manifest.py
 ```
 
-`python scripts/programming_obstacle_manifest.py` prints the exact per-family
-shortfall and exits 2. It exits 0 only when a complete, valid course exists.
+It prints authored-versus-required for every family, the exact per-family
+shortfall, and exits 2 while any of them is unmet. It exits 0 only when a
+complete, valid course exists — so the exit code, not a paragraph, is the
+answer to "is the course built".
 No score has been produced against the brain yet, and none can be: the runner
 only accepts a manifest, and a manifest cannot be constructed from an
 incomplete task set.
@@ -150,7 +155,7 @@ The runner exits 0 only on a full-course pass with no validator errors and no
 empty answers. A partial run can never report admission however well it
 scores, because the contract's threshold is the complete frozen course.
 
-## Authoring the remaining 986 tasks
+## Authoring the remaining tasks
 
 Add a module per family under `scripts/programming_obstacle_tasks/` exporting
 `TASKS`, plus a reference and mutation per task in
@@ -167,3 +172,31 @@ memorised textbook body from a working implementation. Where a complexity
 claim is part of the contract, assert it structurally — count comparisons or
 element reads — never by wall-clock time, which would make the verdict depend
 on host load.
+
+### An invisible mutation is a validator that does not probe that axis
+
+The mutation test asserts the mutilated reference **fails**. So a mutation the
+validator cannot see does not slip through quietly — it surfaces as that test
+failing, with the mutated reference still passing. This is the most useful
+signal in the authoring loop, and the temptation is to read it backwards.
+
+Measured while writing the robotics family. The Denavit-Hartenberg link matrix
+row is `(ct, -st*ca, st*sa, a*ct)`, and the obvious mutation — dropping the
+`alpha` terms to `(ct, -st, 0.0, a*ct)` — changed nothing, because the only
+non-planar pose asserted used `theta = 0`, where `st = 0` makes both forms
+identical. Three single-joint poses agreed under both.
+
+The fix is almost never to pick a mutation the validator happens to catch.
+That trains the mutation on the test and leaves the capability unmeasured. The
+fix is to strengthen the **validator** until the honest mutation is visible —
+here, adding a pose with two joints bent, where neither link lies on an axis
+and any dropped or transposed rotation term diverges.
+
+The rule generalises: a mutation is a probe of the validator, not decoration
+for it. Write the bug a competent implementer would actually ship — a
+translation negated without being rotated, a quaternion product in the reverse
+order, a parallel-axis term added instead of subtracted, a facet record short
+by its two attribute bytes — and if the suite still passes, the gap is in the
+assertions. Every one of those is correct on the example a prompt would quote
+and wrong in an assembly, which is the same reason the contract asks for
+standard-specified behaviour rather than reproduced examples.
