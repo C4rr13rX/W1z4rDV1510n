@@ -529,20 +529,27 @@ about the watcher rather than about the curriculum.
 
 ### Sustained, seven yields later: what the repaired loop actually costs
 
-The confirmation above is one interval. Measured later the same day, across a
-supervisor generation 1.45 h old (PID 1921673, started 1788641111) that had by
-then taken **seven** yield/recycle cycles:
+The confirmation above is one interval. Measured later the same day against
+supervisor PID 1921673 (started 1788641111), at two points 1.45 h and 1.8 h
+into that generation:
 
 ```
-event kinds since supervisor start:
-  settled_node_memory_recycle 7   deferred_replay_resource_yield 7
-  deferred_replay_failed      0   protected_route_preflight      1
+events since supervisor start, at 1.45 h:  recycle 4  yield 4  failed 0
+events since supervisor start, at 1.80 h:  recycle 5  yield 5  failed 0
 
-seconds between yields:  1652 1634 2296 1481 1429 1362
+all yields in a 3 h window (spans the PREVIOUS generation too), ages in s:
+  10015  8363  6729 | 4433  2952  1523  161      all passed=True
+  seconds between:  1652  1634  2296  1481  1429  1362
 ```
 
-Zero `deferred_replay_failed` against seven yields is the repair holding at
-steady state rather than once. Two intervals resolved inside the window
+Read the split carefully, because it is easy to get wrong and it is the whole
+strength of the evidence. Seven yields fall in a 3-hour window, but the
+generation was only 5,214 s old at that moment, so **three of them belong to
+the previous supervisor** — a query windowed on wall-clock time silently
+crosses a restart boundary that a query windowed on process start does not.
+The claim that holds is: five yields with zero `deferred_replay_failed` inside
+one generation, and zero failures anywhere in the 3-hour window across both.
+Two intervals resolved inside the window
 (`…:0:131072` at 1788633431, `…:131072:201344` at 1788641100), and the running
 worker's own argv is the direct evidence that a yield no longer discards a
 pass:
