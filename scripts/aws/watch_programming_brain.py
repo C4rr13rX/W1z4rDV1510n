@@ -84,6 +84,65 @@ def completion_marker_valid(payload: dict) -> bool:
     )
 
 
+def source_mtime() -> float:
+    """Newest mtime across the modules this process compiled at import."""
+    # Resolved through `aws.__module__` rather than a module import, because
+    # the transport is imported two different ways depending on whether this
+    # runs as a package or from its own directory, and only one of them binds
+    # a module name.
+    newest = 0.0
+    transport = getattr(sys.modules.get(aws.__module__), "__file__", "")
+    for module in (__file__, transport):
+        try:
+            newest = max(newest, Path(module).stat().st_mtime)
+        except (OSError, TypeError):
+            continue
+    return newest
+
+
+def reload_stale_watcher(loaded_mtime: float, activity_path: Path,
+                         dry_run: bool) -> None:
+    """Re-exec when this file has changed since the process compiled it.
+
+    THE WATCHER IS SUBJECT TO THE RULE IT ENFORCES. It already reports
+    `stale_code_lag` for the supervisor, because "did the bytes land" and "did
+    anything reload them" are different questions and only the first leaves an
+    artifact you can grep. It exempted itself, and the exemption cost a real
+    alarm.
+
+    Measured 2026-09-05. The `gate_artifacts` probe was fixed at 10:06 -- it
+    had globbed `*interval_recall*`, a name nothing writes, so it returned 0
+    whether the gate had run a thousand times or never. The watcher process
+    had started at 09:46. Nineteen minutes older than its own fix, it kept
+    counting with the vacuous glob and woke an agent with "the admission gate
+    has never produced an artifact ... the gate is not running", while 45
+    admission artifacts and 402 rejection records sat in that same tree. The
+    diagnosis in the alarm text was exactly backwards, and a session was
+    billed to discover the watcher was quoting itself from before the repair.
+
+    Re-exec rather than exit: the scheduled task is disabled, so nothing would
+    restart this, and a watcher that exits to be correct supervises nothing.
+    `execv` replaces the process in place, keeping the console, the pid file's
+    purpose and the poll cadence. It runs only here, at the top of the loop
+    with no Claude invocation in flight, so it can never abandon a running
+    session -- and the replacement stamps the new mtime, so it settles after
+    one hop instead of looping.
+    """
+    if dry_run:
+        return
+    current = source_mtime()
+    if current <= loaded_mtime:
+        return
+    append_activity(
+        activity_path,
+        f"WATCHER RELOAD source changed {current - loaded_mtime:.0f}s after "
+        f"this process compiled it; re-exec pid={os.getpid()}",
+    )
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os.execv(sys.executable, [sys.executable, *sys.argv])
+
+
 def event_fingerprint(kind: str, probe: dict) -> str:
     status = probe.get("status") or {}
     identity = {
@@ -141,10 +200,37 @@ def classify_probe(probe: dict, *, stall_seconds: float,
             event_fingerprint("milestone", probe),
         )
     if supervisor_count > 0 or wrapper_count > 0:
-        if status_age > stall_seconds:
+        # THE STATUS FILE IS NOT THE HEARTBEAT. The supervisor publishes it
+        # only at state transitions, so it goes stale for the whole length of
+        # a replay pass while training runs perfectly underneath it -- a
+        # 49,152-row pass at ~13 rows/s is ~3,900 s of deliberate silence
+        # against a 1,800 s alarm. The worker's progress file is the
+        # heartbeat: it carries `durable_next_row` and is rewritten every
+        # batch, measured 0.1-2.9 s old throughout.
+        #
+        # Measured 2026-09-05: `status_age 2630s` on a host whose progress
+        # file was 2.3 s old and advancing at 13.1 rows/s across twelve
+        # consecutive 30 s windows. Alarming on the status file alone would
+        # have woken an agent against a converging interval -- the same
+        # false-positive class as the vacuous glob, one file over.
+        #
+        # Both must be stale to mean control is gone. Liveness comes from the
+        # heartbeat; whether that liveness is *converging* is a separate
+        # question, already answered by the admission-drought check below.
+        throughput = probe.get("throughput") or {}
+        heartbeat_age = throughput.get("age_seconds")
+        heartbeat_dead = (
+            heartbeat_age is None or float(heartbeat_age) > stall_seconds
+        )
+        if status_age > stall_seconds and heartbeat_dead:
             return Decision(
                 "fix_required",
-                f"live curriculum control is stale for {status_age:.0f}s",
+                f"live curriculum control is stale for {status_age:.0f}s and "
+                + (
+                    "the replay worker has published no progress file"
+                    if heartbeat_age is None else
+                    f"its progress heartbeat is {float(heartbeat_age):.0f}s old"
+                ),
                 event_fingerprint("fix_required", probe),
             )
         # Motion is not progress. Measured 2026-09-05: eight clean
@@ -742,12 +828,14 @@ def main() -> int:
         activity_path,
         f"WATCHER START pid={os.getpid()} session={args.session_id or 'dry-run'}",
     )
+    loaded_mtime = source_mtime()
     while True:
         if completion_marker_valid(read_json(args.completion_marker)):
             state.update({"state": "objective_complete", "updated_unix": time.time()})
             atomic_json(args.state_path, state)
             print(json.dumps({"decision": {"kind": "objective_complete"}}))
             return 0
+        reload_stale_watcher(loaded_mtime, activity_path, args.dry_run)
         try:
             probe = remote_probe(args.profile, args.instance_id, args.runtime)
             decision = classify_probe(

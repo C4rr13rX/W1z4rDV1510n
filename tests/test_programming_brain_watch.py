@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import scripts.aws.watch_programming_brain as watch
 from scripts.programming_curriculum_supervisor import curriculum_phases
 from scripts.aws.watch_programming_brain import (
     Decision,
@@ -425,3 +426,79 @@ def test_interval_rollover_counts_as_progress_not_a_stall() -> None:
     # And the probe must actually publish the row the comparison reads.
     assert 'out["replay_resume_row"]' in source
     assert "deferred-replay-*.resume.json" in source
+
+
+def test_watcher_reexecs_itself_when_its_own_source_changes(monkeypatch,
+                                                            tmp_path) -> None:
+    """The watcher must apply the rule it enforces on the supervisor.
+
+    It reports `stale_code_lag` for the supervisor and exempted itself. On
+    2026-09-05 the `gate_artifacts` probe was repaired at 10:06 and the
+    watcher process had started at 09:46, so it kept counting with the vacuous
+    `*interval_recall*` glob and woke an agent claiming "the gate is not
+    running" against a tree holding 45 admission artifacts.
+    """
+    activity = tmp_path / "activity.log"
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        watch.os, "execv",
+        lambda executable, argv: calls.append([executable, *argv[1:]]),
+    )
+
+    # Unchanged source must NOT re-exec. Asserted first and separately: a
+    # guard that fires unconditionally would pass the positive case below
+    # while turning the poll loop into an exec loop.
+    monkeypatch.setattr(watch, "source_mtime", lambda: 1000.0)
+    watch.reload_stale_watcher(1000.0, activity, dry_run=False)
+    watch.reload_stale_watcher(1500.0, activity, dry_run=False)
+    assert calls == []
+    assert not activity.exists()
+
+    # A dry run never re-execs, so `--once --dry-run` stays a pure probe.
+    monkeypatch.setattr(watch, "source_mtime", lambda: 2000.0)
+    watch.reload_stale_watcher(1000.0, activity, dry_run=True)
+    assert calls == []
+
+    # Source newer than the compiled process re-execs with argv preserved.
+    monkeypatch.setattr(watch.sys, "argv", ["watch.py", "--poll-seconds", "300"])
+    watch.reload_stale_watcher(1000.0, activity, dry_run=False)
+    assert len(calls) == 1
+    assert calls[0][1:] == ["watch.py", "--poll-seconds", "300"]
+    assert "WATCHER RELOAD" in activity.read_text(encoding="utf-8")
+
+
+def test_source_mtime_covers_the_transport_module_too() -> None:
+    """A stale probe can come from the transport, not just the watcher."""
+    assert watch.source_mtime() > 0.0
+    watcher = Path(watch.__file__)
+    assert watch.source_mtime() >= watcher.stat().st_mtime
+
+
+def test_a_stale_status_file_alone_is_not_a_stalled_curriculum() -> None:
+    """The supervisor is deliberately silent for the length of a replay pass.
+
+    It publishes `curriculum-supervisor.status.json` only at state
+    transitions, so a 49,152-row pass at ~13 rows/s leaves it ~3,900 s stale
+    against a 1,800 s alarm while training runs perfectly. Measured
+    2026-09-05: status_age 2630 s with a progress file 2.3 s old advancing at
+    13.1 rows/s across twelve consecutive 30 s windows.
+    """
+    # Deliberately not a `service_stage: replay` probe: that short-circuits to
+    # `quarantine_ready` before the staleness check and would never reach the
+    # branch under test.
+    converging = probe("midphase_gate_failed", age=2630.0)
+    converging["throughput"] = {"age_seconds": 2.3, "durable_next_row": 73944}
+    assert classify_probe(converging, stall_seconds=1800).kind == "healthy"
+
+    # Both stale is a genuinely stalled worker and must still alarm.
+    dead = probe("deferred_replay_training", age=2630.0)
+    dead["throughput"] = {"age_seconds": 4000.0, "durable_next_row": 73944}
+    decision = classify_probe(dead, stall_seconds=1800)
+    assert decision.kind == "fix_required"
+    assert "heartbeat is 4000s old" in decision.reason
+
+    # No progress file at all cannot be read as liveness.
+    missing = probe("midphase_gate_failed", age=2630.0)
+    decision = classify_probe(missing, stall_seconds=1800)
+    assert decision.kind == "fix_required"
+    assert "no progress file" in decision.reason
