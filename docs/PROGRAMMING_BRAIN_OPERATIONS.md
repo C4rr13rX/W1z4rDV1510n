@@ -230,3 +230,29 @@ paraphrase 2/3` on every gate from 2026-09-03 10:13 to 2026-09-04 18:32, and
 Changing the suite is not enough on its own: the supervisor only ever invokes
 these suites with `--no-train`, so the bindings must be re-seeded once through
 the new path before the gate can pass.
+
+Measured after the re-seed on 2026-09-05, `--no-train` on the live brain:
+
+| | before | after |
+|---|---|---|
+| `trained` | 3/3 | 3/3 |
+| `paraphrase` | **2/3** | **3/3** |
+| `oov_honesty` | 3/3 | 3/3 |
+| exit | 1 | 0 |
+
+Cost: +278 neurons, +278 concepts, +275 bindings. OOV honesty held at 3/3,
+so this bought paraphrase reach without trading away abstention — check that
+every time, because widening a route to fix paraphrase has broken OOV honesty
+here before.
+
+**A re-seed is an unadmitted mutation, so a rollback silently undoes it.**
+Re-seeding necessarily happens outside any replay transaction, but the
+last-good guard was created *before* it, and `restore_rejected_deferred_replay`
+restores that guard wholesale. So if the next interval is rejected for any
+reason, the re-seeded bindings go with it and the gate returns to failing on
+the very case that was just fixed — with nothing in the logs naming the
+re-seed, because losing it is not an event. The re-seed only becomes permanent
+when an interval is **admitted** and `accept_last_good_guard` releases the
+guard. After any `deferred_replay_failed` that follows a re-seed, re-run the
+suite with `--no-train` before assuming the repair still holds; if its
+paraphrase count dropped back, re-seed again rather than re-diagnosing.
