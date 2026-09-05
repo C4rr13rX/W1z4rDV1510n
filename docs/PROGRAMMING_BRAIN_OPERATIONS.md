@@ -471,3 +471,96 @@ interval had resolved during the run. Convergence across a pass boundary is
 necessary for admission and is not evidence of it. The count that closes this
 out is `resolved` rising — the same rule CLAUDE.md states for the curriculum
 as a whole, applied one level down.
+
+## The failure ledger is older than the process that will be blamed for it
+
+The section on deploying a fix warns that the running process can be older
+than the file. The watchdog payload creates the mirror-image trap, and it is
+easier to fall into because every field in it is true.
+
+Woken 2026-09-05 16:19 on `quarantine_ready`, the payload led with
+`hours_since_admission: 351.2` and
+
+```
+last_failure: "deferred replay worker exited -15; stderr=...-408a84ade3bb96e1.stderr.log"
+deferred_replay_failed: 288      deferred_replay_resource_yield: 19
+```
+
+which is the yield misattribution exactly. The obvious reading — the fix did
+not work, go and re-debug it — is wrong, and the two checks that show why cost
+about a minute between them.
+
+**Check one: is the fix in the process?** Not in the file, in the process.
+
+```
+sha256 (host)  07790e16...9486a  /srv/wizard/project/scripts/programming_curriculum_supervisor.py
+sha256 (local) 07790e16...9486a  HEAD
+file mtime     14:57      process start  14:58:02      lag  ~ -60 s
+```
+
+Byte-identical to `HEAD`, and started *after* it was written, so the guard at
+line 3727 (`if worker.returncode != 0 and not yielded:`) is live.
+
+**Check two: when did the failures happen?** Ages, against a process 1.37 h
+old at observation:
+
+```
+23.51h  21.81h  20.07h  18.07h  16.21h  13.75h  11.26h  8.73h  6.45h  3.64h
+```
+
+Every one of the ten most recent failures predates the restart; the newest is
+2.3 h older than the process. The ledger is append-only and `last_failure`
+carries no notion of which binary produced it, so a repaired fault keeps being
+reported as the current one until something new is written over it. The
+absence of a *post-restart* failure is the signal, and it is invisible unless
+you compare timestamps against process start.
+
+The confirmation is positive, not just an absence: at 16:17 a
+`settled_node_memory_recycle` completed with **no** `deferred_replay_failed`
+three seconds behind it — the first recycle in 20 h not followed by a
+rollback — while `durable_next_row` ran 45,960 -> 50,088 -> 64,000 through it.
+
+So before repairing anything a watchdog names, timestamp it against the
+running process. `last_failure` answers "what failed most recently", never
+"what is failing now".
+
+## The admission gate is read-only, so measure it before it fires
+
+`run_deferred_replays` admits an interval only if `run_completion_gate`
+passes, and a single failing stage rolls back the entire interval — up to
+131,072 rows and hours of billed compute. Waiting for the gate to discover a
+blocker is therefore the most expensive possible way to find one.
+
+It is also unnecessary. Every stage of that gate is a read-only probe of the
+live brain, so the whole chain can be run against the brain *while the replay
+is still training*, and it answers "will this admit?" hours early. Measured
+2026-09-05 with the interval at row 64,000 of 131,072, ~1.6 h before its gate:
+
+| stage | command | result |
+|---|---|---|
+| foundation | `programming_brain_eval.py --details` | toddler 32/32, k12 16/16, oov 3/3 |
+| code | `programming_code_eval.py --details` | trained 5/5, novel paraphrase 5/5 |
+| typescript | `programming_typescript_enterprise.py --no-train` | 3/3, 3/3, oov 3/3, exit 0 |
+| enterprise | `<phase>.enterprise-gate.json` | 12/12 suites |
+
+Only `interval_recall` cannot be pre-run, because it samples rows the replay
+has not posted yet.
+
+Two things make this safe rather than another mutation of the thing being
+measured. The eval scripts take `--no-train`/`--details` and do not observe;
+the enterprise report carries `tick_before`, `tick_after` and
+`structure_unchanged`, and the run above recorded `tick_delta: 0` with
+`structure_unchanged: true`. And the enterprise gate need not even be re-run
+if a recent artifact exists — reading the 15:11 report cost nothing where
+re-running it is budgeted at four hours.
+
+Worth recording separately: that report is **12/12**. `enterprise_gate_confirmed`
+documents 6, 5, 7, 8, 7, 6, 6, 8 of 12 across consecutive runs on one brain,
+which is what the confirm-a-failure-once mechanism was built for. One clean
+sweep is not proof the flicker is gone, but it is the first 12/12 in the
+ledger and it is the reason the next gate is expected to convert.
+
+The prediction this supports is bounded, and the bound is the rule CLAUDE.md
+states: every gate stage passing means the gate is *expected* to admit. It is
+not an admission. The measurement that closes it out is `hours_since_admission`
+falling and the `resolved` count rising.
