@@ -398,3 +398,76 @@ One transport note, because it silently produces the wrong table: events in
 `curriculum-health.jsonl` carry `updated_unix`, not `unix`. A filter on
 `r.get("unix")` matches nothing and reports a quiet, empty window regardless of
 what happened in it — `vacuous_zero_signals` again, in a new key.
+
+## A rising row counter does not mean the interval is converging
+
+The two sections above establish that the yield misattribution was real and
+that it had already been fixed. Neither establishes that the replay now makes
+progress, and the check that looks like it would — "is `durable_next_row`
+going up?" — cannot, because it goes up just as steadily on a pass that
+restarts the same prefix forever.
+
+That distinction is the whole failure. A 131,072-row interval is trained in
+capped passes of `--replay-rows-per-pass` (49,152). Between passes the
+supervisor settles the brain and recycles the node process, and the next pass
+is told where to start by `deferred_replay_resume_row`. That function returns
+the interval's `start_row` — discarding the previous pass's work — whenever
+the resume record's `guard_identity` no longer matches the live one:
+
+```python
+if record.get("guard_identity") != guard_identity:
+    return start
+```
+
+`guard_identity` is `phase:created_unix:tick` read from
+`brain/brain.last-good.json`. The recycle between passes is exactly the moment
+a new last-good guard could be published, and if it were, every pass would
+restart at row 0, the interval would never reach its gate, and every external
+signal — live PID, advancing tick, fresh progress file, rising
+`durable_next_row`, `/health` answering — would look correct while the host
+billed indefinitely. Thirteen passes on one interval had already done this.
+
+**The discriminator is `accepted_episodes`, not `durable_next_row`.** The
+progress file carries both, and they mean different things: `durable_next_row`
+is the absolute row now WAL-durable, while `accepted_episodes` counts only
+what *this* pass posted. So
+
+```
+pass_start_row = durable_next_row - accepted_episodes
+```
+
+and a pass that resumed correctly has a non-zero one. Measured 2026-09-05
+across a real boundary:
+
+```
+before   durable_next_row 43384   accepted_episodes 43384   -> pass began at 0
+after    durable_next_row 60832   accepted_episodes 11680   -> pass began at 49152
+```
+
+49,152 is the cap exactly. The `guard_identity` string was byte-identical
+either side of the recycle (`jupyter-scientific-full:1788621147.7185087:4148389`)
+while the brain's own tick advanced 4,148,389 -> 4,197,541, which is the
+combination that has to hold: the guard stable, the brain still learning.
+
+The full boundary, worth recognising because it is what a healthy one looks
+like — a pass ending at its **cap** rather than on a yield:
+
+```
+t+120s  row=49152  state=deferred_replay_training   memGB=4.63
+t+160s  row=49152  state=resource_node_recycled     memGB=14.35   old_pid -> replacement_pid
+t+180s  row=49160  state=resource_node_recycled     memGB=6.28
+```
+
+`resident_terminals: 0` and `total_neurons` rising across the recycle confirm
+the settle serialized every neuron without dropping learned topology.
+
+Two cautions on reading this as success. First, the supervisor writes its
+status only at state transitions, so `curriculum-supervisor.status.json` sat
+at `resource_node_recycled` and 955 s stale while the replay ran normally
+underneath it; the progress file, 0.1 s old, is the heartbeat. Second, and
+more important, **a converging interval is not an admitted one**. At the time
+of this measurement the ledger still read 28 deferred / 59 resolved and no
+interval had resolved during the run. Convergence across a pass boundary is
+necessary for admission and is not evidence of it. The count that closes this
+out is `resolved` rising — the same rule CLAUDE.md states for the curriculum
+as a whole, applied one level down.
