@@ -8,7 +8,7 @@ from scripts.aws.watch_programming_brain import (
     classify_probe,
     completion_marker_valid,
     cooldown_elapsed,
-    format_codex_event,
+    format_claude_event,
     observe,
 )
 
@@ -36,14 +36,14 @@ def probe(state: str, *, supervisors: int = 1, wrappers: int = 1,
     }
 
 
-def test_live_automation_does_not_wake_codex_for_failures_it_still_owns() -> None:
+def test_live_automation_does_not_wake_the_agent_for_failures_it_still_owns() -> None:
     decision = classify_probe(
         probe("continuous_canary_failed"), stall_seconds=1800
     )
     assert decision.kind == "healthy"
 
 
-def test_completed_automation_wakes_codex_for_the_next_stage() -> None:
+def test_completed_automation_wakes_the_agent_for_the_next_stage() -> None:
     decision = classify_probe(
         probe("deferred_replay_complete", supervisors=0, wrappers=0),
         stall_seconds=1800,
@@ -52,7 +52,7 @@ def test_completed_automation_wakes_codex_for_the_next_stage() -> None:
     assert decision.fingerprint
 
 
-def test_quarantine_handoff_wakes_codex_even_while_replay_is_live() -> None:
+def test_quarantine_handoff_wakes_the_agent_even_while_replay_is_live() -> None:
     ready = probe("deferred_intervals_pending")
     ready["runtime"] = "/runtime"
     replay = probe("deferred_replay_training")
@@ -133,22 +133,6 @@ def test_probe_process_matching_is_executable_scoped() -> None:
     assert "process_name == 'bash'" in source
 
 
-def test_codex_json_events_have_a_human_readable_tail() -> None:
-    message = format_codex_event({
-        "type": "item.completed",
-        "item": {"type": "agent_message", "text": "Fixed the replay gate."},
-    })
-    command = format_codex_event({
-        "type": "item.started",
-        "item": {
-            "type": "command_execution", "status": "in_progress",
-            "command": "python -m pytest",
-        },
-    })
-    assert message == "CODEX MESSAGE Fixed the replay gate."
-    assert command == "CODEX COMMAND [in_progress] python -m pytest"
-
-
 def test_tail_reports_full_curriculum_admission_accounting() -> None:
     source = (
         __import__("pathlib").Path(__file__).parents[1]
@@ -159,3 +143,109 @@ def test_tail_reports_full_curriculum_admission_accounting() -> None:
         "deferred_rows", "forward_remaining_rows", "minimum_outstanding_rows",
     ):
         assert field in source
+
+
+def test_claude_stream_json_events_have_a_human_readable_tail() -> None:
+    message = format_claude_event({
+        "type": "assistant",
+        "message": {"content": [
+            {"type": "text", "text": "Fixed the replay gate."},
+        ]},
+    })
+    tool = format_claude_event({
+        "type": "assistant",
+        "message": {"content": [
+            {"type": "tool_use", "name": "Bash",
+             "input": {"command": "python -m pytest"}},
+        ]},
+    })
+    result = format_claude_event({
+        "type": "result", "is_error": False,
+        "num_turns": 12, "total_cost_usd": 1.5,
+    })
+    assert message == "CLAUDE MESSAGE Fixed the replay gate."
+    assert tool == "CLAUDE TOOL Bash python -m pytest"
+    assert result == "CLAUDE result [ok] turns=12 cost=$1.50"
+
+
+def test_a_gate_that_never_runs_is_an_alarm_not_a_healthy_brain() -> None:
+    """Motion is not progress.
+
+    Measured 2026-09-05: eight clean yield/recycle cycles, seven intervals
+    advanced, 18,568 accepted episodes and "0 failed" on every worker pass --
+    with zero admissions for two weeks, because the admission gate never
+    executed once. A watcher that only checks liveness called that healthy
+    and let the budget burn. An absent gate logs neither pass nor failure, so
+    the only tell is that it has produced no artifacts.
+    """
+    live = probe("deferred_replay_training")
+
+    healthy = classify_probe(
+        {**live,
+         "admissions": {"gate_artifacts": 4, "hours_since_admission": 0.5,
+                        "event_counts": {}},
+         "memory": {"available_gb": 6.0}},
+        stall_seconds=1800.0,
+    )
+    assert healthy.kind == "healthy"
+
+    never_ran = classify_probe(
+        {**live,
+         "admissions": {"gate_artifacts": 0, "hours_since_admission": 300.0,
+                        "event_counts": {"deferred_replay_resource_yield": 8}},
+         "memory": {"available_gb": 6.0}},
+        stall_seconds=1800.0,
+    )
+    assert never_ran.kind == "fix_required"
+    assert "never produced an artifact" in never_ran.reason
+
+    # One yield is not yet evidence; two cycles with no artifact is.
+    single = classify_probe(
+        {**live,
+         "admissions": {"gate_artifacts": 0, "hours_since_admission": 1.0,
+                        "event_counts": {"deferred_replay_resource_yield": 1}},
+         "memory": {"available_gb": 6.0}},
+        stall_seconds=1800.0,
+    )
+    assert single.kind == "healthy"
+
+
+def test_a_long_admission_drought_wakes_the_agent() -> None:
+    stale = classify_probe(
+        {**probe("deferred_replay_training"),
+         "admissions": {"gate_artifacts": 6, "hours_since_admission": 48.0,
+                        "event_counts": {}},
+         "memory": {"available_gb": 6.0}},
+        stall_seconds=1800.0, admission_stall_hours=6.0,
+    )
+    assert stale.kind == "fix_required"
+    assert "no interval admitted" in stale.reason
+
+
+def test_host_memory_pressure_wakes_the_agent_before_the_oom() -> None:
+    """The kernel killed the brain at anon-rss 15,450,400 kB on a no-swap
+    host; an alarm below the floor is the last chance to act first."""
+    low = classify_probe(
+        {**probe("deferred_replay_training"),
+         "admissions": {"gate_artifacts": 6, "hours_since_admission": 0.2,
+                        "event_counts": {}},
+         "memory": {"available_gb": 0.9}},
+        stall_seconds=1800.0, memory_floor_gb=1.5,
+    )
+    assert low.kind == "fix_required"
+    assert "below the" in low.reason
+
+
+def test_watcher_runs_claude_on_opus_at_xhigh_with_permissions_bypassed() -> None:
+    source = (
+        __import__("pathlib").Path(__file__).parents[1]
+        / "scripts/aws/watch_programming_brain.py"
+    ).read_text(encoding="utf-8")
+    # An alarm at 03:00 must be repaired, not queued behind a prompt.
+    assert '"--dangerously-skip-permissions"' in source
+    assert '"--effort", effort' in source
+    assert 'effort: str = "xhigh"' in source
+    assert 'model: str = "opus"' in source
+    assert '"--output-format", "stream-json"' in source
+    # A stale session id must not swallow the alarm.
+    assert "retrying as a fresh" in source
