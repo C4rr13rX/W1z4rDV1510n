@@ -10104,3 +10104,275 @@ MUTATIONS["requirements_api_contracts-0108"] = (
     '        if operation["state"] != "running":\n'
     '            raise ValueError("the operation is already terminal")',
 )
+
+REFERENCES["testing_debugging_repair_refactoring-0201"] = r'''
+def detect_order_dependency(tests, run):
+    tests = list(tests)
+    failing = set(run(list(tests)))
+    victim = None
+    for name in tests:
+        if name in failing:
+            victim = name
+            break
+    if victim is None:
+        return None
+    if victim in set(run([victim])):
+        return None
+    prefix = tests[:tests.index(victim)]
+    low, high = 0, len(prefix)
+    while low < high:
+        middle = (low + high) // 2
+        if victim in set(run(prefix[:middle] + [victim])):
+            high = middle
+        else:
+            low = middle + 1
+    return (prefix[low - 1], victim)
+'''
+
+
+REFERENCES["testing_debugging_repair_refactoring-0202"] = r'''
+import difflib
+
+
+def _changes(base, other):
+    matcher = difflib.SequenceMatcher(a=base, b=other, autojunk=False)
+    found = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag != "equal":
+            found.append((i1, i2, list(other[j1:j2])))
+    return found
+
+
+def _side(base, changes, low, high):
+    out = []
+    position = low
+    for start, stop, replacement in changes:
+        out.extend(base[position:start])
+        out.extend(replacement)
+        position = stop
+    out.extend(base[position:high])
+    return out
+
+
+def merge_three_way(base, left, right):
+    base = list(base)
+    tagged = [("left",) + item for item in _changes(base, list(left))]
+    tagged += [("right",) + item for item in _changes(base, list(right))]
+    tagged.sort(key=lambda item: (item[1], item[2]))
+
+    merged = []
+    conflicted = False
+    position = 0
+    index = 0
+    while index < len(tagged):
+        group = [tagged[index]]
+        low, high = tagged[index][1], tagged[index][2]
+        index += 1
+        while index < len(tagged):
+            start, stop = tagged[index][1], tagged[index][2]
+            touching = start < high or (
+                start == high and start == stop and low == high
+            )
+            if not touching:
+                break
+            group.append(tagged[index])
+            high = max(high, stop)
+            index += 1
+        merged.extend(base[position:low])
+        original = base[low:high]
+        left_side = _side(base, [item[1:] for item in group
+                                 if item[0] == "left"], low, high)
+        right_side = _side(base, [item[1:] for item in group
+                                  if item[0] == "right"], low, high)
+        if left_side == right_side:
+            merged.extend(left_side)
+        elif left_side == original:
+            merged.extend(right_side)
+        elif right_side == original:
+            merged.extend(left_side)
+        else:
+            conflicted = True
+            merged.append("<<<<<<< left")
+            merged.extend(left_side)
+            merged.append("=======")
+            merged.extend(right_side)
+            merged.append(">>>>>>> right")
+        position = high
+    merged.extend(base[position:])
+    return merged, conflicted
+'''
+
+
+REFERENCES["testing_debugging_repair_refactoring-0204"] = r'''
+_RANK = {"session": 0, "module": 1, "function": 2}
+
+
+def _scope(fixtures, name):
+    if name not in fixtures:
+        raise ValueError("undefined fixture %r" % (name,))
+    scope = fixtures[name].get("scope", "function")
+    if scope not in _RANK:
+        raise ValueError("fixture %r has unknown scope %r" % (name, scope))
+    return scope
+
+
+def resolve_fixtures(fixtures, requested):
+    walked = []
+    state = {}
+
+    def visit(name):
+        scope = _scope(fixtures, name)
+        if state.get(name) == "done":
+            return
+        if state.get(name) == "open":
+            raise ValueError("fixture %r takes part in a cycle" % (name,))
+        state[name] = "open"
+        for required in fixtures[name].get("requires", ()):
+            inner = _scope(fixtures, required)
+            if _RANK[inner] > _RANK[scope]:
+                raise ValueError(
+                    "%s fixture %r cannot require %s fixture %r"
+                    % (scope, name, inner, required)
+                )
+            visit(required)
+        state[name] = "done"
+        walked.append(name)
+
+    for name in requested:
+        visit(name)
+
+    setup = sorted(
+        walked,
+        key=lambda name: _RANK[fixtures[name].get("scope", "function")],
+    )
+    return setup, list(reversed(setup))
+'''
+
+
+REFERENCES["testing_debugging_repair_refactoring-0205"] = r'''
+def nondeterministic_fields(run, times):
+    if times < 2:
+        raise ValueError("at least two runs are needed to compare them")
+    results = [run() for _ in range(times)]
+    found = set()
+
+    def compare(path, values):
+        first = values[0]
+        if all(other == first for other in values[1:]):
+            return
+        if isinstance(first, dict) and all(
+                isinstance(other, dict) for other in values[1:]):
+            keys = set(first)
+            if all(set(other) == keys for other in values[1:]):
+                for key in sorted(keys, key=repr):
+                    child = "%s.%s" % (path, key) if path else str(key)
+                    compare(child, [other[key] for other in values])
+                return
+        if isinstance(first, list) and all(
+                isinstance(other, list) for other in values[1:]):
+            size = len(first)
+            if all(len(other) == size for other in values[1:]):
+                for index in range(size):
+                    compare("%s[%d]" % (path, index),
+                            [other[index] for other in values])
+                return
+        found.add(path)
+
+    compare("", results)
+    return sorted(found)
+'''
+
+
+REFERENCES["testing_debugging_repair_refactoring-0206"] = r'''
+def check_equality_contract(values):
+    values = list(values)
+    violations = set()
+
+    for x in values:
+        if not (x == x):
+            violations.add("reflexive")
+
+    for x in values:
+        for y in values:
+            if bool(x == y) != bool(y == x):
+                violations.add("symmetric")
+            if (x == y) and hash(x) != hash(y):
+                violations.add("hash")
+            if bool(x != y) == bool(x == y):
+                violations.add("inequality")
+
+    for x in values:
+        for y in values:
+            for z in values:
+                if (x == y) and (y == z) and not (x == z):
+                    violations.add("transitive")
+
+    orderable = True
+    for x in values:
+        for y in values:
+            try:
+                x < y
+            except TypeError:
+                orderable = False
+
+    if orderable:
+        for x in values:
+            for y in values:
+                held = [bool(x < y), bool(x == y), bool(y < x)]
+                if sum(1 for flag in held if flag) != 1:
+                    violations.add("ordering")
+        for x in values:
+            for y in values:
+                for z in values:
+                    if (x < y) and (y < z) and not (x < z):
+                        violations.add("ordering")
+
+    return sorted(violations)
+'''
+
+
+# Treat every test that failed in the full run as order-dependent. Suites with
+# a real polluter still resolve correctly, so this ships; only a test that was
+# already broken on its own now gets an innocent predecessor blamed for it.
+MUTATIONS["testing_debugging_repair_refactoring-0201"] = (
+    "    if victim in set(run([victim])):\n"
+    "        return None\n",
+    "",
+)
+
+# Prefer the left side wherever the two disagree, as a last-write-wins merge
+# would. Conflicts and identical edits are unaffected; a region only the right
+# side changed silently reverts to base.
+MUTATIONS["testing_debugging_repair_refactoring-0202"] = (
+    "        elif left_side == original:\n"
+    "            merged.extend(right_side)\n",
+    "        elif left_side == original:\n"
+    "            merged.extend(left_side)\n",
+)
+
+# Keep the walk order and drop the scope ordering. Every dependency is still
+# set up before its dependent, so the chains all pass; only two fixtures with
+# no dependency between them come out in whichever order the test named them.
+MUTATIONS["testing_debugging_repair_refactoring-0204"] = (
+    "    setup = sorted(\n"
+    "        walked,\n"
+    '        key=lambda name: _RANK[fixtures[name].get("scope", "function")],\n'
+    "    )\n",
+    "    setup = list(walked)\n",
+)
+
+# Compare against the first run, but only the first comparison. Two runs
+# behave identically and so does any flake that appears immediately -- the one
+# that needs a third attempt to show up is reported as reproducible.
+MUTATIONS["testing_debugging_repair_refactoring-0205"] = (
+    "        if all(other == first for other in values[1:]):\n",
+    "        if all(other == first for other in values[1:2]):\n",
+)
+
+# Check symmetry only between values of one type. Every same-type asymmetry is
+# still caught; the cross-type case -- a wide type accepting a narrow one that
+# does not accept it back -- is exactly what the guard hides.
+MUTATIONS["testing_debugging_repair_refactoring-0206"] = (
+    "            if bool(x == y) != bool(y == x):\n",
+    "            if type(x) is type(y) and bool(x == y) != bool(y == x):\n",
+)

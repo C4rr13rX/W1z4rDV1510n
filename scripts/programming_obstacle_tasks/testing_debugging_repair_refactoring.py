@@ -2325,4 +2325,535 @@ matched, differences = compare_snapshot("", "a", PATTERNS)
 assert matched is False and differences == [(0, "a", "")], f"got {differences!r}"
 ''',
     ),
+    task(
+        f"{FAMILY}-0201", FAMILY,
+        prompt=(
+            "Implement a Python function detect_order_dependency(tests, run) "
+            "that explains why a test passes alone and fails in the suite. "
+            "tests is a list of distinct test names in the order the suite "
+            "runs them, and run(order) executes exactly the named tests in "
+            "the given order and returns the collection of names that "
+            "failed. Let victim be the first test in tests that fails when "
+            "the whole suite runs. Find the smallest k for which running "
+            "tests[:k] followed by victim still fails victim, and return the "
+            "pair (tests[k - 1], victim). You may assume that if some prefix "
+            "fails victim then every longer prefix does too. Return None "
+            "when the whole suite passes, and also when victim fails on its "
+            "own, because a test that fails in isolation is broken rather "
+            "than order-dependent. Call run at most "
+            "3 * len(tests).bit_length() + 15 times, which rules out trying "
+            "each earlier test in turn."
+        ),
+        timeout_seconds=60.0,
+        validator=LOAD_CANDIDATE + require("detect_order_dependency") + r'''
+def build(size, polluter_index, victim_index=None, alone_fails=False,
+          healthy=False):
+    """A suite whose only defect is one test leaking state into another."""
+    names = ['t%03d' % index for index in range(size)]
+    victim = names[size - 1 if victim_index is None else victim_index]
+    polluter = names[polluter_index]
+    tally = {'calls': 0}
+
+    def run(order):
+        tally['calls'] += 1
+        order = list(order)
+        for name in order:
+            assert name in names, 'run called with an unknown test %r' % name
+        assert len(set(order)) == len(order), 'run called with a repeated test'
+        if healthy or victim not in order:
+            return []
+        if alone_fails:
+            return [victim]
+        if polluter in order and order.index(polluter) < order.index(victim):
+            return [victim]
+        return []
+
+    return names, run, tally, polluter, victim
+
+
+def allowance(size):
+    return 3 * size.bit_length() + 15
+
+
+# A polluter near the end of a long suite. Growing a prefix one test at a
+# time would need 61 calls against an allowance of 33.
+names, run, tally, polluter, victim = build(64, 60)
+assert detect_order_dependency(names, run) == (polluter, victim), (
+    'the polluter at index 60 was not attributed'
+)
+assert tally['calls'] <= allowance(64), (
+    'used %d calls of an allowed %d' % (tally['calls'], allowance(64))
+)
+
+# And one near the front, which shrinking the suite from the back cannot
+# afford either. Only a search that halves the prefix satisfies both.
+names, run, tally, polluter, victim = build(64, 1)
+assert detect_order_dependency(names, run) == (polluter, victim), (
+    'the polluter at index 1 was not attributed'
+)
+assert tally['calls'] <= allowance(64), (
+    'used %d calls of an allowed %d' % (tally['calls'], allowance(64))
+)
+
+# The victim is not always the last test to run.
+names, run, tally, polluter, victim = build(16, 2, victim_index=9)
+assert detect_order_dependency(names, run) == (polluter, victim), (
+    'a victim in the middle of the suite was not attributed'
+)
+
+# The smallest suite that can carry a polluter at all.
+names, run, tally, polluter, victim = build(2, 0)
+assert detect_order_dependency(names, run) == ('t000', 't001')
+
+# Nothing failed, so there is nothing to attribute.
+names, run, tally, polluter, victim = build(8, 3, healthy=True)
+assert detect_order_dependency(names, run) is None, (
+    'a passing suite was reported as order-dependent'
+)
+
+# A test that fails on its own is broken. Naming whichever test precedes it
+# sends the repair at innocent code, which is the failure mode this measures.
+names, run, tally, polluter, victim = build(8, 3, alone_fails=True)
+assert detect_order_dependency(names, run) is None, (
+    'a test that fails in isolation was blamed on an earlier test'
+)
+
+# An empty suite has no victim.
+assert detect_order_dependency([], lambda order: []) is None
+''',
+    ),
+    task(
+        f"{FAMILY}-0202", FAMILY,
+        prompt=(
+            "Implement a Python function merge_three_way(base, left, right) "
+            "performing a three-way line merge. Each argument is a list of "
+            "lines without terminators. Return a (lines, conflicted) pair. "
+            "Where only one side changed a region of base, take that side's "
+            "version. Where both sides made the identical change, take it "
+            "once. Where both changed one region differently, emit the line "
+            "'<<<<<<< left', then the left version of that region, then the "
+            "line '=======', then the right version, then the line "
+            "'>>>>>>> right'. Two insertions at the same point in base count "
+            "as one region. conflicted is True exactly when a conflict "
+            "region was emitted, and every region the two sides changed "
+            "independently must still be merged in the same result."
+        ),
+        timeout_seconds=60.0,
+        validator=LOAD_CANDIDATE + require("merge_three_way") + r'''
+BASE = ['alpha', 'beta', 'gamma', 'delta', 'epsilon', 'zeta', 'eta']
+
+
+def merged(base, left, right):
+    result = merge_three_way(list(base), list(left), list(right))
+    assert isinstance(result, tuple) and len(result) == 2, (
+        'expected a (lines, conflicted) pair; got %r' % (result,)
+    )
+    lines, conflicted = result
+    return list(lines), conflicted
+
+
+# Nobody changed anything.
+assert merged(BASE, BASE, BASE) == (list(BASE), False)
+
+# One side changed and the other did not, from each side in turn.
+left_only = ['alpha', 'BETA', 'gamma', 'delta', 'epsilon', 'zeta', 'eta']
+assert merged(BASE, left_only, BASE) == (left_only, False), (
+    'a change only the left side made was dropped'
+)
+right_only = ['alpha', 'beta', 'gamma', 'DELTA', 'epsilon', 'zeta', 'eta']
+assert merged(BASE, BASE, right_only) == (right_only, False), (
+    'a change only the right side made was dropped'
+)
+
+# Independent regions merge into one result.
+assert merged(BASE, left_only, right_only) == (
+    ['alpha', 'BETA', 'gamma', 'DELTA', 'epsilon', 'zeta', 'eta'], False
+)
+
+# The same edit from both sides is applied once, not twice.
+assert merged(BASE, left_only, left_only) == (left_only, False)
+
+# A deletion is a change like any other.
+shortened = ['alpha', 'delta', 'epsilon', 'zeta', 'eta']
+assert merged(BASE, shortened, BASE) == (shortened, False)
+
+# Both sides rewrote one line differently. That is the conflict.
+lines, conflicted = merged(
+    BASE,
+    ['alpha', 'beta', 'LEFT', 'delta', 'epsilon', 'zeta', 'eta'],
+    ['alpha', 'beta', 'RIGHT', 'delta', 'epsilon', 'zeta', 'eta'],
+)
+assert conflicted is True, 'a genuine conflict was reported as a clean merge'
+assert lines == ['alpha', 'beta', '<<<<<<< left', 'LEFT', '=======', 'RIGHT',
+                 '>>>>>>> right', 'delta', 'epsilon', 'zeta', 'eta'], lines
+
+# Two insertions at the same point conflict even though neither side touched
+# a line the other touched.
+lines, conflicted = merged(
+    BASE,
+    ['alpha', 'LX', 'beta', 'gamma', 'delta', 'epsilon', 'zeta', 'eta'],
+    ['alpha', 'RX', 'beta', 'gamma', 'delta', 'epsilon', 'zeta', 'eta'],
+)
+assert conflicted is True and lines == [
+    'alpha', '<<<<<<< left', 'LX', '=======', 'RX', '>>>>>>> right',
+    'beta', 'gamma', 'delta', 'epsilon', 'zeta', 'eta',
+], lines
+
+# A conflict in one region must not abandon the merge of the others: the
+# left edit before it and the right edit after it both survive.
+lines, conflicted = merged(
+    BASE,
+    ['alpha', 'BETA', 'gamma', 'delta', 'LEFT', 'zeta', 'eta'],
+    ['alpha', 'beta', 'gamma', 'delta', 'RIGHT', 'zeta', 'ETA'],
+)
+assert conflicted is True
+assert lines == ['alpha', 'BETA', 'gamma', 'delta', '<<<<<<< left', 'LEFT',
+                 '=======', 'RIGHT', '>>>>>>> right', 'zeta', 'ETA'], lines
+
+# An empty base is the degenerate case both sides add to.
+assert merged([], ['x', 'y'], ['x', 'y']) == (['x', 'y'], False)
+lines, conflicted = merged([], ['x'], ['y'])
+assert conflicted is True and lines == [
+    '<<<<<<< left', 'x', '=======', 'y', '>>>>>>> right'
+], lines
+''',
+    ),
+    task(
+        f"{FAMILY}-0204", FAMILY,
+        prompt=(
+            "Implement a Python function resolve_fixtures(fixtures, "
+            "requested) that decides the order test fixtures are set up and "
+            "torn down. fixtures maps a fixture name to a mapping with keys "
+            "scope, one of 'session', 'module' or 'function', and requires, "
+            "a list of fixture names it depends on. requested lists the "
+            "fixtures one test asks for, in the order it names them. Return "
+            "a (setup, teardown) pair of lists holding every fixture "
+            "reachable from requested exactly once. In setup a fixture "
+            "appears after everything it requires, broader scopes come "
+            "before narrower ones with session before module before "
+            "function, and fixtures neither of those rules separates keep "
+            "the order a depth-first walk of requested first reached them "
+            "in. teardown is setup reversed. Raise ValueError if a named "
+            "fixture is not defined, if the dependency graph contains a "
+            "cycle, or if a fixture requires one of narrower scope, which "
+            "cannot outlive it."
+        ),
+        validator=LOAD_CANDIDATE + require("resolve_fixtures") + r'''
+def fixture(scope, *requires):
+    return {'scope': scope, 'requires': list(requires)}
+
+
+def resolved(fixtures, requested):
+    result = resolve_fixtures(fixtures, list(requested))
+    assert isinstance(result, tuple) and len(result) == 2, (
+        'expected a (setup, teardown) pair; got %r' % (result,)
+    )
+    setup, teardown = list(result[0]), list(result[1])
+    assert len(set(setup)) == len(setup), (
+        'a fixture is set up more than once: %r' % (setup,)
+    )
+    assert teardown == list(reversed(setup)), (
+        'teardown is not setup reversed: %r then %r' % (setup, teardown)
+    )
+    return setup
+
+
+# A chain is set up from its base outwards.
+chain = {
+    'database': fixture('session'),
+    'schema': fixture('module', 'database'),
+    'rows': fixture('function', 'schema'),
+}
+assert resolved(chain, ['rows']) == ['database', 'schema', 'rows']
+
+# A shared dependency of two requested fixtures is set up once.
+diamond = {
+    'engine': fixture('session'),
+    'reader': fixture('module', 'engine'),
+    'writer': fixture('module', 'engine'),
+    'case': fixture('function', 'reader', 'writer'),
+}
+assert resolved(diamond, ['case']) == ['engine', 'reader', 'writer', 'case']
+
+# Scope decides the order of two fixtures that do not depend on each other,
+# even when the test names the narrower one first. Setting up a session
+# fixture inside a function one would tie its lifetime to the wrong thing.
+scoped = {'tmpdir': fixture('function'), 'server': fixture('session')}
+assert resolved(scoped, ['tmpdir', 'server']) == ['server', 'tmpdir'], (
+    'a session fixture was set up after a function one'
+)
+
+# Within one scope the walk order is what remains, so it must be kept.
+flat = {'a': fixture('function'), 'b': fixture('function'),
+        'c': fixture('function')}
+assert resolved(flat, ['c', 'a', 'b']) == ['c', 'a', 'b']
+assert resolved(flat, ['b', 'b', 'a']) == ['b', 'a']
+
+# A fixture no test asked for is not set up.
+assert resolved(dict(chain, spare=fixture('session')), ['schema']) == \
+    ['database', 'schema']
+
+for fixtures, requested, why in (
+    ({'a': fixture('function', 'missing')}, ['a'], 'undefined dependency'),
+    ({'a': fixture('function')}, ['absent'], 'undefined request'),
+    ({'a': fixture('function', 'b'), 'b': fixture('function', 'a')}, ['a'],
+     'two-fixture cycle'),
+    ({'a': fixture('function', 'a')}, ['a'], 'self-dependency'),
+    ({'slow': fixture('session', 'fast'), 'fast': fixture('function')},
+     ['slow'], 'session fixture requiring a function one'),
+    ({'mid': fixture('module', 'inner'), 'inner': fixture('function')},
+     ['mid'], 'module fixture requiring a function one'),
+):
+    try:
+        resolve_fixtures(fixtures, requested)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('accepted a %s' % why)
+
+# Requiring something broader is exactly what scopes are for.
+assert resolved({'narrow': fixture('function', 'wide'),
+                 'wide': fixture('session')}, ['narrow']) == \
+    ['wide', 'narrow']
+assert resolve_fixtures({}, []) == ([], []) or \
+    list(resolve_fixtures({}, [])[0]) == []
+''',
+    ),
+    task(
+        f"{FAMILY}-0205", FAMILY,
+        prompt=(
+            "Implement a Python function nondeterministic_fields(run, times) "
+            "that finds which parts of a result are not reproducible. run() "
+            "takes no arguments and returns a structure of dicts, lists and "
+            "scalars. Call run exactly times times and return the sorted "
+            "list of the paths whose value is not identical in every run. A "
+            "path is a string: the empty string is the whole result, a "
+            "mapping key extends a path with a dot and the key, and a list "
+            "index extends it with the index in square brackets. A key "
+            "directly on the result takes no leading dot, so 'a.b[0].c' and "
+            "'[2].x' both name nested fields. Descend into two mappings only "
+            "when they have the same keys and into two lists only when they "
+            "have the same length; when a container's shape differs between "
+            "runs, or the values at a path are of different types, report "
+            "that container's own path and do not descend into it. "
+            "Otherwise report the deepest paths that account for the "
+            "difference, never an ancestor of one. Raise ValueError if "
+            "times is less than 2."
+        ),
+        validator=LOAD_CANDIDATE + require("nondeterministic_fields") + r'''
+def source(sequence):
+    """A run() that returns the next canned result, and counts its calls."""
+    state = {'index': 0, 'calls': 0}
+
+    def run():
+        state['calls'] += 1
+        value = sequence[min(state['index'], len(sequence) - 1)]
+        state['index'] += 1
+        return value
+
+    return run, state
+
+
+steady = {'a': {'b': [1, 2]}, 'c': 'fixed'}
+run, state = source([steady, steady, steady])
+assert nondeterministic_fields(run, 3) == []
+assert state['calls'] == 3, 'run was called %d times, not 3' % state['calls']
+
+# One deep field varies; its ancestors must not be reported instead.
+run, _ = source([{'a': {'b': [1, 2]}, 'c': 'fixed'},
+                 {'a': {'b': [1, 9]}, 'c': 'fixed'}])
+assert nondeterministic_fields(run, 2) == ['a.b[1]']
+
+# Two independent fields, reported sorted.
+run, _ = source([{'a': 1, 'z': {'q': 'x'}}, {'a': 2, 'z': {'q': 'y'}}])
+assert nondeterministic_fields(run, 2) == ['a', 'z.q']
+
+# A field that only moves on the third run is still nondeterministic. A
+# check that compares the first two results reports nothing here, which is
+# how a flake survives a reproduction attempt that ran twice.
+run, _ = source([{'seed': 1}, {'seed': 1}, {'seed': 4}])
+assert nondeterministic_fields(run, 3) == ['seed'], (
+    'a difference that appears only on a later run was missed'
+)
+
+# A container whose shape changes is reported as itself: there is no
+# per-element path that survives in both runs.
+run, _ = source([{'items': [1, 2], 'ok': True},
+                 {'items': [1, 2, 3], 'ok': True}])
+assert nondeterministic_fields(run, 2) == ['items']
+run, _ = source([{'meta': {'host': 'a'}}, {'meta': {'host': 'a', 'pid': 7}}])
+assert nondeterministic_fields(run, 2) == ['meta']
+
+# A type change at a path is a shape change too.
+run, _ = source([{'v': 3}, {'v': '3'}])
+assert nondeterministic_fields(run, 2) == ['v']
+
+# The whole result is the empty path.
+run, _ = source(['first', 'second'])
+assert nondeterministic_fields(run, 2) == ['']
+run, _ = source([[1, 2], [1, 3]])
+assert nondeterministic_fields(run, 2) == ['[1]']
+run, _ = source([[{'x': 1}], [{'x': 2}]])
+assert nondeterministic_fields(run, 2) == ['[0].x']
+
+for bad in (1, 0, -3):
+    try:
+        nondeterministic_fields(lambda: 1, bad)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('accepted times=%r, which compares nothing' % bad)
+''',
+    ),
+    task(
+        f"{FAMILY}-0206", FAMILY,
+        prompt=(
+            "Implement a Python function check_equality_contract(values) "
+            "that audits value objects for the rules dicts, sets and sorting "
+            "rely on. values is a sequence of hashable instances. Return the "
+            "sorted list of rule names that are violated, drawn from: "
+            "'reflexive' when a value does not equal itself; 'symmetric' "
+            "when x == y and y == x disagree for some pair, including a pair "
+            "of different types; 'transitive' when x == y and y == z but not "
+            "x == z; 'hash' when two values compare equal and hash to "
+            "different numbers; 'inequality' when x != y is not the negation "
+            "of x == y; and 'ordering' when x < y and x == y are not a "
+            "consistent strict order, meaning some pair does not have "
+            "exactly one of x < y, x == y and y < x true, or some triple has "
+            "x < y and y < z without x < z. Skip the ordering rule entirely "
+            "if comparing two values with < raises TypeError. Consider every "
+            "pair and triple drawn from values, including a value paired "
+            "with itself, and return an empty list when every rule holds."
+        ),
+        validator=LOAD_CANDIDATE + require("check_equality_contract") + r'''
+class Point:
+    """The contract kept."""
+
+    def __init__(self, x):
+        self.x = x
+
+    def __eq__(self, other):
+        return isinstance(other, Point) and self.x == other.x
+
+    def __hash__(self):
+        return hash(self.x)
+
+    def __lt__(self, other):
+        if not isinstance(other, Point):
+            return NotImplemented
+        return self.x < other.x
+
+
+class Loose:
+    """Overrides __eq__ and inherits identity hashing, the classic slip."""
+
+    def __init__(self, x):
+        self.x = x
+
+    def __eq__(self, other):
+        return isinstance(other, Loose) and self.x == other.x
+
+    __hash__ = object.__hash__
+
+
+class Fuzzy:
+    """Equality within a tolerance, which cannot be transitive."""
+
+    def __init__(self, x):
+        self.x = x
+
+    def __eq__(self, other):
+        return isinstance(other, Fuzzy) and abs(self.x - other.x) <= 2
+
+    def __hash__(self):
+        return 0
+
+
+class Blurry(Fuzzy):
+    """The same tolerance, now hashing by identity as well."""
+
+    __hash__ = object.__hash__
+
+
+class Wide:
+    """Accepts the narrow type; the narrow type does not accept it back."""
+
+    def __eq__(self, other):
+        return isinstance(other, (Wide, Narrow))
+
+    def __hash__(self):
+        return 7
+
+
+class Narrow:
+    def __eq__(self, other):
+        return isinstance(other, Narrow)
+
+    def __hash__(self):
+        return 7
+
+
+class Sloppy:
+    """__ne__ written by hand and no longer the negation of __eq__."""
+
+    def __init__(self, x):
+        self.x = x
+
+    def __eq__(self, other):
+        return isinstance(other, Sloppy) and self.x == other.x
+
+    def __ne__(self, other):
+        return False
+
+    def __hash__(self):
+        return hash(self.x)
+
+
+class Nanish:
+    def __eq__(self, other):
+        return False
+
+    def __hash__(self):
+        return 3
+
+
+class Weird:
+    """Ordering that is true of everything, including a value and itself."""
+
+    def __init__(self, x):
+        self.x = x
+
+    def __eq__(self, other):
+        return isinstance(other, Weird) and self.x == other.x
+
+    def __hash__(self):
+        return hash(self.x)
+
+    def __lt__(self, other):
+        return True
+
+
+assert check_equality_contract([]) == []
+assert check_equality_contract([Point(1), Point(2), Point(1)]) == [], (
+    'a correct value type was reported as broken'
+)
+assert check_equality_contract([Loose(1), Loose(1)]) == ['hash']
+assert check_equality_contract([Fuzzy(0), Fuzzy(2), Fuzzy(4)]) == ['transitive']
+assert check_equality_contract([Wide(), Narrow()]) == ['symmetric'], (
+    'an asymmetry that only shows across two types was missed'
+)
+assert check_equality_contract([Sloppy(1), Sloppy(2)]) == ['inequality']
+assert check_equality_contract([Nanish(), Nanish()]) == ['reflexive']
+assert check_equality_contract([Weird(1), Weird(2)]) == ['ordering']
+
+# Every violated rule is reported, not the first one found.
+assert check_equality_contract([Blurry(0), Blurry(2), Blurry(4)]) == \
+    ['hash', 'transitive']
+
+# One value on its own still exercises the reflexive and ordering rules.
+assert check_equality_contract([Point(5)]) == []
+assert check_equality_contract([Nanish()]) == ['reflexive']
+assert check_equality_contract([Weird(1)]) == ['ordering']
+''',
+    ),
 ]
