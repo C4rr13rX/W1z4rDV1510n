@@ -2856,4 +2856,428 @@ assert check_equality_contract([Nanish()]) == ['reflexive']
 assert check_equality_contract([Weird(1)]) == ['ordering']
 ''',
     ),
+    task(
+        f"{FAMILY}-0203", FAMILY,
+        prompt=(
+            "Implement a Python function tidy_imports(source) that removes "
+            "the unused imports from a module and returns the new source. "
+            "Consider only import statements at module level; leave an "
+            "import inside a function or class alone. An imported binding "
+            "counts as used when its name appears anywhere else in the "
+            "module as a name, including as the leftmost part of an "
+            "attribute reference and inside a nested function or class, when "
+            "it appears as a string in a module-level __all__ assignment, or "
+            "when it appears inside a string annotation. A string anywhere "
+            "else, such as an ordinary constant, does not count. 'import "
+            "a.b' binds the name a, while 'import a.b as c' binds c. Drop a "
+            "'from x import a, b' statement entirely when none of its names "
+            "are used, and otherwise rewrite it as one line naming the used "
+            "ones in their original order. Never remove a __future__ import "
+            "and never remove a star import, whose bindings cannot be known. "
+            "Leave every other line of the module exactly as it was."
+        ),
+        validator=LOAD_CANDIDATE + require("tidy_imports") + r'''
+import ast
+
+SOURCE = """from __future__ import annotations
+
+import os
+import sys
+import json.decoder
+import collections.abc as abc
+from typing import Dict, List, Optional
+from dataclasses import dataclass
+from decimal import Decimal
+from re import *
+
+__all__ = ["Row", "dump", "Decimal"]
+
+MARKER = "os"
+
+
+@dataclass
+class Row:
+    values: Dict[str, int]
+
+    def widen(self) -> "Optional[int]":
+        return abc.Sized and sys.maxsize
+
+
+def dump(payload):
+    import string
+
+    return json.decoder.JSONDecoder().decode(payload)
+"""
+
+
+def imports_of(text):
+    found = []
+    for node in ast.parse(text).body:
+        if isinstance(node, ast.Import):
+            found.append(('import',
+                          tuple((a.name, a.asname) for a in node.names)))
+        elif isinstance(node, ast.ImportFrom):
+            found.append(('from', node.module, node.level,
+                          tuple((a.name, a.asname) for a in node.names)))
+    return found
+
+
+def body_lines(text):
+    return [line for line in text.splitlines()
+            if not line.startswith(('import ', 'from '))]
+
+
+result = tidy_imports(SOURCE)
+try:
+    ast.parse(result)
+except SyntaxError as error:
+    raise AssertionError('the tidied module does not parse: %s' % (error,))
+
+assert imports_of(result) == [
+    ('from', '__future__', 0, (('annotations', None),)),
+    ('import', (('sys', None),)),
+    ('import', (('json.decoder', None),)),
+    ('import', (('collections.abc', 'abc'),)),
+    ('from', 'typing', 0, (('Dict', None), ('Optional', None))),
+    ('from', 'dataclasses', 0, (('dataclass', None),)),
+    ('from', 'decimal', 0, (('Decimal', None),)),
+    ('from', 're', 0, (('*', None),)),
+], imports_of(result)
+
+# Nothing outside an import statement may move, including the nested import
+# of a name the module never uses.
+assert body_lines(result) == body_lines(SOURCE), body_lines(result)
+assert '    import string' in result, 'a function-level import was removed'
+
+# A module with nothing to remove comes back byte for byte.
+CLEAN = 'import sys\n\nLIMIT = sys.maxsize\n'
+assert tidy_imports(CLEAN) == CLEAN
+
+# When every import goes, only the statement lines go with them.
+assert tidy_imports('import os\nimport sys\n\nVALUE = 1\n') == '\nVALUE = 1\n'
+
+# A partially used import spanning several lines collapses to one.
+WRAPPED = """from typing import (
+    Dict,
+    List,
+)
+
+value: Dict[str, int] = {}
+"""
+tidied = tidy_imports(WRAPPED)
+assert imports_of(tidied) == [('from', 'typing', 0, (('Dict', None),))], \
+    imports_of(tidied)
+assert 'value: Dict[str, int] = {}' in tidied
+
+# A star import stays even though its bindings are invisible.
+assert tidy_imports('from os.path import *\n\nX = 1\n') == \
+    'from os.path import *\n\nX = 1\n'
+
+# An empty module is not a special case.
+assert tidy_imports('') == ''
+''',
+    ),
+    task(
+        f"{FAMILY}-0207", FAMILY,
+        prompt=(
+            "Implement a Python function explain_assertion(expression, "
+            "namespace) that renders the intermediate values behind a failed "
+            "assertion the way a test framework does. expression is the "
+            "source of one Python expression written on a single line, built "
+            "only from names, attribute access, subscripts, calls, "
+            "comparisons, boolean and arithmetic operators, conditional "
+            "expressions, container displays and literals. namespace maps "
+            "names to values. Return a (result, lines) pair. result is the "
+            "value of the whole expression, evaluated with those names in "
+            "scope, and an exception raised by the whole expression "
+            "propagates. lines holds one 'source = repr' string for every "
+            "sub-expression of the whole expression that is neither a "
+            "literal nor the whole expression itself, where source is "
+            "exactly the slice of expression that the sub-expression spans "
+            "and repr is the repr of evaluating that slice on its own. "
+            "Order the lines by where the sub-expression starts, and for two "
+            "that start together put the longer first. A sub-expression that "
+            "raises is rendered with the exception class in angle brackets, "
+            "such as '<KeyError>', and does not stop the others. Raise "
+            "ValueError if expression is not a single expression."
+        ),
+        validator=LOAD_CANDIDATE + require("explain_assertion") + r'''
+def explained(expression, namespace):
+    outcome = explain_assertion(expression, dict(namespace))
+    assert isinstance(outcome, tuple) and len(outcome) == 2, (
+        'expected a (result, lines) pair; got %r' % (outcome,)
+    )
+    return outcome[0], list(outcome[1])
+
+
+class Sized:
+    """A callable with a stable repr, so the expected text is fixed."""
+
+    def __call__(self, values):
+        return len(values)
+
+    def __repr__(self):
+        return '<sized>'
+
+
+result, lines = explained('total == expected', {'total': 3, 'expected': 4})
+assert result is False and lines == ['total = 3', 'expected = 4'], lines
+
+# A literal contributes nothing; only the name is worth showing.
+result, lines = explained('x + 1', {'x': 2})
+assert result == 3 and lines == ['x = 2'], lines
+
+# Two sub-expressions starting at the same column: the longer one first,
+# because the reader wants the compound value before its parts.
+result, lines = explained("user['name'] == 'bob'", {'user': {'name': 'ann'}})
+assert result is False, result
+assert lines == ["user['name'] = 'ann'", "user = {'name': 'ann'}"], lines
+
+# The whole expression short-circuits, so the right operand never ran. The
+# explanation still has to say what it would have been, without blowing up.
+result, lines = explained("flag or data['k']", {'flag': True, 'data': {}})
+assert result is True, result
+assert lines == ['flag = True', "data['k'] = <KeyError>", 'data = {}'], lines
+
+# The untaken branch of a conditional names something that does not exist.
+result, lines = explained('a if ok else b', {'a': 1, 'ok': True})
+assert result == 1, result
+assert lines == ['a = 1', 'ok = True', 'b = <NameError>'], lines
+
+# A call shows the call, the thing called and each argument.
+result, lines = explained('size(items) > limit',
+                          {'size': Sized(), 'items': [1, 2], 'limit': 5})
+assert result is False, result
+assert lines == ['size(items) = 2', 'size = <sized>', 'items = [1, 2]',
+                 'limit = 5'], lines
+
+# The same name twice is two occurrences, not one.
+result, lines = explained('x + x', {'x': 2})
+assert result == 4 and lines == ['x = 2', 'x = 2'], lines
+
+# An exception from the whole expression is the caller's to see.
+try:
+    explained('missing + 1', {})
+except NameError:
+    pass
+except ValueError:
+    raise AssertionError('a valid expression was rejected as invalid')
+else:
+    raise AssertionError('an expression that raises returned a value')
+
+for bad in ('x = 1', 'import os', 'a\nb', 'for x in y: pass', '('):
+    try:
+        explain_assertion(bad, {})
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('accepted %r, which is not one expression' % bad)
+''',
+    ),
+    task(
+        f"{FAMILY}-0208", FAMILY,
+        prompt=(
+            "Implement a Python function rewrite_module_path(source, old, "
+            "new) that updates one module for a package that moved, and "
+            "returns the new source. old and new are dotted module paths. "
+            "Rewrite an 'import old' or 'import old.sub' statement, and its "
+            "'as' form, so the imported module starts with new instead of "
+            "old, keeping any alias. Rewrite 'from old import name' and "
+            "'from old.sub import name' the same way, leaving relative "
+            "imports alone. Where a plain import bound a dotted name, every "
+            "attribute reference through it must move too, so with old as "
+            "'a' the expression a.sub.call() becomes new's equivalent. A "
+            "module path that merely begins with the same characters, such "
+            "as 'oldest' when old is 'old', is a different package and must "
+            "not change, and neither may a string literal, a comment, or any "
+            "other line of the module."
+        ),
+        validator=LOAD_CANDIDATE + require("rewrite_module_path") + r'''
+import ast
+import sys
+import types
+
+
+def install(path, **attributes):
+    module = types.ModuleType(path)
+    module.__path__ = []
+    for key, value in attributes.items():
+        setattr(module, key, value)
+    sys.modules[path] = module
+    if '.' in path:
+        parent, _, leaf = path.rpartition('.')
+        setattr(sys.modules[parent], leaf, module)
+    return module
+
+
+class Row:
+    pass
+
+
+fresh = install('fresh')
+install('fresh.core', call=lambda: 'core')
+install('fresh.helpers', assist=lambda: 'assist')
+install('fresh.models', Row=Row)
+fresh.registry = types.SimpleNamespace(name='registry')
+install('staleness')
+install('staleness.thing', tag=lambda: 'tag')
+
+# The old package is deliberately absent: a reference the rewrite missed
+# raises on import rather than quietly resolving to the code that moved.
+SOURCE = """import stale.core
+import stale.helpers as helpers
+import staleness.thing
+from stale.models import Row
+from stale import registry
+
+# stale.core moved, and this comment did not.
+LABEL = "stale.core"
+
+
+def run():
+    return (stale.core.call(), helpers.assist(), staleness.thing.tag(),
+            Row(), registry.name, LABEL)
+"""
+
+
+def imports_of(text):
+    found = []
+    for node in ast.parse(text).body:
+        if isinstance(node, ast.Import):
+            found.append(('import',
+                          tuple((a.name, a.asname) for a in node.names)))
+        elif isinstance(node, ast.ImportFrom):
+            found.append(('from', node.module, node.level,
+                          tuple((a.name, a.asname) for a in node.names)))
+    return found
+
+
+rewritten = rewrite_module_path(SOURCE, 'stale', 'fresh')
+assert imports_of(rewritten) == [
+    ('import', (('fresh.core', None),)),
+    ('import', (('fresh.helpers', 'helpers'),)),
+    ('import', (('staleness.thing', None),)),
+    ('from', 'fresh.models', 0, (('Row', None),)),
+    ('from', 'fresh', 0, (('registry', None),)),
+], imports_of(rewritten)
+
+namespace = {}
+try:
+    exec(compile(rewritten, '<module>', 'exec'), namespace)
+    outcome = namespace['run']()
+except Exception as error:
+    raise AssertionError('the rewritten module does not run: %r' % (error,))
+
+assert outcome[0] == 'core', 'the attribute reference was not moved'
+assert outcome[1] == 'assist' and outcome[2] == 'tag', outcome
+assert isinstance(outcome[3], Row) and outcome[4] == 'registry', outcome
+assert outcome[5] == 'stale.core', 'a string literal was rewritten'
+assert '# stale.core moved, and this comment did not.' in rewritten, \
+    'a comment was rewritten'
+
+# A package that only shares a prefix is a different package.
+assert 'staleness.thing' in rewritten and 'freshness' not in rewritten
+
+# Moving a submodule leaves its siblings where they are.
+moved = rewrite_module_path(SOURCE, 'stale.core', 'fresh.core')
+assert imports_of(moved) == [
+    ('import', (('fresh.core', None),)),
+    ('import', (('stale.helpers', 'helpers'),)),
+    ('import', (('staleness.thing', None),)),
+    ('from', 'stale.models', 0, (('Row', None),)),
+    ('from', 'stale', 0, (('registry', None),)),
+], imports_of(moved)
+assert 'fresh.core.call()' in moved, 'the attribute chain did not follow'
+
+# A package that does not appear leaves the module untouched.
+assert rewrite_module_path(SOURCE, 'absent', 'other') == SOURCE
+
+# A relative import names no package to move.
+RELATIVE = 'from . import stale\nfrom .stale import thing\n'
+assert rewrite_module_path(RELATIVE, 'stale', 'fresh') == RELATIVE
+''',
+    ),
+    task(
+        f"{FAMILY}-0209", FAMILY,
+        prompt=(
+            "Implement a Python function audit_resource_lifetimes(events) "
+            "that finds resource-handling defects in a trace. events is a "
+            "sequence of (action, resource_id) pairs in the order they "
+            "happened, where action is 'acquire' or 'release'. Return a "
+            "mapping with exactly the keys 'leaked', 'double_released', "
+            "'reacquired' and 'out_of_order', each a list of resource ids. "
+            "'leaked' holds the ids still held at the end, in the order they "
+            "were acquired. 'double_released' holds each release of an id "
+            "that is not currently held. 'reacquired' holds each acquire of "
+            "an id already held, which does not acquire it a second time. "
+            "'out_of_order' holds each release that closes an id other than "
+            "the most recently acquired one still held, the pattern that "
+            "defeats nesting-based cleanup; such a release still closes its "
+            "resource. The last three are in the order the defect happened. "
+            "Acquiring an id again after it was released is ordinary and is "
+            "not a defect. Raise ValueError if an action is neither "
+            "'acquire' nor 'release'."
+        ),
+        validator=LOAD_CANDIDATE + require("audit_resource_lifetimes") + r'''
+EMPTY = {'leaked': [], 'double_released': [], 'reacquired': [],
+         'out_of_order': []}
+
+
+def audited(events):
+    report = audit_resource_lifetimes(list(events))
+    assert set(report) == set(EMPTY), (
+        'expected exactly the four keys; got %r' % (sorted(report),)
+    )
+    return {key: list(value) for key, value in report.items()}
+
+
+assert audited([]) == EMPTY
+
+# Properly nested use reports nothing.
+assert audited([('acquire', 'a'), ('acquire', 'b'),
+                ('release', 'b'), ('release', 'a')]) == EMPTY
+
+# Reusing an id after releasing it is ordinary.
+assert audited([('acquire', 'a'), ('release', 'a'),
+                ('acquire', 'a'), ('release', 'a')]) == EMPTY
+
+# What was acquired and never released, in acquisition order.
+assert audited([('acquire', 'b'), ('acquire', 'a'),
+                ('release', 'a')])['leaked'] == ['b']
+assert audited([('acquire', 'b'), ('acquire', 'a')])['leaked'] == ['b', 'a']
+
+# Releasing what is not held, both a second time and never at all.
+assert audited([('acquire', 'a'), ('release', 'a'),
+                ('release', 'a')])['double_released'] == ['a']
+assert audited([('release', 'ghost')]) == dict(EMPTY,
+                                               double_released=['ghost'])
+
+# Acquiring what is already held does not acquire it twice, so one release
+# is enough to close it and there is nothing left over.
+report = audited([('acquire', 'a'), ('acquire', 'a'), ('release', 'a')])
+assert report == dict(EMPTY, reacquired=['a']), report
+
+# Closing out of nesting order is still a close: nothing leaks here.
+report = audited([('acquire', 'a'), ('acquire', 'b'),
+                  ('release', 'a'), ('release', 'b')])
+assert report == dict(EMPTY, out_of_order=['a']), report
+
+# And several such closes are reported in the order they happened.
+report = audited([('acquire', 'a'), ('acquire', 'b'), ('acquire', 'c'),
+                  ('release', 'a'), ('release', 'b'), ('release', 'c')])
+assert report == dict(EMPTY, out_of_order=['a', 'b']), report
+
+# The innermost close is in order even when an outer one is still held.
+report = audited([('acquire', 'a'), ('acquire', 'b'), ('release', 'b')])
+assert report == dict(EMPTY, leaked=['a']), report
+
+for bad in ('open', 'close', '', None):
+    try:
+        audit_resource_lifetimes([('acquire', 'a'), (bad, 'a')])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('accepted the unknown action %r' % (bad,))
+''',
+    ),
 ]

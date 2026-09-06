@@ -10376,3 +10376,290 @@ MUTATIONS["testing_debugging_repair_refactoring-0206"] = (
     "            if bool(x == y) != bool(y == x):\n",
     "            if type(x) is type(y) and bool(x == y) != bool(y == x):\n",
 )
+
+REFERENCES["testing_debugging_repair_refactoring-0203"] = r'''
+import ast
+
+
+def _names_in(text, used):
+    try:
+        inner = ast.parse(text, mode="eval")
+    except SyntaxError:
+        return
+    for node in ast.walk(inner):
+        if isinstance(node, ast.Name):
+            used.add(node.id)
+
+
+def _annotations_of(node):
+    if isinstance(node, ast.AnnAssign):
+        return [node.annotation]
+    if isinstance(node, ast.arg) and node.annotation is not None:
+        return [node.annotation]
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return [node.returns] if node.returns is not None else []
+    return []
+
+
+def _used_names(tree):
+    used = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            used.add(node.id)
+        for annotation in _annotations_of(node):
+            for child in ast.walk(annotation):
+                if isinstance(child, ast.Constant) and \
+                        isinstance(child.value, str):
+                    _names_in(child.value, used)
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id == "__all__"
+                for target in node.targets):
+            for child in ast.walk(node.value):
+                if isinstance(child, ast.Constant) and \
+                        isinstance(child.value, str):
+                    used.add(child.value)
+    return used
+
+
+def _render(aliases):
+    return ", ".join(
+        alias.name + (" as " + alias.asname if alias.asname else "")
+        for alias in aliases
+    )
+
+
+def tidy_imports(source):
+    tree = ast.parse(source)
+    used = _used_names(tree)
+    replacements = {}
+
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            kept = [
+                alias for alias in node.names
+                if (alias.asname or alias.name.split(".")[0]) in used
+            ]
+            if len(kept) == len(node.names):
+                continue
+            text = "import " + _render(kept) + "\n" if kept else None
+            replacements[node.lineno] = (node.end_lineno, text)
+        elif isinstance(node, ast.ImportFrom):
+            if node.module == "__future__":
+                continue
+            if any(alias.name == "*" for alias in node.names):
+                continue
+            kept = [
+                alias for alias in node.names
+                if (alias.asname or alias.name) in used
+            ]
+            if len(kept) == len(node.names):
+                continue
+            if kept:
+                text = ("from " + "." * node.level + (node.module or "")
+                        + " import " + _render(kept) + "\n")
+            else:
+                text = None
+            replacements[node.lineno] = (node.end_lineno, text)
+
+    out = []
+    skip_until = 0
+    for number, line in enumerate(source.splitlines(keepends=True), start=1):
+        if number <= skip_until:
+            continue
+        if number in replacements:
+            skip_until, text = replacements[number]
+            if text is not None:
+                out.append(text)
+            continue
+        out.append(line)
+    return "".join(out)
+'''
+
+
+REFERENCES["testing_debugging_repair_refactoring-0207"] = r'''
+import ast
+
+
+class _Raised:
+    def __init__(self, name):
+        self.name = name
+
+    def __repr__(self):
+        return "<%s>" % (self.name,)
+
+
+def explain_assertion(expression, namespace):
+    try:
+        tree = ast.parse(expression, mode="eval")
+    except SyntaxError as error:
+        raise ValueError("not a single expression: %s" % (error,))
+
+    def evaluate(node):
+        code = compile(ast.Expression(body=node), "<expression>", "eval")
+        return eval(code, {}, dict(namespace))
+
+    shown = []
+    for node in ast.walk(tree.body):
+        if node is tree.body or isinstance(node, ast.Constant):
+            continue
+        if not isinstance(node, ast.expr):
+            continue
+        segment = ast.get_source_segment(expression, node)
+        if segment is None:
+            continue
+        try:
+            value = evaluate(node)
+        except Exception as error:
+            value = _Raised(type(error).__name__)
+        shown.append((node.col_offset, -node.end_col_offset,
+                      "%s = %r" % (segment, value)))
+
+    shown.sort(key=lambda item: (item[0], item[1]))
+    return evaluate(tree.body), [text for _, _, text in shown]
+'''
+
+
+REFERENCES["testing_debugging_repair_refactoring-0208"] = r'''
+import ast
+
+
+def _dotted(node):
+    parts = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return None
+    parts.append(node.id)
+    return ".".join(reversed(parts))
+
+
+def _moved(name, old, new):
+    if name == old:
+        return new
+    if name.startswith(old + "."):
+        return new + name[len(old):]
+    return None
+
+
+def rewrite_module_path(source, old, new):
+    tree = ast.parse(source)
+    lines = source.splitlines(keepends=True)
+    statements = {}
+    edits = []
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            rendered = []
+            changed = False
+            for alias in node.names:
+                target = _moved(alias.name, old, new)
+                if target is not None:
+                    changed = True
+                rendered.append((target or alias.name, alias.asname))
+            if changed:
+                statements[node.lineno] = (node.end_lineno, "import " + ", ".join(
+                    name + (" as " + asname if asname else "")
+                    for name, asname in rendered) + "\n")
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                continue
+            target = _moved(node.module or "", old, new)
+            if target is None:
+                continue
+            statements[node.lineno] = (node.end_lineno, (
+                "from " + target + " import " + ", ".join(
+                    alias.name + (" as " + alias.asname if alias.asname else "")
+                    for alias in node.names) + "\n"))
+        elif isinstance(node, (ast.Attribute, ast.Name)):
+            if _dotted(node) == old and node.lineno == node.end_lineno:
+                edits.append((node.lineno, node.col_offset,
+                              node.end_col_offset))
+
+    for lineno, start, end in sorted(edits, reverse=True):
+        line = lines[lineno - 1]
+        lines[lineno - 1] = line[:start] + new + line[end:]
+
+    out = []
+    skip_until = 0
+    for number, line in enumerate(lines, start=1):
+        if number <= skip_until:
+            continue
+        if number in statements:
+            skip_until, text = statements[number]
+            out.append(text)
+            continue
+        out.append(line)
+    return "".join(out)
+'''
+
+
+REFERENCES["testing_debugging_repair_refactoring-0209"] = r'''
+def audit_resource_lifetimes(events):
+    held = []
+    report = {
+        "leaked": [],
+        "double_released": [],
+        "reacquired": [],
+        "out_of_order": [],
+    }
+    for action, resource in events:
+        if action == "acquire":
+            if resource in held:
+                report["reacquired"].append(resource)
+                continue
+            held.append(resource)
+        elif action == "release":
+            if resource not in held:
+                report["double_released"].append(resource)
+                continue
+            if held[-1] != resource:
+                report["out_of_order"].append(resource)
+            held.remove(resource)
+        else:
+            raise ValueError("unknown action %r" % (action,))
+    report["leaked"] = list(held)
+    return report
+'''
+
+
+# Decide a plain import is used by its full dotted path rather than by the
+# name it actually binds. Every undotted import and every aliased one still
+# resolves; only "import a.b", used as a.b.thing, is deleted out from under
+# the code that calls it.
+MUTATIONS["testing_debugging_repair_refactoring-0203"] = (
+    "                if (alias.asname or alias.name.split(\".\")[0]) in used\n",
+    "                if (alias.asname or alias.name) in used\n",
+)
+
+# Show only the sub-expressions that could be evaluated. Every assertion whose
+# parts all evaluate reads the same, and the explanation goes quiet on exactly
+# the operand that short-circuiting or a missing name makes interesting.
+MUTATIONS["testing_debugging_repair_refactoring-0207"] = (
+    "        except Exception as error:\n"
+    "            value = _Raised(type(error).__name__)\n",
+    "        except Exception:\n"
+    "            continue\n",
+)
+
+# Match the moved package by string prefix instead of on a dot boundary.
+# Everything under the package that moved is still rewritten correctly; a
+# neighbouring package whose name merely starts the same way is dragged along.
+MUTATIONS["testing_debugging_repair_refactoring-0208"] = (
+    "    if name.startswith(old + \".\"):\n",
+    "    if name.startswith(old):\n",
+)
+
+# Report the out-of-order release but do not let it close the resource, as a
+# strict stack discipline would. The defect is still named; the resource it
+# closed is now reported leaked as well, blaming code that did release it.
+MUTATIONS["testing_debugging_repair_refactoring-0209"] = (
+    "            if held[-1] != resource:\n"
+    "                report[\"out_of_order\"].append(resource)\n"
+    "            held.remove(resource)\n",
+    "            if held[-1] != resource:\n"
+    "                report[\"out_of_order\"].append(resource)\n"
+    "                continue\n"
+    "            held.remove(resource)\n",
+)
