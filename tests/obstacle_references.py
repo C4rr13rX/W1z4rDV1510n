@@ -1186,6 +1186,259 @@ class ReadWriteLock:
 '''
 
 
+REFERENCES["concurrency_async_distributed-0009"] = r'''
+import bisect
+import hashlib
+
+
+class HashRing:
+    def __init__(self, nodes=(), replicas=100):
+        if replicas < 1:
+            raise ValueError("replicas must be positive")
+        self._replicas = replicas
+        self._points = []
+        self._owners = {}
+        self._members = set()
+        for node in nodes:
+            self.add(node)
+
+    @staticmethod
+    def _hash(text):
+        digest = hashlib.sha256(text.encode("utf-8")).digest()
+        return int.from_bytes(digest[:8], "big")
+
+    def _points_for(self, node):
+        return [self._hash(f"{node}:{i}") for i in range(self._replicas)]
+
+    def add(self, node):
+        if node in self._members:
+            return
+        self._members.add(node)
+        for point in self._points_for(node):
+            self._owners[point] = node
+            bisect.insort(self._points, point)
+
+    def remove(self, node):
+        if node not in self._members:
+            raise KeyError(node)
+        self._members.discard(node)
+        for point in self._points_for(node):
+            if self._owners.pop(point, None) is None:
+                continue
+            index = bisect.bisect_left(self._points, point)
+            while index < len(self._points) and self._points[index] == point:
+                self._points.pop(index)
+
+    def get(self, key):
+        if not self._points:
+            raise KeyError("the ring has no members")
+        index = bisect.bisect(self._points, self._hash(key))
+        if index == len(self._points):
+            index = 0
+        return self._owners[self._points[index]]
+'''
+
+
+REFERENCES["concurrency_async_distributed-0010"] = r'''
+class PNCounter:
+    def __init__(self, node_id, _increments=None, _decrements=None):
+        self.node_id = node_id
+        self._increments = dict(_increments or {})
+        self._decrements = dict(_decrements or {})
+
+    def increment(self, amount=1):
+        if amount < 0:
+            raise ValueError("amount must not be negative")
+        self._increments[self.node_id] = (
+            self._increments.get(self.node_id, 0) + amount)
+
+    def decrement(self, amount=1):
+        if amount < 0:
+            raise ValueError("amount must not be negative")
+        self._decrements[self.node_id] = (
+            self._decrements.get(self.node_id, 0) + amount)
+
+    def value(self):
+        return sum(self._increments.values()) - sum(self._decrements.values())
+
+    def merge(self, other):
+        increments = dict(self._increments)
+        for node, count in other._increments.items():
+            increments[node] = max(increments.get(node, 0), count)
+        decrements = dict(self._decrements)
+        for node, count in other._decrements.items():
+            decrements[node] = max(decrements.get(node, 0), count)
+        return PNCounter(self.node_id, increments, decrements)
+'''
+
+
+REFERENCES["concurrency_async_distributed-0011"] = r'''
+class LeaseHeldError(Exception):
+    pass
+
+
+class StaleTokenError(Exception):
+    pass
+
+
+class LeaseManager:
+    def __init__(self, lease_seconds, clock):
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be positive")
+        self._lease_seconds = lease_seconds
+        self._clock = clock
+        self._holder = None
+        self._expires_at = 0.0
+        self._issued = 0
+
+    def _active(self):
+        return self._holder is not None and self._clock() < self._expires_at
+
+    def acquire(self, holder):
+        if self._active() and self._holder != holder:
+            raise LeaseHeldError(f"{self._holder} holds the lease")
+        self._issued += 1
+        self._holder = holder
+        self._expires_at = self._clock() + self._lease_seconds
+        return self._issued
+
+    def release(self, holder):
+        if self._holder != holder or not self._active():
+            raise LeaseHeldError(f"{holder} does not hold the lease")
+        self._holder = None
+        self._expires_at = 0.0
+
+
+class FencedStore:
+    def __init__(self):
+        self._values = {}
+        self._highest = 0
+
+    def write(self, token, key, value):
+        if token < self._highest:
+            raise StaleTokenError(
+                f"token {token} is below the accepted {self._highest}")
+        self._highest = token
+        self._values[key] = value
+
+    def read(self, key):
+        return self._values[key]
+'''
+
+
+REFERENCES["concurrency_async_distributed-0012"] = r'''
+class NotEnoughReplicas(Exception):
+    pass
+
+
+class ConflictingVersions(Exception):
+    pass
+
+
+def _validate(n, r, w):
+    if not 1 <= r <= n or not 1 <= w <= n:
+        raise ValueError("r and w must each lie between 1 and n")
+
+
+def is_strongly_consistent(n, r, w):
+    _validate(n, r, w)
+    return r + w > n
+
+
+def tolerated_failures(n, r, w):
+    _validate(n, r, w)
+    return n - max(r, w)
+
+
+def resolve(responses, r):
+    responses = list(responses)
+    if len(responses) < r:
+        raise NotEnoughReplicas(
+            f"{len(responses)} responses, {r} required")
+    newest = max(version for _, version, _ in responses)
+    winners = {value for _, version, value in responses if version == newest}
+    if len(winners) > 1:
+        raise ConflictingVersions(
+            f"{len(winners)} values share version {newest}")
+    value = winners.pop()
+    stale = sorted(node for node, version, _ in responses if version < newest)
+    return value, stale
+'''
+
+
+REFERENCES["concurrency_async_distributed-0013"] = r'''
+class TumblingWindows:
+    def __init__(self, window_seconds, allowed_lateness):
+        if window_seconds <= 0:
+            raise ValueError("window_seconds must be positive")
+        if allowed_lateness < 0:
+            raise ValueError("allowed_lateness must not be negative")
+        self._window = window_seconds
+        self._lateness = allowed_lateness
+        self._open = {}
+        self._closed = set()
+        self._watermark = None
+        self._dropped = 0
+
+    def _start_of(self, event_time):
+        return (event_time // self._window) * self._window
+
+    def add(self, event_time, value):
+        start = self._start_of(event_time)
+        if start in self._closed:
+            self._dropped += 1
+            return
+        self._open.setdefault(start, []).append(value)
+
+    def advance_watermark(self, watermark):
+        if self._watermark is not None and watermark < self._watermark:
+            raise ValueError("the watermark must not move backwards")
+        self._watermark = watermark
+        due = sorted(
+            start for start in self._open
+            if start + self._window + self._lateness <= watermark
+        )
+        emitted = []
+        for start in due:
+            emitted.append((start, self._open.pop(start)))
+            self._closed.add(start)
+        return emitted
+
+    def dropped_count(self):
+        return self._dropped
+'''
+
+
+REFERENCES["concurrency_async_distributed-0014"] = r'''
+import threading
+
+
+class CyclicBarrier:
+    def __init__(self, parties):
+        if isinstance(parties, bool) or not isinstance(parties, int) \
+                or parties < 1:
+            raise ValueError("parties must be a positive integer")
+        self._parties = parties
+        self._condition = threading.Condition()
+        self._count = 0
+        self._round = 0
+
+    def wait(self):
+        with self._condition:
+            current = self._round
+            index = self._count
+            self._count += 1
+            if self._count == self._parties:
+                self._count = 0
+                self._round += 1
+                self._condition.notify_all()
+            else:
+                while current == self._round:
+                    self._condition.wait()
+            return index
+'''
+
+
 REFERENCES["databases_migrations_transactions-0001"] = r'''
 import hashlib
 
@@ -8064,6 +8317,51 @@ MUTATIONS: dict[str, tuple[str, str]] = {
     "concurrency_async_distributed-0008": (
         "while self._writer or self._waiting_writers > 0:",
         "while self._writer:",
+    ),
+    # Give every replica of a node the same ring position. Membership,
+    # determinism and minimal disruption all still hold -- the ring is simply
+    # eight arcs of wildly uneven length, which is what replicas exist to fix.
+    "concurrency_async_distributed-0009": (
+        '        return [self._hash(f"{node}:{i}") '
+        "for i in range(self._replicas)]",
+        '        return [self._hash(f"{node}") for i in range(self._replicas)]',
+    ),
+    # Add the two replicas' counts instead of joining them. Right the first
+    # time a state is delivered and wrong on every redelivery, which is the
+    # case an at-least-once gossip protocol guarantees will happen.
+    "concurrency_async_distributed-0010": (
+        "            increments[node] = max(increments.get(node, 0), count)",
+        "            increments[node] = increments.get(node, 0) + count",
+    ),
+    # Compute the fencing check and then decline to act on it -- the shape a
+    # guard takes after it is softened to stop breaking a caller. Expiry
+    # still works, so only the write from the lapsed holder tells them apart.
+    "concurrency_async_distributed-0011": (
+        "            raise StaleTokenError(\n"
+        '                f"token {token} is below the accepted '
+        '{self._highest}")',
+        "            pass",
+    ),
+    # Make the quorum rule inclusive. Correct for every configuration that is
+    # comfortably safe or comfortably unsafe, and it certifies exactly the
+    # boundary case where a read and a write quorum need not intersect.
+    "concurrency_async_distributed-0012": (
+        "    return r + w > n",
+        "    return r + w >= n",
+    ),
+    # Close a window as soon as event time passes its end, ignoring the
+    # lateness the constructor was given. Every punctual event still lands in
+    # the right window; the late ones the allowance exists for are dropped.
+    "concurrency_async_distributed-0013": (
+        "            if start + self._window + self._lateness <= watermark",
+        "            if start + self._window <= watermark",
+    ),
+    # Hand every party the same arrival index. The barrier still synchronises
+    # correctly, so only the contract that each round's indices are distinct
+    # notices.
+    "concurrency_async_distributed-0014": (
+        "            index = self._count",
+        "            index = 0",
     ),
     # Take the first range that covers a candidate instead of the most
     # specific one: `*/*;q=0.5, text/html;q=0.1` then reads html at 0.5.

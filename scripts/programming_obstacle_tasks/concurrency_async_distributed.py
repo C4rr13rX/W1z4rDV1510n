@@ -705,4 +705,488 @@ assert order == ["writer", "reader"], \
 ''',
         timeout_seconds=90.0,
     ),
+    task(
+        f"{FAMILY}-0009", FAMILY,
+        prompt=(
+            "Implement a Python class HashRing(nodes=(), replicas=100) that "
+            "distributes keys over nodes by consistent hashing. add(node) "
+            "and remove(node) change the membership and get(key) returns the "
+            "node holding a key. Each node takes `replicas` positions on the "
+            "ring so that load stays even. The mapping must depend only on "
+            "the current member set, never on the order members were added, "
+            "and adding or removing one node must leave every other key "
+            "where it was. get raises KeyError on an empty ring and remove "
+            "raises KeyError for a node that is not a member."
+        ),
+        timeout_seconds=90.0,
+        validator=LOAD_CANDIDATE + require("HashRing") + '''
+nodes = [f"node-{index}" for index in range(8)]
+keys = [f"key-{index}" for index in range(8000)]
+
+ring = HashRing(nodes)
+before = {key: ring.get(key) for key in keys}
+assert set(before.values()) <= set(nodes), "get returned an unknown node"
+assert len(set(before.values())) == 8, "some node was given no keys at all"
+
+# The ring is a function of the member set, not of the build order.
+rebuilt = HashRing()
+for node in reversed(nodes):
+    rebuilt.add(node)
+assert all(rebuilt.get(key) == before[key] for key in keys), \\
+    "the mapping depends on the order nodes were added"
+
+# Even load is what the replica count buys; one position per node would not
+# reach it. The bounds are wide enough that hash noise cannot cross them.
+counts = {}
+for owner in before.values():
+    counts[owner] = counts.get(owner, 0) + 1
+mean = len(keys) / 8.0
+assert min(counts.values()) > 0.4 * mean, \\
+    f"load is badly skewed: {sorted(counts.values())}"
+assert max(counts.values()) < 2.0 * mean, \\
+    f"load is badly skewed: {sorted(counts.values())}"
+
+# Removing a node may move that node's keys and nothing else. Hashing modulo
+# the member count passes every assertion above and fails this one.
+victim = nodes[3]
+ring.remove(victim)
+after = {key: ring.get(key) for key in keys}
+assert victim not in set(after.values()), "a removed node still owns keys"
+moved = [key for key in keys if after[key] != before[key]]
+assert all(before[key] == victim for key in moved), \\
+    "removing one node moved keys that did not belong to it"
+assert len(moved) == sum(1 for key in keys if before[key] == victim)
+
+# Adding a node may only pull keys onto the newcomer.
+grown = HashRing(nodes)
+grown.add("node-new")
+after_add = {key: grown.get(key) for key in keys}
+gained = [key for key in keys if after_add[key] != before[key]]
+assert gained, "adding a node moved no keys at all"
+assert all(after_add[key] == "node-new" for key in gained), \\
+    "adding one node shuffled keys between the existing nodes"
+
+assert all(grown.get(key) == after_add[key] for key in keys), \\
+    "get is not deterministic across calls"
+
+solo = HashRing(["only"])
+assert all(solo.get(key) == "only" for key in keys[:200])
+
+try:
+    HashRing().get("anything")
+except KeyError:
+    pass
+else:
+    raise AssertionError("an empty ring returned a node")
+
+try:
+    HashRing(["a"]).remove("b")
+except KeyError:
+    pass
+else:
+    raise AssertionError("removing a node that is not a member was accepted")
+''',
+    ),
+    task(
+        f"{FAMILY}-0010", FAMILY,
+        prompt=(
+            "Implement a Python class PNCounter(node_id) -- a counter that "
+            "several replicas increment and decrement independently and then "
+            "reconcile without coordination. increment(amount=1) and "
+            "decrement(amount=1) record activity against this replica's own "
+            "node_id and raise ValueError for a negative amount. value() "
+            "returns the current total. merge(other) returns a NEW PNCounter "
+            "holding the join of the two replicas' knowledge and leaves both "
+            "operands unchanged. Merging must be idempotent, commutative and "
+            "associative, so replicas that exchange states in any order, any "
+            "number of times, all settle on the same value."
+        ),
+        validator=LOAD_CANDIDATE + require("PNCounter") + '''
+a = PNCounter("a")
+b = PNCounter("b")
+c = PNCounter("c")
+a.increment(5)
+a.decrement(2)
+b.increment(7)
+c.decrement(4)
+assert a.value() == 3, f"a.value() is {a.value()}, expected 3"
+assert b.value() == 7, f"b.value() is {b.value()}, expected 7"
+assert c.value() == -4, f"c.value() is {c.value()}, expected -4"
+
+ab = a.merge(b)
+assert a.value() == 3 and b.value() == 7, "merge mutated one of its operands"
+assert ab.value() == 10, f"a.merge(b) is {ab.value()}, expected 10"
+
+# Re-delivering a state a replica has already seen must change nothing. This
+# is what separates joining the two states from adding them: addition is
+# right the first time and wrong on every repeat.
+assert ab.merge(b).value() == 10, "merging an already-seen state changed the value"
+assert ab.merge(b).merge(b).value() == 10, "a third delivery changed the value"
+assert ab.merge(ab).value() == 10, "merging a replica with itself changed the value"
+
+assert a.merge(b).value() == b.merge(a).value(), "merge is not commutative"
+assert (a.merge(b)).merge(c).value() == a.merge(b.merge(c)).value(), \\
+    "merge is not associative"
+
+fresh = PNCounter("fresh")
+assert a.merge(fresh).value() == 3, "merging an empty replica changed the value"
+assert fresh.merge(a).value() == 3, "merging into an empty replica lost updates"
+
+# A divergent history gossiped in two different orders, with redundant
+# deliveries in both. The expected total is accumulated alongside the plan
+# rather than written down.
+replicas = [PNCounter("r0"), PNCounter("r1"), PNCounter("r2")]
+plan = [(0, 1, 3), (1, -1, 1), (2, 1, 10), (0, -1, 4),
+        (1, 1, 6), (2, -1, 2), (0, 1, 1), (1, -1, 5)]
+total = 0
+for index, sign, amount in plan:
+    if sign > 0:
+        replicas[index].increment(amount)
+    else:
+        replicas[index].decrement(amount)
+    total += sign * amount
+
+left = replicas[0].merge(replicas[1]).merge(replicas[2]).merge(replicas[1])
+right = replicas[2].merge(replicas[0]).merge(replicas[1]).merge(replicas[2])
+assert left.value() == total, f"one gossip order settled on {left.value()}, not {total}"
+assert right.value() == total, f"the other settled on {right.value()}, not {total}"
+assert left.merge(right).value() == total, "re-merging two converged replicas drifted"
+
+for bad in (-1, -100):
+    try:
+        PNCounter("x").increment(bad)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"increment({bad}) was accepted")
+    try:
+        PNCounter("x").decrement(bad)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"decrement({bad}) was accepted")
+''',
+    ),
+    task(
+        f"{FAMILY}-0011", FAMILY,
+        prompt=(
+            "Implement LeaseManager(lease_seconds, clock) and FencedStore(), "
+            "plus exception classes LeaseHeldError and StaleTokenError. "
+            "`clock` is a zero-argument callable returning a monotonic float "
+            "in seconds. LeaseManager.acquire(holder) grants the lease when "
+            "none is active or the active one has expired, and returns a "
+            "fencing token: an integer strictly greater than every token the "
+            "manager has ever issued. It raises LeaseHeldError while another "
+            "holder's lease is unexpired. release(holder) ends the lease and "
+            "raises LeaseHeldError if that holder does not hold it. "
+            "FencedStore.write(token, key, value) stores the value and "
+            "remembers the highest token it has accepted, raising "
+            "StaleTokenError for any token below that. read(key) returns the "
+            "stored value and raises KeyError when there is none."
+        ),
+        validator=LOAD_CANDIDATE + require("LeaseManager") + require("FencedStore")
+        + require("LeaseHeldError") + require("StaleTokenError") + '''
+now = [1000.0]
+manager = LeaseManager(30.0, lambda: now[0])
+store = FencedStore()
+
+first = manager.acquire("A")
+assert isinstance(first, int) and not isinstance(first, bool), \\
+    f"the fencing token {first!r} is not an integer"
+store.write(first, "config", "from A")
+assert store.read("config") == "from A"
+
+now[0] += 10.0
+try:
+    manager.acquire("B")
+except LeaseHeldError:
+    pass
+else:
+    raise AssertionError("two holders were granted the lease at once")
+
+# A stalls -- garbage collection, a network partition -- long enough for its
+# lease to lapse, and B takes over.
+now[0] += 25.0
+second = manager.acquire("B")
+assert second > first, "the fencing token did not increase across holders"
+store.write(second, "config", "from B")
+
+# A wakes up still believing it holds the lease. Expiry alone cannot stop
+# this write; only the token can, and that is the whole point of the task.
+try:
+    store.write(first, "config", "from A, too late")
+except StaleTokenError:
+    pass
+else:
+    raise AssertionError("a write from an expired lease holder was accepted")
+assert store.read("config") == "from B", "the stale write survived in the store"
+
+# The current holder keeps writing with the token it already has.
+store.write(second, "other", "also from B")
+assert store.read("other") == "also from B"
+
+manager.release("B")
+third = manager.acquire("A")
+assert third > second, "a token was reissued after a clean release"
+
+try:
+    manager.release("B")
+except LeaseHeldError:
+    pass
+else:
+    raise AssertionError("a holder that does not hold the lease released it")
+
+issued = [first, second, third]
+for _ in range(5):
+    manager.release("A")
+    now[0] += 1.0
+    issued.append(manager.acquire("A"))
+assert len(set(issued)) == len(issued), f"a token was reused: {issued}"
+assert issued == sorted(issued), f"tokens are not strictly increasing: {issued}"
+
+try:
+    store.read("missing")
+except KeyError:
+    pass
+else:
+    raise AssertionError("reading an absent key did not raise KeyError")
+''',
+    ),
+    task(
+        f"{FAMILY}-0012", FAMILY,
+        prompt=(
+            "Implement quorum helpers for a replicated store, plus exception "
+            "classes NotEnoughReplicas and ConflictingVersions. "
+            "is_strongly_consistent(n, r, w) reports whether a read quorum of "
+            "r and a write quorum of w over n replicas guarantee that a read "
+            "sees the latest acknowledged write. tolerated_failures(n, r, w) "
+            "returns how many replicas may be unreachable while both quorums "
+            "are still satisfiable. Both raise ValueError unless r and w each "
+            "lie between 1 and n. resolve(responses, r) takes a list of "
+            "(node, version, value) triples: it raises NotEnoughReplicas when "
+            "fewer than r responded, raises ConflictingVersions when two "
+            "different values share the highest version, and otherwise "
+            "returns (value, stale_nodes) where value is the one at the "
+            "highest version and stale_nodes is the sorted list of nodes that "
+            "answered with an older version."
+        ),
+        validator=LOAD_CANDIDATE + require("is_strongly_consistent")
+        + require("tolerated_failures") + require("resolve")
+        + require("NotEnoughReplicas") + require("ConflictingVersions") + '''
+# The rule is a strict inequality over integers, so the cases that sit
+# exactly on r + w == n are the ones worth asserting, from both sides. The
+# asymmetric pairs also separate the overlap rule from the write-quorum rule
+# w * 2 > n, which agrees everywhere else.
+for n, r, w, expected in (
+        (3, 2, 2, True), (3, 2, 1, False), (3, 1, 3, True), (3, 3, 1, True),
+        (5, 3, 3, True), (5, 2, 3, False), (5, 1, 1, False), (5, 4, 2, True),
+        (5, 5, 1, True), (1, 1, 1, True), (4, 2, 2, False), (4, 3, 2, True)):
+    got = is_strongly_consistent(n, r, w)
+    assert got is expected, (
+        f"is_strongly_consistent(n={n}, r={r}, w={w}) returned {got!r}, "
+        f"expected {expected!r}")
+
+for n, r, w, expected in ((3, 2, 2, 1), (5, 2, 2, 3), (5, 1, 5, 0),
+                          (3, 1, 1, 2), (5, 4, 1, 1), (1, 1, 1, 0)):
+    got = tolerated_failures(n, r, w)
+    assert got == expected, (
+        f"tolerated_failures(n={n}, r={r}, w={w}) returned {got}, "
+        f"expected {expected}")
+
+for n, r, w in ((3, 0, 2), (3, 4, 2), (3, 2, 0), (3, 2, 4), (3, -1, 1)):
+    for function in (is_strongly_consistent, tolerated_failures):
+        try:
+            function(n, r, w)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"{function.__name__}({n}, {r}, {w}) was accepted")
+
+value, stale = resolve(
+    [("n3", 3, "old"), ("n1", 5, "current"), ("n2", 5, "current")], 2)
+assert value == "current", f"resolve chose {value!r}"
+assert stale == ["n3"], f"stale nodes {stale}"
+
+value, stale = resolve([("n2", 9, "same"), ("n1", 9, "same")], 2)
+assert value == "same" and stale == [], f"unanimous responses reported {stale}"
+
+value, stale = resolve(
+    [("nb", 1, "old"), ("nc", 1, "old"), ("na", 4, "new")], 3)
+assert value == "new" and stale == ["nb", "nc"], f"stale nodes {stale}"
+
+try:
+    resolve([("n1", 5, "only")], 2)
+except NotEnoughReplicas:
+    pass
+else:
+    raise AssertionError("resolve answered from fewer than r replicas")
+
+try:
+    resolve([], 1)
+except NotEnoughReplicas:
+    pass
+else:
+    raise AssertionError("resolve answered from no replicas at all")
+
+try:
+    resolve([("n1", 5, "left"), ("n2", 5, "right")], 2)
+except ConflictingVersions:
+    pass
+else:
+    raise AssertionError("two values at the same highest version were resolved")
+
+# A conflict below the highest version is not a conflict; it is stale data.
+value, stale = resolve(
+    [("n1", 5, "winner"), ("n2", 4, "left"), ("n3", 4, "right")], 3)
+assert value == "winner" and stale == ["n2", "n3"], f"stale nodes {stale}"
+''',
+    ),
+    task(
+        f"{FAMILY}-0013", FAMILY,
+        prompt=(
+            "Implement a Python class TumblingWindows(window_seconds, "
+            "allowed_lateness) that groups out-of-order events by event time. "
+            "add(event_time, value) files the event into the window starting "
+            "at the largest multiple of window_seconds not above event_time; "
+            "if that window has already been emitted the event is dropped "
+            "instead and counted. advance_watermark(watermark) emits and "
+            "forgets every window that the watermark has passed, meaning "
+            "window_start + window_seconds + allowed_lateness is at most the "
+            "watermark, returning a list of (window_start, values) in "
+            "ascending window_start order with values in arrival order. A "
+            "watermark below the previous one raises ValueError, as does a "
+            "window_seconds that is not positive or a negative "
+            "allowed_lateness. dropped_count() returns how many events "
+            "arrived too late to be filed."
+        ),
+        validator=LOAD_CANDIDATE + require("TumblingWindows") + '''
+windows = TumblingWindows(10, 5)
+windows.add(3, "a")
+windows.add(7, "b")
+windows.add(12, "c")
+assert windows.dropped_count() == 0
+
+# The first window ends at 10 but stays open until 10 + 5 lateness. An
+# implementation that forgets allowed_lateness closes it here.
+assert windows.advance_watermark(14) == [], \\
+    "a window closed before its allowed lateness elapsed"
+
+windows.add(5, "late but welcome")
+emitted = windows.advance_watermark(15)
+assert emitted == [(0, ["a", "b", "late but welcome"])], f"emitted {emitted}"
+
+windows.add(6, "far too late")
+assert windows.dropped_count() == 1, "an event for a closed window was filed"
+assert windows.advance_watermark(24) == [], "the second window closed early"
+
+emitted = windows.advance_watermark(25)
+assert emitted == [(10, ["c"])], f"emitted {emitted}"
+
+try:
+    windows.advance_watermark(20)
+except ValueError:
+    pass
+else:
+    raise AssertionError("the watermark was allowed to move backwards")
+
+# Several windows becoming due at once come out in event-time order.
+many = TumblingWindows(10, 0)
+for event_time, value in ((25, "x"), (4, "y"), (31, "z"), (14, "w"), (6, "v")):
+    many.add(event_time, value)
+emitted = many.advance_watermark(40)
+assert emitted == [(0, ["y", "v"]), (10, ["w"]), (20, ["x"]), (30, ["z"])], \\
+    f"emitted {emitted}"
+assert many.advance_watermark(41) == [], "a window was emitted twice"
+
+# Zero lateness closes a window exactly at its end, not before it.
+edge = TumblingWindows(10, 0)
+edge.add(1, "p")
+assert edge.advance_watermark(9) == []
+assert edge.advance_watermark(10) == [(0, ["p"])]
+
+for bad_window, bad_lateness in ((0, 0), (-10, 0), (10, -1)):
+    try:
+        TumblingWindows(bad_window, bad_lateness)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(
+            f"TumblingWindows({bad_window}, {bad_lateness}) was accepted")
+''',
+    ),
+    task(
+        f"{FAMILY}-0014", FAMILY,
+        prompt=(
+            "Implement a Python class CyclicBarrier(parties) at which "
+            "threads wait for one another. wait() blocks until `parties` "
+            "threads have called it, then releases all of them; it returns "
+            "the caller's arrival index, a distinct integer in [0, parties) "
+            "for each thread in that round. The barrier is reusable: once a "
+            "round is released the next wait() starts a fresh round with its "
+            "own indices. Raise ValueError unless parties is a positive "
+            "integer."
+        ),
+        timeout_seconds=90.0,
+        validator=LOAD_CANDIDATE + require("CyclicBarrier") + '''
+import threading
+
+PARTIES = 6
+ROUNDS = 5
+
+barrier = CyclicBarrier(PARTIES)
+arrived = [0] * ROUNDS
+indices = [[] for _ in range(ROUNDS)]
+guard = threading.Lock()
+faults = []
+
+
+def worker():
+    try:
+        for round_number in range(ROUNDS):
+            with guard:
+                arrived[round_number] += 1
+            index = barrier.wait()
+            # Every party increments before it calls wait, and wait cannot
+            # return until all of them have called it -- so this count must
+            # already be complete. The assertion holds under every
+            # interleaving rather than under a lucky one.
+            with guard:
+                seen = arrived[round_number]
+                indices[round_number].append(index)
+            if seen != PARTIES:
+                faults.append(
+                    f"round {round_number} released a thread when only "
+                    f"{seen} of {PARTIES} had arrived")
+    except BaseException as error:
+        faults.append(repr(error))
+
+
+threads = [threading.Thread(target=worker) for _ in range(PARTIES)]
+for thread in threads:
+    thread.start()
+for thread in threads:
+    thread.join(timeout=20)
+
+assert not any(thread.is_alive() for thread in threads), \\
+    "the barrier deadlocked and never released its parties"
+assert not faults, faults[0]
+
+for round_number in range(ROUNDS):
+    got = sorted(indices[round_number])
+    assert got == list(range(PARTIES)), \\
+        f"round {round_number} handed out indices {got}"
+
+alone = CyclicBarrier(1)
+assert alone.wait() == 0
+assert alone.wait() == 0, "a barrier of one is not reusable"
+
+for bad in (0, -3):
+    try:
+        CyclicBarrier(bad)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"CyclicBarrier({bad}) was accepted")
+''',
+    ),
 ]
