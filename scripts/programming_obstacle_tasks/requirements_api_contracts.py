@@ -805,165 +805,140 @@ else:
     task(
         f"{FAMILY}-0103", FAMILY,
         prompt=(
-            "Implement a Python function resolve_reference(base, reference) "
-            "resolving a URI reference against an absolute base URI using "
-            "the strict algorithm of RFC 3986 section 5.2, and returning "
-            "the recomposed target. Split each input into scheme, "
-            "authority, path, query and fragment, remembering that a "
-            "component which is absent differs from one that is present and "
-            "empty -- a reference of '?' carries an empty query and must "
-            "not inherit the base's. The base's own fragment is never "
-            "inherited. A relative path is merged against the base by "
-            "replacing everything after the base path's last '/', then the "
-            "result has its dot segments removed: '.' and '..' are resolved "
-            "against the accumulated output, '..' at the root is discarded "
-            "rather than escaping it, and a segment such as '..g' or 'g.' "
-            "is an ordinary name. Dot segments inside a query or fragment "
-            "are left alone. Raise ValueError when the base has no scheme."
+            "Implement a Python function evaluate_cache(response_headers, "
+            "request_headers, age_seconds, shared) deciding how a stored HTTP "
+            "response may be reused, following RFC 9111. Header names are "
+            "case-insensitive and Cache-Control holds comma-separated "
+            "directives, each a bare name or name=value whose value may be "
+            "quoted. Return 'unusable' when either message carries no-store, "
+            "or when the response is private and the cache is shared. "
+            "Otherwise compute a freshness lifetime from the first source "
+            "that applies: s-maxage, but only for a shared cache; then "
+            "max-age; then Expires minus Date, which may be zero or "
+            "negative; then a heuristic of a tenth of the interval from "
+            "Last-Modified to Date, capped at 86400 seconds; otherwise zero. "
+            "Dates are IMF-fixdate. Return 'revalidate' when either message "
+            "carries no-cache. The response is fresh when its lifetime "
+            "exceeds age_seconds, and additionally, when the request carries "
+            "max-age=n, only while age_seconds is strictly below n, and when "
+            "the request carries min-fresh=n, only while the remaining "
+            "lifetime is at least n. A fresh response returns 'fresh'. A "
+            "stale one returns 'revalidate' if the response carries "
+            "must-revalidate, or proxy-revalidate in a shared cache; "
+            "otherwise 'stale' if the request carries max-stale with no "
+            "value, or max-stale=n and the response is stale by no more than "
+            "n seconds; otherwise 'revalidate'."
         ),
-        validator=LOAD_CANDIDATE + require("resolve_reference") + r'''
-BASE = "http://a/b/c/d;p?q"
+        validator=LOAD_CANDIDATE + require("evaluate_cache") + r'''
+DATE = "Sun, 06 Nov 1994 08:49:37 GMT"
+LATER = "Sun, 06 Nov 1994 08:51:17 GMT"      # DATE + 100 s
+EARLIER = "Sun, 06 Nov 1994 08:47:57 GMT"    # DATE - 100 s
+LONG_AGO = "Sun, 06 Nov 1994 08:33:00 GMT"   # DATE - 997 s
 
-# The normal examples of RFC 3986 section 5.4.1.
-NORMAL = {
-    "g:h": "g:h",
-    "g": "http://a/b/c/g",
-    "./g": "http://a/b/c/g",
-    "g/": "http://a/b/c/g/",
-    "/g": "http://a/g",
-    "//g": "http://g",
-    "?y": "http://a/b/c/d;p?y",
-    "g?y": "http://a/b/c/g?y",
-    "#s": "http://a/b/c/d;p?q#s",
-    "g#s": "http://a/b/c/g#s",
-    "g?y#s": "http://a/b/c/g?y#s",
-    ";x": "http://a/b/c/;x",
-    "g;x": "http://a/b/c/g;x",
-    "g;x?y#s": "http://a/b/c/g;x?y#s",
-    "": "http://a/b/c/d;p?q",
-    ".": "http://a/b/c/",
-    "./": "http://a/b/c/",
-    "..": "http://a/b/",
-    "../": "http://a/b/",
-    "../g": "http://a/b/g",
-    "../..": "http://a/",
-    "../../": "http://a/",
-    "../../g": "http://a/g",
-}
 
-# The abnormal examples of section 5.4.2, which is where a resolver that
-# only handles the easy cases diverges.
-ABNORMAL = {
-    "../../../g": "http://a/g",
-    "../../../../g": "http://a/g",
-    "/./g": "http://a/g",
-    "/../g": "http://a/g",
-    "g.": "http://a/b/c/g.",
-    ".g": "http://a/b/c/.g",
-    "g..": "http://a/b/c/g..",
-    "..g": "http://a/b/c/..g",
-    "./../g": "http://a/b/g",
-    "./g/.": "http://a/b/c/g/",
-    "g/./h": "http://a/b/c/g/h",
-    "g/../h": "http://a/b/c/h",
-    "g;x=1/./y": "http://a/b/c/g;x=1/y",
-    "g;x=1/../y": "http://a/b/c/y",
-    "g?y/./x": "http://a/b/c/g?y/./x",
-    "g?y/../x": "http://a/b/c/g?y/../x",
-    "g#s/./x": "http://a/b/c/g#s/./x",
-    "g#s/../x": "http://a/b/c/g#s/../x",
-}
+def check(expected, response, request=None, age=0, shared=False):
+    actual = evaluate_cache(response, dict(request or {}), age, shared)
+    assert actual == expected, (
+        f"{response} + {request} at age {age} (shared={shared}) -> "
+        f"{actual!r}, want {expected!r}"
+    )
 
-for cases in (NORMAL, ABNORMAL):
-    for reference, expected in cases.items():
-        actual = resolve_reference(BASE, reference)
-        assert actual == expected, (
-            f"{reference!r} -> {actual!r}, want {expected!r}"
-        )
 
-# An empty component is not an absent one.
-assert resolve_reference(BASE, "?") == "http://a/b/c/d;p?"
-assert resolve_reference(BASE, "#") == "http://a/b/c/d;p?q#"
-assert resolve_reference("http://a/b/c/d;p?q#f", "g") == "http://a/b/c/g", (
-    "the base's fragment must never be inherited"
-)
+# no-store on either side, and private in a shared cache, are unusable.
+check("unusable", {"Cache-Control": "no-store"})
+check("unusable", {"Cache-Control": "max-age=100"}, {"Cache-Control": "no-store"})
+check("unusable", {"Cache-Control": "private, max-age=100"}, shared=True)
+check("fresh", {"Cache-Control": "private, max-age=100"}, age=50, shared=False)
 
-# A base whose path is empty still merges to an absolute path.
-assert resolve_reference("http://a", "g") == "http://a/g"
+# max-age against the stored age.
+check("fresh", {"Cache-Control": "max-age=100"}, age=50)
+check("revalidate", {"Cache-Control": "max-age=100"}, age=150)
 
-try:
-    resolve_reference("/not/absolute", "g")
-except ValueError:
-    pass
-else:
-    raise AssertionError("a base without a scheme must be rejected")
+# s-maxage applies only to a shared cache; a private cache must ignore it.
+SHARED = {"Cache-Control": "max-age=100, s-maxage=200"}
+check("fresh", SHARED, age=150, shared=True)
+# A private cache must ignore s-maxage and fall back to max-age.
+check("revalidate", SHARED, age=150, shared=False)
+
+# Expires minus Date, including an Expires that has already passed.
+check("fresh", {"Date": DATE, "Expires": LATER}, age=50)
+check("revalidate", {"Date": DATE, "Expires": LATER}, age=150)
+check("revalidate", {"Date": DATE, "Expires": EARLIER}, age=0)
+
+# A directive outranks Expires, and header names are case-insensitive.
+check("revalidate", {"date": DATE, "expires": LATER,
+                     "cache-control": "max-age=10"}, age=50)
+
+# The heuristic is a tenth of the Last-Modified interval, and it is capped.
+check("fresh", {"Date": DATE, "Last-Modified": LONG_AGO}, age=50)
+check("revalidate", {"Date": DATE, "Last-Modified": LONG_AGO}, age=150)
+check("revalidate", {"Date": DATE}, age=0)
+check("revalidate", {}, age=0)
+
+# no-cache on either side forces revalidation however fresh the response is.
+check("revalidate", {"Cache-Control": "no-cache, max-age=100"}, age=0)
+check("revalidate", {"Cache-Control": "max-age=100"},
+      {"Cache-Control": "no-cache"}, age=0)
+
+# Request directives narrow freshness.
+check("revalidate", {"Cache-Control": "max-age=100"},
+      {"Cache-Control": "max-age=30"}, age=50)
+check("fresh", {"Cache-Control": "max-age=100"},
+      {"Cache-Control": "max-age=60"}, age=50)
+# Request max-age bounds the age strictly, so max-age=0 always revalidates.
+check("revalidate", {"Cache-Control": "max-age=100"},
+      {"Cache-Control": "max-age=50"}, age=50)
+check("revalidate", {"Cache-Control": "max-age=100"},
+      {"Cache-Control": "max-age=0"}, age=0)
+check("revalidate", {"Cache-Control": "max-age=100"},
+      {"Cache-Control": "min-fresh=60"}, age=50)
+check("fresh", {"Cache-Control": "max-age=100"},
+      {"Cache-Control": "min-fresh=50"}, age=50)
+
+# max-stale permits serving a stale response, unless the origin forbade it.
+check("stale", {"Cache-Control": "max-age=100"},
+      {"Cache-Control": "max-stale=100"}, age=150)
+check("revalidate", {"Cache-Control": "max-age=100"},
+      {"Cache-Control": "max-stale=10"}, age=150)
+check("stale", {"Cache-Control": "max-age=100"},
+      {"Cache-Control": "max-stale"}, age=99999)
+check("revalidate", {"Cache-Control": "max-age=100, must-revalidate"},
+      {"Cache-Control": "max-stale=100"}, age=150)
+check("stale", {"Cache-Control": "max-age=100, proxy-revalidate"},
+      {"Cache-Control": "max-stale=100"}, age=150, shared=False)
+check("revalidate", {"Cache-Control": "max-age=100, proxy-revalidate"},
+      {"Cache-Control": "max-stale=100"}, age=150, shared=True)
+
+# A quoted directive value parses like an unquoted one.
+check("fresh", {"Cache-Control": 'max-age="100"'}, age=50)
 ''',
     ),
     task(
         f"{FAMILY}-0104", FAMILY,
         prompt=(
-            "Implement compare_versions(left, right) and satisfies(version, "
-            "constraint) for Semantic Versioning 2.0.0. compare_versions "
-            "returns -1, 0 or 1. Build metadata after '+' never affects "
-            "precedence. A version with a prerelease ranks below the same "
-            "core version without one; prerelease identifiers are compared "
-            "field by field, numerically when both fields are all digits, "
-            "a numeric field ranking below an alphanumeric one, and a "
-            "longer identifier list ranking above a shorter one that is "
-            "otherwise identical. Reject anything that is not "
-            "major.minor.patch with no leading zeroes -- including a "
-            "numeric prerelease field with a leading zero -- by raising "
-            "ValueError. satisfies takes a comma-separated conjunction of "
+            "Implement satisfies(version, constraint) and "
+            "max_satisfying(versions, constraint), the two operations a "
+            "dependency resolver performs against a Semantic Versioning "
+            "2.0.0 range. A constraint is a comma-separated conjunction of "
             "comparators using >=, >, <=, < or =, or a single '^' or '~' "
-            "range. '^' needs a full major.minor.patch and permits changes "
-            "that do not alter the leftmost non-zero field, so ^1.2.3 "
-            "allows below 2.0.0, ^0.2.3 below 0.3.0 and ^0.0.3 below 0.0.4. "
-            "'~' accepts major.minor or major.minor.patch and allows the "
-            "rest of that minor series. A prerelease version satisfies a "
-            "constraint only when some comparator in it names a prerelease "
-            "of that same major.minor.patch, so a prerelease never leaks "
-            "into a range written for released versions."
+            "range. '^' takes a full major.minor.patch and permits changes "
+            "that do not alter the leftmost non-zero field, so ^1.2.3 admits "
+            "below 2.0.0, ^0.2.3 below 0.3.0 and ^0.0.3 below 0.0.4. '~' "
+            "takes major.minor or major.minor.patch and admits the rest of "
+            "that minor series. A version carrying a prerelease satisfies a "
+            "constraint only when some comparator in that constraint names a "
+            "prerelease of the same major.minor.patch, so a prerelease never "
+            "leaks into a range written for released versions. "
+            "max_satisfying returns the highest satisfying entry of "
+            "`versions`, or None when none qualifies; among entries that "
+            "differ only in build metadata it returns the one that appeared "
+            "first. Ordering follows the specification, so a numeric "
+            "prerelease field compares as a number. Raise ValueError for a "
+            "version or comparator that is not well formed, and for a "
+            "constraint with no comparators in it."
         ),
-        validator=(LOAD_CANDIDATE + require("compare_versions")
-                   + require("satisfies") + r'''
-# Build metadata is ignored entirely.
-assert compare_versions("1.0.0+build.1", "1.0.0+build.9") == 0
-assert compare_versions("1.0.0+x", "1.0.0") == 0
-
-# Core precedence.
-ORDER = ["1.0.0", "2.0.0", "2.1.0", "2.1.1"]
-for index in range(len(ORDER) - 1):
-    assert compare_versions(ORDER[index], ORDER[index + 1]) == -1
-    assert compare_versions(ORDER[index + 1], ORDER[index]) == 1
-    assert compare_versions(ORDER[index], ORDER[index]) == 0
-
-# The prerelease chain from the specification, in order.
-CHAIN = [
-    "1.0.0-alpha", "1.0.0-alpha.1", "1.0.0-alpha.beta", "1.0.0-beta",
-    "1.0.0-beta.2", "1.0.0-beta.11", "1.0.0-rc.1", "1.0.0",
-]
-for index in range(len(CHAIN) - 1):
-    lower, higher = CHAIN[index], CHAIN[index + 1]
-    assert compare_versions(lower, higher) == -1, f"{lower} !< {higher}"
-    assert compare_versions(higher, lower) == 1
-
-# The two comparisons the chain exists to pin down.
-assert compare_versions("1.0.0-beta.2", "1.0.0-beta.11") == -1, (
-    "numeric prerelease fields compare numerically, not as text"
-)
-assert compare_versions("1.0.0-alpha.1", "1.0.0-alpha.beta") == -1, (
-    "a numeric field ranks below an alphanumeric one"
-)
-assert compare_versions("1.0.0-alpha", "1.0.0-alpha.1") == -1
-
-for bad in ("1.0", "1.0.0.0", "01.0.0", "1.01.0", "1.0.0-01", "v1.0.0", ""):
-    try:
-        compare_versions(bad, "1.0.0")
-    except ValueError:
-        pass
-    else:
-        raise AssertionError(f"{bad!r} should not parse")
-
+        validator=LOAD_CANDIDATE + require("satisfies") + require(
+            "max_satisfying") + r'''
 # Caret ranges pivot on the leftmost non-zero field.
 assert satisfies("1.2.3", "^1.2.3")
 assert satisfies("1.9.9", "^1.2.3")
@@ -972,22 +947,27 @@ assert not satisfies("1.2.2", "^1.2.3")
 assert satisfies("0.2.9", "^0.2.3")
 assert not satisfies("0.3.0", "^0.2.3")
 assert satisfies("0.0.3", "^0.0.3")
-assert not satisfies("0.0.4", "^0.0.3")
+assert not satisfies("0.0.4", "^0.0.3"), "^0.0.x admits only that patch"
 
-# Tilde ranges allow the rest of the minor series.
+# Tilde ranges admit the rest of the minor series, from either spelling.
 assert satisfies("1.2.9", "~1.2.3")
 assert not satisfies("1.3.0", "~1.2.3")
 assert satisfies("1.2.0", "~1.2")
 assert not satisfies("1.3.0", "~1.2")
 
-# A conjunction must hold on every comparator.
+# A conjunction must hold on every comparator it contains.
 assert satisfies("1.5.0", ">=1.0.0, <2.0.0")
 assert not satisfies("2.0.0", ">=1.0.0, <2.0.0")
 assert satisfies("1.0.0", "=1.0.0")
 assert not satisfies("1.0.1", "=1.0.0")
+assert satisfies("1.0.1", ">1.0.0")
+assert not satisfies("1.0.0", ">1.0.0")
 
-# A prerelease only satisfies a range that named a prerelease of its own
-# core version.
+# Build metadata never changes whether a version qualifies.
+assert satisfies("1.2.3+build.9", "^1.2.3")
+
+# A prerelease qualifies only against a range that named a prerelease of its
+# own core version.
 assert not satisfies("1.2.4-beta", "^1.2.3"), (
     "a prerelease must not leak into a released-version range"
 )
@@ -995,6 +975,304 @@ assert not satisfies("3.0.0-alpha", ">=1.0.0")
 assert satisfies("1.2.3-beta", ">=1.2.3-alpha, <2.0.0")
 assert satisfies("1.2.3", "^1.2.3-alpha")
 assert not satisfies("1.2.3-alpha", "^1.2.3-beta")
-'''),
+
+# Resolution picks the highest qualifying entry, not the last or the first.
+assert max_satisfying(
+    ["1.2.3", "1.9.9", "1.4.0", "2.0.0"], "^1.2.3"
+) == "1.9.9"
+assert max_satisfying(["1.0.0", "1.0.10", "1.0.9"], "^1.0.0") == "1.0.10", (
+    "1.0.10 outranks 1.0.9 numerically"
+)
+assert max_satisfying(["2.0.0", "0.9.0"], "^1.0.0") is None
+assert max_satisfying([], "^1.0.0") is None
+
+# Among entries differing only in build metadata, the first one wins.
+assert max_satisfying(["1.0.0+a", "1.0.0+b"], "^1.0.0") == "1.0.0+a"
+assert max_satisfying(["1.0.0", "1.0.0+b"], "^1.0.0") == "1.0.0"
+
+# Resolution across prereleases orders numeric fields as numbers.
+assert max_satisfying(
+    ["1.0.0-beta.2", "1.0.0-beta.11"], ">=1.0.0-beta.1, <1.0.0"
+) == "1.0.0-beta.11", "beta.11 is a later prerelease than beta.2"
+assert max_satisfying(
+    ["1.0.0-rc.1", "1.0.0"], ">=1.0.0-alpha, <2.0.0"
+) == "1.0.0"
+
+for bad_version in ("1.0", "1.0.0.0", "01.0.0", "1.0.0-01", "v1.0.0"):
+    try:
+        satisfies(bad_version, ">=1.0.0")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"{bad_version!r} should not parse")
+
+for bad_constraint in (">=1.0", "", "  ", "^1.2", "~1"):
+    try:
+        satisfies("1.2.3", bad_constraint)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"{bad_constraint!r} should be rejected")
+''',
+    ),
+    task(
+        f"{FAMILY}-0105", FAMILY,
+        prompt=(
+            "Implement a Python function classify_signature_change(old, new) "
+            "returning (compatible, reasons) for two callables, where "
+            "reasons is the sorted list of distinct findings and compatible "
+            "is True exactly when that list is empty. Read both signatures "
+            "with the inspect module. Ignore *args and **kwargs except that "
+            "adding either is never a finding. Pair the parameters "
+            "positionally: the positional-only and positional-or-keyword "
+            "parameters of each signature line up by index, and each "
+            "keyword-only parameter pairs with the identically named "
+            "parameter of the other signature wherever it sits. That "
+            "pairing decides rename against removal, rather than guessing. "
+            "Report 'renamed-parameter' when a pair's names differ and the "
+            "old parameter could be passed by keyword; a positional-only "
+            "rename is invisible to callers and is not a finding. Report "
+            "'removed-default' when the old parameter had a default and its "
+            "pair does not. Report 'narrowed-kind' when a "
+            "positional-or-keyword parameter becomes positional-only or "
+            "keyword-only; the opposite widening is not a finding. Report "
+            "'removed-parameter' for an old parameter with no pair, and "
+            "'added-required-parameter' for a new parameter with no pair and "
+            "no default. Report 'reordered-parameters' when the names common "
+            "to both positional lists do not keep their relative order. A "
+            "changed default value is not a finding."
+        ),
+        validator=LOAD_CANDIDATE + require("classify_signature_change") + r'''
+def check(old, new, expected):
+    compatible, reasons = classify_signature_change(old, new)
+    assert list(reasons) == expected, (
+        f"{old.__name__} -> {new.__name__}: {list(reasons)!r}, "
+        f"want {expected!r}"
+    )
+    assert compatible is (not expected), (
+        f"{old.__name__} -> {new.__name__}: compatible={compatible!r} "
+        f"disagrees with {list(reasons)!r}"
+    )
+
+
+def base(a, b=1):
+    return a, b
+
+
+# Compatible changes a caller cannot observe.
+def add_optional(a, b=1, c=2):
+    return a, b, c
+
+
+def add_variadic(a, b=1, *args, **kwargs):
+    return a, b
+
+
+def change_default(a, b=2):
+    return a, b
+
+
+check(base, add_optional, [])
+check(base, add_variadic, [])
+check(base, change_default, [])
+
+
+# Widening the kind is compatible; narrowing it is not.
+def keyword_only(a, *, b=1):
+    return a, b
+
+
+def positional_only(a, b=1, /):
+    return a, b
+
+
+check(keyword_only, base, [])
+check(base, keyword_only, ["narrowed-kind"])
+check(base, positional_only, ["narrowed-kind"])
+
+
+# A positional-only rename cannot be seen by a caller.
+def slot(a, /, b=1):
+    return a, b
+
+
+def slot_renamed(x, /, b=1):
+    return x, b
+
+
+check(slot, slot_renamed, [])
+
+
+# A keyword-callable rename can.
+def renamed(a, c=1):
+    return a, c
+
+
+check(base, renamed, ["renamed-parameter"])
+
+
+# Additions and removals.
+def added_required_keyword(a, b=1, *, c):
+    return a, b, c
+
+
+def dropped(a):
+    return a
+
+
+def dropped_default(a, b):
+    return a, b
+
+
+check(base, added_required_keyword, ["added-required-parameter"])
+check(dropped, base, [])
+check(base, dropped, ["removed-parameter"])
+check(base, dropped_default, ["removed-default"])
+
+
+# A keyword-only parameter that disappears is removed, not renamed.
+def keyword_only_gone(a):
+    return a
+
+
+check(keyword_only, keyword_only_gone, ["removed-parameter"])
+
+
+# Swapping two parameters is both a rename at each position and a reorder.
+def three(a, b, c=1):
+    return a, b, c
+
+
+def swapped(b, a, c=1):
+    return b, a, c
+
+
+check(three, swapped, ["renamed-parameter", "reordered-parameters"])
+
+
+# Several findings at once are reported once each, sorted.
+def rebuilt(a, *, z):
+    return a, z
+
+
+compatible, reasons = classify_signature_change(base, rebuilt)
+assert compatible is False
+assert sorted(set(reasons)) == list(reasons), "reasons must be sorted and unique"
+assert set(reasons) == {"added-required-parameter", "removed-parameter"}, (
+    f"unexpected findings: {reasons!r}"
+)
+''',
+    ),
+    task(
+        f"{FAMILY}-0106", FAMILY,
+        prompt=(
+            "Implement to_minor(amount, exponent) and allocate(total, "
+            "weights), the two operations an invoice total has to survive. "
+            "to_minor converts a decimal amount to an integer number of "
+            "minor units at the given currency exponent, rounding half to "
+            "even, so at exponent 2 the amount 1.005 becomes 100 and 1.015 "
+            "becomes 102. Accept only a str or a decimal.Decimal; a float "
+            "raises TypeError because a binary float cannot hold a decimal "
+            "amount exactly. Raise ValueError for text that is not a finite "
+            "decimal, and for a negative exponent. allocate splits an "
+            "integer number of minor units across a sequence of "
+            "non-negative int or Decimal weights, returning a list of "
+            "integers of the same length whose sum is exactly total. Each "
+            "entry is the floor of its exact share of the magnitude, then "
+            "the units still unassigned are handed out one each to the "
+            "entries with the largest fractional remainder, ties going to "
+            "the lower index, and the sign of total is applied to every "
+            "entry. Compute the shares exactly rather than in floating "
+            "point. Raise ValueError for an empty sequence, a negative "
+            "weight, weights that are all zero, or a total that is not an "
+            "integer."
+        ),
+        validator=LOAD_CANDIDATE + require("to_minor") + require("allocate")
+        + r'''
+import decimal
+
+# Half-even is the rounding, and it is visible only on an exact tie.
+assert to_minor("1.005", 2) == 100, "1.005 rounds to even at two places"
+assert to_minor("1.015", 2) == 102, "1.015 rounds up because 1 is odd"
+assert to_minor("1.004", 2) == 100
+assert to_minor("1.006", 2) == 101
+assert to_minor("-1.005", 2) == -100
+assert to_minor("1", 2) == 100
+assert to_minor("1.2345", 3) == 1234
+assert to_minor("2.5", 0) == 2
+assert to_minor("3.5", 0) == 4
+assert to_minor(decimal.Decimal("0.125"), 2) == 12
+assert to_minor("0", 2) == 0
+
+# A binary float is refused rather than silently mis-rounded.
+try:
+    to_minor(1.005, 2)
+except TypeError:
+    pass
+else:
+    raise AssertionError("a float amount must raise TypeError")
+
+for bad in ("abc", "", "NaN", "Infinity"):
+    try:
+        to_minor(bad, 2)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"{bad!r} should be rejected")
+try:
+    to_minor("1.00", -1)
+except ValueError:
+    pass
+else:
+    raise AssertionError("a negative exponent must be rejected")
+
+# The allocation always reconciles, and the leftover unit goes to the
+# largest remainder rather than to the first or the last entry.
+assert allocate(100, [1, 1, 1]) == [34, 33, 33]
+assert allocate(7, [1, 1, 1]) == [3, 2, 2]
+assert allocate(5, [3, 1]) == [4, 1], "the larger remainder takes the unit"
+assert allocate(100, [1, 2]) == [33, 67]
+assert allocate(0, [1, 1]) == [0, 0]
+assert allocate(10, [0, 1]) == [0, 10]
+assert allocate(3, [1]) == [3]
+
+# The sign of the total reaches every entry.
+assert allocate(-100, [1, 1, 1]) == [-34, -33, -33]
+assert allocate(-5, [3, 1]) == [-4, -1]
+
+# Decimal weights are exact, not floating point.
+assert allocate(10, [decimal.Decimal("0.5"), decimal.Decimal("0.5")]) == [5, 5]
+assert allocate(
+    100, [decimal.Decimal("0.7"), decimal.Decimal("0.2"),
+          decimal.Decimal("0.1")]
+) == [70, 20, 10]
+
+# Reconciliation is the invariant, over a range the examples do not cover.
+for total in range(-40, 41):
+    for weights in ([1, 1, 1], [1, 2, 3], [5, 1, 1, 1], [0, 3, 1], [7]):
+        parts = allocate(total, weights)
+        assert len(parts) == len(weights)
+        assert sum(parts) == total, (
+            f"allocate({total}, {weights}) sums to {sum(parts)}"
+        )
+        if total >= 0:
+            assert all(part >= 0 for part in parts)
+        else:
+            assert all(part <= 0 for part in parts)
+
+for bad_weights in ([], [-1, 1], [0, 0]):
+    try:
+        allocate(10, bad_weights)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"weights {bad_weights!r} should be rejected")
+try:
+    allocate("10", [1, 1])
+except ValueError:
+    pass
+else:
+    raise AssertionError("a non-integer total should be rejected")
+''',
     ),
 ]

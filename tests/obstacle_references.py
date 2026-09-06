@@ -9465,111 +9465,107 @@ def expand_uri_template(template, variables):
 
 
 REFERENCES["requirements_api_contracts-0103"] = r'''
-import re
-
-_URI = re.compile(
-    r"^(?:(?P<scheme>[^:/?#]+):)?"
-    r"(?://(?P<authority>[^/?#]*))?"
-    r"(?P<path>[^?#]*)"
-    r"(?:\?(?P<query>[^#]*))?"
-    r"(?:#(?P<fragment>.*))?$"
-)
+import email.utils
 
 
-def _split(uri):
-    match = _URI.match(str(uri))
-    if match is None:
-        raise ValueError(f"not a URI reference: {uri!r}")
-    return match.groupdict()
+def _lookup(headers, name):
+    for key, value in dict(headers).items():
+        if str(key).lower() == name:
+            return value
+    return None
 
 
-def _remove_dot_segments(path):
-    output = []
-    while path:
-        if path.startswith("../"):
-            path = path[3:]
-        elif path.startswith("./"):
-            path = path[2:]
-        elif path.startswith("/./"):
-            path = "/" + path[3:]
-        elif path == "/.":
-            path = "/"
-        elif path.startswith("/../"):
-            path = "/" + path[4:]
-            if output:
-                output.pop()
-        elif path == "/..":
-            path = "/"
-            if output:
-                output.pop()
-        elif path in (".", ".."):
-            path = ""
-        else:
-            cut = path.find("/", 1) if path.startswith("/") else path.find("/")
-            if cut == -1:
-                cut = len(path)
-            output.append(path[:cut])
-            path = path[cut:]
-    return "".join(output)
-
-
-def _merge(base, path):
-    if base["authority"] is not None and base["path"] == "":
-        return "/" + path
-    cut = base["path"].rfind("/")
-    if cut == -1:
-        return path
-    return base["path"][:cut + 1] + path
-
-
-def _recompose(parts):
-    out = ""
-    if parts["scheme"] is not None:
-        out += parts["scheme"] + ":"
-    if parts["authority"] is not None:
-        out += "//" + parts["authority"]
-    out += parts["path"]
-    if parts["query"] is not None:
-        out += "?" + parts["query"]
-    if parts["fragment"] is not None:
-        out += "#" + parts["fragment"]
+def _directives(raw):
+    out = {}
+    for piece in str(raw or "").split(","):
+        piece = piece.strip()
+        if not piece:
+            continue
+        name, sep, value = piece.partition("=")
+        value = value.strip()
+        if len(value) >= 2 and value.startswith('"') and value.endswith('"'):
+            value = value[1:-1]
+        out[name.strip().lower()] = value if sep else None
     return out
 
 
-def resolve_reference(base, reference):
-    origin = _split(base)
-    if origin["scheme"] is None:
-        raise ValueError("the base URI must carry a scheme")
-    ref = _split(reference)
+def _number(directives, name):
+    value = directives.get(name)
+    if value is None:
+        return None
+    text = value.strip()
+    if not text.lstrip("-").isdigit():
+        return None
+    return int(text)
 
-    target = {"fragment": ref["fragment"]}
-    if ref["scheme"] is not None:
-        target["scheme"] = ref["scheme"]
-        target["authority"] = ref["authority"]
-        target["path"] = _remove_dot_segments(ref["path"])
-        target["query"] = ref["query"]
-        return _recompose(target)
 
-    target["scheme"] = origin["scheme"]
-    if ref["authority"] is not None:
-        target["authority"] = ref["authority"]
-        target["path"] = _remove_dot_segments(ref["path"])
-        target["query"] = ref["query"]
-        return _recompose(target)
+def _date(headers, name):
+    raw = _lookup(headers, name)
+    if raw is None:
+        return None
+    try:
+        parsed = email.utils.parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return None
+    if parsed is None:
+        return None
+    return parsed.timestamp()
 
-    target["authority"] = origin["authority"]
-    if ref["path"] == "":
-        target["path"] = origin["path"]
-        query = ref["query"] if ref["query"] is not None else origin["query"]
-        target["query"] = query
-        return _recompose(target)
 
-    if ref["path"].startswith("/"):
-        target["path"] = _remove_dot_segments(ref["path"])
-    else:
-        target["path"] = _remove_dot_segments(_merge(origin, ref["path"]))
-    target["query"] = ref["query"]
-    return _recompose(target)
+def _lifetime(response_headers, response, shared):
+    if shared:
+        seconds = _number(response, "s-maxage")
+        if seconds is not None:
+            return seconds
+    seconds = _number(response, "max-age")
+    if seconds is not None:
+        return seconds
+
+    date = _date(response_headers, "date")
+    expires = _date(response_headers, "expires")
+    if date is not None and expires is not None:
+        return int(expires - date)
+
+    modified = _date(response_headers, "last-modified")
+    if date is not None and modified is not None:
+        return min(int((date - modified) / 10), 86400)
+    return 0
+
+
+def evaluate_cache(response_headers, request_headers, age_seconds, shared):
+    response = _directives(_lookup(response_headers, "cache-control"))
+    request = _directives(_lookup(request_headers, "cache-control"))
+
+    if "no-store" in response or "no-store" in request:
+        return "unusable"
+    if shared and "private" in response:
+        return "unusable"
+
+    lifetime = _lifetime(response_headers, response, shared)
+    if "no-cache" in response or "no-cache" in request:
+        return "revalidate"
+
+    age = float(age_seconds)
+    remaining = lifetime - age
+    fresh = remaining > 0
+    ceiling = _number(request, "max-age")
+    if ceiling is not None and not age < ceiling:
+        fresh = False
+    floor = _number(request, "min-fresh")
+    if floor is not None and remaining < floor:
+        fresh = False
+    if fresh:
+        return "fresh"
+
+    if "must-revalidate" in response:
+        return "revalidate"
+    if shared and "proxy-revalidate" in response:
+        return "revalidate"
+    if "max-stale" in request:
+        allowance = _number(request, "max-stale")
+        if allowance is None or (age - lifetime) <= allowance:
+            return "stale"
+    return "revalidate"
 '''
 
 
@@ -9593,8 +9589,6 @@ def _parse(text):
     prerelease = (parts["prerelease"].split(".")
                   if parts["prerelease"] else [])
     for field in prerelease:
-        if field == "":
-            raise ValueError("empty prerelease identifier")
         if field.isdigit() and len(field) > 1 and field.startswith("0"):
             raise ValueError("numeric prerelease field has a leading zero")
     return (int(parts["major"]), int(parts["minor"]), int(parts["patch"]),
@@ -9611,7 +9605,7 @@ def _prerelease_key(fields):
     return key
 
 
-def _compare_parsed(left, right):
+def _order(left, right):
     if left[:3] != right[:3]:
         return -1 if left[:3] < right[:3] else 1
     if not left[3] and not right[3]:
@@ -9626,11 +9620,7 @@ def _compare_parsed(left, right):
     return -1 if lower < higher else 1
 
 
-def compare_versions(left, right):
-    return _compare_parsed(_parse(left), _parse(right))
-
-
-def _parse_partial(text, minimum):
+def _prefix(text, minimum):
     core = str(text).split("+", 1)[0]
     prerelease = []
     if "-" in core:
@@ -9650,7 +9640,7 @@ def _parse_partial(text, minimum):
 
 
 def _caret(text):
-    lower = _parse_partial(text, minimum=3)
+    lower = _prefix(text, minimum=3)
     major, minor, patch, _ = lower
     if major > 0:
         upper = (major + 1, 0, 0, [])
@@ -9662,7 +9652,7 @@ def _caret(text):
 
 
 def _tilde(text):
-    lower = _parse_partial(text, minimum=2)
+    lower = _prefix(text, minimum=2)
     return [(">=", lower), ("<", (lower[0], lower[1] + 1, 0, []))]
 
 
@@ -9682,7 +9672,7 @@ def _comparators(constraint):
                 raise ValueError(f"not a comparator: {piece!r}")
             out.append((match.group(1) or "=", _parse(match.group(2))))
     if not out:
-        raise ValueError("empty constraint")
+        raise ValueError("a constraint needs at least one comparator")
     return out
 
 
@@ -9690,7 +9680,7 @@ def satisfies(version, constraint):
     target = _parse(version)
     comparators = _comparators(constraint)
     for operator, bound in comparators:
-        order = _compare_parsed(target, bound)
+        order = _order(target, bound)
         if operator == ">=" and order < 0:
             return False
         if operator == ">" and order <= 0:
@@ -9705,7 +9695,158 @@ def satisfies(version, constraint):
                              for _, bound in comparators):
         return False
     return True
+
+
+def max_satisfying(versions, constraint):
+    best = None
+    best_parsed = None
+    for candidate in versions:
+        if not satisfies(candidate, constraint):
+            continue
+        parsed = _parse(candidate)
+        if best_parsed is None or _order(parsed, best_parsed) > 0:
+            best, best_parsed = candidate, parsed
+    return best
 '''
+
+
+REFERENCES["requirements_api_contracts-0105"] = r'''
+import inspect
+
+_VARIADIC = (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+_POSITIONAL = (inspect.Parameter.POSITIONAL_ONLY,
+               inspect.Parameter.POSITIONAL_OR_KEYWORD)
+_EMPTY = inspect.Parameter.empty
+
+
+def _parts(target):
+    named = [parameter
+             for parameter in inspect.signature(target).parameters.values()
+             if parameter.kind not in _VARIADIC]
+    positional = [p for p in named if p.kind in _POSITIONAL]
+    keyword = [p for p in named
+               if p.kind is inspect.Parameter.KEYWORD_ONLY]
+    return named, positional, keyword
+
+
+def classify_signature_change(old, new):
+    old_named, old_positional, old_keyword = _parts(old)
+    new_named, new_positional, new_keyword = _parts(new)
+    old_by_name = {p.name: p for p in old_named}
+    new_by_name = {p.name: p for p in new_named}
+
+    pairs = []
+    paired_old = set()
+    paired_new = set()
+    for index in range(min(len(old_positional), len(new_positional))):
+        before, after = old_positional[index], new_positional[index]
+        pairs.append((before, after))
+        paired_old.add(before.name)
+        paired_new.add(after.name)
+    for before in old_keyword:
+        after = new_by_name.get(before.name)
+        if (after is not None and before.name not in paired_old
+                and after.name not in paired_new):
+            pairs.append((before, after))
+            paired_old.add(before.name)
+            paired_new.add(after.name)
+    for after in new_keyword:
+        before = old_by_name.get(after.name)
+        if (before is not None and before.name not in paired_old
+                and after.name not in paired_new):
+            pairs.append((before, after))
+            paired_old.add(before.name)
+            paired_new.add(after.name)
+
+    reasons = set()
+    for before, after in pairs:
+        if (before.name != after.name
+                and before.kind is not inspect.Parameter.POSITIONAL_ONLY):
+            reasons.add("renamed-parameter")
+        if before.default is not _EMPTY and after.default is _EMPTY:
+            reasons.add("removed-default")
+        if (before.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+                and after.kind is not inspect.Parameter.POSITIONAL_OR_KEYWORD):
+            reasons.add("narrowed-kind")
+
+    for before in old_named:
+        if before.name not in paired_old:
+            reasons.add("removed-parameter")
+    for after in new_named:
+        if after.name not in paired_new and after.default is _EMPTY:
+            reasons.add("added-required-parameter")
+
+    kept = {p.name for p in new_positional}
+    common = [p.name for p in old_positional if p.name in kept]
+    order = [p.name for p in new_positional if p.name in set(common)]
+    if common != order:
+        reasons.add("reordered-parameters")
+
+    ordered = sorted(reasons)
+    return (not ordered, ordered)
+'''
+
+
+REFERENCES["requirements_api_contracts-0106"] = r'''
+import decimal
+from fractions import Fraction
+
+
+def to_minor(amount, exponent):
+    if isinstance(exponent, bool) or not isinstance(exponent, int):
+        raise ValueError("exponent must be an integer")
+    if exponent < 0:
+        raise ValueError("exponent must not be negative")
+    if isinstance(amount, float):
+        raise TypeError("a binary float cannot hold a decimal amount exactly")
+    if not isinstance(amount, (str, decimal.Decimal)):
+        raise TypeError(f"unsupported amount: {type(amount).__name__}")
+    try:
+        value = decimal.Decimal(amount)
+    except decimal.InvalidOperation:
+        raise ValueError(f"not a decimal amount: {amount!r}") from None
+    if not value.is_finite():
+        raise ValueError(f"amount is not finite: {amount!r}")
+    with decimal.localcontext() as context:
+        context.prec = 60
+        quantum = decimal.Decimal(1).scaleb(-exponent)
+        rounded = value.quantize(quantum, rounding=decimal.ROUND_HALF_EVEN)
+        return int(rounded.scaleb(exponent))
+
+
+def allocate(total, weights):
+    if isinstance(total, bool) or not isinstance(total, int):
+        raise ValueError("total must be an integer number of minor units")
+    items = list(weights)
+    if not items:
+        raise ValueError("weights must not be empty")
+
+    shares = []
+    for weight in items:
+        if isinstance(weight, bool) or not isinstance(
+                weight, (int, decimal.Decimal)):
+            raise ValueError(f"unsupported weight: {weight!r}")
+        share = Fraction(weight)
+        if share < 0:
+            raise ValueError("a weight must not be negative")
+        shares.append(share)
+
+    denominator = sum(shares)
+    if denominator == 0:
+        raise ValueError("weights must not all be zero")
+
+    sign = -1 if total < 0 else 1
+    magnitude = abs(total)
+    exact = [magnitude * share / denominator for share in shares]
+    parts = [int(value) for value in exact]
+    leftover = magnitude - sum(parts)
+    order = sorted(range(len(items)),
+                   key=lambda index: (parts[index] - exact[index], index))
+    for index in order[:leftover]:
+        parts[index] += 1
+    return [sign * part for part in parts]
+'''
+
 
 
 # Add to an array index overwrites the element instead of inserting before
@@ -9724,19 +9865,38 @@ MUTATIONS["requirements_api_contracts-0102"] = (
     '_UNRESERVED = set(string.ascii_letters + string.digits + "-._~!*\'()")',
 )
 
-# Inherit the base query whenever the reference query is falsy rather than
-# absent. A reference of "?" carries a defined but empty query, and this
-# silently resurrects the base's query string instead.
+# Apply s-maxage in a private cache as well. Every shared-cache case still
+# agrees, and so does every response that omits s-maxage; a private cache
+# simply serves a shared-cache lifetime it was never entitled to.
 MUTATIONS["requirements_api_contracts-0103"] = (
-    '        query = ref["query"] if ref["query"] is not None '
-    'else origin["query"]',
-    '        query = ref["query"] or origin["query"]',
+    "    if shared:\n"
+    '        seconds = _number(response, "s-maxage")',
+    "    if True:\n"
+    '        seconds = _number(response, "s-maxage")',
 )
 
-# Compare numeric prerelease fields as text. Every single-field prerelease
-# still orders correctly, and so does numeric-below-alphanumeric; only two
-# numeric fields of different width disagree -- beta.11 before beta.2.
+# Compare numeric prerelease fields as text. A single-field prerelease still
+# orders correctly, and so does numeric-below-alphanumeric; only two numeric
+# fields of different width disagree -- beta.11 resolving below beta.2.
 MUTATIONS["requirements_api_contracts-0104"] = (
     '            key.append((0, int(field), ""))',
     '            key.append((0, 0, field))',
+)
+
+# Report any change of kind rather than only a narrowing, which turns the
+# widening of a keyword-only parameter into a false breaking change.
+MUTATIONS["requirements_api_contracts-0105"] = (
+    "        if (before.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD\n"
+    "                and after.kind is not "
+    "inspect.Parameter.POSITIONAL_OR_KEYWORD):",
+    "        if before.kind is not after.kind:",
+)
+
+# Round half away from zero. Every amount that is not an exact tie agrees,
+# so the divergence appears only on the halfpenny the contract names.
+MUTATIONS["requirements_api_contracts-0106"] = (
+    "        rounded = value.quantize(quantum, "
+    "rounding=decimal.ROUND_HALF_EVEN)",
+    "        rounded = value.quantize(quantum, "
+    "rounding=decimal.ROUND_HALF_UP)",
 )
