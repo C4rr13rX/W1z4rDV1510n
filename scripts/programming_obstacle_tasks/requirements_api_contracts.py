@@ -1289,4 +1289,227 @@ else:
     raise AssertionError("a non-integer total should be rejected")
 ''',
     ),
+    task(
+        f"{FAMILY}-0107", FAMILY,
+        prompt=(
+            "Implement a Python function project(document, mask) returning "
+            "the partial response a caller asked for with a field mask. A "
+            "mask is a comma-separated list of selectors. A selector is a "
+            "name made of letters, digits, underscore, hyphen or '*', "
+            "optionally followed by a sub-selection written either as "
+            "'name/child' for a single child or 'name(one,two)' for several. "
+            "A name of '*' selects every member at that level. Projecting an "
+            "object keeps only the selected members, in the DOCUMENT's key "
+            "order rather than the mask's, and a selected name the document "
+            "does not carry is simply absent rather than an error or a null. "
+            "Projecting a list applies the sub-selection to each element and "
+            "drops any element that is not an object. A selected member that "
+            "is a scalar with a sub-selection asked of it is dropped, "
+            "because a scalar has no members; an object that matches nothing "
+            "is kept as an empty object, because it exists. Naming a member "
+            "both bare and narrowed, in either order, keeps all of it -- the "
+            "wider selection wins. Return new structures: neither the "
+            "argument nor anything reachable from it may be mutated or "
+            "aliased by the result. Raise ValueError for a malformed mask, "
+            "including an empty selector, a trailing or leading comma, and "
+            "unbalanced parentheses."
+        ),
+        validator=LOAD_CANDIDATE + require("project") + r'''
+import copy
+
+# Selection at one level, and the document's key order is what survives.
+assert project({"a": 1, "b": 2, "c": 3}, "a,c") == {"a": 1, "c": 3}
+ordered = project({"b": 1, "a": 2}, "a,b")
+assert list(ordered) == ["b", "a"], "the document's key order, not the mask's"
+
+# Both spellings of a sub-selection.
+assert project({"a": {"b": 1, "c": 2}}, "a/b") == {"a": {"b": 1}}
+assert project({"a": {"b": 1, "c": 2, "d": 3}}, "a(b,d)") == {
+    "a": {"b": 1, "d": 3}
+}
+assert project({"a": {"b": {"c": 1, "d": 2}}}, "a/b/c") == {
+    "a": {"b": {"c": 1}}
+}
+assert project(
+    {"a": {"b": 1, "c": 2}, "z": 9}, "a(b),z"
+) == {"a": {"b": 1}, "z": 9}
+
+# A list distributes the sub-selection over its elements.
+assert project(
+    {"a": [{"b": 1, "c": 2}, {"b": 3, "c": 4}]}, "a/b"
+) == {"a": [{"b": 1}, {"b": 3}]}
+assert project({"a": [{"b": 1}, 2, "three"]}, "a/b") == {"a": [{"b": 1}]}
+
+# '*' selects every member at its level.
+assert project({"a": 1, "b": 2}, "*") == {"a": 1, "b": 2}
+assert project(
+    {"m": {"x": {"k": 1, "z": 2}, "y": {"k": 3, "z": 4}}}, "m/*/k"
+) == {"m": {"x": {"k": 1}, "y": {"k": 3}}}
+
+# Absent, scalar and empty cases are three different outcomes.
+assert project({"a": 1}, "a,zz") == {"a": 1}
+assert project({"a": 1}, "a/b") == {}, "a scalar cannot supply a sub-selection"
+assert project({"a": {"z": 1}}, "a/b") == {"a": {}}, (
+    "an object that matches nothing is still an object"
+)
+
+# The wider of two selections of one name wins, whichever came first.
+assert project({"a": {"b": 1, "c": 2}}, "a,a/b") == {"a": {"b": 1, "c": 2}}
+assert project({"a": {"b": 1, "c": 2}}, "a/b,a") == {"a": {"b": 1, "c": 2}}
+
+# Nothing reachable from the argument is mutated or aliased.
+document = {"a": {"b": [1, 2]}, "c": 3}
+frozen = copy.deepcopy(document)
+result = project(document, "a")
+result["a"]["b"].append(99)
+result["a"]["new"] = True
+assert document == frozen, "the result aliases the document"
+
+for malformed in ("", "   ", "a,", ",a", "a(", "a)", "a()", "a//b", "a/",
+                  "a(b", "a(b))"):
+    try:
+        project({"a": {"b": 1}}, malformed)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"mask {malformed!r} should be rejected")
+''',
+    ),
+    task(
+        f"{FAMILY}-0108", FAMILY,
+        prompt=(
+            "Implement a Python class OperationTracker(clock, "
+            "retention_seconds) modelling the operation resource a "
+            "long-running API hands back, where clock is a callable "
+            "returning seconds as a float. start(name) creates an operation "
+            "in state 'running' with progress 0; report(name, progress) "
+            "records an integer progress between 0 and 100 that must never "
+            "decrease; succeed(name, result) and fail(name, code, message) "
+            "make it terminal, and succeed sets progress to 100 whatever it "
+            "was. States are 'running', 'succeeded', 'failed' and "
+            "'cancelled'. Every one of those methods and poll(name) returns "
+            "a snapshot dict carrying state, progress, created and updated, "
+            "plus result only when it succeeded and error, a dict of code "
+            "and message, only when it failed or was cancelled. A snapshot "
+            "is a copy: mutating one, including anything nested inside its "
+            "result, must not reach the tracker. A terminal operation is "
+            "final -- start, report, succeed and fail on it all raise "
+            "ValueError, and so does start on a name that is still held -- "
+            "but cancel is idempotent, cancelling a running operation and "
+            "returning the existing snapshot unchanged for a terminal one. "
+            "A terminal operation is retained for retention_seconds after "
+            "its updated time and then poll raises KeyError and the name "
+            "becomes free again; a running operation never expires however "
+            "old it is. poll of an unknown name raises KeyError."
+        ),
+        validator=LOAD_CANDIDATE + require("OperationTracker") + r'''
+now = [1000.0]
+
+
+def clock():
+    return now[0]
+
+
+tracker = OperationTracker(clock, 60)
+
+snapshot = tracker.start("job")
+assert snapshot["state"] == "running"
+assert snapshot["progress"] == 0
+assert snapshot["created"] == 1000.0 and snapshot["updated"] == 1000.0
+assert "result" not in snapshot and "error" not in snapshot
+
+try:
+    tracker.start("job")
+except ValueError:
+    pass
+else:
+    raise AssertionError("starting a held name must be rejected")
+
+now[0] = 1010.0
+assert tracker.report("job", 30)["progress"] == 30
+assert tracker.poll("job")["updated"] == 1010.0
+assert tracker.report("job", 30)["progress"] == 30, "equal progress is allowed"
+
+for bad in (20, 101, -1, 5.0, True):
+    try:
+        tracker.report("job", bad)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"progress {bad!r} should be rejected")
+
+# Succeeding completes the operation whatever the last progress was.
+snapshot = tracker.succeed("job", {"rows": [1, 2]})
+assert snapshot["state"] == "succeeded"
+assert snapshot["progress"] == 100
+assert snapshot["result"] == {"rows": [1, 2]}
+assert "error" not in snapshot
+
+# A snapshot is a copy all the way down.
+snapshot["state"] = "tampered"
+snapshot["result"]["rows"].append(99)
+fresh = tracker.poll("job")
+assert fresh["state"] == "succeeded"
+assert fresh["result"] == {"rows": [1, 2]}, "the snapshot aliased the result"
+
+# Terminal is final for every transition except cancel.
+for attempt in (lambda: tracker.report("job", 100),
+                lambda: tracker.succeed("job", 1),
+                lambda: tracker.fail("job", "E", "m"),
+                lambda: tracker.start("job")):
+    try:
+        attempt()
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("a terminal operation accepted a transition")
+
+# Cancel is idempotent, and reports what is already there.
+assert tracker.cancel("job")["state"] == "succeeded", (
+    "cancelling a finished operation is a no-op, not an error"
+)
+
+# Failure carries an error and no result.
+tracker.start("broken")
+snapshot = tracker.fail("broken", "E_IO", "disk full")
+assert snapshot["state"] == "failed"
+assert snapshot["error"] == {"code": "E_IO", "message": "disk full"}
+assert "result" not in snapshot
+
+# Cancelling a running operation is a terminal transition of its own.
+tracker.start("doomed")
+snapshot = tracker.cancel("doomed")
+assert snapshot["state"] == "cancelled"
+assert snapshot["error"]["code"] == "cancelled"
+assert tracker.cancel("doomed")["state"] == "cancelled"
+
+try:
+    tracker.poll("never-started")
+except KeyError:
+    pass
+else:
+    raise AssertionError("polling an unknown name must raise KeyError")
+
+# Retention runs from the terminal update, and frees the name.
+now[0] = 1010.0 + 60
+assert tracker.poll("job")["state"] == "succeeded", "retention is exclusive"
+now[0] = 1010.0 + 61
+try:
+    tracker.poll("job")
+except KeyError:
+    pass
+else:
+    raise AssertionError("a retained operation must expire")
+assert tracker.start("job")["state"] == "running", (
+    "an expired name is free again"
+)
+
+# A running operation never expires, however long it sits.
+patient = OperationTracker(clock, 10)
+patient.start("long")
+now[0] += 1_000_000
+assert patient.poll("long")["state"] == "running"
+assert patient.report("long", 5)["progress"] == 5
+''',
+    ),
 ]

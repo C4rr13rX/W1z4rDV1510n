@@ -9900,3 +9900,207 @@ MUTATIONS["requirements_api_contracts-0106"] = (
     "        rounded = value.quantize(quantum, "
     "rounding=decimal.ROUND_HALF_UP)",
 )
+
+
+REFERENCES["requirements_api_contracts-0107"] = r'''
+import copy
+
+_MISSING = object()
+_DROP = object()
+
+
+def _parse_name(text, index):
+    start = index
+    while index < len(text) and (text[index].isalnum()
+                                 or text[index] in "_-*"):
+        index += 1
+    if index == start:
+        raise ValueError(f"empty selector at offset {start}")
+    return text[start:index], index
+
+
+def _parse_selector(text, index):
+    name, index = _parse_name(text, index)
+    if index < len(text) and text[index] == "(":
+        children, index = _parse_selectors(text, index + 1)
+        if index >= len(text) or text[index] != ")":
+            raise ValueError("unbalanced parentheses in mask")
+        return name, children, index + 1
+    if index < len(text) and text[index] == "/":
+        child, sub, index = _parse_selector(text, index + 1)
+        return name, {child: sub}, index
+    return name, None, index
+
+
+def _parse_selectors(text, index):
+    selectors = {}
+    while True:
+        name, sub, index = _parse_selector(text, index)
+        held = selectors.get(name, _MISSING)
+        if held is _MISSING:
+            selectors[name] = sub
+        elif held is None or sub is None:
+            selectors[name] = None
+        else:
+            held.update(sub)
+        if index < len(text) and text[index] == ",":
+            index += 1
+            continue
+        return selectors, index
+
+
+def _apply(value, selectors):
+    if selectors is None:
+        return copy.deepcopy(value)
+    if isinstance(value, list):
+        kept = []
+        for item in value:
+            projected = _apply(item, selectors)
+            if projected is not _DROP:
+                kept.append(projected)
+        return kept
+    if not isinstance(value, dict):
+        return _DROP
+    out = {}
+    for key, item in value.items():
+        sub = selectors.get(key, _MISSING)
+        if sub is _MISSING:
+            sub = selectors.get("*", _MISSING)
+        if sub is _MISSING:
+            continue
+        projected = _apply(item, sub)
+        if projected is _DROP:
+            continue
+        out[key] = projected
+    return out
+
+
+def project(document, mask):
+    text = str(mask)
+    selectors, index = _parse_selectors(text, 0)
+    if index != len(text):
+        raise ValueError(f"unexpected character at offset {index}")
+    projected = _apply(document, selectors)
+    return {} if projected is _DROP else projected
+'''
+
+
+REFERENCES["requirements_api_contracts-0108"] = r'''
+import copy
+
+_TERMINAL = ("succeeded", "failed", "cancelled")
+
+
+class OperationTracker:
+    def __init__(self, clock, retention_seconds):
+        self._clock = clock
+        self._retention = float(retention_seconds)
+        self._operations = {}
+
+    def _now(self):
+        return float(self._clock())
+
+    def _expired(self, operation, now):
+        return (operation["state"] in _TERMINAL
+                and now - operation["updated"] > self._retention)
+
+    def _live(self, name):
+        operation = self._operations.get(name)
+        if operation is None:
+            raise KeyError(name)
+        if self._expired(operation, self._now()):
+            del self._operations[name]
+            raise KeyError(name)
+        return operation
+
+    def _running(self, name):
+        operation = self._live(name)
+        if operation["state"] != "running":
+            raise ValueError(f"operation {name!r} is already terminal")
+        return operation
+
+    def start(self, name):
+        now = self._now()
+        held = self._operations.get(name)
+        if held is not None and not self._expired(held, now):
+            raise ValueError(f"operation {name!r} is already held")
+        self._operations[name] = {
+            "state": "running",
+            "progress": 0,
+            "created": now,
+            "updated": now,
+        }
+        return self.poll(name)
+
+    def report(self, name, progress):
+        operation = self._running(name)
+        if isinstance(progress, bool) or not isinstance(progress, int):
+            raise ValueError("progress must be an integer")
+        if not 0 <= progress <= 100:
+            raise ValueError("progress must lie between 0 and 100")
+        if progress < operation["progress"]:
+            raise ValueError("progress must not decrease")
+        operation["progress"] = progress
+        operation["updated"] = self._now()
+        return self.poll(name)
+
+    def succeed(self, name, result):
+        operation = self._running(name)
+        operation["state"] = "succeeded"
+        operation["progress"] = 100
+        operation["result"] = copy.deepcopy(result)
+        operation["updated"] = self._now()
+        return self.poll(name)
+
+    def fail(self, name, code, message):
+        operation = self._running(name)
+        operation["state"] = "failed"
+        operation["error"] = {"code": code, "message": message}
+        operation["updated"] = self._now()
+        return self.poll(name)
+
+    def cancel(self, name):
+        operation = self._live(name)
+        if operation["state"] != "running":
+            return self.poll(name)
+        operation["state"] = "cancelled"
+        operation["error"] = {"code": "cancelled",
+                              "message": "the operation was cancelled"}
+        operation["updated"] = self._now()
+        return self.poll(name)
+
+    def poll(self, name):
+        operation = self._live(name)
+        snapshot = {
+            "state": operation["state"],
+            "progress": operation["progress"],
+            "created": operation["created"],
+            "updated": operation["updated"],
+        }
+        if operation["state"] == "succeeded":
+            snapshot["result"] = copy.deepcopy(operation["result"])
+        if operation["state"] in ("failed", "cancelled"):
+            snapshot["error"] = dict(operation["error"])
+        return snapshot
+'''
+
+
+# Let the narrower of two selections of one name win, as a last-write-wins
+# merge would. Every mask naming a member once still projects correctly; only
+# a mask asking for both a member and part of it loses the rest of it.
+MUTATIONS["requirements_api_contracts-0107"] = (
+    "        elif held is None or sub is None:\n"
+    "            selectors[name] = None",
+    "        elif held is None or sub is None:\n"
+    "            selectors[name] = sub",
+)
+
+# Make cancel as final as every other transition. The state machine is
+# otherwise unchanged, and cancelling a running operation still works; only
+# the retry a client sends after the operation has already finished breaks.
+MUTATIONS["requirements_api_contracts-0108"] = (
+    '        if operation["state"] != "running":\n'
+    "            return self.poll(name)",
+    '        if operation["state"] != "running":\n'
+    '            raise ValueError("the operation is already terminal")',
+)
