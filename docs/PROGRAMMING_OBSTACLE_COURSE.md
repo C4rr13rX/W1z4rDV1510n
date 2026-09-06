@@ -125,6 +125,31 @@ because the whole point is to pin a specific behaviour — derive it from a
 second source rather than from reasoning, as the fixture-generation rule below
 does for standards that ship with the language.
 
+### A worked example in the prompt is a second specification
+
+A prompt that states a composition rule and then shows an example of a
+composed result has specified the behaviour twice, and the two statements can
+disagree. `testing_debugging_repair_refactoring-0205` said a mapping key
+extends a path as `.key`, and in the next clause that `a.b[0].c` names a
+nested field. Both read naturally. They contradict each other at the root,
+where the rule yields `.a.b[0].c` and the example yields `a.b[0].c`.
+
+The reference followed the rule, the validator asserted the example, and the
+reference test failed on the first run — the system working as intended. But
+the same disagreement reaches the candidate, and there nothing catches it: a
+brain that follows the stated rule is marked wrong for obeying the prompt, and
+the case is then clustered as a capability gap in path formatting rather than
+as an authoring defect. A wrong expected value costs one run; a prompt that
+contradicts itself costs a repair aimed at curriculum that was never at fault.
+
+Composition rules break at the *degenerate* position — the empty path, the
+single-element list, the zero-length interval — because that is the only place
+where "append the separator" has nothing to append it to. Deriving the example
+from the rule at a middle position proves nothing, since that is where the two
+agree. Derive it at the first position instead, and where rule and example
+disagree, decide which one is the contract and rewrite the other rather than
+leaving the example to imply it.
+
 ### A stub that fails proves almost nothing
 
 `test_a_broken_solution_fails_its_validator` mutates the *reference*, which is
