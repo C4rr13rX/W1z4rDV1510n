@@ -398,12 +398,48 @@ The digests differed, every test passed, and the course would have carried two
 tasks measuring one capability while both counted toward the fixed family
 totals — so a slot that should measure something the brain cannot yet do
 would instead re-measure something already covered. That is the contract's
-"1,000 distinct" requirement failing quietly, and no automated check in this
-repository is positioned to notice it.
+"1,000 distinct" requirement failing quietly.
 
-So the guard is procedural and belongs *before* authoring, not after: grep
-every family for the **behaviour**, not for the family name or the identifier
-you have in mind.
+#### Two signals that fire before the commit, and what they still miss
+
+`capability_overlaps` in `programming_obstacle_manifest.py` now reports two
+things, and `test_every_capability_overlap_has_been_reviewed` fails until
+each is recorded in `REVIEWED_OVERLAPS` with the reason the tasks differ:
+
+- **the public symbols a validator demands**, parsed from the
+  `hasattr(candidate, '...')` line `_support.require` emits, since a
+  duplicated capability is usually asked for under the same name; and
+- **the normative document a prompt cites**, counted only across families,
+  since one family reusing a specification for two of its own behaviours is
+  ordinary.
+
+Measured, not assumed. Run against the state of commit `082ebcf`, the scan
+names both of that commit's duplicates —
+`symbol:compare_versions` pairs the new requirements task with
+`validation_parsing_serialization-0002`, and `citation:RFC3986` pulls the
+other in beside `validation_parsing_serialization-0007`. Neither is reviewed,
+so the suite would have failed before the commit landed. Neither signal alone
+suffices: the versions pair cited no RFC, and the URI pair used two different
+function names.
+
+The scan is a net, not a proof, and its blind spot is exactly the case that
+motivated this section. `RateLimiter` and `TokenBucket` share no symbol and
+cite no document, so nothing would have fired. The same is true of a live
+pair kept deliberately: `http_apis_authn_appsec-0009` parses a Cache-Control
+header, `requirements_api_contracts-0103` computes RFC 9111 freshness from
+one, and the scan sees neither a shared name nor a shared citation.
+
+A pattern earns a place in the citation list only when naming the document
+implies measuring its behaviour. `POSIX` was tried and removed — four prompts
+say "POSIX file paths" while measuring archive determinism, ignore-rule
+matching, token verification and path containment, so every pair it reported
+was noise, and a scan that mostly cries wolf gets rubber-stamped. `SPDX` was
+removed for the opposite reason: it lives in provenance metadata and never in
+a prompt, so the pattern could not fire at all.
+
+So the procedural guard still belongs *before* authoring, and the scan is the
+backstop for what it misses: grep every family for the **behaviour**, not for
+the family name or the identifier you have in mind.
 
 ```bash
 grep -rin "token bucket\|rate limit\|circuit break\|backoff" \

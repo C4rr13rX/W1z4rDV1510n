@@ -10,6 +10,20 @@ the underlying table changes mid-scan.
 The prompts state the contract in prose. Reproducing the worked examples is
 never sufficient, because every validator also drives cases the prompt does
 not enumerate.
+
+Boundaries with sibling families, recorded so the next author finds them by
+reading rather than by colliding:
+
+- `validation_parsing_serialization` owns URI reference resolution (0007) and
+  SemVer precedence (0002). This family took the resolver half of versioning
+  instead -- which versions a range admits, and which one is picked -- and
+  declines reference resolution outright.
+- `http_apis_authn_appsec` owns Cache-Control *parsing* (0009). Task 0103
+  here computes RFC 9111 freshness from an already-parsed header, and its
+  one quoting case is incidental rather than the thing measured.
+- `capability_overlaps` reports neither of those pairs: they share no public
+  symbol, and 0009 cites no document. The scan is a backstop, not a substitute
+  for reading the neighbouring family first.
 """
 
 from __future__ import annotations

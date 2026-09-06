@@ -27,6 +27,7 @@ from scripts.programming_obstacle_manifest import (
     Provenance,
     audit_manifest,
     build_manifest,
+    capability_overlaps,
     freeze_manifest,
     held_out_violations,
     load_manifest,
@@ -601,4 +602,107 @@ def test_every_authored_task_has_exactly_one_reference_and_mutation():
     )
     assert not (set(MUTATIONS) - authored), (
         "mutations without a task: " f"{sorted(set(MUTATIONS) - authored)}"
+    )
+
+
+#: Capability overlaps a person has looked at and kept, with the reason the
+#: two tasks measure different things. A new overlap fails the test below
+#: instead of appearing in a report nobody reads -- the review has to happen
+#: before the task is committed, which is precisely what did not happen on
+#: 2026-09-05 when two requirements tasks re-measured the validation family.
+REVIEWED_OVERLAPS = {
+    "symbol:apply_patch": (
+        "requirements-0101 patches a JSON document by RFC 6902 pointer "
+        "operations; testing-0008 applies line hunks to a list of file "
+        "lines. Same name, no shared behaviour."
+    ),
+    "symbol:compose": (
+        "architecture-0003 merges typed configuration sources by "
+        "precedence; scientific-0001 multiplies two 4x4 rigid transforms."
+    ),
+    "citation:RFC3986": (
+        "validation-0007 resolves a reference against a base, validation-0008 "
+        "is the percent-encoding and form-decoding primitives, and "
+        "frontend-0011 round-trips typed view state through a query string. "
+        "The last two are adjacent -- both encode -- but frontend-0011 is "
+        "measured on default omission and typed decoding, not on the "
+        "encoding rules themselves."
+    ),
+    "citation:RFC6901": (
+        "validation-0003 evaluates a pointer, validation-0011 emits one to "
+        "name a schema violation, and requirements-0101 uses pointers as the "
+        "addressing inside patch application. Reading, writing and applying."
+    ),
+    "citation:SEMANTICVERSIONING": (
+        "This is the pair that motivated the scan, kept deliberately after "
+        "being narrowed. validation-0002 measures precedence -- given two "
+        "versions, which is newer. requirements-0104 measures range "
+        "resolution -- which versions a caret or tilde constraint admits, "
+        "and which of a set a resolver would pick -- and no longer asks for "
+        "a comparison function at all."
+    ),
+}
+
+
+def test_every_capability_overlap_has_been_reviewed():
+    """A duplicated capability still scores, which is why this is a test.
+
+    `test_no_two_tasks_measure_the_same_behavior` compares digests of the
+    prompt and validator text, so it cannot see two tasks that ask for one
+    behaviour in different words. This surfaces the pairs worth judging and
+    requires each to be judged once, in writing, rather than discovered by
+    reading a neighbouring family after the fact.
+    """
+    overlaps = capability_overlaps(AUTHORED)
+    unreviewed = {
+        f"{overlap['kind']}:{overlap['key']}": overlap["task_ids"]
+        for overlap in overlaps
+        if f"{overlap['kind']}:{overlap['key']}" not in REVIEWED_OVERLAPS
+    }
+    assert not unreviewed, (
+        "these tasks may measure the same capability twice, and nothing else "
+        "in this suite can tell. Decide, then record the decision in "
+        f"REVIEWED_OVERLAPS: {unreviewed}"
+    )
+
+
+def test_the_overlap_scan_can_actually_report_something():
+    """An empty report is only evidence if the scan can be non-empty.
+
+    A pattern that never matches reports "no overlaps" forever, which is the
+    vacuous-zero failure this repository has already paid for once.
+    """
+    duplicate = make_task(
+        "algorithms_data_structures-9002",
+        validator=(
+            "assert hasattr(candidate, 'select_media_type')\n"
+            "assert RESPONSE_TEXT\n"
+        ),
+        prompt=(
+            "Implement a Python function against RFC 7231 that a caller can "
+            "depend on, with stated error behaviour for every input."
+        ),
+    )
+    found = capability_overlaps(list(AUTHORED) + [duplicate])
+    keys = {f"{item['kind']}:{item['key']}" for item in found}
+    assert "symbol:select_media_type" in keys, (
+        "the symbol scan did not see a name shared with an authored task"
+    )
+    assert "citation:RFC7231" in keys, (
+        "the citation scan did not see a document shared across families"
+    )
+
+
+def test_stale_overlap_reviews_are_not_kept():
+    """A review of an overlap that no longer exists is not coverage.
+
+    The other half of the shadowing failure: an entry survives the task being
+    reworked or dropped and then sits in the file looking like a decision
+    about something nothing measures any more.
+    """
+    live = {f"{overlap['kind']}:{overlap['key']}"
+            for overlap in capability_overlaps(AUTHORED)}
+    assert not (set(REVIEWED_OVERLAPS) - live), (
+        "these overlaps were reviewed but no longer occur: "
+        f"{sorted(set(REVIEWED_OVERLAPS) - live)}"
     )

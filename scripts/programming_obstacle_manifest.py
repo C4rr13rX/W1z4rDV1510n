@@ -589,6 +589,87 @@ def held_out_violations(manifest: ObstacleManifest,
     return violations
 
 
+#: Names of a normative document a prompt is written against. Two tasks
+#: citing the same one are not automatically duplicates -- RFC 9110 covers
+#: conditional requests and range requests both -- but they are the pairs
+#: worth deciding about deliberately.
+#:
+#: A pattern earns its place only when naming the document implies measuring
+#: that document's behaviour. POSIX was tried and removed: four prompts say
+#: "POSIX file paths" while measuring archive determinism, ignore-rule
+#: matching, token verification and path containment, so every pair it
+#: reported was noise, and a scan that mostly cries wolf gets rubber-stamped.
+#: SPDX was removed for the opposite reason -- it appears in provenance
+#: metadata, never in a prompt, so the pattern could not fire at all.
+#: No capture groups: `findall` must return the whole citation, or the key
+#: loses the prefix and RFC 3986 collides with ISO 3986.
+_CITATION_PATTERNS = (
+    re.compile(r"\bRFC\s?\d{3,5}\b"),
+    re.compile(r"\bISO\s?\d{3,5}\b"),
+    re.compile(r"\bSemantic Versioning\b", re.IGNORECASE),
+    re.compile(r"\bWCAG\b"),
+    re.compile(r"\bUnicode\b"),
+)
+
+#: The public names a validator demands of the candidate. `_support.require`
+#: emits exactly this line, so the set is the task's required surface.
+_REQUIRED_SYMBOL = re.compile(r"hasattr\(candidate, '([^']+)'\)")
+
+
+def capability_overlaps(tasks: Sequence[ObstacleTask]) -> list[dict]:
+    """Report tasks that may measure one capability twice.
+
+    `audit_manifest` cannot see this and is not meant to. `behavior_digest`
+    hashes the prompt and the validator, so two tasks asking for the same
+    behaviour in different words are distinct to it -- a course of a thousand
+    tasks covering eight hundred capabilities would still report 1000/1000,
+    which is the number the acceptance contract rests on.
+
+    Not hypothetical. On 2026-09-05 the requirements family gained an
+    RFC 3986 reference resolver and a SemVer precedence comparison that
+    `validation_parsing_serialization` already owned, down to the same base
+    URI and the same prerelease chain. Both were found by reading the
+    neighbouring family after committing, which is not a control.
+
+    Two signals, each cheap, each a prompt to look rather than a verdict:
+
+    - the public symbols a validator demands, because a duplicated capability
+      is usually requested under the same name; and
+    - the normative document a prompt cites, counted only across families,
+      because one family reusing a specification for two of its own
+      behaviours is ordinary.
+
+    Neither alone would have caught both of that day's duplicates. The
+    versions pair shared `compare_versions` but cited no RFC; the URI pair
+    cited RFC 3986 under two different function names. Together they cover
+    both, and a real collision still has to be judged by a person: a
+    line-based `apply_patch` over file hunks and a JSON one over a document
+    share a name and measure nothing in common.
+    """
+    by_symbol: dict[str, list[str]] = {}
+    by_citation: dict[str, list[tuple[str, str]]] = {}
+    for task in tasks:
+        for name in sorted(set(_REQUIRED_SYMBOL.findall(task.validator))):
+            by_symbol.setdefault(name, []).append(task.task_id)
+        cited: set[str] = set()
+        for pattern in _CITATION_PATTERNS:
+            for hit in pattern.findall(task.prompt):
+                cited.add(re.sub(r"\s+", "", hit).upper())
+        for key in sorted(cited):
+            by_citation.setdefault(key, []).append((task.family, task.task_id))
+
+    overlaps: list[dict] = []
+    for name, task_ids in sorted(by_symbol.items()):
+        if len(task_ids) > 1:
+            overlaps.append({"kind": "symbol", "key": name,
+                             "task_ids": sorted(task_ids)})
+    for key, entries in sorted(by_citation.items()):
+        if len({family for family, _ in entries}) > 1:
+            overlaps.append({"kind": "citation", "key": key,
+                             "task_ids": sorted(i for _, i in entries)})
+    return overlaps
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     import argparse
 
