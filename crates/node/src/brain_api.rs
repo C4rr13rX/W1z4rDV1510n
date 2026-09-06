@@ -1954,7 +1954,53 @@ fn behaviour_query_frame(subset: &[String], prompt: &str) -> String {
     // The signal is there, it is simply outweighed by the rest of the
     // sentence. Leading with the behaviour and repeating it gives the
     // component's own terms comparable mass to the surrounding request.
-    format!("{canonical} {canonical} {prompt} {canonical}")
+    // Query the component ALONE, with its language -- never with the composite
+    // prompt attached.
+    //
+    // Repeating the canonical name around the whole request was meant to give
+    // the component comparable mass, but the request's own words still carry
+    // every OTHER behaviour's labels, so the per-component query inherits the
+    // composite intent and dies on the same all-or-nothing behaviour gate the
+    // composite did. Measured 2026-09-06 against the live brain, all four
+    // frames for the canonical composition prompt returned `no_answer`:
+    //
+    //   "api idempotent command <prompt> ..."            -> no_answer
+    //   "security authorization <prompt> ..."            -> no_answer
+    //   "persistence atomic transaction <prompt> ..."    -> no_answer
+    //   "observability correlated logging <prompt> ..."  -> no_answer
+    //
+    // The same brain answers every one of them when asked with the language
+    // and the behaviour alone:
+    //
+    //   "Python api idempotent command"           -> api.py
+    //   "Python security authorization"           -> authorization.py
+    //   "Python persistence atomic transaction"   -> repository.py
+    //   "Python observability correlated logging" -> observability.py
+    //
+    // The language prefix is load-bearing, not decoration: "api idempotent
+    // command" on its own returns `order_service.js`, the JavaScript
+    // component, which merge_grounded_file_manifests then discards for
+    // failing the language filter -- leaving the idempotency slot empty and
+    // the whole composite unanswerable.
+    let languages: Vec<String> = subset
+        .iter()
+        .filter_map(|label| label.split(":LANGUAGE:").nth(1))
+        .map(|language| {
+            language
+                .split(':')
+                .next()
+                .unwrap_or(language)
+                .replace('_', " ")
+                .to_ascii_lowercase()
+        })
+        .collect();
+    if languages.is_empty() {
+        // No language to anchor on: the composite prompt is still the only
+        // context available, so keep the previous behaviour rather than
+        // querying a bare behaviour name that resolves to any language.
+        return format!("{canonical} {canonical} {prompt} {canonical}");
+    }
+    format!("{} {canonical}", languages.join(" "))
 }
 
 fn manifest_component_feature_pairs(labels: &[String]) -> Vec<Vec<String>> {
@@ -7343,9 +7389,21 @@ class Model:
             "instruction_intent:SECURITY:AUTHORIZATION".to_string(),
         ];
         let frame = behaviour_query_frame(&subset, prompt);
-        assert!(frame.contains(prompt), "the request's own text is context");
+        // The composite prompt must NOT be carried into a component query.
+        // Measured 2026-09-06 against the live brain: every frame built as
+        // "<canonical> <canonical> <prompt> <canonical>" returned no_answer,
+        // because the request's own words carry every OTHER behaviour's
+        // labels and the component query then dies on the same
+        // all-or-nothing behaviour gate the composite did. The same brain
+        // answers "Python security authorization" with authorization.py.
+        assert!(!frame.contains(prompt), "frame was {frame:?}");
         assert!(frame.contains("authorization"), "frame was {frame:?}");
         assert!(frame.contains("security"), "frame was {frame:?}");
+        // The language anchor is load-bearing: without it the same brain
+        // answers "api idempotent command" with order_service.js, the
+        // JavaScript component, which the language filter then discards --
+        // leaving the slot empty and the composite unanswerable.
+        assert!(frame.contains("python"), "frame was {frame:?}");
 
         // Underscores become words so multi-word behaviours read naturally.
         let idempotent = vec![
@@ -7354,6 +7412,8 @@ class Model:
         ];
         let frame = behaviour_query_frame(&idempotent, prompt);
         assert!(frame.contains("idempotent command"), "frame was {frame:?}");
+        assert!(frame.contains("python"), "frame was {frame:?}");
+        assert!(!frame.contains(prompt), "frame was {frame:?}");
 
         // A language-only subset has no behaviour to name.
         let language_only = vec!["instruction_intent:LANGUAGE:PYTHON".to_string()];
