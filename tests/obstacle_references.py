@@ -9161,3 +9161,582 @@ MUTATIONS: dict[str, tuple[str, str]] = {
         "        self._oldest = float(self._clock())",
     ),
 }
+
+
+# --------------------------------------------------------------------------
+# requirements_api_contracts, id block 0101 and up.
+#
+# Appended after the MUTATIONS literal rather than written into it, so that a
+# session extending this file from the front and a session extending it from
+# the back never touch the same lines. Item assignment on MUTATIONS is
+# equivalent to a literal entry for the duplicate scan in
+# `test_no_task_is_defined_twice_in_the_reference_tables`, which reads
+# Subscript assignments on both tables.
+# --------------------------------------------------------------------------
+
+REFERENCES["requirements_api_contracts-0101"] = r'''
+import copy
+
+_OPERATIONS = {"add", "remove", "replace", "move", "copy", "test"}
+
+
+def _parse_pointer(pointer):
+    if not isinstance(pointer, str):
+        raise ValueError("path must be a string")
+    if pointer == "":
+        return []
+    if not pointer.startswith("/"):
+        raise ValueError("a non-empty pointer must start with /")
+    return [token.replace("~1", "/").replace("~0", "~")
+            for token in pointer[1:].split("/")]
+
+
+def _index(node, token, allow_end):
+    if token == "-":
+        if not allow_end:
+            raise ValueError("- addresses no existing element")
+        return len(node)
+    if not token or not token.isdigit():
+        raise ValueError(f"not an array index: {token!r}")
+    if len(token) > 1 and token.startswith("0"):
+        raise ValueError(f"array index has a leading zero: {token!r}")
+    value = int(token)
+    limit = len(node) if allow_end else len(node) - 1
+    if value > limit:
+        raise ValueError(f"array index out of range: {token!r}")
+    return value
+
+
+def _get(document, tokens):
+    node = document
+    for token in tokens:
+        if isinstance(node, list):
+            node = node[_index(node, token, allow_end=False)]
+        elif isinstance(node, dict):
+            if token not in node:
+                raise ValueError(f"no member {token!r}")
+            node = node[token]
+        else:
+            raise ValueError("the path runs through a scalar")
+    return node
+
+
+def _parent(document, tokens):
+    return _get(document, tokens[:-1])
+
+
+def _equal(left, right):
+    if isinstance(left, bool) != isinstance(right, bool):
+        return False
+    if isinstance(left, dict) and isinstance(right, dict):
+        return (left.keys() == right.keys()
+                and all(_equal(left[key], right[key]) for key in left))
+    if isinstance(left, list) and isinstance(right, list):
+        return (len(left) == len(right)
+                and all(_equal(a, b) for a, b in zip(left, right)))
+    if isinstance(left, dict) or isinstance(right, dict):
+        return False
+    if isinstance(left, list) or isinstance(right, list):
+        return False
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        return left == right
+    return type(left) is type(right) and left == right
+
+
+def _add(document, tokens, value):
+    if not tokens:
+        return value
+    parent = _parent(document, tokens)
+    token = tokens[-1]
+    if isinstance(parent, list):
+        parent.insert(_index(parent, token, allow_end=True), value)
+    elif isinstance(parent, dict):
+        parent[token] = value
+    else:
+        raise ValueError("cannot add to a scalar")
+    return document
+
+
+def _remove(document, tokens):
+    if not tokens:
+        raise ValueError("cannot remove the whole document")
+    parent = _parent(document, tokens)
+    token = tokens[-1]
+    if isinstance(parent, list):
+        del parent[_index(parent, token, allow_end=False)]
+    elif isinstance(parent, dict):
+        if token not in parent:
+            raise ValueError(f"no member {token!r}")
+        del parent[token]
+    else:
+        raise ValueError("cannot remove from a scalar")
+    return document
+
+
+def _replace(document, tokens, value):
+    if not tokens:
+        return value
+    _get(document, tokens)
+    parent = _parent(document, tokens)
+    token = tokens[-1]
+    if isinstance(parent, list):
+        parent[_index(parent, token, allow_end=False)] = value
+    else:
+        parent[token] = value
+    return document
+
+
+def apply_patch(document, operations):
+    working = copy.deepcopy(document)
+    for operation in operations:
+        if not isinstance(operation, dict):
+            raise ValueError("an operation must be an object")
+        name = operation.get("op")
+        if name not in _OPERATIONS:
+            raise ValueError(f"unknown op {name!r}")
+        if "path" not in operation:
+            raise ValueError("an operation needs a path")
+        tokens = _parse_pointer(operation["path"])
+        if name in ("add", "replace", "test") and "value" not in operation:
+            raise ValueError(f"{name} needs a value")
+        source = None
+        if name in ("move", "copy"):
+            if "from" not in operation:
+                raise ValueError(f"{name} needs a from")
+            source = _parse_pointer(operation["from"])
+
+        if name == "test":
+            if not _equal(_get(working, tokens), operation["value"]):
+                raise ValueError("test failed")
+        elif name == "add":
+            working = _add(working, tokens,
+                           copy.deepcopy(operation["value"]))
+        elif name == "replace":
+            working = _replace(working, tokens,
+                               copy.deepcopy(operation["value"]))
+        elif name == "remove":
+            working = _remove(working, tokens)
+        elif name == "copy":
+            working = _add(working, tokens,
+                           copy.deepcopy(_get(working, source)))
+        else:
+            if (len(tokens) > len(source)
+                    and tokens[:len(source)] == source):
+                raise ValueError("cannot move a location into its own child")
+            value = _get(working, source)
+            working = _remove(working, source)
+            working = _add(working, tokens, value)
+    return working
+'''
+
+
+REFERENCES["requirements_api_contracts-0102"] = r'''
+import string
+
+# prefix, separator, named, what an empty value expands to
+_OPERATORS = {
+    "": ("", ",", False, ""),
+    "+": ("", ",", False, ""),
+    "#": ("#", ",", False, ""),
+    ".": (".", ".", False, ""),
+    "/": ("/", "/", False, ""),
+    ";": (";", ";", True, ""),
+    "?": ("?", "&", True, "="),
+    "&": ("&", "&", True, "="),
+}
+
+_UNRESERVED = set(string.ascii_letters + string.digits + "-._~")
+_RESERVED = set(":/?#[]@!$&'()*+,;=")
+
+
+def _encode(text, allow_reserved):
+    raw = str(text)
+    out = []
+    index = 0
+    while index < len(raw):
+        char = raw[index]
+        if char in _UNRESERVED:
+            out.append(char)
+        elif allow_reserved and char in _RESERVED:
+            out.append(char)
+        elif (allow_reserved and char == "%"
+              and len(raw) - index >= 3
+              and all(digit in string.hexdigits
+                      for digit in raw[index + 1:index + 3])):
+            out.append(raw[index:index + 3])
+            index += 3
+            continue
+        else:
+            out.extend("%%%02X" % byte for byte in char.encode("utf-8"))
+        index += 1
+    return "".join(out)
+
+
+def _pair(name, text, if_empty):
+    if text == "":
+        return name + if_empty
+    return name + "=" + text
+
+
+def _render(name, value, explode, limit, named, if_empty, separator,
+            allow_reserved):
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return None
+        items = [_encode(item, allow_reserved) for item in value]
+        if explode:
+            if named:
+                return separator.join(
+                    _pair(name, item, if_empty) for item in items)
+            return separator.join(items)
+        joined = ",".join(items)
+        return _pair(name, joined, if_empty) if named else joined
+    if isinstance(value, dict):
+        if not value:
+            return None
+        pairs = [(_encode(key, allow_reserved), _encode(item, allow_reserved))
+                 for key, item in value.items()]
+        if explode:
+            if named:
+                return separator.join(
+                    _pair(key, item, if_empty) for key, item in pairs)
+            return separator.join(key + "=" + item for key, item in pairs)
+        joined = ",".join(key + "," + item for key, item in pairs)
+        return _pair(name, joined, if_empty) if named else joined
+    text = str(value)
+    if limit is not None:
+        text = text[:limit]
+    text = _encode(text, allow_reserved)
+    return _pair(name, text, if_empty) if named else text
+
+
+def _expand(expression, variables):
+    operator = ""
+    if expression and expression[0] in "+#./;?&":
+        operator = expression[0]
+        expression = expression[1:]
+    prefix, separator, named, if_empty = _OPERATORS[operator]
+    allow_reserved = operator in ("+", "#")
+
+    pieces = []
+    for spec in expression.split(","):
+        spec = spec.strip()
+        explode = spec.endswith("*")
+        if explode:
+            spec = spec[:-1]
+        limit = None
+        if ":" in spec:
+            spec, _, digits = spec.partition(":")
+            if not digits.isdigit():
+                raise ValueError("a prefix modifier needs a length")
+            limit = int(digits)
+        if spec not in variables:
+            continue
+        value = variables[spec]
+        if value is None:
+            continue
+        rendered = _render(spec, value, explode, limit, named, if_empty,
+                           separator, allow_reserved)
+        if rendered is None:
+            continue
+        pieces.append(rendered)
+
+    if not pieces:
+        return ""
+    return prefix + separator.join(pieces)
+
+
+def expand_uri_template(template, variables):
+    out = []
+    index = 0
+    while index < len(template):
+        char = template[index]
+        if char != "{":
+            out.append(char)
+            index += 1
+            continue
+        close = template.find("}", index)
+        if close == -1:
+            raise ValueError("unterminated expression")
+        out.append(_expand(template[index + 1:close], variables))
+        index = close + 1
+    return "".join(out)
+'''
+
+
+REFERENCES["requirements_api_contracts-0103"] = r'''
+import re
+
+_URI = re.compile(
+    r"^(?:(?P<scheme>[^:/?#]+):)?"
+    r"(?://(?P<authority>[^/?#]*))?"
+    r"(?P<path>[^?#]*)"
+    r"(?:\?(?P<query>[^#]*))?"
+    r"(?:#(?P<fragment>.*))?$"
+)
+
+
+def _split(uri):
+    match = _URI.match(str(uri))
+    if match is None:
+        raise ValueError(f"not a URI reference: {uri!r}")
+    return match.groupdict()
+
+
+def _remove_dot_segments(path):
+    output = []
+    while path:
+        if path.startswith("../"):
+            path = path[3:]
+        elif path.startswith("./"):
+            path = path[2:]
+        elif path.startswith("/./"):
+            path = "/" + path[3:]
+        elif path == "/.":
+            path = "/"
+        elif path.startswith("/../"):
+            path = "/" + path[4:]
+            if output:
+                output.pop()
+        elif path == "/..":
+            path = "/"
+            if output:
+                output.pop()
+        elif path in (".", ".."):
+            path = ""
+        else:
+            cut = path.find("/", 1) if path.startswith("/") else path.find("/")
+            if cut == -1:
+                cut = len(path)
+            output.append(path[:cut])
+            path = path[cut:]
+    return "".join(output)
+
+
+def _merge(base, path):
+    if base["authority"] is not None and base["path"] == "":
+        return "/" + path
+    cut = base["path"].rfind("/")
+    if cut == -1:
+        return path
+    return base["path"][:cut + 1] + path
+
+
+def _recompose(parts):
+    out = ""
+    if parts["scheme"] is not None:
+        out += parts["scheme"] + ":"
+    if parts["authority"] is not None:
+        out += "//" + parts["authority"]
+    out += parts["path"]
+    if parts["query"] is not None:
+        out += "?" + parts["query"]
+    if parts["fragment"] is not None:
+        out += "#" + parts["fragment"]
+    return out
+
+
+def resolve_reference(base, reference):
+    origin = _split(base)
+    if origin["scheme"] is None:
+        raise ValueError("the base URI must carry a scheme")
+    ref = _split(reference)
+
+    target = {"fragment": ref["fragment"]}
+    if ref["scheme"] is not None:
+        target["scheme"] = ref["scheme"]
+        target["authority"] = ref["authority"]
+        target["path"] = _remove_dot_segments(ref["path"])
+        target["query"] = ref["query"]
+        return _recompose(target)
+
+    target["scheme"] = origin["scheme"]
+    if ref["authority"] is not None:
+        target["authority"] = ref["authority"]
+        target["path"] = _remove_dot_segments(ref["path"])
+        target["query"] = ref["query"]
+        return _recompose(target)
+
+    target["authority"] = origin["authority"]
+    if ref["path"] == "":
+        target["path"] = origin["path"]
+        query = ref["query"] if ref["query"] is not None else origin["query"]
+        target["query"] = query
+        return _recompose(target)
+
+    if ref["path"].startswith("/"):
+        target["path"] = _remove_dot_segments(ref["path"])
+    else:
+        target["path"] = _remove_dot_segments(_merge(origin, ref["path"]))
+    target["query"] = ref["query"]
+    return _recompose(target)
+'''
+
+
+REFERENCES["requirements_api_contracts-0104"] = r'''
+import re
+
+_VERSION = re.compile(
+    r"^(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)"
+    r"(?:-(?P<prerelease>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
+    r"(?:\+(?P<build>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$"
+)
+
+_COMPARATOR = re.compile(r"^(>=|<=|>|<|=)?\s*(\S+)$")
+
+
+def _parse(text):
+    match = _VERSION.match(str(text).strip())
+    if match is None:
+        raise ValueError(f"not a semantic version: {text!r}")
+    parts = match.groupdict()
+    prerelease = (parts["prerelease"].split(".")
+                  if parts["prerelease"] else [])
+    for field in prerelease:
+        if field == "":
+            raise ValueError("empty prerelease identifier")
+        if field.isdigit() and len(field) > 1 and field.startswith("0"):
+            raise ValueError("numeric prerelease field has a leading zero")
+    return (int(parts["major"]), int(parts["minor"]), int(parts["patch"]),
+            prerelease)
+
+
+def _prerelease_key(fields):
+    key = []
+    for field in fields:
+        if field.isdigit():
+            key.append((0, int(field), ""))
+        else:
+            key.append((1, 0, field))
+    return key
+
+
+def _compare_parsed(left, right):
+    if left[:3] != right[:3]:
+        return -1 if left[:3] < right[:3] else 1
+    if not left[3] and not right[3]:
+        return 0
+    if not left[3]:
+        return 1
+    if not right[3]:
+        return -1
+    lower, higher = _prerelease_key(left[3]), _prerelease_key(right[3])
+    if lower == higher:
+        return 0
+    return -1 if lower < higher else 1
+
+
+def compare_versions(left, right):
+    return _compare_parsed(_parse(left), _parse(right))
+
+
+def _parse_partial(text, minimum):
+    core = str(text).split("+", 1)[0]
+    prerelease = []
+    if "-" in core:
+        core, _, tail = core.partition("-")
+        prerelease = tail.split(".")
+    fields = core.split(".")
+    if not minimum <= len(fields) <= 3:
+        raise ValueError(f"not a usable version prefix: {text!r}")
+    numbers = []
+    for field in fields:
+        if not field.isdigit() or (len(field) > 1 and field.startswith("0")):
+            raise ValueError(f"not a usable version prefix: {text!r}")
+        numbers.append(int(field))
+    while len(numbers) < 3:
+        numbers.append(0)
+    return (numbers[0], numbers[1], numbers[2], prerelease)
+
+
+def _caret(text):
+    lower = _parse_partial(text, minimum=3)
+    major, minor, patch, _ = lower
+    if major > 0:
+        upper = (major + 1, 0, 0, [])
+    elif minor > 0:
+        upper = (0, minor + 1, 0, [])
+    else:
+        upper = (0, 0, patch + 1, [])
+    return [(">=", lower), ("<", upper)]
+
+
+def _tilde(text):
+    lower = _parse_partial(text, minimum=2)
+    return [(">=", lower), ("<", (lower[0], lower[1] + 1, 0, []))]
+
+
+def _comparators(constraint):
+    out = []
+    for piece in str(constraint).split(","):
+        piece = piece.strip()
+        if not piece:
+            continue
+        if piece.startswith("^"):
+            out.extend(_caret(piece[1:].strip()))
+        elif piece.startswith("~"):
+            out.extend(_tilde(piece[1:].strip()))
+        else:
+            match = _COMPARATOR.match(piece)
+            if match is None:
+                raise ValueError(f"not a comparator: {piece!r}")
+            out.append((match.group(1) or "=", _parse(match.group(2))))
+    if not out:
+        raise ValueError("empty constraint")
+    return out
+
+
+def satisfies(version, constraint):
+    target = _parse(version)
+    comparators = _comparators(constraint)
+    for operator, bound in comparators:
+        order = _compare_parsed(target, bound)
+        if operator == ">=" and order < 0:
+            return False
+        if operator == ">" and order <= 0:
+            return False
+        if operator == "<=" and order > 0:
+            return False
+        if operator == "<" and order >= 0:
+            return False
+        if operator == "=" and order != 0:
+            return False
+    if target[3] and not any(bound[3] and bound[:3] == target[:3]
+                             for _, bound in comparators):
+        return False
+    return True
+'''
+
+
+# Add to an array index overwrites the element instead of inserting before
+# it. Every append and every object add still behaves, so the patch looks
+# correct until a caller inserts into the middle of a list.
+MUTATIONS["requirements_api_contracts-0101"] = (
+    "        parent.insert(_index(parent, token, allow_end=True), value)",
+    "        parent[_index(parent, token, allow_end=True)] = value",
+)
+
+# Treat the older RFC 2396 "mark" characters as unreserved, which is what
+# JavaScript's encodeURIComponent does. Reserved expansion is unaffected, so
+# only simple expansion of a value containing ! * ' ( ) diverges.
+MUTATIONS["requirements_api_contracts-0102"] = (
+    '_UNRESERVED = set(string.ascii_letters + string.digits + "-._~")',
+    '_UNRESERVED = set(string.ascii_letters + string.digits + "-._~!*\'()")',
+)
+
+# Inherit the base query whenever the reference query is falsy rather than
+# absent. A reference of "?" carries a defined but empty query, and this
+# silently resurrects the base's query string instead.
+MUTATIONS["requirements_api_contracts-0103"] = (
+    '        query = ref["query"] if ref["query"] is not None '
+    'else origin["query"]',
+    '        query = ref["query"] or origin["query"]',
+)
+
+# Compare numeric prerelease fields as text. Every single-field prerelease
+# still orders correctly, and so does numeric-below-alphanumeric; only two
+# numeric fields of different width disagree -- beta.11 before beta.2.
+MUTATIONS["requirements_api_contracts-0104"] = (
+    '            key.append((0, int(field), ""))',
+    '            key.append((0, 0, field))',
+)

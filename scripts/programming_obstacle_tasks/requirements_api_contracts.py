@@ -552,4 +552,449 @@ for malformed in ("https://api/1; rel=next", "<https://api/1>, oops"):
         raise AssertionError(f"{malformed!r} should be rejected")
 ''',
     ),
+    # ----------------------------------------------------------------------
+    # Ids from 0101 upwards. The sequential block below 0100 is reserved for
+    # whoever is extending this family from the front; numbering a
+    # concurrently authored batch into its own range means two sessions
+    # cannot mint the same id, which `audit_manifest` would only report
+    # after both had been written.
+    # ----------------------------------------------------------------------
+    task(
+        f"{FAMILY}-0101", FAMILY,
+        prompt=(
+            "Implement a Python function apply_patch(document, operations) "
+            "applying an RFC 6902 JSON Patch. Return the patched document "
+            "and never mutate the argument. Each operation is a dict with "
+            "'op' and 'path', where the path is an RFC 6901 JSON Pointer: "
+            "the empty string addresses the whole document, and inside a "
+            "token '~1' means '/' and '~0' means '~', unescaped in that "
+            "order so '~01' is the literal '~1'. Support add, remove, "
+            "replace, move, copy and test. 'add' inserts before an array "
+            "index rather than overwriting it, accepts an index equal to "
+            "the array's length, and accepts '-' to append; on an object it "
+            "creates or overwrites the member. 'remove' and 'replace' "
+            "require the target to already exist. 'move' and 'copy' read "
+            "'from', and moving a location into its own child is an error. "
+            "'test' compares structurally, and a boolean is never equal to "
+            "a number. The patch is atomic: raise ValueError if any "
+            "operation fails, apply none of it, and leave the input "
+            "document untouched. Values taken from the patch or copied "
+            "within the document must not alias their source."
+        ),
+        validator=LOAD_CANDIDATE + require("apply_patch") + r'''
+import copy
+
+# add creates a member; the input is never mutated.
+source = {"a": 1}
+frozen = copy.deepcopy(source)
+assert apply_patch(source, [{"op": "add", "path": "/b", "value": 2}]) == {
+    "a": 1, "b": 2
+}
+assert source == frozen, "apply_patch mutated its input document"
+
+# add INSERTS into an array rather than replacing the element there.
+assert apply_patch(
+    {"a": [1, 3]}, [{"op": "add", "path": "/a/1", "value": 2}]
+) == {"a": [1, 2, 3]}, "add to an array index must insert, not overwrite"
+assert apply_patch(
+    {"a": [1, 2]}, [{"op": "add", "path": "/a/-", "value": 3}]
+) == {"a": [1, 2, 3]}
+assert apply_patch(
+    {"a": [1, 2]}, [{"op": "add", "path": "/a/2", "value": 3}]
+) == {"a": [1, 2, 3]}, "an index equal to the length appends"
+
+# An index past the end is out of range, and add on an object overwrites.
+for bad in ("/a/3", "/a/-1"):
+    try:
+        apply_patch({"a": [1, 2]}, [{"op": "add", "path": bad, "value": 9}])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"add to {bad} should be rejected")
+assert apply_patch(
+    {"a": 1}, [{"op": "add", "path": "/a", "value": 2}]
+) == {"a": 2}
+
+# remove and replace require an existing target.
+assert apply_patch({"a": 1, "b": 2}, [{"op": "remove", "path": "/b"}]) == {
+    "a": 1
+}
+for operation in ({"op": "remove", "path": "/nope"},
+                  {"op": "replace", "path": "/nope", "value": 1}):
+    try:
+        apply_patch({"a": 1}, [operation])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"{operation['op']} on a missing member passed")
+
+# The empty pointer addresses the whole document.
+assert apply_patch({"a": 1}, [{"op": "replace", "path": "", "value": [1]}]) == [1]
+
+# Pointer escaping, including the order the two escapes are undone in.
+assert apply_patch(
+    {"a/b": 1}, [{"op": "replace", "path": "/a~1b", "value": 2}]
+) == {"a/b": 2}
+assert apply_patch(
+    {"m~n": 1}, [{"op": "replace", "path": "/m~0n", "value": 2}]
+) == {"m~n": 2}
+assert apply_patch(
+    {"~1": 1}, [{"op": "replace", "path": "/~01", "value": 2}]
+) == {"~1": 2}, "'~01' unescapes to the literal '~1', not to '/'"
+
+# test compares structurally, and true is not 1.
+assert apply_patch(
+    {"a": [1, {"b": 2}]},
+    [{"op": "test", "path": "/a", "value": [1, {"b": 2}]},
+     {"op": "add", "path": "/ok", "value": True}],
+) == {"a": [1, {"b": 2}], "ok": True}
+try:
+    apply_patch({"a": True}, [{"op": "test", "path": "/a", "value": 1}])
+except ValueError:
+    pass
+else:
+    raise AssertionError("a boolean must not test equal to a number")
+
+# Atomicity: an earlier operation that succeeded is not kept.
+document = {"a": 1}
+frozen = copy.deepcopy(document)
+try:
+    apply_patch(document, [
+        {"op": "add", "path": "/b", "value": 2},
+        {"op": "test", "path": "/a", "value": 99},
+    ])
+except ValueError:
+    pass
+else:
+    raise AssertionError("a failing test must reject the whole patch")
+assert document == frozen, "a rejected patch left the document modified"
+
+# move relocates, and refuses to move a location into its own child.
+assert apply_patch(
+    {"a": {"b": 1}, "c": 2}, [{"op": "move", "from": "/c", "path": "/a/c"}]
+) == {"a": {"b": 1, "c": 2}}
+try:
+    apply_patch({"a": {"b": 1}}, [{"op": "move", "from": "/a", "path": "/a/b"}])
+except ValueError:
+    pass
+else:
+    raise AssertionError("moving a location into its own child passed")
+
+# copy must not alias the value it copied.
+result = apply_patch(
+    {"a": {"b": [1]}}, [{"op": "copy", "from": "/a", "path": "/z"}]
+)
+result["z"]["b"].append(2)
+assert result["a"]["b"] == [1], "copy aliased the value it duplicated"
+
+# An unknown operation is rejected rather than ignored.
+try:
+    apply_patch({"a": 1}, [{"op": "increment", "path": "/a", "value": 1}])
+except ValueError:
+    pass
+else:
+    raise AssertionError("an unknown op must be rejected")
+''',
+    ),
+    task(
+        f"{FAMILY}-0102", FAMILY,
+        prompt=(
+            "Implement a Python function expand_uri_template(template, "
+            "variables) performing RFC 6570 URI Template expansion up to "
+            "level 4. Text outside braces is copied verbatim; an "
+            "unterminated brace raises ValueError. An expression may open "
+            "with one of the operators + # . / ; ? & which selects the "
+            "prefix emitted before a non-empty result, the separator "
+            "between values, whether each value is emitted as name=value, "
+            "and what an empty value produces. The default and . / ; ? & "
+            "operators percent-encode everything outside the unreserved set "
+            "A-Z a-z 0-9 - . _ ~ using UTF-8; + and # additionally pass "
+            "reserved characters and existing percent-encoded triplets "
+            "through unchanged. For ? and & an empty value yields 'name=', "
+            "for ; it yields bare 'name'. A variable that is absent, None, "
+            "an empty list or an empty dict is undefined and contributes "
+            "nothing. A ':n' modifier truncates a string to n characters "
+            "before encoding; a '*' modifier explodes a list into separate "
+            "values and a dict into its own name=value pairs, while an "
+            "unexploded dict flattens to comma-joined keys and values. "
+            "Dicts keep insertion order."
+        ),
+        validator=LOAD_CANDIDATE + require("expand_uri_template") + r'''
+variables = {
+    "var": "value", "hello": "Hello World!", "half": "50%",
+    "who": "fred", "base": "http://example.com/home/",
+    "path": "/foo/bar", "x": "1024", "y": "768",
+    "empty": "", "empty_keys": {}, "undef": None,
+    "list": ["red", "green", "blue"],
+    "keys": {"semi": ";", "dot": ".", "comma": ","},
+}
+
+
+def check(template, expected):
+    actual = expand_uri_template(template, variables)
+    assert actual == expected, f"{template} -> {actual!r}, want {expected!r}"
+
+
+# Simple expansion encodes everything outside the unreserved set.
+check("{var}", "value")
+check("{hello}", "Hello%20World%21")
+check("{half}", "50%25")
+check("{base}index", "http%3A%2F%2Fexample.com%2Fhome%2Findex")
+
+# Reserved expansion passes reserved characters and pct-triplets through.
+check("{+hello}", "Hello%20World!")
+check("{+half}", "50%25")
+check("{+base}index", "http://example.com/home/index")
+check("{+path}/here", "/foo/bar/here")
+check("X{#hello}", "X#Hello%20World!")
+
+# Prefixed operators emit their prefix only for a defined variable.
+check("{.who}", ".fred")
+check("{/who}", "/fred")
+check("{;who}", ";who=fred")
+check("{?who}", "?who=fred")
+check("{&who}", "&who=fred")
+
+# Named operators differ in what an empty value produces.
+check("{?x,y,empty}", "?x=1024&y=768&empty=")
+check("{;x,y,empty}", ";x=1024;y=768;empty")
+check("O{empty}X", "OX")
+check("O{undef}X", "OX")
+check("{?x,y,undef}", "?x=1024&y=768")
+check("{?empty_keys}", "")
+
+# The prefix modifier truncates before encoding.
+check("{var:3}", "val")
+check("{+path:6}/here", "/foo/b/here")
+
+# Lists: explode changes the separator, not just the spelling.
+check("{list}", "red,green,blue")
+check("{list*}", "red,green,blue")
+check("{/list}", "/red,green,blue")
+check("{/list*}", "/red/green/blue")
+check("{.list*}", ".red.green.blue")
+check("{?list}", "?list=red,green,blue")
+check("{?list*}", "?list=red&list=green&list=blue")
+
+# Dicts flatten to key,value pairs unless exploded.
+check("{keys}", "semi,%3B,dot,.,comma,%2C")
+check("{keys*}", "semi=%3B,dot=.,comma=%2C")
+check("{+keys}", "semi,;,dot,.,comma,,")
+check("{?keys}", "?keys=semi,%3B,dot,.,comma,%2C")
+check("{?keys*}", "?semi=%3B&dot=.&comma=%2C")
+check("{;keys*}", ";semi=%3B;dot=.;comma=%2C")
+
+# Several variables share one expression's prefix and separator.
+check("{x,hello,y}", "1024,Hello%20World%21,768")
+check("{+x,hello,y}", "1024,Hello%20World!,768")
+check("{#x,hello,y}", "#1024,Hello%20World!,768")
+check("{/list*,path:4}", "/red/green/blue/%2Ffoo")
+
+# Non-ASCII is encoded as its UTF-8 octets, not as a single byte.
+assert expand_uri_template("{n}", {"n": "é"}) == "%C3%A9"
+assert expand_uri_template("{+n}", {"n": "é"}) == "%C3%A9"
+
+try:
+    expand_uri_template("{var", variables)
+except ValueError:
+    pass
+else:
+    raise AssertionError("an unterminated expression must be rejected")
+''',
+    ),
+    task(
+        f"{FAMILY}-0103", FAMILY,
+        prompt=(
+            "Implement a Python function resolve_reference(base, reference) "
+            "resolving a URI reference against an absolute base URI using "
+            "the strict algorithm of RFC 3986 section 5.2, and returning "
+            "the recomposed target. Split each input into scheme, "
+            "authority, path, query and fragment, remembering that a "
+            "component which is absent differs from one that is present and "
+            "empty -- a reference of '?' carries an empty query and must "
+            "not inherit the base's. The base's own fragment is never "
+            "inherited. A relative path is merged against the base by "
+            "replacing everything after the base path's last '/', then the "
+            "result has its dot segments removed: '.' and '..' are resolved "
+            "against the accumulated output, '..' at the root is discarded "
+            "rather than escaping it, and a segment such as '..g' or 'g.' "
+            "is an ordinary name. Dot segments inside a query or fragment "
+            "are left alone. Raise ValueError when the base has no scheme."
+        ),
+        validator=LOAD_CANDIDATE + require("resolve_reference") + r'''
+BASE = "http://a/b/c/d;p?q"
+
+# The normal examples of RFC 3986 section 5.4.1.
+NORMAL = {
+    "g:h": "g:h",
+    "g": "http://a/b/c/g",
+    "./g": "http://a/b/c/g",
+    "g/": "http://a/b/c/g/",
+    "/g": "http://a/g",
+    "//g": "http://g",
+    "?y": "http://a/b/c/d;p?y",
+    "g?y": "http://a/b/c/g?y",
+    "#s": "http://a/b/c/d;p?q#s",
+    "g#s": "http://a/b/c/g#s",
+    "g?y#s": "http://a/b/c/g?y#s",
+    ";x": "http://a/b/c/;x",
+    "g;x": "http://a/b/c/g;x",
+    "g;x?y#s": "http://a/b/c/g;x?y#s",
+    "": "http://a/b/c/d;p?q",
+    ".": "http://a/b/c/",
+    "./": "http://a/b/c/",
+    "..": "http://a/b/",
+    "../": "http://a/b/",
+    "../g": "http://a/b/g",
+    "../..": "http://a/",
+    "../../": "http://a/",
+    "../../g": "http://a/g",
+}
+
+# The abnormal examples of section 5.4.2, which is where a resolver that
+# only handles the easy cases diverges.
+ABNORMAL = {
+    "../../../g": "http://a/g",
+    "../../../../g": "http://a/g",
+    "/./g": "http://a/g",
+    "/../g": "http://a/g",
+    "g.": "http://a/b/c/g.",
+    ".g": "http://a/b/c/.g",
+    "g..": "http://a/b/c/g..",
+    "..g": "http://a/b/c/..g",
+    "./../g": "http://a/b/g",
+    "./g/.": "http://a/b/c/g/",
+    "g/./h": "http://a/b/c/g/h",
+    "g/../h": "http://a/b/c/h",
+    "g;x=1/./y": "http://a/b/c/g;x=1/y",
+    "g;x=1/../y": "http://a/b/c/y",
+    "g?y/./x": "http://a/b/c/g?y/./x",
+    "g?y/../x": "http://a/b/c/g?y/../x",
+    "g#s/./x": "http://a/b/c/g#s/./x",
+    "g#s/../x": "http://a/b/c/g#s/../x",
+}
+
+for cases in (NORMAL, ABNORMAL):
+    for reference, expected in cases.items():
+        actual = resolve_reference(BASE, reference)
+        assert actual == expected, (
+            f"{reference!r} -> {actual!r}, want {expected!r}"
+        )
+
+# An empty component is not an absent one.
+assert resolve_reference(BASE, "?") == "http://a/b/c/d;p?"
+assert resolve_reference(BASE, "#") == "http://a/b/c/d;p?q#"
+assert resolve_reference("http://a/b/c/d;p?q#f", "g") == "http://a/b/c/g", (
+    "the base's fragment must never be inherited"
+)
+
+# A base whose path is empty still merges to an absolute path.
+assert resolve_reference("http://a", "g") == "http://a/g"
+
+try:
+    resolve_reference("/not/absolute", "g")
+except ValueError:
+    pass
+else:
+    raise AssertionError("a base without a scheme must be rejected")
+''',
+    ),
+    task(
+        f"{FAMILY}-0104", FAMILY,
+        prompt=(
+            "Implement compare_versions(left, right) and satisfies(version, "
+            "constraint) for Semantic Versioning 2.0.0. compare_versions "
+            "returns -1, 0 or 1. Build metadata after '+' never affects "
+            "precedence. A version with a prerelease ranks below the same "
+            "core version without one; prerelease identifiers are compared "
+            "field by field, numerically when both fields are all digits, "
+            "a numeric field ranking below an alphanumeric one, and a "
+            "longer identifier list ranking above a shorter one that is "
+            "otherwise identical. Reject anything that is not "
+            "major.minor.patch with no leading zeroes -- including a "
+            "numeric prerelease field with a leading zero -- by raising "
+            "ValueError. satisfies takes a comma-separated conjunction of "
+            "comparators using >=, >, <=, < or =, or a single '^' or '~' "
+            "range. '^' needs a full major.minor.patch and permits changes "
+            "that do not alter the leftmost non-zero field, so ^1.2.3 "
+            "allows below 2.0.0, ^0.2.3 below 0.3.0 and ^0.0.3 below 0.0.4. "
+            "'~' accepts major.minor or major.minor.patch and allows the "
+            "rest of that minor series. A prerelease version satisfies a "
+            "constraint only when some comparator in it names a prerelease "
+            "of that same major.minor.patch, so a prerelease never leaks "
+            "into a range written for released versions."
+        ),
+        validator=(LOAD_CANDIDATE + require("compare_versions")
+                   + require("satisfies") + r'''
+# Build metadata is ignored entirely.
+assert compare_versions("1.0.0+build.1", "1.0.0+build.9") == 0
+assert compare_versions("1.0.0+x", "1.0.0") == 0
+
+# Core precedence.
+ORDER = ["1.0.0", "2.0.0", "2.1.0", "2.1.1"]
+for index in range(len(ORDER) - 1):
+    assert compare_versions(ORDER[index], ORDER[index + 1]) == -1
+    assert compare_versions(ORDER[index + 1], ORDER[index]) == 1
+    assert compare_versions(ORDER[index], ORDER[index]) == 0
+
+# The prerelease chain from the specification, in order.
+CHAIN = [
+    "1.0.0-alpha", "1.0.0-alpha.1", "1.0.0-alpha.beta", "1.0.0-beta",
+    "1.0.0-beta.2", "1.0.0-beta.11", "1.0.0-rc.1", "1.0.0",
+]
+for index in range(len(CHAIN) - 1):
+    lower, higher = CHAIN[index], CHAIN[index + 1]
+    assert compare_versions(lower, higher) == -1, f"{lower} !< {higher}"
+    assert compare_versions(higher, lower) == 1
+
+# The two comparisons the chain exists to pin down.
+assert compare_versions("1.0.0-beta.2", "1.0.0-beta.11") == -1, (
+    "numeric prerelease fields compare numerically, not as text"
+)
+assert compare_versions("1.0.0-alpha.1", "1.0.0-alpha.beta") == -1, (
+    "a numeric field ranks below an alphanumeric one"
+)
+assert compare_versions("1.0.0-alpha", "1.0.0-alpha.1") == -1
+
+for bad in ("1.0", "1.0.0.0", "01.0.0", "1.01.0", "1.0.0-01", "v1.0.0", ""):
+    try:
+        compare_versions(bad, "1.0.0")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"{bad!r} should not parse")
+
+# Caret ranges pivot on the leftmost non-zero field.
+assert satisfies("1.2.3", "^1.2.3")
+assert satisfies("1.9.9", "^1.2.3")
+assert not satisfies("2.0.0", "^1.2.3")
+assert not satisfies("1.2.2", "^1.2.3")
+assert satisfies("0.2.9", "^0.2.3")
+assert not satisfies("0.3.0", "^0.2.3")
+assert satisfies("0.0.3", "^0.0.3")
+assert not satisfies("0.0.4", "^0.0.3")
+
+# Tilde ranges allow the rest of the minor series.
+assert satisfies("1.2.9", "~1.2.3")
+assert not satisfies("1.3.0", "~1.2.3")
+assert satisfies("1.2.0", "~1.2")
+assert not satisfies("1.3.0", "~1.2")
+
+# A conjunction must hold on every comparator.
+assert satisfies("1.5.0", ">=1.0.0, <2.0.0")
+assert not satisfies("2.0.0", ">=1.0.0, <2.0.0")
+assert satisfies("1.0.0", "=1.0.0")
+assert not satisfies("1.0.1", "=1.0.0")
+
+# A prerelease only satisfies a range that named a prerelease of its own
+# core version.
+assert not satisfies("1.2.4-beta", "^1.2.3"), (
+    "a prerelease must not leak into a released-version range"
+)
+assert not satisfies("3.0.0-alpha", ">=1.0.0")
+assert satisfies("1.2.3-beta", ">=1.2.3-alpha, <2.0.0")
+assert satisfies("1.2.3", "^1.2.3-alpha")
+assert not satisfies("1.2.3-alpha", "^1.2.3-beta")
+'''),
+    ),
 ]
