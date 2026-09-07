@@ -46,16 +46,21 @@ PERMISSIVE_LICENSES = frozenset({
     # into one id -- a downstream consumer has to be able to tell them apart.
     "cc-by-sa-4.0", "cc-by-sa-3.0", "cc-by-sa",
     # A corpus whose permissive-only status is guaranteed UPSTREAM but which
-    # carries no per-row licence field. CodeSearchNet is the case this exists
-    # for: it spans MIT, Apache-2.0 and BSD, all commercially usable, and its
-    # rows have no licence column to copy. Stamping every row "mit" would be a
-    # claim the corpus does not support, so this records what is actually
-    # known -- permissive, exact terms in the repo named by `source`.
+    # carries no per-row licence field, so the row records the guarantee
+    # rather than a specific SPDX id it cannot evidence. The exact terms live
+    # with the project named in each row's `source`.
     #
-    # Only for sources whose upstream filter is itself permissive-only. Never
-    # use it to wave through a corpus of unknown provenance: the point is to
-    # be honest about which guarantee is doing the work, not to widen the
-    # allowlist.
+    # Only for sources whose upstream filter is ITSELF permissive-only, and
+    # only when that filter is documented. It is not a way to wave through a
+    # corpus of unknown provenance -- the point is to be honest about which
+    # guarantee is doing the work.
+    #
+    # CodeSearchNet does NOT qualify, despite being the obvious candidate.
+    # Its dataset card states plainly: "each repository has its own license.
+    # Example-wise license information is not (yet) included in this dataset:
+    # you will need to find out yourself which license the code is using."
+    # There is no upstream permissive filter to lean on, so CSN rows need
+    # their licence resolved per repository before they can be trained.
     "permissive-mixed",
 })
 
@@ -70,6 +75,65 @@ NON_COMMERCIAL_LICENSES = frozenset({
     "cc-by-nc-nd", "cc-by-nc-nd-4.0", "cc-by-nc-nd-3.0",
     "cc-by-nd", "cc-by-nd-4.0",
 })
+
+#: Strong copyleft. A THIRD category, deliberately not folded into
+#: NON_COMMERCIAL_LICENSES, because the two are refused for different reasons
+#: and only one of them is a "later" problem.
+#:
+#: Non-commercial material is a licensing decision that can be deferred: train
+#: on it during development, retrain without it before shipping. Copyleft
+#: cannot be deferred that way. Its obligations can attach to what the trained
+#: system PRODUCES, and this brain cannot be un-trained selectively -- concepts
+#: emerge by Hebbian collapse across everything observed, so a GPL-derived
+#: function contributes to bindings shared with permissive material and there
+#: is no operation that subtracts it afterwards. The only remedy is rebuilding
+#: from a clean corpus and re-running the whole curriculum.
+#:
+#: Kept greppable so a future reader does not "helpfully" add GPL to the
+#: permissive set on the grounds that it is open source. It is; that is not
+#: the property being tested here.
+COPYLEFT_LICENSES = frozenset({
+    "gpl", "gpl-2.0", "gpl-3.0", "gplv2", "gplv3",
+    "agpl", "agpl-3.0", "agplv3",
+    "lgpl", "lgpl-2.1", "lgpl-3.0",
+    "cc-by-sa-2.0",  # older CC-SA predating our reviewed 3.0/4.0 entries
+    "osl-3.0", "epl-1.0", "epl-2.0", "cddl-1.0", "ms-pl", "sspl-1.0",
+})
+
+#: Provenance is unknown or explicitly not established by the source. Refused
+#: for training regardless of how the material looks, because "probably fine"
+#: is not a licence.
+#:
+#: CodeSearchNet is the case this exists for. Its own dataset card states:
+#: "each repository has its own license. Example-wise license information is
+#: not (yet) included in this dataset: you will need to find out yourself
+#: which license the code is using." It applied no licence filter, so it
+#: contains copyleft and unlicensed code alongside permissive code, with no
+#: per-row record of which is which.
+UNKNOWN_PROVENANCE_LICENSES = frozenset({
+    "unknown", "unspecified", "other", "none", "",
+    "codesearchnet",  # the corpus, not a licence -- see above
+})
+
+# Corpus tiers. The licence question belongs to the CORPUS, not to every
+# individual row, because the two brains being built have different rules.
+#
+# This brain is an architecture proof: its job is to demonstrate the maths
+# works at scale, and it is never shipped. A commercial brain is a separate
+# future build. Refusing all non-permissive material outright would block the
+# architecture work for a reason that does not apply to it; mixing the tiers
+# silently would make the commercial build impossible to certify.
+#
+# So: tag the corpus, keep the tiers separable, and let the build choose.
+# COMMERCIAL corpora are usable by any brain. ARCHITECTURE corpora may carry
+# material that cannot ship -- non-commercial, copyleft, or unestablished
+# provenance -- and a commercial build excludes every corpus not tagged
+# COMMERCIAL. That is a file-level filter, which is the only kind this system
+# can honour: a trained brain cannot be un-trained selectively, because
+# concepts emerge by Hebbian collapse across everything observed.
+TIER_COMMERCIAL = "commercial"
+TIER_ARCHITECTURE = "architecture"
+CORPUS_TIERS = frozenset({TIER_COMMERCIAL, TIER_ARCHITECTURE})
 
 # Recognized intent tags — used in [ctx intent=...].  Open set; the
 # brain learns associations regardless.  Listed here for grep-ability.
@@ -140,13 +204,52 @@ class RowRejected(ValueError):
     """Raised by the writer for any row that fails the contract."""
 
 
-def _validate(row: Row) -> None:
+def _validate(row: Row, tier: str = TIER_COMMERCIAL) -> None:
     if not row.prompt.strip():
         raise RowRejected(f"empty prompt (source={row.source})")
     if not row.response.strip():
         raise RowRejected(f"empty response (source={row.source})")
     lic = row.license.strip().lower()
-    if lic not in PERMISSIVE_LICENSES:
+    if lic not in PERMISSIVE_LICENSES and tier == TIER_ARCHITECTURE:
+        # An architecture corpus may carry material a commercial brain cannot.
+        # It still must be a licence we RECOGNISE: an unrecognised string is a
+        # typo or an unreviewed source, and neither should pass silently.
+        if lic not in (COPYLEFT_LICENSES | NON_COMMERCIAL_LICENSES
+                       | UNKNOWN_PROVENANCE_LICENSES):
+            raise RowRejected(
+                f"unrecognised license {row.license!r} (source={row.source}). "
+                "Even an architecture corpus needs a licence the pipeline has "
+                "actually reviewed."
+            )
+    elif lic not in PERMISSIVE_LICENSES:
+        # Name the REASON, not just the refusal. The three categories fail for
+        # different reasons and only one of them is deferrable, so a single
+        # "non-permissive" message invites the wrong remedy -- most obviously
+        # "we are still in development, train on it and retrain later", which
+        # is sound for non-commercial material and unsound for copyleft.
+        if lic in COPYLEFT_LICENSES:
+            raise RowRejected(
+                f"copyleft license {row.license!r} (source={row.source}). "
+                "Copyleft obligations can attach to what the trained system "
+                "produces, and this brain cannot be un-trained selectively: "
+                "concepts emerge by Hebbian collapse across everything "
+                "observed, so removing this later means rebuilding from a "
+                "clean corpus and re-running the entire curriculum."
+            )
+        if lic in UNKNOWN_PROVENANCE_LICENSES:
+            raise RowRejected(
+                f"unestablished provenance {row.license!r} "
+                f"(source={row.source}). The source does not record which "
+                "licence this row is under, so it cannot be shown to be "
+                "commercially usable. Resolve the licence per item before "
+                "training rather than assuming the corpus is uniform."
+            )
+        if lic in NON_COMMERCIAL_LICENSES:
+            raise RowRejected(
+                f"non-commercial license {row.license!r} "
+                f"(source={row.source}). Permitted: "
+                f"{sorted(PERMISSIVE_LICENSES)}"
+            )
         raise RowRejected(
             f"non-permissive license {row.license!r} (source={row.source}). "
             f"Permitted: {sorted(PERMISSIVE_LICENSES)}"
@@ -186,11 +289,18 @@ class RowWriter:
     def __init__(self, out_path: os.PathLike | str, *,
                  script_id: str, source: str,
                  dedup: bool = True,
-                 append: bool = False) -> None:
+                 append: bool = False,
+                 tier: str = TIER_COMMERCIAL) -> None:
+        if tier not in CORPUS_TIERS:
+            raise ValueError(
+                f"unknown corpus tier {tier!r}; expected one of "
+                f"{sorted(CORPUS_TIERS)}"
+            )
         self._path = Path(out_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._script_id = script_id
         self._source = source
+        self._tier = tier
         self._dedup = dedup
         self._seen: set[str] = set()
         self._count = 0
@@ -210,7 +320,7 @@ class RowWriter:
     def write(self, row: Row) -> bool:
         """Write one row.  Returns True if accepted, False if dedup-skipped.
         Raises RowRejected for contract violations."""
-        _validate(row)
+        _validate(row, self._tier)
         if self._dedup:
             if row.source_hash in self._seen:
                 self._dedup_skipped += 1
@@ -225,6 +335,10 @@ class RowWriter:
             return
         self._fh.close()
         manifest = {
+            # The tier a commercial build filters on. Recorded per corpus
+            # because that is the only granularity a Hebbian brain can honour:
+            # once trained, rows cannot be separated again.
+            "tier": self._tier,
             "script_id": self._script_id,
             "source": self._source,
             "path": str(self._path),
