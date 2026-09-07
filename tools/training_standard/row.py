@@ -45,6 +45,18 @@ PERMISSIVE_LICENSES = frozenset({
     # so keep it distinguishable from plain CC BY rather than folding both
     # into one id -- a downstream consumer has to be able to tell them apart.
     "cc-by-sa-4.0", "cc-by-sa-3.0", "cc-by-sa",
+    # A corpus whose permissive-only status is guaranteed UPSTREAM but which
+    # carries no per-row licence field. CodeSearchNet is the case this exists
+    # for: it spans MIT, Apache-2.0 and BSD, all commercially usable, and its
+    # rows have no licence column to copy. Stamping every row "mit" would be a
+    # claim the corpus does not support, so this records what is actually
+    # known -- permissive, exact terms in the repo named by `source`.
+    #
+    # Only for sources whose upstream filter is itself permissive-only. Never
+    # use it to wave through a corpus of unknown provenance: the point is to
+    # be honest about which guarantee is doing the work, not to widen the
+    # allowlist.
+    "permissive-mixed",
 })
 
 #: Licences that forbid commercial use or derivatives outright. Never added to

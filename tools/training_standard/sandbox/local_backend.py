@@ -28,6 +28,12 @@ _CHECKERS: dict[str, tuple[str, str, list[str]]] = {
     "powershell": ("stdin", ".ps1", ["pwsh",   "-NoProfile", "-Command",
                                      "$null = [System.Management.Automation.PSParser]"
                                      "::Tokenize({code}, [ref]$null)"]),
+    # `gofmt -e` parses and reports syntax errors without compiling, so a
+    # bare function body validates without needing a package clause, a module
+    # or the network. Real validation matters here: an unsupported language
+    # falls through to CheckResult.passed(), so leaving Go out would admit
+    # every Go row unchecked while reporting a clean ingest.
+    "go":         ("file",  ".go",  ["gofmt",  "-e",               "{path}"]),
     # Rust and TS need real compilers + project files, which are slow
     # and tooling-specific on Windows; skipped in local backend.  The
     # Docker backend handles them properly.
@@ -66,10 +72,23 @@ class LocalSandbox:
                 escaped = code
             cmd = [a.replace("{code}", escaped) for a in argv]
         else:
+            source = code
+            if lang == "go":
+                # gofmt parses a FILE, so a bare function -- which is what a
+                # CodeSearchNet row holds -- fails with "expected 'package'"
+                # before its real syntax is ever examined. Verified on the
+                # host: an unwrapped valid function and an unwrapped broken
+                # one both exit 2, so without this every Go row would be
+                # rejected for the same spurious reason. Wrapped, a valid
+                # function exits 0 and a broken one still exits 2, which is
+                # the discrimination the check exists to provide.
+                stripped = source.lstrip()
+                if not stripped.startswith("package "):
+                    source = "package p" + chr(10) * 2 + source
             with tempfile.NamedTemporaryFile(
                 mode="w", suffix=suffix, delete=False, encoding="utf-8",
             ) as f:
-                f.write(code)
+                f.write(source)
                 path = f.name
             cmd = [a.replace("{path}", path) for a in argv]
         try:

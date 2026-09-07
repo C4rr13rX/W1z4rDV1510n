@@ -297,7 +297,12 @@ def ingest(
                     prompt=prompt,
                     response=code_stripped,
                     ctx=render_ctx(lang=lang, intent="implement", source="csn"),
-                    license="MIT",
+                    # CodeSearchNet is permissive-only upstream, but it spans
+                    # MIT, Apache-2.0 and BSD -- stamping every row "MIT" is a
+                    # provenance claim the corpus does not support. The exact
+                    # terms live with the repo named in `source` below, which
+                    # keeps each row auditable to its own project.
+                    license="permissive-mixed",
                     source=f"codesearchnet:{lang}:{rec.get('repo','?')}:{rec.get('path','?')}#{func_name}",
                     source_hash=hash_source(code_stripped),
                     script_id=script_id,
