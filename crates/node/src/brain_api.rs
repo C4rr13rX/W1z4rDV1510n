@@ -1573,7 +1573,26 @@ fn merge_grounded_file_manifests(labels: &[String], candidates: &[Vec<u8>]) -> O
         None
     }
     let maximum = requested_manifest_component_count(labels).min(manifests.len());
-    (2..=maximum).find_map(|selection_size| {
+    // Prefer the LARGEST satisfying selection, not the smallest.
+    //
+    // `manifest_language_coverage` checks languages; nothing checks that every
+    // requested BEHAVIOUR got a component. Ascending order therefore returned
+    // the first selection that merely covered the languages, and stopped.
+    //
+    // Measured 2026-09-07 on polyglot's `javascript_go_order_workers`, the one
+    // case holding the enterprise gate at 11/12: the request asks for
+    // idempotency, transactional outbox AND deduplication across JavaScript
+    // and Go, and the brain recalled all three components correctly --
+    // GO+DEDUPLICATION -> dedup.go, GO+TRANSACTIONAL_OUTBOX -> ledger.go,
+    // JAVASCRIPT+* -> order_service.js. A 2-file selection of
+    // ledger.go + order_service.js covers both languages, so it won at
+    // selection_size 2 and dedup.go was never considered. The composed
+    // project then failed with `stat dedup.go: no such file`.
+    //
+    // Descending costs nothing when the smaller selection is genuinely right:
+    // a larger one only wins if it also passes every merge, coverage and
+    // behaviour-compatibility check.
+    (2..=maximum).rev().find_map(|selection_size| {
         search(
             labels,
             &manifests,
