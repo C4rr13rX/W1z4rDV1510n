@@ -800,4 +800,520 @@ for bad in ("pkg-1.0.0-cp313-abi3-any.tar.gz", "pkg-1.0.0-cp313-abi3.whl",
         raise AssertionError(f"accepted malformed wheel name {bad!r}")
 ''',
     ),
+    # ---------------------------------------------------------------------
+    # Ids from 0101 up. The sequential range below 0100 stays free for
+    # whoever extends this family from the front, so two sessions appending
+    # to opposite ends of the file cannot mint the same id.
+    # ---------------------------------------------------------------------
+    task(
+        f"{FAMILY}-0101", FAMILY,
+        prompt=(
+            "Implement a Python function canonical_reference(reference) that "
+            "expands a container image reference into its canonical parts, "
+            "returning a dict with keys 'registry', 'repository', 'tag' and "
+            "'digest'. Parse it as a registry does. A leading component is "
+            "the registry only when it contains a '.' or a ':' or is exactly "
+            "'localhost'; otherwise there is no registry in the string and it "
+            "defaults to 'docker.io'. A ':' introduces a tag only when it "
+            "appears after the last '/', so a registry port is not a tag. An "
+            "'@' introduces a digest, which must be 'sha256:' followed by "
+            "exactly 64 lowercase hex characters. On docker.io a repository "
+            "with no '/' is prefixed with 'library/'; on any other registry "
+            "it is left alone. The tag defaults to 'latest' only when no "
+            "digest was given -- with a digest and no tag, 'tag' is None. "
+            "Raise ValueError for an empty reference, a repository component "
+            "that is not lowercase alphanumeric with '.', '_' or '-' "
+            "separators, a malformed tag, or a malformed digest."
+        ),
+        timeout_seconds=60.0,
+        validator=LOAD_CANDIDATE + require("canonical_reference") + r'''
+DIGEST = "sha256:" + "3f" * 32
+
+cases = {
+    # No registry component at all.
+    "nginx": ("docker.io", "library/nginx", "latest", None),
+    "nginx:1.25": ("docker.io", "library/nginx", "1.25", None),
+    # A bare first component is NOT a registry: it has no dot and no port,
+    # so this is a docker.io namespace and the whole string is the
+    # repository. Splitting on the first '/' unconditionally is the
+    # mistake this case exists to catch.
+    "myorg/app": ("docker.io", "myorg/app", "latest", None),
+    "myorg/app:v1": ("docker.io", "myorg/app", "v1", None),
+    "deep/org/app:v1": ("docker.io", "deep/org/app", "v1", None),
+    # 'localhost' is a registry by name even without a dot.
+    "localhost/app": ("localhost", "app", "latest", None),
+    # A port makes it a registry, and the port's colon is not a tag.
+    "localhost:5000/app:dev": ("localhost:5000", "app", "dev", None),
+    "example.com:8443/a/b": ("example.com:8443", "a/b", "latest", None),
+    "registry.example.com/team/app:v2":
+        ("registry.example.com", "team/app", "v2", None),
+    # A digest suppresses the default tag rather than joining it.
+    "nginx@" + DIGEST: ("docker.io", "library/nginx", None, DIGEST),
+    "myorg/app:v1@" + DIGEST: ("docker.io", "myorg/app", "v1", DIGEST),
+}
+for text, expected in cases.items():
+    got = canonical_reference(text)
+    assert isinstance(got, dict), f"{text!r} returned {got!r}"
+    actual = (got.get("registry"), got.get("repository"),
+              got.get("tag"), got.get("digest"))
+    assert actual == expected, f"{text!r} -> {actual} != {expected}"
+
+# 'library/' is a docker.io convention, never applied to another registry.
+assert canonical_reference("localhost/app")["repository"] == "app"
+
+# --- stated error behaviour ----------------------------------------------
+for bad in (
+    "",
+    "Nginx",                       # uppercase is not a legal repository
+    "nginx:",                      # empty tag
+    "nginx:BAD!tag",
+    "nginx@sha256:abc",            # digest too short
+    "nginx@md5:" + "3f" * 32,      # wrong algorithm
+    "nginx@sha256:" + "zz" * 32,   # not hex
+):
+    try:
+        canonical_reference(bad)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"accepted malformed reference {bad!r}")
+''',
+    ),
+    task(
+        f"{FAMILY}-0102", FAMILY,
+        prompt=(
+            "Implement a Python function resolve_cache(key, restore_keys, "
+            "entries) that picks which cache entry a job restores. entries is "
+            "a list of dicts with 'key' and 'created_unix'. An entry whose "
+            "key equals key exactly is restored, whatever its age. Otherwise "
+            "try each restore key in the order given: collect the entries "
+            "whose key starts with it, and if there are any, restore the most "
+            "recently created one, breaking a tie on created_unix by the "
+            "lexicographically smallest key. The first restore key that "
+            "matches anything decides the result -- a later restore key is "
+            "never consulted, even if it would find something newer. Return "
+            "the restored entry's key, or None when nothing matches. Raise "
+            "ValueError if key is empty or any restore key is empty."
+        ),
+        timeout_seconds=60.0,
+        validator=LOAD_CANDIDATE + require("resolve_cache") + r'''
+entries = [
+    {"key": "build-linux-abc123", "created_unix": 100},
+    {"key": "build-linux-def456", "created_unix": 300},
+    {"key": "build-macos-aaa111", "created_unix": 900},
+    {"key": "build-linux-exact", "created_unix": 50},
+]
+
+# An exact hit wins even though two prefix matches are newer than it.
+assert resolve_cache(
+    "build-linux-exact", ["build-linux-", "build-"], entries
+) == "build-linux-exact"
+
+# The decisive case: restore-key ORDER outranks recency. 'build-linux-'
+# matches first, so the newest LINUX entry is restored -- not the newer
+# macOS entry that the broader 'build-' prefix would reach.
+assert resolve_cache(
+    "build-linux-zzz", ["build-linux-", "build-"], entries
+) == "build-linux-def456"
+
+# A restore key that matches nothing falls through to the next one.
+assert resolve_cache(
+    "build-macos-zzz", ["build-windows-", "build-macos-"], entries
+) == "build-macos-aaa111"
+
+# The broad prefix, when it really is first, does reach the newest entry.
+assert resolve_cache("build-zzz", ["build-"], entries) == "build-macos-aaa111"
+
+assert resolve_cache("other", ["nope-"], entries) is None
+assert resolve_cache("other", [], entries) is None
+assert resolve_cache("anything", ["build-"], []) is None
+
+# A tie on creation time resolves to the smaller key, so two runners agree.
+tied = [
+    {"key": "p-b", "created_unix": 5},
+    {"key": "p-a", "created_unix": 5},
+]
+assert resolve_cache("p-x", ["p-"], tied) == "p-a"
+assert resolve_cache("p-x", ["p-"], list(reversed(tied))) == "p-a"
+
+# --- stated error behaviour ----------------------------------------------
+for bad_key, bad_restore in (("", ["p-"]), ("k", [""]), ("k", ["p-", ""])):
+    try:
+        resolve_cache(bad_key, bad_restore, entries)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(
+            f"accepted empty key/restore key: {bad_key!r} {bad_restore!r}"
+        )
+''',
+    ),
+    task(
+        f"{FAMILY}-0103", FAMILY,
+        prompt=(
+            "Implement a Python function build_order(stages, target) that "
+            "returns the stages of a multi-stage container build that must "
+            "actually be built to produce target, in an order where every "
+            "dependency precedes what needs it. stages maps a stage name to a "
+            "dict with 'from' (a stage name or an external base image) and "
+            "'copy_from' (a list of stage names it copies artifacts out of). "
+            "A 'from' value that is not a stage name is an external image and "
+            "contributes no dependency. Both 'from' and 'copy_from' create "
+            "dependencies: a stage reached only through a copy_from is still "
+            "required. Stages that target does not transitively need must not "
+            "appear. The order must be deterministic -- whenever several "
+            "stages are ready, build the alphabetically smallest first. The "
+            "returned list includes target itself. Raise KeyError if target "
+            "is not a stage or a copy_from names an unknown stage, and "
+            "ValueError if the dependencies form a cycle."
+        ),
+        timeout_seconds=60.0,
+        validator=LOAD_CANDIDATE + require("build_order") + r'''
+stages = {
+    "base": {"from": "debian:12", "copy_from": []},
+    "deps": {"from": "base", "copy_from": []},
+    "assets": {"from": "node:20", "copy_from": []},
+    # 'assets' is reachable ONLY through a copy_from. A pruner that walks
+    # 'from' alone still returns a plausible, correctly ordered list -- and
+    # the build fails later, at the COPY.
+    "build": {"from": "deps", "copy_from": ["assets"]},
+    "runtime": {"from": "base", "copy_from": ["build"]},
+    "docs": {"from": "base", "copy_from": []},
+    "test": {"from": "build", "copy_from": []},
+}
+
+order = build_order(stages, "runtime")
+assert isinstance(order, list), order
+assert set(order) == {"base", "deps", "assets", "build", "runtime"}, order
+assert len(order) == len(set(order)), f"a stage is built twice: {order}"
+# Nothing that only depends ON the target may be dragged in.
+assert "docs" not in order and "test" not in order, order
+
+# Every dependency precedes its dependant.
+for name in order:
+    position = order.index(name)
+    required = [stages[name]["from"]] + list(stages[name]["copy_from"])
+    for dependency in required:
+        if dependency in stages:
+            assert order.index(dependency) < position, (
+                f"{dependency} must be built before {name}: {order}"
+            )
+
+# Deterministic, and specifically alphabetical among ready stages.
+assert build_order(stages, "runtime") == order
+assert order == ["assets", "base", "deps", "build", "runtime"], order
+
+assert build_order(stages, "docs") == ["base", "docs"]
+assert build_order(stages, "assets") == ["assets"]
+assert build_order(stages, "test") == [
+    "assets", "base", "deps", "build", "test"
+], build_order(stages, "test")
+
+# --- stated error behaviour ----------------------------------------------
+try:
+    build_order(stages, "missing")
+except KeyError:
+    pass
+else:
+    raise AssertionError("accepted an unknown target stage")
+
+try:
+    build_order(
+        {"a": {"from": "scratch", "copy_from": ["ghost"]}}, "a"
+    )
+except KeyError:
+    pass
+else:
+    raise AssertionError("accepted a copy_from naming an unknown stage")
+
+try:
+    build_order(
+        {
+            "a": {"from": "b", "copy_from": []},
+            "b": {"from": "a", "copy_from": []},
+        },
+        "a",
+    )
+except ValueError:
+    pass
+else:
+    raise AssertionError("accepted a dependency cycle")
+''',
+    ),
+    task(
+        f"{FAMILY}-0104", FAMILY,
+        prompt=(
+            "Implement a Python function rollout_plan(replicas, max_surge, "
+            "max_unavailable) that returns the steps of a rolling update as a "
+            "list of dicts with keys 'new' and 'old' holding the replica "
+            "counts AFTER that step. The rollout starts from new=0, "
+            "old=replicas and every step must respect both budgets: new+old "
+            "must never exceed replicas+max_surge, and new+old must never "
+            "drop below replicas-max_unavailable. Counts never go negative, "
+            "new never decreases, old never increases, and every step must "
+            "change something. The last step must be new=replicas, old=0. "
+            "Raise ValueError if replicas is less than 1, if either budget is "
+            "negative, or if both budgets are zero -- with no surge and no "
+            "unavailability allowed there is no legal first move, and "
+            "returning an empty plan would report success for a rollout that "
+            "can never start."
+        ),
+        timeout_seconds=60.0,
+        validator=LOAD_CANDIDATE + require("rollout_plan") + r'''
+def check(replicas, max_surge, max_unavailable):
+    plan = rollout_plan(replicas, max_surge, max_unavailable)
+    label = f"rollout_plan({replicas}, {max_surge}, {max_unavailable})"
+    assert isinstance(plan, list) and plan, f"{label} returned {plan!r}"
+
+    ceiling = replicas + max_surge
+    floor = replicas - max_unavailable
+    new, old = 0, replicas
+    for index, step in enumerate(plan):
+        assert isinstance(step, dict), f"{label} step {index}: {step!r}"
+        following_new, following_old = step["new"], step["old"]
+        assert following_new >= 0 and following_old >= 0, (
+            f"{label} step {index} went negative: {step}"
+        )
+        # The two budgets are the whole point of a rolling update: exceed
+        # the ceiling and the cluster cannot schedule; cross the floor and
+        # the service drops below its promised capacity mid-deploy.
+        assert following_new + following_old <= ceiling, (
+            f"{label} step {index} exceeds surge budget {ceiling}: {step}"
+        )
+        assert following_new + following_old >= floor, (
+            f"{label} step {index} falls below availability floor {floor}: "
+            f"{step}"
+        )
+        assert following_new >= new, f"{label} step {index} removed new pods"
+        assert following_old <= old, f"{label} step {index} added old pods"
+        assert (following_new, following_old) != (new, old), (
+            f"{label} step {index} made no progress: {step}"
+        )
+        new, old = following_new, following_old
+
+    assert (new, old) == (replicas, 0), (
+        f"{label} ended at new={new} old={old}, not a completed rollout"
+    )
+    return plan
+
+
+# Surge-only, availability-only, and both together.
+check(3, 1, 0)
+check(3, 0, 1)
+check(1, 1, 0)
+check(1, 0, 1)
+check(10, 2, 2)
+check(5, 5, 0)
+check(2, 0, 2)
+
+# Deterministic: the same inputs plan the same way twice.
+assert rollout_plan(10, 2, 2) == rollout_plan(10, 2, 2)
+
+# --- stated error behaviour ----------------------------------------------
+for bad in ((3, 0, 0), (0, 1, 1), (-1, 1, 1), (3, -1, 1), (3, 1, -1)):
+    try:
+        rollout_plan(*bad)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"accepted an impossible rollout {bad}")
+''',
+    ),
+    task(
+        f"{FAMILY}-0105", FAMILY,
+        prompt=(
+            "Implement a Python function admit(quota, used, containers) that "
+            "decides whether a pod may be admitted against a namespace quota, "
+            "returning (True, '') or (False, reason). quota and used are "
+            "dicts with 'cpu' and 'memory' quantity strings; containers is a "
+            "list of dicts with 'requests' and 'limits' sub-dicts, either of "
+            "which may omit a resource. CPU quantities are millicores: '250m' "
+            "is 250, '1' is 1000, '1.5' is 1500. Memory quantities are bytes, "
+            "where the binary suffixes Ki, Mi, Gi and Ti are powers of 1024 "
+            "and the decimal suffixes k, M, G and T are powers of 1000, and a "
+            "bare number is already bytes. Reject with a reason if any "
+            "container sets a limit below its own request for a resource. "
+            "Otherwise reject if used plus the sum of all container requests "
+            "would exceed quota for either resource; equalling the quota "
+            "exactly is allowed. A missing request counts as zero and a "
+            "missing limit is unbounded. Raise ValueError on a malformed "
+            "quantity, including a CPU value finer than a whole millicore."
+        ),
+        timeout_seconds=60.0,
+        validator=LOAD_CANDIDATE + require("admit") + r'''
+def verdict(result):
+    assert isinstance(result, tuple) and len(result) == 2, result
+    assert isinstance(result[0], bool), result
+    assert isinstance(result[1], str), result
+    return result[0]
+
+
+quota = {"cpu": "2", "memory": "1Gi"}
+zero = {"cpu": "0", "memory": "0"}
+
+# Exactly equalling the quota is admitted: 500m + 1500m == 2000m.
+assert verdict(admit(
+    quota, {"cpu": "500m", "memory": "0"},
+    [{"requests": {"cpu": "1500m", "memory": "0"}, "limits": {}}],
+)) is True
+
+# One millicore more is not.
+assert verdict(admit(
+    quota, {"cpu": "500m", "memory": "0"},
+    [{"requests": {"cpu": "1501m", "memory": "0"}, "limits": {}}],
+)) is False
+
+# The decisive case. 1025Mi is 1074790400 bytes, just over the 1073741824
+# bytes of a 1Gi quota, so this pod must be refused. Read 'Mi' as a
+# decimal megabyte and it computes 1025000000 -- comfortably inside the
+# quota -- and the pod is admitted onto a node that cannot hold it.
+assert verdict(admit(
+    quota, zero, [{"requests": {"memory": "1025Mi", "cpu": "0"}, "limits": {}}],
+)) is False
+# And 1024Mi is exactly 1Gi, which fits.
+assert verdict(admit(
+    quota, zero, [{"requests": {"memory": "1024Mi", "cpu": "0"}, "limits": {}}],
+)) is True
+# The decimal suffixes really are decimal: 1G is smaller than 1Gi.
+assert verdict(admit(
+    quota, zero, [{"requests": {"memory": "1G", "cpu": "0"}, "limits": {}}],
+)) is True
+
+# Requests accumulate across containers rather than being taken one at a time.
+assert verdict(admit(
+    quota, zero,
+    [
+        {"requests": {"cpu": "1", "memory": "0"}, "limits": {}},
+        {"requests": {"cpu": "1", "memory": "0"}, "limits": {}},
+        {"requests": {"cpu": "1m", "memory": "0"}, "limits": {}},
+    ],
+)) is False
+
+# A limit below its own request is incoherent, whatever the quota says.
+below = admit(
+    quota, zero,
+    [{"requests": {"cpu": "500m"}, "limits": {"cpu": "250m"}}],
+)
+assert verdict(below) is False
+assert below[1], "a rejection must carry a reason"
+
+# A missing limit is unbounded, and a missing request is zero.
+assert verdict(admit(quota, zero, [{"requests": {}, "limits": {}}])) is True
+assert verdict(admit(
+    quota, zero, [{"requests": {"cpu": "1"}, "limits": {"cpu": "1"}}],
+)) is True
+
+# Fractional and suffixed CPU agree.
+assert verdict(admit(
+    {"cpu": "1500m", "memory": "1Gi"}, zero,
+    [{"requests": {"cpu": "1.5"}, "limits": {}}],
+)) is True
+
+# --- stated error behaviour ----------------------------------------------
+for bad in ("1.0005", "abc", "", "10Xi", "1..0", "-1"):
+    try:
+        admit({"cpu": "2", "memory": "1Gi"}, zero,
+              [{"requests": {"cpu": bad}, "limits": {}}])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"accepted malformed cpu quantity {bad!r}")
+
+for bad in ("12MB", "1.5Gi", "zz", "1 Gi"):
+    try:
+        admit({"cpu": "2", "memory": "1Gi"}, zero,
+              [{"requests": {"memory": bad}, "limits": {}}])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"accepted malformed memory quantity {bad!r}")
+''',
+    ),
+    task(
+        f"{FAMILY}-0106", FAMILY,
+        prompt=(
+            "Implement a Python function expand_matrix(axes, include, "
+            "exclude) that expands a CI build matrix. axes maps an axis name "
+            "to its list of values; the base combinations are the cartesian "
+            "product in axis order with the last axis varying fastest. Then "
+            "drop every combination that matches all of the key/value pairs "
+            "of any exclude entry. Then apply the include entries in order, "
+            "and never exclude anything they produce: for each entry, look at "
+            "the keys it shares with the axes -- if it has such keys and at "
+            "least one surviving combination matches all of them, merge the "
+            "entry's other keys into every combination that matches; "
+            "otherwise append the entry itself as a new combination. Return "
+            "the list of combinations as dicts. Raise ValueError if axes is "
+            "empty, if any axis has no values, or if an exclude entry names a "
+            "key that is not an axis."
+        ),
+        timeout_seconds=60.0,
+        validator=LOAD_CANDIDATE + require("expand_matrix") + r'''
+axes = {"os": ["linux", "macos"], "python": ["3.11", "3.12"]}
+
+# The bare product, last axis varying fastest.
+assert expand_matrix(axes, [], []) == [
+    {"os": "linux", "python": "3.11"},
+    {"os": "linux", "python": "3.12"},
+    {"os": "macos", "python": "3.11"},
+    {"os": "macos", "python": "3.12"},
+], expand_matrix(axes, [], [])
+
+# An exclude entry matches on the pairs it names and ignores the rest.
+assert expand_matrix(axes, [], [{"os": "macos"}]) == [
+    {"os": "linux", "python": "3.11"},
+    {"os": "linux", "python": "3.12"},
+]
+
+# An include that matches an existing combination decorates it in place
+# rather than appending a near-duplicate.
+decorated = expand_matrix(
+    axes, [{"os": "linux", "python": "3.12", "coverage": True}], []
+)
+assert decorated == [
+    {"os": "linux", "python": "3.11"},
+    {"os": "linux", "python": "3.12", "coverage": True},
+    {"os": "macos", "python": "3.11"},
+    {"os": "macos", "python": "3.12"},
+], decorated
+
+# A partial include decorates every combination it matches.
+both = expand_matrix(axes, [{"os": "macos", "tier": "slow"}], [])
+assert [row.get("tier") for row in both] == [None, None, "slow", "slow"], both
+
+# An include naming a value no axis has is a new combination, appended.
+extended = expand_matrix(axes, [{"os": "windows", "python": "3.12"}], [])
+assert extended[-1] == {"os": "windows", "python": "3.12"}, extended
+assert len(extended) == 5, extended
+
+# The decisive case: include runs AFTER exclude and is never subject to it.
+# Excluding macos/3.11 and then including it back must leave it present.
+readded = expand_matrix(
+    axes,
+    [{"os": "macos", "python": "3.11"}],
+    [{"os": "macos", "python": "3.11"}],
+)
+assert {"os": "macos", "python": "3.11"} in readded, readded
+assert len(readded) == 4, readded
+
+# An include with no axis keys at all is simply appended.
+plain = expand_matrix({"os": ["linux"]}, [{"note": "extra"}], [])
+assert plain == [{"os": "linux"}, {"note": "extra"}], plain
+
+# --- stated error behaviour ----------------------------------------------
+for bad_axes, bad_exclude in (
+    ({}, []),
+    ({"os": []}, []),
+    ({"os": ["linux"]}, [{"nosuch": "x"}]),
+):
+    try:
+        expand_matrix(bad_axes, [], bad_exclude)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(
+            f"accepted a malformed matrix: {bad_axes!r} {bad_exclude!r}"
+        )
+''',
+    ),
 ]

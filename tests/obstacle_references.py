@@ -10663,3 +10663,773 @@ MUTATIONS["testing_debugging_repair_refactoring-0209"] = (
     "                continue\n"
     "            held.remove(resource)\n",
 )
+
+
+REFERENCES["cicd_containers_packaging_platform-0101"] = r'''
+import re
+
+_TAG = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,127}\Z")
+_COMPONENT = re.compile(r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*\Z")
+_HEX = set("0123456789abcdef")
+
+
+def canonical_reference(reference):
+    if not isinstance(reference, str) or not reference:
+        raise ValueError("reference must be a non-empty string")
+
+    rest = reference
+    digest = None
+    if "@" in rest:
+        rest, _, digest = rest.partition("@")
+        algorithm, _, hex_digits = digest.partition(":")
+        if (algorithm != "sha256" or len(hex_digits) != 64
+                or any(character not in _HEX for character in hex_digits)):
+            raise ValueError(f"malformed digest {digest!r}")
+
+    tag = None
+    # A colon is a tag separator only after the last slash; before it, the
+    # colon belongs to a registry port.
+    if rest.rfind(":") > rest.rfind("/"):
+        rest, _, tag = rest.rpartition(":")
+        if not _TAG.match(tag):
+            raise ValueError(f"malformed tag {tag!r}")
+    if not rest:
+        raise ValueError("empty repository")
+
+    head, _, remainder = rest.partition("/")
+    if remainder and ("." in head or ":" in head or head == "localhost"):
+        registry, repository = head, remainder
+    else:
+        registry, repository = "docker.io", rest
+    if registry == "docker.io" and "/" not in repository:
+        repository = "library/" + repository
+
+    for component in repository.split("/"):
+        if not _COMPONENT.match(component):
+            raise ValueError(f"malformed repository component {component!r}")
+
+    if tag is None and digest is None:
+        tag = "latest"
+    return {
+        "registry": registry,
+        "repository": repository,
+        "tag": tag,
+        "digest": digest,
+    }
+'''
+
+
+REFERENCES["cicd_containers_packaging_platform-0102"] = r'''
+def resolve_cache(key, restore_keys, entries):
+    if not key:
+        raise ValueError("key must not be empty")
+    restore_keys = list(restore_keys)
+    for restore_key in restore_keys:
+        if not restore_key:
+            raise ValueError("restore keys must not be empty")
+
+    if any(entry["key"] == key for entry in entries):
+        return key
+
+    for restore_key in restore_keys:
+        matches = [
+            entry for entry in entries
+            if entry["key"].startswith(restore_key)
+        ]
+        if matches:
+            best = min(
+                matches,
+                key=lambda entry: (-entry["created_unix"], entry["key"]),
+            )
+            return best["key"]
+    return None
+'''
+
+
+REFERENCES["cicd_containers_packaging_platform-0103"] = r'''
+def build_order(stages, target):
+    if target not in stages:
+        raise KeyError(f"unknown stage {target!r}")
+
+    def dependencies(name):
+        spec = stages[name]
+        found = []
+        base = spec.get("from")
+        if base in stages:
+            found.append(base)
+        for other in spec.get("copy_from") or []:
+            if other not in stages:
+                raise KeyError(
+                    f"stage {name!r} copies from unknown stage {other!r}"
+                )
+            found.append(other)
+        return found
+
+    needed = set()
+    pending = [target]
+    while pending:
+        name = pending.pop()
+        if name in needed:
+            continue
+        needed.add(name)
+        pending.extend(dependencies(name))
+
+    remaining = {name: set(dependencies(name)) for name in needed}
+    order = []
+    while remaining:
+        ready = sorted(
+            name for name, waiting in remaining.items() if not waiting
+        )
+        if not ready:
+            raise ValueError("stage dependencies form a cycle")
+        chosen = ready[0]
+        order.append(chosen)
+        del remaining[chosen]
+        for waiting in remaining.values():
+            waiting.discard(chosen)
+    return order
+'''
+
+
+# Treat any leading component before a '/' as a registry. Every reference
+# that really does carry a registry still parses correctly, and every
+# docker.io namespace -- 'myorg/app' -- silently becomes a pull from a
+# host named 'myorg'.
+MUTATIONS["cicd_containers_packaging_platform-0101"] = (
+    '    if remainder and ("." in head or ":" in head or head == "localhost"):',
+    "    if remainder:",
+)
+
+# Consider every restore key at once and take the newest hit. The result is
+# always a real cache entry, so nothing errors; the job just restores a
+# broader, wrong-platform cache whenever one happens to be newer.
+MUTATIONS["cicd_containers_packaging_platform-0102"] = (
+    "    for restore_key in restore_keys:\n"
+    "        matches = [\n"
+    "            entry for entry in entries\n"
+    "            if entry[\"key\"].startswith(restore_key)\n"
+    "        ]\n"
+    "        if matches:\n",
+    "    if True:\n"
+    "        matches = [\n"
+    "            entry for entry in entries\n"
+    "            if any(entry[\"key\"].startswith(restore_key)\n"
+    "                   for restore_key in restore_keys)\n"
+    "        ]\n"
+    "        if matches:\n",
+)
+
+# Validate copy_from but do not treat it as a dependency. The pruned list
+# stays correctly ordered and looks right; the stage a COPY --from needs is
+# simply never built.
+MUTATIONS["cicd_containers_packaging_platform-0103"] = (
+    "            found.append(other)\n",
+    "            continue\n",
+)
+
+
+REFERENCES["cicd_containers_packaging_platform-0104"] = r'''
+def rollout_plan(replicas, max_surge, max_unavailable):
+    if replicas < 1:
+        raise ValueError("replicas must be at least 1")
+    if max_surge < 0 or max_unavailable < 0:
+        raise ValueError("budgets must not be negative")
+    if max_surge == 0 and max_unavailable == 0:
+        raise ValueError("no surge and no unavailability leaves no first move")
+
+    ceiling = replicas + max_surge
+    floor = replicas - max_unavailable
+    new, old = 0, replicas
+    plan = []
+    while new < replicas or old > 0:
+        moved = False
+
+        # Bring up as many new replicas as the surge ceiling allows.
+        starting = min(ceiling - (new + old), replicas - new)
+        if starting > 0:
+            new += starting
+            plan.append({"new": new, "old": old})
+            moved = True
+
+        # Retire as many old replicas as the availability floor allows.
+        retiring = min((new + old) - floor, old)
+        if retiring > 0:
+            old -= retiring
+            plan.append({"new": new, "old": old})
+            moved = True
+
+        if not moved:
+            raise ValueError("rollout cannot make progress")
+    return plan
+'''
+
+
+REFERENCES["cicd_containers_packaging_platform-0105"] = r'''
+_MEMORY_SUFFIXES = {
+    "Ki": 1024, "Mi": 1024 ** 2, "Gi": 1024 ** 3, "Ti": 1024 ** 4,
+    "k": 1000, "M": 1000 ** 2, "G": 1000 ** 3, "T": 1000 ** 4,
+}
+
+
+def _memory(text):
+    if not isinstance(text, str) or not text:
+        raise ValueError(f"malformed memory quantity {text!r}")
+    for suffix in ("Ki", "Mi", "Gi", "Ti"):
+        if text.endswith(suffix):
+            digits = text[:-2]
+            if not digits.isdigit():
+                raise ValueError(f"malformed memory quantity {text!r}")
+            return int(digits) * _MEMORY_SUFFIXES[suffix]
+    for suffix in ("k", "M", "G", "T"):
+        if text.endswith(suffix):
+            digits = text[:-1]
+            if not digits.isdigit():
+                raise ValueError(f"malformed memory quantity {text!r}")
+            return int(digits) * _MEMORY_SUFFIXES[suffix]
+    if not text.isdigit():
+        raise ValueError(f"malformed memory quantity {text!r}")
+    return int(text)
+
+
+def _cpu(text):
+    if not isinstance(text, str) or not text:
+        raise ValueError(f"malformed cpu quantity {text!r}")
+    if text.endswith("m"):
+        digits = text[:-1]
+        if not digits.isdigit():
+            raise ValueError(f"malformed cpu quantity {text!r}")
+        return int(digits)
+    whole, dot, fraction = text.partition(".")
+    if not whole.isdigit() or (dot and not fraction.isdigit()):
+        raise ValueError(f"malformed cpu quantity {text!r}")
+    if len(fraction) > 3:
+        raise ValueError(f"cpu quantity {text!r} is finer than a millicore")
+    return int(whole) * 1000 + int((fraction + "000")[:3]) if fraction \
+        else int(whole) * 1000
+
+
+_PARSERS = {"cpu": _cpu, "memory": _memory}
+
+
+def _amount(mapping, resource):
+    value = (mapping or {}).get(resource)
+    return 0 if value is None else _PARSERS[resource](value)
+
+
+def admit(quota, used, containers):
+    for index, container in enumerate(containers):
+        for resource in _PARSERS:
+            limit = (container.get("limits") or {}).get(resource)
+            request = (container.get("requests") or {}).get(resource)
+            if limit is None or request is None:
+                # Parse anyway, so a malformed quantity still raises.
+                _amount(container.get("limits"), resource)
+                _amount(container.get("requests"), resource)
+                continue
+            if _PARSERS[resource](limit) < _PARSERS[resource](request):
+                return (
+                    False,
+                    f"container {index} sets {resource} limit {limit} below "
+                    f"its request {request}",
+                )
+
+    for resource in _PARSERS:
+        allowed = _amount(quota, resource)
+        requested = _amount(used, resource) + sum(
+            _amount(container.get("requests"), resource)
+            for container in containers
+        )
+        if requested > allowed:
+            return (
+                False,
+                f"{resource} request {requested} exceeds the remaining "
+                f"quota of {allowed}",
+            )
+    return (True, "")
+'''
+
+
+REFERENCES["cicd_containers_packaging_platform-0106"] = r'''
+import itertools
+
+
+def _product(axes):
+    names = list(axes)
+    return [
+        dict(zip(names, values))
+        for values in itertools.product(*(axes[name] for name in names))
+    ]
+
+
+def _matches(combination, entry, keys):
+    return all(combination.get(key) == entry[key] for key in keys)
+
+
+def _apply_exclude(combinations, exclude, axes):
+    kept = list(combinations)
+    for entry in exclude:
+        for key in entry:
+            if key not in axes:
+                raise ValueError(f"exclude names unknown axis {key!r}")
+        kept = [
+            combination for combination in kept
+            if not _matches(combination, entry, list(entry))
+        ]
+    return kept
+
+
+def _apply_include(combinations, include, axes):
+    kept = list(combinations)
+    for entry in include:
+        shared = [key for key in entry if key in axes]
+        targets = [
+            combination for combination in kept
+            if shared and _matches(combination, entry, shared)
+        ]
+        if targets:
+            for combination in targets:
+                for key, value in entry.items():
+                    if key not in shared:
+                        combination[key] = value
+        else:
+            kept.append(dict(entry))
+    return kept
+
+
+def expand_matrix(axes, include, exclude):
+    if not axes:
+        raise ValueError("a matrix needs at least one axis")
+    for name, values in axes.items():
+        if not values:
+            raise ValueError(f"axis {name!r} has no values")
+
+    combinations = _product(axes)
+    combinations = _apply_exclude(combinations, exclude, axes)
+    combinations = _apply_include(combinations, include, axes)
+    return combinations
+'''
+
+
+# Bring up every new replica at once, ignoring the surge ceiling. The plan
+# still ends correctly and still retires the old replicas, so it reads like a
+# rollout; it just asks the scheduler for capacity the cluster never agreed
+# to provide.
+MUTATIONS["cicd_containers_packaging_platform-0104"] = (
+    "        starting = min(ceiling - (new + old), replicas - new)",
+    "        starting = replicas - new",
+)
+
+# Read the binary mebibyte as a decimal megabyte -- 1000000 rather than
+# 1048576. Every quantity still parses and every comparison still runs; the
+# accounting is simply 4.9% short, which only ever shows up as a pod that was
+# admitted and then cannot be scheduled.
+MUTATIONS["cicd_containers_packaging_platform-0105"] = (
+    '    "Ki": 1024, "Mi": 1024 ** 2, "Gi": 1024 ** 3, "Ti": 1024 ** 4,',
+    '    "Ki": 1024, "Mi": 1000 ** 2, "Gi": 1024 ** 3, "Ti": 1024 ** 4,',
+)
+
+# Exclude after include instead of before. Both filters still run and the
+# usual matrix is unchanged, so it looks right -- until an include exists to
+# put back a combination the exclude removed, which is the reason CI matrices
+# order the two phases this way at all.
+MUTATIONS["cicd_containers_packaging_platform-0106"] = (
+    "    combinations = _apply_exclude(combinations, exclude, axes)\n"
+    "    combinations = _apply_include(combinations, include, axes)\n",
+    "    combinations = _apply_include(combinations, include, axes)\n"
+    "    combinations = _apply_exclude(combinations, exclude, axes)\n",
+)
+
+
+REFERENCES["algorithms_data_structures-0009"] = r'''
+def align(source, target):
+    rows, cols = len(source) + 1, len(target) + 1
+    cost = [[0] * cols for _ in range(rows)]
+    for i in range(1, rows):
+        cost[i][0] = i
+    for j in range(1, cols):
+        cost[0][j] = j
+    for i in range(1, rows):
+        for j in range(1, cols):
+            same = source[i - 1] == target[j - 1]
+            cost[i][j] = min(
+                cost[i - 1][j - 1] + (0 if same else 1),
+                cost[i - 1][j] + 1,
+                cost[i][j - 1] + 1,
+            )
+    steps = []
+    i, j = len(source), len(target)
+    while i > 0 or j > 0:
+        if i > 0 and j > 0:
+            same = source[i - 1] == target[j - 1]
+            if cost[i][j] == cost[i - 1][j - 1] + (0 if same else 1):
+                steps.append(('match' if same else 'replace',
+                              source[i - 1], target[j - 1]))
+                i -= 1
+                j -= 1
+                continue
+        if i > 0 and cost[i][j] == cost[i - 1][j] + 1:
+            steps.append(('delete', source[i - 1], None))
+            i -= 1
+            continue
+        steps.append(('insert', None, target[j - 1]))
+        j -= 1
+    steps.reverse()
+    return steps
+'''
+
+
+REFERENCES["algorithms_data_structures-0010"] = r'''
+import bisect
+
+
+def longest_increasing(values):
+    tails = []
+    tail_index = []
+    previous = [-1] * len(values)
+    for index, value in enumerate(values):
+        position = bisect.bisect_left(tails, value)
+        if position == len(tails):
+            tails.append(value)
+            tail_index.append(index)
+        else:
+            tails[position] = value
+            tail_index[position] = index
+        previous[index] = tail_index[position - 1] if position else -1
+    if not tails:
+        return []
+    result = []
+    index = tail_index[-1]
+    while index != -1:
+        result.append(values[index])
+        index = previous[index]
+    result.reverse()
+    return result
+'''
+
+
+REFERENCES["algorithms_data_structures-0011"] = r'''
+class RangeSum:
+    def __init__(self, values):
+        self._values = list(values)
+        size = len(self._values)
+        self._tree = [0] * (size + 1)
+        for index, value in enumerate(self._values):
+            position = index + 1
+            while position <= size:
+                self._tree[position] = self._tree[position] + value
+                position += position & -position
+
+    def _prefix(self, count):
+        total = 0
+        while count > 0:
+            total = total + self._tree[count]
+            count -= count & -count
+        return total
+
+    def update(self, index, value):
+        delta = value - self._values[index]
+        self._values[index] = value
+        size = len(self._values)
+        position = index + 1
+        while position <= size:
+            self._tree[position] = self._tree[position] + delta
+            position += position & -position
+
+    def query(self, low, high):
+        if high <= low:
+            return 0
+        return self._prefix(high) - self._prefix(low)
+'''
+
+
+REFERENCES["algorithms_data_structures-0012"] = r'''
+def strong_components(nodes, edges):
+    successors = {node: [] for node in nodes}
+    predecessors = {node: [] for node in nodes}
+    for source, target in edges:
+        successors[source].append(target)
+        predecessors[target].append(source)
+
+    order, seen = [], set()
+    for start in nodes:
+        if start in seen:
+            continue
+        seen.add(start)
+        stack = [(start, iter(successors[start]))]
+        while stack:
+            node, following = stack[-1]
+            advanced = False
+            for nxt in following:
+                if nxt not in seen:
+                    seen.add(nxt)
+                    stack.append((nxt, iter(successors[nxt])))
+                    advanced = True
+                    break
+            if not advanced:
+                order.append(node)
+                stack.pop()
+
+    assigned, components = set(), []
+    for node in reversed(order):
+        if node in assigned:
+            continue
+        assigned.add(node)
+        group, stack = [], [node]
+        while stack:
+            current = stack.pop()
+            group.append(current)
+            for previous in predecessors[current]:
+                if previous not in assigned:
+                    assigned.add(previous)
+                    stack.append(previous)
+        components.append(sorted(group))
+    components.reverse()
+    return components
+'''
+
+
+REFERENCES["algorithms_data_structures-0013"] = r'''
+import heapq
+
+
+def prefix_code(frequencies):
+    if not frequencies:
+        raise ValueError("frequencies must not be empty")
+    for symbol, count in frequencies.items():
+        if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+            raise ValueError(f"count for {symbol!r} must be a positive integer")
+    symbols = list(frequencies)
+    if len(symbols) == 1:
+        return {symbols[0]: "0"}
+    heap = [(frequencies[symbol], index, {symbol: ""})
+            for index, symbol in enumerate(symbols)]
+    heapq.heapify(heap)
+    counter = len(symbols)
+    while len(heap) > 1:
+        weight_a, _, left = heapq.heappop(heap)
+        weight_b, _, right = heapq.heappop(heap)
+        merged = {}
+        for symbol, code in left.items():
+            merged[symbol] = "0" + code
+        for symbol, code in right.items():
+            merged[symbol] = "1" + code
+        heapq.heappush(heap, (weight_a + weight_b, counter, merged))
+        counter += 1
+    return heap[0][2]
+'''
+
+
+REFERENCES["algorithms_data_structures-0014"] = r'''
+def select_compatible(intervals):
+    pairs = []
+    for interval in intervals:
+        start, end = interval[0], interval[1]
+        if start >= end:
+            raise ValueError(f"interval [{start}, {end}) covers nothing")
+        pairs.append((start, end))
+    chosen = []
+    reached = None
+    for start, end in sorted(pairs, key=lambda pair: (pair[1], pair[0])):
+        if reached is None or start >= reached:
+            chosen.append([start, end])
+            reached = end
+    return chosen
+'''
+
+
+REFERENCES["algorithms_data_structures-0015"] = r'''
+def min_largest_part(weights, parts):
+    if not weights:
+        raise ValueError("weights must not be empty")
+    if (isinstance(parts, bool) or not isinstance(parts, int)
+            or parts < 1 or parts > len(weights)):
+        raise ValueError(f"parts must be between 1 and {len(weights)}")
+    for weight in weights:
+        if weight < 0:
+            raise ValueError("weights must be non-negative")
+
+    def groups_needed(limit):
+        used, current = 1, 0
+        for weight in weights:
+            if current + weight <= limit:
+                current += weight
+            else:
+                used += 1
+                current = weight
+        return used
+
+    low, high = max(weights), sum(weights)
+    while low < high:
+        middle = (low + high) // 2
+        if groups_needed(middle) <= parts:
+            high = middle
+        else:
+            low = middle + 1
+    return low
+'''
+
+
+REFERENCES["algorithms_data_structures-0016"] = r'''
+def skyline(buildings):
+    for building in buildings:
+        left, right, height = building[0], building[1], building[2]
+        if left >= right:
+            raise ValueError(f"building {building} has no width")
+        if height <= 0:
+            raise ValueError(f"building {building} has no height")
+    if not buildings:
+        return []
+    positions = sorted(
+        {building[0] for building in buildings}
+        | {building[1] for building in buildings}
+    )
+    points, previous = [], 0
+    for x in positions:
+        tallest = 0
+        for left, right, height in buildings:
+            if left <= x < right and height > tallest:
+                tallest = height
+        if tallest != previous:
+            points.append((x, tallest))
+            previous = tallest
+    return points
+'''
+
+
+REFERENCES["algorithms_data_structures-0017"] = r'''
+def min_window(text, needed):
+    if not needed:
+        return ''
+    want = {}
+    for character in needed:
+        want[character] = want.get(character, 0) + 1
+    have = {}
+    missing = len(want)
+    best = None
+    start = 0
+    for end, character in enumerate(text):
+        if character in want:
+            have[character] = have.get(character, 0) + 1
+            if have[character] == want[character]:
+                missing -= 1
+        while missing == 0:
+            length = end - start + 1
+            if best is None or length < best[0]:
+                best = (length, start)
+            leaving = text[start]
+            start += 1
+            if leaving in want:
+                if have[leaving] == want[leaving]:
+                    missing += 1
+                have[leaving] -= 1
+    return '' if best is None else text[best[1]:best[1] + best[0]]
+'''
+
+
+REFERENCES["algorithms_data_structures-0018"] = r'''
+def best_selection(items, capacity):
+    if capacity < 0:
+        raise ValueError("capacity must not be negative")
+    for weight, value in items:
+        if weight < 0 or value < 0:
+            raise ValueError("weights and values must not be negative")
+    table = [[0] * (capacity + 1) for _ in range(len(items) + 1)]
+    for index in range(1, len(items) + 1):
+        weight, value = items[index - 1]
+        for room in range(capacity + 1):
+            best = table[index - 1][room]
+            if weight <= room:
+                taken = table[index - 1][room - weight] + value
+                if taken > best:
+                    best = taken
+            table[index][room] = best
+    indices, room = [], capacity
+    for index in range(len(items), 0, -1):
+        if table[index][room] != table[index - 1][room]:
+            indices.append(index - 1)
+            room -= items[index - 1][0]
+    indices.reverse()
+    return table[len(items)][capacity], indices
+'''
+
+
+# Express a substitution as a replace even when the two characters are equal.
+# The alignment still reproduces both strings, and its edit count is inflated
+# by exactly the number of positions that already agreed.
+MUTATIONS["algorithms_data_structures-0009"] = (
+    "                steps.append(('match' if same else 'replace',\n",
+    "                steps.append(('replace',\n",
+)
+
+# Search for the insertion point to the RIGHT of an equal value, making the
+# subsequence non-decreasing rather than strictly increasing. Correct for
+# every input without a repeated value, which is most of them.
+MUTATIONS["algorithms_data_structures-0010"] = (
+    "        position = bisect.bisect_left(tails, value)\n",
+    "        position = bisect.bisect_right(tails, value)\n",
+)
+
+# Answer the query by adding the range up directly. Every sum it returns is
+# correct; only the cost is wrong, which is the half of the contract the
+# prompt states as a measured budget.
+MUTATIONS["algorithms_data_structures-0011"] = (
+    "        if high <= low:\n"
+    "            return 0\n"
+    "        return self._prefix(high) - self._prefix(low)\n",
+    "        return sum(self._values[low:high])\n",
+)
+
+# Walk the second pass forwards instead of over the transpose, collecting
+# everything reachable rather than everything mutually reachable: two cycles
+# joined by a one-way edge collapse into a single component.
+MUTATIONS["algorithms_data_structures-0012"] = (
+    "            for previous in predecessors[current]:\n",
+    "            for previous in successors[current]:\n",
+)
+
+# Give a lone symbol the empty code. It is prefix-free against nothing and
+# costs zero bits, and no decoder can find a symbol boundary with it.
+MUTATIONS["algorithms_data_structures-0013"] = (
+    '        return {symbols[0]: "0"}\n',
+    '        return {symbols[0]: ""}\n',
+)
+
+# Take intervals in order of when they START rather than when they finish --
+# the obvious greedy, which strands the timeline behind one long early
+# interval.
+MUTATIONS["algorithms_data_structures-0014"] = (
+    "    for start, end in sorted(pairs, key=lambda pair: (pair[1], pair[0])):\n",
+    "    for start, end in sorted(pairs, key=lambda pair: (pair[0], pair[1])):\n",
+)
+
+# Require the division to use strictly fewer groups than were asked for, so
+# the search settles on a limit no division of that size ever needs.
+MUTATIONS["algorithms_data_structures-0015"] = (
+    "        if groups_needed(middle) <= parts:\n",
+    "        if groups_needed(middle) < parts:\n",
+)
+
+# Emit a point at every event position rather than only where the height
+# changes. It traces the same shape and is no longer an outline.
+MUTATIONS["algorithms_data_structures-0016"] = (
+    "        if tallest != previous:\n"
+    "            points.append((x, tallest))\n"
+    "            previous = tallest\n",
+    "        points.append((x, tallest))\n"
+    "        previous = tallest\n",
+)
+
+# Keep the LAST window of the shortest length rather than the first. Nothing
+# observes the difference until two windows tie.
+MUTATIONS["algorithms_data_structures-0017"] = (
+    "            if best is None or length < best[0]:\n",
+    "            if best is None or length <= best[0]:\n",
+)
+
+# Forget to spend the capacity while walking the table back. The reported
+# total stays optimal, and the indices handed back no longer fit inside it.
+MUTATIONS["algorithms_data_structures-0018"] = (
+    "            indices.append(index - 1)\n"
+    "            room -= items[index - 1][0]\n",
+    "            indices.append(index - 1)\n",
+)
