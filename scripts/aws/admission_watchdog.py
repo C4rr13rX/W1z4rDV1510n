@@ -244,6 +244,69 @@ try:
 except Exception:
     pass
 
+# --- is the running BRAIN running the code on disk? ------------------------
+# The check above covers exactly one Python file against one process. The
+# brain is neither: it is Rust, so its source has to survive two more steps
+# -- compile, then restart -- and each step can silently not happen.
+#
+# Measured 2026-09-09. `polyglot` was the sole enterprise-gate blocker for
+# three days, failing 19 intervals and holding admission at 96 h. The repair
+# existed and its unit test passed, but the host binary was built
+# 2026-09-07 14:44 and its `brain_api.rs` contained neither
+# `selection_behaviour_coverage` nor the `servable` block. Nothing compared
+# them, so the gate reported a capability regression the whole time and the
+# operator kept re-diagnosing recall.
+#
+# Three artifacts, two gaps, both reported separately because the remedies
+# differ: source newer than binary means REBUILD; binary newer than the
+# process means RESTART the brain (cheap -- it is relaunched at every memory
+# recycle and needs no supervisor restart).
+BRAIN_BIN = "/srv/wizard/project/target/release/w1z4rd_brain_server"
+out["brain_unbuilt_lag"] = None
+out["brain_unloaded_lag"] = None
+out["brain_source_fingerprint"] = {}
+try:
+    newest_rust = 0.0
+    for root, _dirs, names in os.walk("/srv/wizard/project/crates"):
+        if "/target/" in root:
+            continue
+        for name in names:
+            if name.endswith(".rs"):
+                newest_rust = max(newest_rust,
+                                  os.path.getmtime(os.path.join(root, name)))
+    binary_mtime = os.path.getmtime(BRAIN_BIN)
+    if newest_rust:
+        out["brain_unbuilt_lag"] = round(newest_rust - binary_mtime)
+    brain_pids = subprocess.run(
+        ["pgrep", "-f", "release/w1z4rd_brain_server"],
+        capture_output=True, text=True, timeout=30).stdout.split()
+    if brain_pids:
+        started = min(os.path.getmtime(f"/proc/{pid}") for pid in brain_pids)
+        out["brain_unloaded_lag"] = round(binary_mtime - started)
+except Exception:
+    pass
+
+# The two lags above are both host-local, so they agree perfectly whenever a
+# fix never reached the host at all -- which is what actually happened here.
+# Fingerprint the files the enterprise gate's verdict depends on so the
+# caller, which runs beside the developer's checkout, can compare content
+# rather than trusting that a deploy occurred.
+try:
+    import hashlib
+    for path in ("crates/node/src/brain_api.rs",
+                 "scripts/programming_curriculum_supervisor.py",
+                 "scripts/programming_polyglot_composition.py",
+                 "scripts/programming_native_enterprise_eval.py"):
+        full = os.path.join("/srv/wizard/project", path)
+        try:
+            with open(full, "rb") as handle:
+                digest = hashlib.sha256(handle.read()).hexdigest()[:16]
+            out["brain_source_fingerprint"][path] = digest
+        except OSError:
+            out["brain_source_fingerprint"][path] = None
+except Exception:
+    pass
+
 # What a restart would COST is a different question from whether one is owed.
 #
 # `run_deferred_replays` publishes `deferred-replay-active.json` with
@@ -479,6 +542,56 @@ def faults(now: dict, baseline_deferred: int) -> list[str]:
         found.append(
             f"stale_code: supervisor source is {lag}s newer than the running "
             f"process; the deployed fix is not loaded{cost}")
+
+    # The same question for the brain, which needs a compile and a restart.
+    #
+    # Both are reported only while the gate is actually failing. A developer
+    # editing Rust legitimately leaves source newer than the binary for hours,
+    # and alarming on that alone would fire constantly and teach the operator
+    # to ignore this watchdog -- the habit that let the original stall run for
+    # two days. Paired with a failing gate it is never noise: it says the
+    # verdict was scored against code that is not the code under repair.
+    if now.get("failed_since_deploy"):
+        unbuilt = now.get("brain_unbuilt_lag")
+        if unbuilt is not None and unbuilt > 300:
+            found.append(
+                f"brain_unbuilt: Rust source is {unbuilt}s newer than "
+                f"target/release/w1z4rd_brain_server while the gate is "
+                f"failing -- rebuild before scoring another capability "
+                f"verdict")
+        unloaded = now.get("brain_unloaded_lag")
+        if unloaded is not None and unloaded > 300:
+            found.append(
+                f"brain_unloaded: the brain binary is {unloaded}s newer than "
+                f"the running brain process -- restart the brain (it is "
+                f"relaunched at every memory recycle, so this does NOT need "
+                f"a supervisor restart and cannot roll back an interval)")
+
+    # Did the host ever receive the fix? Both lags above are host-local, so
+    # they agree perfectly when the answer is no -- exactly the 2026-09-09
+    # case, where the host's own source and binary were consistent with each
+    # other and three days behind the repair.
+    #
+    # This runs beside the developer's checkout, so it can compare content
+    # directly instead of inferring from a deploy that may never have run.
+    fingerprints = now.get("brain_source_fingerprint") or {}
+    if fingerprints and now.get("failed_since_deploy"):
+        import hashlib
+        drifted = []
+        for path, remote in fingerprints.items():
+            local_path = SP.parents[1] / path
+            try:
+                local = hashlib.sha256(
+                    local_path.read_bytes()).hexdigest()[:16]
+            except OSError:
+                continue
+            if remote != local:
+                drifted.append(path)
+        if drifted:
+            found.append(
+                "host_source_drift: the gate is failing and the host is not "
+                "running this checkout's " + ", ".join(drifted) +
+                " -- ship the fix before reading another capability verdict")
 
     error = now.get("status_error") or ""
     if error and error != "none":

@@ -382,6 +382,80 @@ read 704 ninety-eight seconds after the recycle and 8,944 thirteen minutes
 later, which is a pass converging, not one re-reading rows it had already
 trained.
 
+### A compiled fix has three artifacts, not two
+
+`stale_code_lag` answers the Python question — is the *process* the source —
+and it is scoped to one file, `programming_curriculum_supervisor.py`, compared
+against one process start. The brain is Rust, so between its source and its
+behaviour sit two more steps that can each silently not happen: **compile**,
+then **restart**. Grepping the deployed `.rs` proves neither.
+
+Measured 2026-09-09. `polyglot` was the sole enterprise-gate blocker for three
+days — 11 of 12 suites passing, ten consecutive confirmations all 11-then-11,
+19 intervals re-deferred, admission silent for 96 h. Exactly one row failed,
+`javascript_go_order_workers/canonical`, with `stat dedup.go: no such file`.
+
+The repair already existed. `merge_grounded_file_manifests` had been given
+`selection_behaviour_coverage`, which judges a behaviour covered only when
+that behaviour's own ranked query retrieved the manifest, and its unit test
+`composition_gives_every_requested_behaviour_its_own_component` passed on all
+three binaries. None of that was running. The host binary was built
+2026-09-07 14:44 and its `brain_api.rs` contained:
+
+```
+selection_behaviour_coverage = 0
+servable_block               = 0
+behaviour_query_frame        = 1
+```
+
+That last line is the whole story. `behaviour_query_frame` — the change that
+made each component search on its own terms instead of the composite prompt —
+*was* in the running build, and it is what repaired `cross_project`,
+`composition`, `platform` and `semantic_stress` (last failures 74–78 h ago).
+It also introduced the phantom `GO+TRANSACTIONAL_OUTBOX -> ledger.go` route
+that broke `polyglot` on 2026-09-07. The trade landed; the correction did not.
+Three days of gate verdicts were scored against a build that could not contain
+the fix, and each one read as a capability regression.
+
+Two traps sit inside this. First, `intent_diagnostics.component_recall` is the
+**char-motif** diagnostic, and the coverage rule deliberately ignores it —
+provenance comes from the ranked route in `component_routes`. Reading the
+wrong one makes the fix look insufficient when it is merely absent; verify
+which field the rule consumes before concluding the rule is wrong. Second, the
+committed test hand-wrote the two routes it wished for. The live brain emits
+four, two of them phantoms. A test that invents its fixture cannot fail the
+way production does — build route fixtures from a probe of the real brain.
+
+`admission_watchdog.py` now reports the two missing comparisons, both gated on
+`failed_since_deploy` so ordinary in-progress editing stays quiet and only a
+verdict scored against unshipped code alarms:
+
+- `brain_unbuilt` — newest `crates/**/*.rs` mtime minus the brain binary's.
+  Remedy is a rebuild.
+- `brain_unloaded` — binary mtime minus the brain process start. Remedy is a
+  brain restart, which is **cheap**: the brain is relaunched at every memory
+  recycle, so it needs no supervisor restart and cannot roll an interval back.
+
+Neither would have fired here, because the host's own source and binary were
+consistent with each other and three days behind the repair — the fix had
+never been shipped at all. So the watchdog also fingerprints the files the
+gate's verdict depends on (`brain_api.rs`, the supervisor, and the polyglot
+and native-enterprise evals) with a SHA-256 prefix, and, running beside the
+developer checkout, compares content rather than trusting that a deploy
+occurred. On first run it named the outstanding step directly:
+
+```
+gate_failing:      14 deferred_replay_failed since deploy -- failing: polyglot
+brain_unbuilt:     Rust source is 196401s newer than the brain binary
+host_source_drift: the host is not running this checkout's
+                   scripts/programming_curriculum_supervisor.py
+```
+
+The general rule: **a capability verdict is only evidence about capability if
+the build under test contains the code under repair.** Until that is checked,
+a failing suite and an unshipped fix are the same observation, and the cheaper
+explanation is almost always the second one.
+
 ## The named failure is not the failure population
 
 The watchdog reports `last_failure`. It is one row. Repairing it and declaring
