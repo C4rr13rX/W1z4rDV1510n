@@ -404,6 +404,38 @@ claim is part of the contract, assert it structurally — count comparisons or
 element reads — never by wall-clock time, which would make the verdict depend
 on host load.
 
+#### Count the operation the claim is about, and put the budget in the prompt
+
+"Assert it structurally" leaves open *what* to count, and counting the wrong
+thing measures nothing. `algorithms_data_structures-0011` asks for a range-sum
+structure with logarithmic update *and* query. Counting element reads cannot
+separate the three plausible implementations: a Fenwick tree, a prefix-sum
+array and a plain list all read the input once at construction and never
+touch it again. What distinguishes them is how many **additions on the stored
+values** each operation performs — the prefix array rebuilds on every update,
+the plain list re-adds the range on every query, and only the tree is cheap
+at both.
+
+So the validator supplies the values as objects that count their own
+arithmetic, and the two near-misses miss by two orders of magnitude rather
+than by a hair. That also makes the mutation honest: it replaces the query
+body with `sum(self._values[low:high])`, which is *correct* for every input
+and fails only the budget — a mutation that could not exist if the assertion
+were about answers.
+
+Two rules follow. **Count the operation the complexity claim is about, not
+whichever operation is easiest to observe.** And **state the budget in the
+prompt as a number**, with the exact workload that will be run: a candidate
+told "the caller performs 4096 updates and 4096 queries and allows 400000
+additions" is being given the contract, while one told "must be O(log n)" is
+being asked to guess which constant the author had in mind.
+
+Pick the budget by measuring the reference, not by estimating it. Here the
+tree spends about 200,000 operations against a 400,000 ceiling, and the two
+near-misses spend upward of 16,000,000 — a margin wide enough that no
+reasonable implementation lands near the boundary, which is the same
+`reliability_observability_performance-0005` lesson in a different costume.
+
 ### The distinctness digest cannot see a behavioural duplicate
 
 `build_manifest` keys distinctness on a digest of the normalized validator

@@ -356,6 +356,37 @@ the supervisor mid-replay rolls the interval back** — check
 **the watcher is subject to every rule it enforces**: it ran nineteen minutes
 behind its own repaired probe and alarmed on the pre-fix reading.
 
+### Shipping a brain-server fix without restarting the supervisor
+
+Measured 2026-09-09, deploying the manifest-composition fix while a replay
+interval was mid-pass. The whole point is that these are two processes: the
+supervisor holds the interval and must not be restarted, while the brain
+server it launches is relaunched at **every memory recycle** — 36 of them in
+the preceding 24 h, roughly one per 40 minutes. So a binary swap needs no
+restart of anything and costs no rows.
+
+The sequence, and what each step exists to catch:
+
+| Step | Why |
+|---|---|
+| `sha256sum` the host file against the parent commit *before* patching | `/srv/wizard/project` is a staged copy, **not a checkout** — there is no `git pull` here, and a drifted pre-image would take a patch with fuzz and produce a file nobody compiled |
+| `git apply`, not `patch` | `patch(1)` is **not installed** on this host. `git apply` works outside a repository and refuses fuzz, so a mismatch fails loudly |
+| gzip the patch before base64 | The SSM helper passes the script as a process argument, and Windows caps that near 32 KB. A 23.6 KB patch is 31.5 KB as plain base64 — over the limit — and 8.7 KB gzipped |
+| `chown ec2-user:ec2-user` after applying | `git apply` over SSM leaves the file `root:root` |
+| `sha256sum` the post-image against the local build | Proves the host is compiling the bytes that passed the tests, rather than something that merely applied |
+| `cargo build -p w1z4rdv1510n-node --bin w1z4rd_brain_server` | Without `-p` this errors `no bin target named w1z4rd_brain_server in default-run packages` and builds nothing |
+| Read `${PIPESTATUS[0]}`, never `$?`, after piping cargo to `tail` | `$?` is `tail`'s status. The first attempt reported `cargo_rc=0` for a build that never started |
+| `echo 1000 > /proc/self/oom_score_adj` before building | The brain holds 11 of 15 GB, so the OOM killer's natural target is the brain. This makes the compiler the victim instead, and a compiler is restartable |
+| Compare the binary **inode**, not only its mtime | Cargo hard-links from its cache; a run that does not relink leaves both unchanged. Here inode 1616894522 became 1616920738 |
+| Compare the brain's start time against the binary mtime | The recycle landed 65 s *before* the build finished, so the running brain was still the old code. Nothing about the deploy looked wrong — this is the only check that says so |
+
+That last row is the one that matters. Everything else succeeded: the patch
+applied cleanly, the checksums matched, the build relinked, the brain was up
+with 10.8 GB resident and replay never stalled. And the fix was not live,
+because the process predated the bytes by about a minute. Waiting for the next
+natural recycle costs nothing; asserting the fix works before that recycle
+costs a false all-clear, which is exactly the failure this section opens with.
+
 ### Confirmed in production, 2026-09-05
 
 With the module actually loaded — supervisor source mtime 3.19 h, process

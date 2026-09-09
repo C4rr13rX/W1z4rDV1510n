@@ -66,6 +66,58 @@ Do not re-attempt these without new evidence.
 | Query reduced to content words only | 3 of 6 questions cleared the floor, all on wrong sections. |
 | Lower `UNLABELED_RECALL_MIN_SCORE` | Answerable and unanswerable ranges overlap (0.048–0.113 against 0.076–0.113). Admitting the former admits "summarise the internal memo that was never written". |
 
+## Composing a project: ordering cannot break a tie
+
+`merge_grounded_file_manifests` picks a set of independently recalled
+manifests to answer one composite request. It has failed twice in the same
+place, and the second failure was caused by the fix for the first.
+
+**The candidates are usually right; the selection is what is wrong.** Read
+`intent_diagnostics.component_recall` and `component_routes` before
+concluding a component was never learned. On polyglot's
+`javascript_go_order_workers` the brain recalled every component correctly
+and still shipped a project missing one of them.
+
+**`requested_manifest_component_count` is a ceiling, and it is often 2.** It
+is `max(behaviour groups, languages)` clamped to `[2, 4]`, so a request
+naming two behaviours across two languages can only ever select two files.
+A change to the *order* the sizes are searched in — which is what
+2026-09-07's `.rev()` was — does nothing at all when the range holds one
+value. Before attributing anything to search order, print the count.
+
+**Two selections of equal size are separated by nothing but rank.** Both
+`{ledger.go, order_service.js}` and `{dedup.go, order_service.js}` merge
+cleanly, contain two files and cover JavaScript and Go, so whichever ranked
+first won — and the composed project failed with `stat dedup.go: no such
+file` for three days, holding the enterprise gate at 11/12 and re-deferring
+every quarantine interval behind it. The same case's *paraphrase* passed
+throughout, purely because one extra recalled label raised the ceiling to 3
+and let a larger selection sweep the missing file in. **A paraphrase that
+passes while its canonical fails is evidence about the label set, not about
+the phrasing.**
+
+**Judge behaviour coverage on recall provenance, not on file contents.**
+`programming_behavior_compatible` has no rule for most behaviours —
+deduplication and transactional outbox among them — so it answers "not
+incompatible" for every manifest and every selection looks equally well
+covered. Asking instead *which manifest that behaviour's own
+LANGUAGE+BEHAVIOUR query retrieved* needs no new keyword table and is what
+the per-component recall has already computed.
+
+Use the **ranked** route as provenance, never the char-motif fallback. Asked
+for `JAVASCRIPT+DEDUPLICATION` the fallback returns the JavaScript outbox
+service, and `GO+TRANSACTIONAL_OUTBOX` returns the Go ledger; admitting
+those would make every manifest cover every behaviour and erase the
+distinction. The ranked route returned an artifact for exactly the two
+subsets that genuinely own a component.
+
+**Require only what some candidate can serve, and keep a fallback.** A
+coverage rule that demands a component for a behaviour nothing recalled
+converts a partial answer into no answer, which is worse than the defect
+being fixed. Restricting the requirement to servable behaviours, and
+re-running the old rule when nothing satisfies it, makes the change a
+tie-breaker that cannot stop anything that composes today.
+
 ## Char motifs are not the weak link
 
 Verified 2026-08-23: 3-grams already bridge morphology — `wooden`/`wood` and
