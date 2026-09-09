@@ -52,7 +52,15 @@ def _go_batch_ok(snippets: list[str], timeout_s: float) -> bool:
         path = f.name
     try:
         proc = subprocess.run(
-            ["gofmt", "-e", path], capture_output=True, text=True,
+            # encoding+errors, not bare text=True: text=True decodes with the
+            # LOCALE codec, which is cp1252 on Windows, and real corpus Go
+            # carries non-ASCII bytes in comments and string literals.
+            # Measured on the CodeSearchNet Go ingest: UnicodeDecodeError on
+            # byte 0x81 aborted the batch, and because the exception escaped
+            # the checker the run reported rejected_sandbox 0 across 328,449
+            # rows -- validation silently stopped happening.
+            ["gofmt", "-e", path], capture_output=True,
+            encoding="utf-8", errors="replace",
             timeout=timeout_s,
         )
         return proc.returncode == 0
@@ -146,7 +154,8 @@ class LocalSandbox:
             t0 = time.monotonic()
             try:
                 proc = subprocess.run(
-                    cmd, capture_output=True, text=True,
+                    cmd, capture_output=True,
+                    encoding="utf-8", errors="replace",
                     timeout=timeout_s,
                 )
             except subprocess.TimeoutExpired as e:
