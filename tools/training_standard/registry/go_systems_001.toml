@@ -1,0 +1,48 @@
+[script]
+id          = "go_systems_001"
+category    = "systems_programming_go"
+phase       = 31
+description = """
+Go functions paired with their doc comments, from CodeSearchNet.
+
+Trains the brain that Go is a language with its own idioms rather than a
+word that appears inside other languages' material. Measured 2026-09-09,
+"golang integration transactional outbox" answered with order_service.js
+and the label LANGUAGE:JAVASCRIPT, because the transactional-outbox
+behaviour had only ever been observed in JavaScript. That single gap held
+the enterprise gate at 11/12 on polyglot's javascript_go_order_workers,
+which composes a Go component beside a JavaScript one.
+
+ARCHITECTURE TIER. CodeSearchNet records no per-row licence -- its card
+says "each repository has its own license ... you will need to find out
+yourself which license the code is using" -- so these rows carry
+license="codesearchnet" and a commercial build excludes this corpus by
+file. Each row's `source` names repo, path and function, so provenance
+stays auditable if terms are ever resolved.
+"""
+depends_on  = ["conversation_basics_001"]
+
+[[inputs]]
+kind = "corpus"
+path = "data/training/go_systems_001.jsonl"
+
+[[benchmarks]]
+label         = "go: concurrent map guarded by a mutex"
+prompt        = "Write a Go function that safely increments a counter in a map shared by multiple goroutines."
+must_include  = ["func", "sync.", "Lock"]
+must_be_valid = "go"
+min_score     = 0.6
+
+[[benchmarks]]
+label         = "go: error return convention"
+prompt        = "Write a Go function that opens a file and returns its contents along with an error."
+must_include  = ["func", "error", "return"]
+must_be_valid = "go"
+min_score     = 0.6
+
+[[benchmarks]]
+label         = "go: channel fan-in"
+prompt        = "Write a Go function that reads from two channels and forwards every value to a single output channel."
+must_include  = ["func", "chan", "select"]
+must_be_valid = "go"
+min_score     = 0.6

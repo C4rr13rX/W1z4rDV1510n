@@ -215,3 +215,63 @@ def test_commercial_is_the_default_so_a_corpus_opts_in_to_the_looser_tier() -> N
 
     with pytest.raises(ValueError, match="unknown corpus tier"):
         RowWriter(out / "e.jsonl", script_id="sid", source="t", tier="whatever")
+
+
+@pytest.mark.skipif(shutil.which("gofmt") is None, reason="gofmt not installed")
+def test_batch_validation_keeps_the_good_rows_around_a_bad_one() -> None:
+    """A batch is all-or-nothing in gofmt, so a bad row must not sink the rest.
+
+    Per-row checking spends a process per row -- measured 14.8 rows/s on the
+    CodeSearchNet Go corpus, 5.9 hours for its 317,832 functions, nearly all
+    of it spawn overhead. Batched it runs at ~1,400 rows/s. The risk that
+    buys is that one broken function fails the whole file, so a failing batch
+    is bisected rather than discarded.
+    """
+    from tools.training_standard.ingest.code_search_net import _flush
+    from tools.training_standard.sandbox.local_backend import LocalSandbox
+
+    class _Writer:
+        def __init__(self) -> None:
+            self.rows: list = []
+
+        def write(self, row) -> bool:
+            self.rows.append(row)
+            return True
+
+    good = GOOD_GO
+    rows = [(_row_with_code(good, i), good) for i in range(8)]
+    rows.insert(5, (_row_with_code(BROKEN_GO, 99), BROKEN_GO))
+
+    counters = {"rejected_sandbox": 0, "rejected_row_writer": 0,
+                "written": 0, "dedup_skipped": 0}
+    writer = _Writer()
+    _flush(rows, writer, LocalSandbox(), "go", True, counters)
+
+    assert counters["rejected_sandbox"] == 1, counters
+    assert counters["written"] == 8, counters
+    assert all(r.response == good for r in writer.rows)
+
+
+@pytest.mark.skipif(shutil.which("gofmt") is None, reason="gofmt not installed")
+def test_batch_validation_is_not_a_silent_pass() -> None:
+    """An all-bad batch must reject every row, not wave the batch through."""
+    from tools.training_standard.ingest.code_search_net import _flush
+    from tools.training_standard.sandbox.local_backend import LocalSandbox
+
+    class _Writer:
+        def write(self, row) -> bool:  # pragma: no cover - must not be called
+            raise AssertionError("a broken row reached the writer")
+
+    rows = [(_row_with_code(BROKEN_GO, i), BROKEN_GO) for i in range(4)]
+    counters = {"rejected_sandbox": 0, "rejected_row_writer": 0,
+                "written": 0, "dedup_skipped": 0}
+    _flush(rows, _Writer(), LocalSandbox(), "go", True, counters)
+    assert counters["rejected_sandbox"] == 4, counters
+    assert counters["written"] == 0, counters
+
+
+def _row_with_code(code: str, index: int):
+    from tools.training_standard.row import Row, hash_source
+    return Row(prompt="p", response=code, ctx="", license="codesearchnet",
+               source=f"codesearchnet:go:repo:path#fn{index}",
+               source_hash=hash_source(f"{code}{index}"), script_id="sid")
