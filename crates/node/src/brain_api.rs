@@ -1447,42 +1447,52 @@ fn manifest_language_coverage(labels: &[String], files: &serde_json::Map<String,
         })
 }
 
-fn requested_manifest_component_count(labels: &[String]) -> usize {
-    let mut groups = std::collections::BTreeSet::new();
-    for label in labels {
-        let group = if label.ends_with(":SECURITY:AUTHORIZATION") {
-            Some("authorization")
-        } else if label.ends_with(":API:IDEMPOTENT_COMMAND") {
-            Some("idempotency")
-        } else if label.ends_with(":PERSISTENCE:ATOMIC_TRANSACTION")
-            || label.ends_with(":DOMAIN:ATOMIC_LEDGER_TRANSFER")
-        {
-            Some("transaction")
-        } else if label.ends_with(":OBSERVABILITY:CORRELATED_LOGGING")
-            || label.ends_with(":ENTERPRISE:SECRET_REDACTION")
-        {
-            Some("observability")
-        } else if label.ends_with(":RESILIENCE:CIRCUIT_BREAKER") {
-            Some("circuit_breaker")
-        } else if label.ends_with(":ENTERPRISE:BOUNDED_RETRY")
-            || label.ends_with(":RESILIENCE:ASYNC_RETRY")
-        {
-            Some("retry")
-        } else if label.ends_with(":CONCURRENCY:DEDUPLICATION") {
-            Some("deduplication")
-        } else if label.ends_with(":INTEGRATION:TRANSACTIONAL_OUTBOX") {
-            Some("outbox")
-        } else if label.ends_with(":STATE:OPTIMISTIC_CONCURRENCY") {
-            Some("optimistic_concurrency")
-        } else if label.ends_with(":ENTERPRISE:BATCHING") {
-            Some("batching")
-        } else {
-            None
-        };
-        if let Some(group) = group {
-            groups.insert(group);
-        }
+/// The behaviour a label names, collapsing synonymous labels onto one group.
+///
+/// One table, used by both the component count and the coverage check below.
+/// Keeping two copies is how the count and the check drift apart, and a
+/// coverage rule that disagrees with the count it is bounded by would reject
+/// selections the search can never grow large enough to satisfy.
+fn behaviour_group(label: &str) -> Option<&'static str> {
+    if label.ends_with(":SECURITY:AUTHORIZATION") {
+        Some("authorization")
+    } else if label.ends_with(":API:IDEMPOTENT_COMMAND") {
+        Some("idempotency")
+    } else if label.ends_with(":PERSISTENCE:ATOMIC_TRANSACTION")
+        || label.ends_with(":DOMAIN:ATOMIC_LEDGER_TRANSFER")
+    {
+        Some("transaction")
+    } else if label.ends_with(":OBSERVABILITY:CORRELATED_LOGGING")
+        || label.ends_with(":ENTERPRISE:SECRET_REDACTION")
+    {
+        Some("observability")
+    } else if label.ends_with(":RESILIENCE:CIRCUIT_BREAKER") {
+        Some("circuit_breaker")
+    } else if label.ends_with(":ENTERPRISE:BOUNDED_RETRY")
+        || label.ends_with(":RESILIENCE:ASYNC_RETRY")
+    {
+        Some("retry")
+    } else if label.ends_with(":CONCURRENCY:DEDUPLICATION") {
+        Some("deduplication")
+    } else if label.ends_with(":INTEGRATION:TRANSACTIONAL_OUTBOX") {
+        Some("outbox")
+    } else if label.ends_with(":STATE:OPTIMISTIC_CONCURRENCY") {
+        Some("optimistic_concurrency")
+    } else if label.ends_with(":ENTERPRISE:BATCHING") {
+        Some("batching")
+    } else {
+        None
     }
+}
+
+fn requested_behaviour_groups(labels: &[String])
+    -> std::collections::BTreeSet<&'static str>
+{
+    labels.iter().filter_map(|label| behaviour_group(label)).collect()
+}
+
+fn requested_manifest_component_count(labels: &[String]) -> usize {
+    let groups = requested_behaviour_groups(labels);
     let languages = labels
         .iter()
         .filter(|label| label.contains(":LANGUAGE:"))
@@ -1522,7 +1532,31 @@ fn merge_manifest_selection(selection: &[&Vec<u8>])
 /// conflict must not poison a different dependency-complete project. Search
 /// rank order deterministically and admit only a subset whose aggregate
 /// source satisfies every requested behavior and every requested language.
-fn merge_grounded_file_manifests(labels: &[String], candidates: &[Vec<u8>]) -> Option<Vec<u8>> {
+/// Behaviour groups a selection actually supplies a component for.
+///
+/// Provenance, not content inspection: `routes` records which manifest the
+/// ranked per-component recall returned when asked for LANGUAGE+BEHAVIOUR
+/// alone, so a manifest covers a behaviour only if that behaviour's own query
+/// retrieved it. Judging coverage from file contents instead would mean a new
+/// keyword table per behaviour, and `programming_behavior_compatible` has no
+/// rule for most of them -- which is precisely why every selection currently
+/// looks equally well covered.
+fn selection_behaviour_coverage<'a>(
+    routes: &'a [(String, Vec<u8>)],
+    selection: &[&Vec<u8>],
+) -> std::collections::BTreeSet<&'a str> {
+    routes
+        .iter()
+        .filter(|(_, manifest)| selection.iter().any(|chosen| *chosen == manifest))
+        .filter_map(|(label, _)| behaviour_group(label))
+        .collect()
+}
+
+fn merge_grounded_file_manifests(
+    labels: &[String],
+    candidates: &[Vec<u8>],
+    routes: &[(String, Vec<u8>)],
+) -> Option<Vec<u8>> {
     let manifests: Vec<&Vec<u8>> = candidates
         .iter()
         .filter(|candidate| is_complete_file_manifest(candidate))
@@ -1545,10 +1579,20 @@ fn merge_grounded_file_manifests(labels: &[String], candidates: &[Vec<u8>]) -> O
         selection_size: usize,
         start: usize,
         selected: &mut Vec<usize>,
+        routes: &[(String, Vec<u8>)],
+        required: &std::collections::BTreeSet<&str>,
     ) -> Option<Vec<u8>> {
         if selected.len() == selection_size {
             let selection: Vec<&Vec<u8>> =
                 selected.iter().map(|index| manifests[*index]).collect();
+            // Every behaviour the request names AND some candidate can serve
+            // must actually receive a component in this selection.
+            if !required.is_empty() {
+                let covered = selection_behaviour_coverage(routes, &selection);
+                if !required.iter().all(|group| covered.contains(group)) {
+                    return None;
+                }
+            }
             let files = merge_manifest_selection(&selection)?;
             if files.len() < 2 || !manifest_language_coverage(labels, &files) {
                 return None;
@@ -1565,6 +1609,8 @@ fn merge_grounded_file_manifests(labels: &[String], candidates: &[Vec<u8>]) -> O
                 selection_size,
                 index + 1,
                 selected,
+                routes,
+                required,
             ) {
                 return Some(bytes);
             }
@@ -1573,34 +1619,69 @@ fn merge_grounded_file_manifests(labels: &[String], candidates: &[Vec<u8>]) -> O
         None
     }
     let maximum = requested_manifest_component_count(labels).min(manifests.len());
-    // Prefer the LARGEST satisfying selection, not the smallest.
+
+    // Require each requested behaviour to receive a component, but only for
+    // behaviours some candidate can actually serve.
     //
-    // `manifest_language_coverage` checks languages; nothing checks that every
-    // requested BEHAVIOUR got a component. Ascending order therefore returned
-    // the first selection that merely covered the languages, and stopped.
+    // Restricting to servable groups is what makes this safe. Demanding a
+    // component for a behaviour nothing recalled would turn a partially
+    // grounded request from a partial answer into no answer at all, which is
+    // a worse outcome than the one being fixed. So an ungrounded behaviour is
+    // simply not required, and this rule can only ever choose BETWEEN
+    // selections that already pass every other check.
+    let requested = requested_behaviour_groups(labels);
+    let servable: std::collections::BTreeSet<&str> = routes
+        .iter()
+        .filter(|(_, manifest)| manifests.iter().any(|kept| *kept == manifest))
+        .filter_map(|(label, _)| behaviour_group(label))
+        .filter(|group| requested.contains(group))
+        .collect();
+
+    // Prefer the LARGEST satisfying selection, not the smallest -- a request
+    // naming three behaviours is not answered by the first pair that happens
+    // to cover the languages.
+    let mut find = |required: &std::collections::BTreeSet<&str>| {
+        (2..=maximum).rev().find_map(|selection_size| {
+            search(
+                labels,
+                &manifests,
+                selection_size,
+                0,
+                &mut Vec::new(),
+                routes,
+                required,
+            )
+        })
+    };
+
+    // Measured 2026-09-09 on polyglot's `javascript_go_order_workers`, the
+    // single case that had held the enterprise gate at 11/12 for three days
+    // and blocked every quarantine interval for 96 h. The canonical request
+    // labels JAVASCRIPT, GO, TRANSACTIONAL_OUTBOX and DEDUPLICATION, so
+    // `requested_manifest_component_count` is 2 and the size loop above runs
+    // over exactly one value -- the 2026-09-07 `.rev()` could not help. Both
+    // {ledger.go, order_service.js} and {dedup.go, order_service.js} are size
+    // 2, merge cleanly and cover both languages, so rank order alone decided
+    // and the first won. The composed project then failed with
+    // `stat dedup.go: no such file`, while the SAME case's paraphrase passed
+    // only because its extra IDEMPOTENT_COMMAND label raised the count to 3.
     //
-    // Measured 2026-09-07 on polyglot's `javascript_go_order_workers`, the one
-    // case holding the enterprise gate at 11/12: the request asks for
-    // idempotency, transactional outbox AND deduplication across JavaScript
-    // and Go, and the brain recalled all three components correctly --
-    // GO+DEDUPLICATION -> dedup.go, GO+TRANSACTIONAL_OUTBOX -> ledger.go,
-    // JAVASCRIPT+* -> order_service.js. A 2-file selection of
-    // ledger.go + order_service.js covers both languages, so it won at
-    // selection_size 2 and dedup.go was never considered. The composed
-    // project then failed with `stat dedup.go: no such file`.
-    //
-    // Descending costs nothing when the smaller selection is genuinely right:
-    // a larger one only wins if it also passes every merge, coverage and
-    // behaviour-compatibility check.
-    (2..=maximum).rev().find_map(|selection_size| {
-        search(
-            labels,
-            &manifests,
-            selection_size,
-            0,
-            &mut Vec::new(),
-        )
-    })
+    // Coverage is judged on recall provenance rather than on file contents.
+    // Asked for GO+DEDUPLICATION alone the brain returns dedup.go and asked
+    // for JAVASCRIPT+TRANSACTIONAL_OUTBOX it returns order_service.js, and
+    // neither ledger.go nor order_service.js is what a deduplication query
+    // retrieves. Content inspection could not make that distinction without a
+    // new keyword table per behaviour -- `programming_behavior_compatible`
+    // has no rule for deduplication or outbox at all, which is exactly why
+    // every selection looked equally well covered.
+    if !servable.is_empty() {
+        if let Some(bytes) = find(&servable) {
+            return Some(bytes);
+        }
+    }
+    // Nothing satisfies full coverage: fall back to the previous rule rather
+    // than answering nothing, so no request that composes today stops.
+    find(&std::collections::BTreeSet::new())
 }
 
 /// Direct cross-pool corpus episode formation. Frames are atomized by each
@@ -4469,6 +4550,10 @@ async fn h_brain_chat(
     // Six blind attempts at cross_project's authorized_transfer paraphrase
     // each reasoned from source and were wrong; this reports the fact.
     let mut diagnostic_component_recall = Vec::<serde_json::Value>::new();
+    // (behaviour label, manifest) pairs the ranked per-component recall
+    // returned, so composition can tell a manifest that a behaviour's own
+    // query retrieves from one that merely shares its language.
+    let mut component_behaviour_routes = Vec::<(String, Vec<u8>)>::new();
     if let Some((pool_id, labels)) = composition_features.as_ref() {
         for candidate in brain.decode_ranked_feature_bindings_with_context_where(
             *pool_id,
@@ -4631,6 +4716,28 @@ async fn h_brain_chat(
                     "labels": subset,
                     "artifacts": route_artifacts,
                 }));
+            }
+            // Which behaviour actually retrieved which manifest, kept so the
+            // composition step can require every requested behaviour to
+            // receive a component instead of taking whichever pair ranks
+            // first. Only the RANKED route is recorded: the char-motif
+            // fallback above answers a deduplication query with the
+            // JavaScript outbox service, so using it as provenance would make
+            // every manifest look like it covers every behaviour and destroy
+            // the very distinction this exists to draw.
+            for behaviour in subset
+                .iter()
+                .filter(|label| label.contains(':') && !label.contains(":LANGUAGE:"))
+            {
+                for candidate in component_candidates
+                    .iter()
+                    .filter(|candidate| is_complete_file_manifest(candidate))
+                {
+                    let entry = (behaviour.clone(), candidate.clone());
+                    if !component_behaviour_routes.contains(&entry) {
+                        component_behaviour_routes.push(entry);
+                    }
+                }
             }
             let mut accepted_components = 0usize;
             for candidate in component_candidates {
@@ -4843,8 +4950,11 @@ async fn h_brain_chat(
     });
     let fragment_composition =
         merge_grounded_code_fragments_for_prompt(&feature_candidates, prompt);
-    let manifest_composition =
-        merge_grounded_file_manifests(&diagnostic_intent_labels, &feature_candidates);
+    let manifest_composition = merge_grounded_file_manifests(
+        &diagnostic_intent_labels,
+        &feature_candidates,
+        &component_behaviour_routes,
+    );
     let diagnostic_fragment_composition_ready = fragment_composition.is_some();
     let diagnostic_manifest_composition_ready = manifest_composition.is_some();
     let composed = select_composed_artifact(
@@ -6577,7 +6687,8 @@ class Model:
             br#"{"files":{"repository.py":"def transfer(db, source_id, target_id, amount):\n    with db:\n        db.debit(source_id, amount)\n        db.credit(target_id, amount)\n"}}"#
                 .to_vec(),
         ];
-        let composed = merge_grounded_file_manifests(&labels, &candidates).unwrap();
+        let composed =
+            merge_grounded_file_manifests(&labels, &candidates, &[]).unwrap();
         let value: serde_json::Value = serde_json::from_slice(&composed).unwrap();
         assert!(value["files"].get("authorization.py").is_some());
         assert!(value["files"]["repository.py"]
@@ -6602,9 +6713,94 @@ class Model:
         assert!(merge_grounded_file_manifests(
             &labels,
             &[java.clone(), rust],
+            &[],
         )
         .is_some());
-        assert!(merge_grounded_file_manifests(&labels, &[java]).is_none());
+        assert!(merge_grounded_file_manifests(&labels, &[java], &[]).is_none());
+    }
+
+    #[test]
+    fn composition_gives_every_requested_behaviour_its_own_component() {
+        // polyglot's `javascript_go_order_workers`, canonical phrasing. It
+        // held the enterprise gate at 11/12 for three days and re-deferred
+        // every quarantine interval, a 96 h admission drought.
+        //
+        // The labels name two behaviours and two languages, so
+        // `requested_manifest_component_count` is 2 and the size loop runs
+        // over exactly one value. Both two-file selections merge cleanly and
+        // cover JavaScript and Go, so before this rule the first in rank
+        // order won -- and rank order put the Go OUTBOX manifest first, so
+        // the deduplicator the request asked for was never composed.
+        let labels = vec![
+            "instruction_intent:LANGUAGE:JAVASCRIPT".to_string(),
+            "instruction_intent:LANGUAGE:GO".to_string(),
+            "instruction_intent:ARTIFACT:PROJECT".to_string(),
+            "instruction_intent:INTEGRATION:TRANSACTIONAL_OUTBOX".to_string(),
+            "instruction_intent:CONCURRENCY:DEDUPLICATION".to_string(),
+        ];
+        let order_service = br#"{"files":{"order_service.js":"class OrderService { constructor() { this.responses = new Map(); this.outbox = []; } create(key) { if (this.responses.has(key)) return this.responses.get(key); const order = { key }; this.responses.set(key, order); this.outbox.push({ type: 'created' }); return order; } }"}}"#.to_vec();
+        let ledger_go = br#"{"files":{"ledger.go":"package main\nimport \"sync\"\ntype Ledger struct { mu sync.Mutex; outbox []string }\nfunc (l *Ledger) Publish(event string) { l.mu.Lock(); defer l.mu.Unlock(); l.outbox = append(l.outbox, event) }"}}"#.to_vec();
+        let dedup_go = br#"{"files":{"dedup.go":"package main\nimport \"sync\"\ntype Deduplicator struct { mu sync.Mutex; seen map[string]struct{} }\nfunc (d *Deduplicator) AddIfNew(key string) bool { d.mu.Lock(); defer d.mu.Unlock(); if _, ok := d.seen[key]; ok { return false }; d.seen[key] = struct{}{}; return true }"}}"#.to_vec();
+
+        // Rank order as measured: the Go outbox manifest precedes the
+        // deduplicator, which is what made the wrong pair win.
+        let candidates = vec![
+            order_service.clone(),
+            ledger_go.clone(),
+            dedup_go.clone(),
+        ];
+
+        // Provenance as the live brain reports it in
+        // `intent_diagnostics.component_routes`: asked for its own behaviour
+        // and language alone, OUTBOX retrieves the JavaScript service and
+        // DEDUPLICATION retrieves the Go deduplicator. Nothing routes
+        // ledger.go, so it can cover neither behaviour.
+        let routes = vec![
+            (
+                "instruction_intent:INTEGRATION:TRANSACTIONAL_OUTBOX".to_string(),
+                order_service.clone(),
+            ),
+            (
+                "instruction_intent:CONCURRENCY:DEDUPLICATION".to_string(),
+                dedup_go.clone(),
+            ),
+        ];
+
+        let composed = merge_grounded_file_manifests(&labels, &candidates, &routes)
+            .expect("a selection covering both behaviours exists");
+        let value: serde_json::Value = serde_json::from_slice(&composed).unwrap();
+        let files = value["files"].as_object().unwrap();
+        assert!(
+            files.contains_key("dedup.go"),
+            "the deduplication component was not composed: {:?}",
+            files.keys().collect::<Vec<_>>()
+        );
+        assert!(files.contains_key("order_service.js"));
+
+        // Without provenance the rule cannot fire, and the previous
+        // behaviour is preserved exactly -- which is what keeps this change
+        // from making any request that composes today stop composing.
+        let unguided = merge_grounded_file_manifests(&labels, &candidates, &[])
+            .expect("the previous rule still composes something");
+        let unguided: serde_json::Value = serde_json::from_slice(&unguided).unwrap();
+        assert_eq!(
+            unguided["files"].as_object().unwrap().len(),
+            2,
+            "the fallback should still return the first satisfying pair"
+        );
+
+        // A behaviour nothing can serve is not required: dropping the
+        // deduplicator from the candidate pool must still yield the best
+        // available answer rather than no answer at all.
+        let starved = merge_grounded_file_manifests(
+            &labels,
+            &[order_service.clone(), ledger_go.clone()],
+            &routes,
+        );
+        assert!(
+            starved.is_some(),
+            "an ungrounded behaviour must not turn a partial answer into none"
+        );
     }
 
     #[test]
@@ -6618,7 +6814,7 @@ class Model:
         ];
         let javascript = br#"{"files":{"order_service.js":"class OrderService { constructor() { this.responses = new Map(); this.outbox = []; } create(key) { if (this.responses.has(key)) return this.responses.get(key); const order = { key }; this.responses.set(key, order); this.outbox.push({ type: 'created' }); return order; } }"}}"#.to_vec();
         let go = br#"{"files":{"dedup.go":"package main\nimport \"sync\"\ntype Deduplicator struct { mu sync.Mutex; seen map[string]struct{} }\nfunc (d *Deduplicator) AddIfNew(key string) bool { d.mu.Lock(); defer d.mu.Unlock(); if _, ok := d.seen[key]; ok { return false }; d.seen[key] = struct{}{}; return true }"}}"#.to_vec();
-        let composed = merge_grounded_file_manifests(&labels, &[javascript, go])
+        let composed = merge_grounded_file_manifests(&labels, &[javascript, go], &[])
             .expect("two manifests should satisfy three behaviors");
         let value: serde_json::Value = serde_json::from_slice(&composed).unwrap();
         assert!(value["files"].get("order_service.js").is_some());
@@ -7564,7 +7760,7 @@ class Model:
         let authorization = br#"{"files":{"authorization.py":"def is_authorized(p):\n    return True\n"}}"#.to_vec();
         let observability = br#"{"files":{"observability.py":"import json\ndef log(e, c):\n    print(e)\n"}}"#.to_vec();
         let pool = vec![authorization, observability, javascript.clone()];
-        let merged = merge_grounded_file_manifests(&python_only, &pool)
+        let merged = merge_grounded_file_manifests(&python_only, &pool, &[])
             .expect("two python manifests must still compose");
         let value: serde_json::Value = serde_json::from_slice(&merged).unwrap();
         let files = value["files"].as_object().unwrap();
@@ -7605,11 +7801,11 @@ class Model:
         // One manifest plus plain source cannot compose -- the measured
         // failure, where only the char-motif route held the second manifest.
         let one = vec![authorization.clone(), plain_source.clone()];
-        assert!(merge_grounded_file_manifests(&labels, &one).is_none());
+        assert!(merge_grounded_file_manifests(&labels, &one, &[]).is_none());
 
         // Two manifests in the pool is exactly what the fix contributes.
         let two = vec![authorization, observability, plain_source];
-        let merged = merge_grounded_file_manifests(&labels, &two);
+        let merged = merge_grounded_file_manifests(&labels, &two, &[]);
         assert!(merged.is_some(), "two manifests in the pool must compose");
         let value: serde_json::Value =
             serde_json::from_slice(&merged.unwrap()).unwrap();
