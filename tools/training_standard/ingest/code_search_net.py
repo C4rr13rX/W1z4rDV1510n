@@ -57,6 +57,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -91,7 +92,13 @@ LANG_MAP = {
 
 # Sandbox-supported subset; rows in other langs get accepted without
 # the syntactic check (still a valid row, just unverified).
-_SANDBOX_SUPPORTED = {"python", "javascript"}
+# Languages whose syntax we actually check before accepting a row.
+#
+# Go was missing, so a Go ingest reported rejected_sandbox: 0 while running no
+# check at all -- a corpus that looks validated and is not. Measured
+# 2026-09-09 on 216 CSN Go rows: 200 written, zero sandbox rejections, and the
+# sandbox never invoked.
+_SANDBOX_SUPPORTED = {"python", "javascript", "go"}
 
 # Docstring rejection patterns — license blobs and auto-gen comments.
 _BAD_DOC_PATTERNS = [
@@ -255,7 +262,12 @@ def ingest(
     skip_sandbox: bool,
 ) -> dict:
     """Run the CSN → JSONL conversion.  Returns counters."""
-    sb = None if skip_sandbox else get_sandbox()
+    # "auto" rather than the docker default: this host has a Go toolchain but
+    # no docker engine, and DockerSandbox returns not-ok for EVERY input when
+    # the engine is unreachable -- valid code included. Falling back to the
+    # local backend checks with the real parser instead of rejecting the
+    # entire corpus for an infrastructure reason.
+    sb = None if skip_sandbox else get_sandbox(os.getenv("W1Z4RD_SANDBOX", "auto"))
     sandbox_lang = LANG_MAP.get(lang, lang)
     do_sandbox = (sb is not None) and (sandbox_lang in _SANDBOX_SUPPORTED)
 
