@@ -783,4 +783,386 @@ for bad in ([('size_t', 1)], [('void', None)], [('int32_t', 1)]):
         raise AssertionError(f'varargs_layout({bad}) was accepted')
 ''',
     ),
+    task(
+        f"{FAMILY}-0201", FAMILY,
+        prompt=(
+            "Implement two Python functions, cobs_encode(data) and "
+            "cobs_decode(frame), converting between arbitrary bytes and a "
+            "framing that contains no zero byte, so a zero can delimit "
+            "frames on the wire. Both take and return bytes.\n\n"
+            "cobs_encode processes the input as consecutive blocks. A block "
+            "gathers input bytes until either a zero byte is reached or 254 "
+            "non-zero bytes have been gathered, whichever happens first. For "
+            "each block emit one code byte equal to the number of gathered "
+            "bytes plus one, followed by the gathered bytes themselves. A "
+            "zero byte that ended a block is consumed and not emitted. After "
+            "a block that ended on a consumed zero byte, another block "
+            "always follows, even when the input is exhausted, in which case "
+            "that final block gathers nothing and its code byte is 1. After "
+            "a block that ended because 254 bytes were gathered, another "
+            "block follows only if input remains. Empty input therefore "
+            "encodes to the single byte 0x01.\n\n"
+            "cobs_decode reverses this: read a code byte c, copy the next "
+            "c - 1 bytes to the output, and then append one zero byte unless "
+            "c was 255 or the frame is now exhausted. Raise ValueError if "
+            "the frame is empty, contains a zero byte, or declares a block "
+            "running past its end."
+        ),
+        validator=LOAD_CANDIDATE + require("cobs_encode") + require("cobs_decode")
+        + """
+def reference_decode(frame):
+    \"\"\"Decode independently of the candidate, so a self-consistent but
+    non-standard encoder is caught. This is the peer implementation the
+    framing exists to interoperate with; agreeing only with itself is
+    exactly the interoperability defect under test.\"\"\"
+    out = bytearray()
+    index = 0
+    while index < len(frame):
+        code = frame[index]
+        index += 1
+        end = index + code - 1
+        out += frame[index:end]
+        index = end
+        if code != 0xFF and index < len(frame):
+            out.append(0)
+    return bytes(out)
+
+def check(data):
+    frame = cobs_encode(data)
+    assert isinstance(frame, (bytes, bytearray)), 'cobs_encode must return bytes'
+    assert 0 not in frame, f'frame for {data!r} contains a zero byte'
+    assert bytes(cobs_decode(bytes(frame))) == data, \\
+        f'candidate did not round-trip {data!r}'
+    assert reference_decode(bytes(frame)) == data, \\
+        f'an independent decoder read {reference_decode(bytes(frame))!r} ' \\
+        f'from the frame for {data!r}'
+    # One code byte per 254 bytes of payload, and never more.
+    assert len(frame) <= len(data) + (len(data) // 254) + 2, \\
+        f'frame for {len(data)} bytes is {len(frame)} bytes, too much overhead'
+    return bytes(frame)
+
+# The cases the rule pins exactly, each derived from the prompt's own wording
+# rather than from a remembered table.
+assert check(b'') == b'\\x01'
+assert check(b'\\x00') == b'\\x01\\x01'
+assert check(b'\\x00\\x00') == b'\\x01\\x01\\x01'
+assert check(b'\\x11\\x22\\x00\\x33') == b'\\x03\\x11\\x22\\x02\\x33'
+assert check(b'\\x11\\x00\\x00\\x00') == b'\\x02\\x11\\x01\\x01\\x01'
+assert check(b'\\x01\\x02\\x03') == b'\\x04\\x01\\x02\\x03'
+
+# The 254-byte boundary, where "another block follows only if input remains"
+# is the whole contract. A block gathering exactly 254 bytes at the end of
+# the input must not be followed by an empty one.
+run = bytes(range(1, 255))
+assert len(run) == 254
+frame = check(run)
+assert frame == b'\\xff' + run, \\
+    f'254 non-zero bytes framed as {len(frame)} bytes'
+frame = check(run + b'\\x05')
+assert frame == b'\\xff' + run + b'\\x02\\x05'
+# A block that filled at 254 bytes does not consume the zero that follows,
+# so that zero opens a block of its own and the always-present final block
+# follows that. Both trailing code bytes are 1 and neither is optional --
+# dropping either one loses the payload's last zero on the wire.
+frame = check(run + b'\\x00')
+assert frame == b'\\xff' + run + b'\\x01\\x01'
+
+for payload in (bytes(255), bytes(range(1, 255)) * 3, b'\\x00' * 700,
+                bytes([7]) * 253, bytes([7]) * 254, bytes([7]) * 255,
+                bytes([7]) * 508, b'\\x00\\x01' * 400):
+    check(payload)
+
+import random
+rng = random.Random(20260909)
+for _ in range(30):
+    length = rng.randint(0, 900)
+    check(bytes(rng.randrange(0, 256) for _ in range(length)))
+
+for bad in (b'', b'\\x03\\x11', b'\\x05\\x01\\x02', b'\\x02\\x00\\x01',
+            b'\\x01\\x00'):
+    try:
+        cobs_decode(bad)
+    except ValueError:
+        continue
+    raise AssertionError(f'cobs_decode({bad!r}) was accepted')
+""",
+    ),
+    task(
+        f"{FAMILY}-0202", FAMILY,
+        prompt=(
+            "Implement a Python function crc16(data) returning the CRC-16 of "
+            "a bytes object under the parameters commonly labelled "
+            "CCITT-FALSE: width 16, generator polynomial 0x1021, initial "
+            "register value 0xFFFF, the message processed most significant "
+            "bit first with neither the input bytes nor the output register "
+            "bit-reversed, and no final exclusive-or. Return an integer in "
+            "the range 0 to 65535. The check value for the nine ASCII bytes "
+            "'123456789' under these parameters is 0x29B1."
+        ),
+        validator=LOAD_CANDIDATE + require("crc16") + """
+POLYNOMIAL = (1 << 16) | 0x1021
+
+def by_long_division(data):
+    \"\"\"The same CRC as polynomial remainder over GF(2).
+
+    A non-reflected CRC with initial value I and no final exclusive-or is the
+    remainder of the message -- with I applied to its leading bits -- shifted
+    left by the register width. That is ordinary long division, and it shares
+    no structure with the byte-at-a-time shift register a candidate will
+    write, so it cannot inherit that loop's reflection or seeding mistakes.
+    \"\"\"
+    seeded = bytearray(data)
+    seeded[0] ^= 0xFF
+    seeded[1] ^= 0xFF
+    value = int.from_bytes(bytes(seeded), 'big') << 16
+    for shift in range(value.bit_length() - 17, -1, -1):
+        if (value >> (shift + 16)) & 1:
+            value ^= POLYNOMIAL << shift
+    return value & 0xFFFF
+
+# Anchor the oracle against the parameter set's own published check value
+# before letting it judge anything. An oracle nobody checked is just a second
+# opinion from the same author.
+assert by_long_division(b'123456789') == 0x29B1, 'the oracle is wrong'
+assert crc16(b'123456789') == 0x29B1, \\
+    f'check value is 0x{crc16(b"123456789"):04X}, not 0x29B1'
+
+samples = [
+    b'\\x00\\x00', b'\\xff\\xff', b'A ', b'\\x00\\x01\\x02\\x03',
+    bytes(range(32)), b'the quick brown fox', b'\\x80\\x00\\x00\\x00',
+    bytes(64), bytes([0xAA, 0x55]) * 9, b'interoperability',
+]
+import random
+rng = random.Random(29177)
+for _ in range(40):
+    samples.append(bytes(rng.randrange(256)
+                         for _ in range(rng.randint(2, 300))))
+for data in samples:
+    expected = by_long_division(data)
+    actual = crc16(data)
+    assert actual == expected, \\
+        f'crc16({data[:16]!r}...) gave 0x{actual:04X}, expected 0x{expected:04X}'
+
+# Single bytes and the empty message still have to work; with no message bits
+# the register is the initial value.
+assert crc16(b'') == 0xFFFF, f'empty message gave 0x{crc16(b""):04X}'
+for single in (b'\\x00', b'\\x01', b'\\xff', b'A'):
+    seeded = bytes([single[0] ^ 0xFF, 0xFF])
+    value = int.from_bytes(seeded, 'big') << 16
+    for shift in range(value.bit_length() - 17, -1, -1):
+        if (value >> (shift + 16)) & 1:
+            value ^= POLYNOMIAL << shift
+    # Only the first byte is real message, so undo the second seed byte by
+    # running the division over one byte directly instead.
+    register = 0xFFFF ^ (single[0] << 8)
+    for _ in range(8):
+        register = (((register << 1) ^ 0x1021) & 0xFFFF
+                    if register & 0x8000 else (register << 1) & 0xFFFF)
+    assert crc16(single) == register, \\
+        f'crc16({single!r}) gave 0x{crc16(single):04X}, expected 0x{register:04X}'
+
+# The register must be 16 bits wide throughout: a candidate that lets it grow
+# agrees on short messages and diverges once the overflow would have mattered.
+for data in (bytes([0xFF]) * 40, bytes([0x80]) * 40):
+    assert 0 <= crc16(data) <= 0xFFFF
+    assert crc16(data) == by_long_division(data)
+""",
+    ),
+    task(
+        f"{FAMILY}-0203", FAMILY,
+        prompt=(
+            "Implement a Python function parse_der(data) reading one "
+            "distinguished-encoding-rules element from the start of a bytes "
+            "object and returning a tuple.\n\n"
+            "Every element is an identifier octet, then length octets, then "
+            "contents. Assume the identifier is always a single octet; its "
+            "bit 0x20 marks the element constructed rather than primitive. "
+            "If the first length octet is below 0x80 it is the content "
+            "length. Otherwise its low seven bits give how many further "
+            "octets hold the length, big-endian.\n\n"
+            "For a primitive element return ('primitive', identifier, "
+            "contents) with contents as bytes. For a constructed element "
+            "return ('constructed', identifier, children), where children is "
+            "the list of elements parsed from its contents, each in the same "
+            "form, and those children must fill the contents exactly.\n\n"
+            "Raise ValueError when the data is empty or ends early, when the "
+            "first length octet is 0x80 (the indefinite form, which these "
+            "rules forbid) or 0xFF (reserved), when a length is not encoded "
+            "in the fewest possible octets -- a length below 128 must use "
+            "the single-octet form, and a multi-octet length must not begin "
+            "with a zero octet -- or when a constructed element's children "
+            "do not end exactly on its content boundary. Trailing bytes "
+            "after the first complete element are ignored."
+        ),
+        validator=LOAD_CANDIDATE + require("parse_der") + """
+def encode_length(length):
+    \"\"\"Build fixtures with an encoder, so no expected byte is hand-written.\"\"\"
+    if length < 0x80:
+        return bytes([length])
+    body = length.to_bytes((length.bit_length() + 7) // 8, 'big')
+    return bytes([0x80 | len(body)]) + body
+
+def primitive(identifier, contents):
+    return bytes([identifier]) + encode_length(len(contents)) + contents
+
+def constructed(identifier, *children):
+    body = b''.join(children)
+    return bytes([identifier | 0x20]) + encode_length(len(body)) + body
+
+assert parse_der(primitive(0x02, b'\\x2a')) == ('primitive', 0x02, b'\\x2a')
+assert parse_der(primitive(0x04, b'')) == ('primitive', 0x04, b'')
+assert parse_der(primitive(0x05, b'')) == ('primitive', 0x05, b'')
+
+# The short form's boundary in both directions.
+short = primitive(0x04, b'x' * 127)
+assert short[1] == 127, 'fixture is not using the short form'
+assert parse_der(short) == ('primitive', 0x04, b'x' * 127)
+longer = primitive(0x04, b'y' * 128)
+assert longer[1] == 0x81 and longer[2] == 128
+assert parse_der(longer) == ('primitive', 0x04, b'y' * 128)
+biggest = primitive(0x04, b'z' * 300)
+assert biggest[1] == 0x82
+assert parse_der(biggest) == ('primitive', 0x04, b'z' * 300)
+
+nested = constructed(
+    0x10,
+    primitive(0x02, b'\\x01'),
+    constructed(0x10, primitive(0x0c, b'inner')),
+    primitive(0x01, b'\\xff'),
+)
+kind, identifier, children = parse_der(nested)
+assert kind == 'constructed' and identifier == 0x30
+assert children == [
+    ('primitive', 0x02, b'\\x01'),
+    ('constructed', 0x30, [('primitive', 0x0c, b'inner')]),
+    ('primitive', 0x01, b'\\xff'),
+], f'nested parse gave {children}'
+
+# An empty constructed element has no children rather than one empty child.
+assert parse_der(constructed(0x10)) == ('constructed', 0x30, [])
+
+# Trailing bytes belong to whatever comes next and are not an error.
+assert parse_der(primitive(0x02, b'\\x07') + b'\\x99\\x99') == \\
+    ('primitive', 0x02, b'\\x07')
+
+def rejects(data, why):
+    try:
+        parse_der(data)
+    except ValueError:
+        return
+    raise AssertionError(f'accepted {why}: {data!r}')
+
+rejects(b'', 'empty input')
+rejects(b'\\x02', 'identifier with no length')
+rejects(b'\\x02\\x03\\x01', 'contents shorter than the declared length')
+rejects(b'\\x02\\x80\\x01\\x02\\x00\\x00', 'the indefinite length form')
+rejects(b'\\x02\\xff\\x01', 'the reserved 0xFF length octet')
+rejects(b'\\x02\\x81\\x01\\x2a', 'a long form encoding a length below 128')
+rejects(b'\\x02\\x81\\x7f' + b'x' * 127, 'a long form encoding exactly 127')
+rejects(b'\\x02\\x82\\x00\\x80' + b'x' * 128, 'a leading zero length octet')
+rejects(b'\\x02\\x82\\x01', 'length octets that end early')
+# The children must land exactly on the boundary, not merely inside it.
+rejects(bytes([0x30, 0x05]) + primitive(0x02, b'\\x01'),
+        'a constructed element whose children stop short')
+rejects(bytes([0x30, 0x02]) + primitive(0x02, b'\\x01'),
+        'a constructed element whose child overruns it')
+""",
+    ),
+    task(
+        f"{FAMILY}-0204", FAMILY,
+        prompt=(
+            "Implement a Python function read_name(message, offset) that "
+            "reads one domain name from a DNS message and returns the tuple "
+            "(name, next_offset).\n\n"
+            "A name is a sequence of labels. Each label begins with one "
+            "length octet. When the octet's top two bits are both zero it "
+            "gives the label's length, 1 to 63, and that many bytes follow. "
+            "A length octet of zero ends the name. When the top two bits are "
+            "both one, that octet and the next form a pointer whose low "
+            "fourteen bits are an offset from the start of the message; "
+            "reading continues from there and the name ends where that "
+            "branch ends.\n\n"
+            "Return the labels decoded as ASCII and joined with '.', with "
+            "the root name -- a single zero octet -- decoding to the empty "
+            "string. next_offset is the position just past the name as it "
+            "appears at the offset given, so when a pointer was followed it "
+            "is two past that pointer, never a position in the branch.\n\n"
+            "Raise ValueError when offset is outside the message, when a "
+            "label or pointer runs past the end of the message, when a "
+            "length octet's top two bits are 01 or 10 (both reserved), and "
+            "when the pointers form a cycle. read_name must always "
+            "terminate, however the message is constructed."
+        ),
+        validator=LOAD_CANDIDATE + require("read_name") + """
+def labels(*parts):
+    out = bytearray()
+    for part in parts:
+        out.append(len(part))
+        out += part.encode('ascii')
+    out.append(0)
+    return bytes(out)
+
+def pointer(offset):
+    return bytes([0xC0 | (offset >> 8), offset & 0xFF])
+
+# A plain name, and the root.
+message = labels('www', 'example', 'com')
+assert read_name(message, 0) == ('www.example.com', len(message))
+assert read_name(b'\\x00', 0) == ('', 1)
+
+# A pointer to a suffix. next_offset is two past the POINTER, which is the
+# assertion a solver that returns the branch's end fails -- and the reason a
+# caller can keep walking a message full of compressed names at all.
+base = labels('example', 'com')
+message = base + labels('www')[:-1] + pointer(0)
+name, next_offset = read_name(message, len(base))
+assert name == 'www.example.com', f'got {name!r}'
+assert next_offset == len(message), \\
+    f'next_offset {next_offset} is not two past the pointer'
+
+# A pointer straight to another name, with nothing before it.
+message = base + pointer(0)
+assert read_name(message, len(base)) == ('example.com', len(base) + 2)
+
+# A chain of pointers is legal as long as it terminates.
+first = labels('com')
+second = b'\\x07example' + pointer(0)
+message = first + second + b'\\x03www' + pointer(len(first))
+name, next_offset = read_name(message, len(first) + len(second))
+assert name == 'www.example.com', f'chained pointers gave {name!r}'
+assert next_offset == len(message)
+
+# Case and hyphens survive; labels are bytes, not identifiers.
+message = labels('My-Host', 'EXAMPLE', 'co', 'uk')
+assert read_name(message, 0) == ('My-Host.EXAMPLE.co.uk', len(message))
+
+# A label of the maximum length.
+longest = 'a' * 63
+message = labels(longest, 'net')
+assert read_name(message, 0) == (f'{longest}.net', len(message))
+
+def rejects(message, offset, why):
+    try:
+        read_name(message, offset)
+    except ValueError:
+        return
+    raise AssertionError(f'accepted {why}')
+
+rejects(b'', 0, 'an empty message')
+rejects(labels('a'), 99, 'an offset past the end')
+rejects(b'\\x05abc', 0, 'a label running past the end')
+rejects(b'\\x03www', 0, 'a name with no terminating zero')
+rejects(b'\\x40\\x01', 0, 'the reserved 01 length prefix')
+rejects(b'\\x80\\x01', 0, 'the reserved 10 length prefix')
+rejects(b'\\xc0', 0, 'a pointer with no second octet')
+rejects(pointer(500) + b'\\x00', 0, 'a pointer past the end')
+
+# The two cycles that hang a solver which trusts the message. Reaching this
+# assertion at all is most of what the task measures; a solver that loops is
+# stopped by the task timeout and scored a failure, not a hang.
+rejects(pointer(0), 0, 'a pointer to itself')
+rejects(pointer(2) + pointer(0), 0, 'a two-step pointer cycle')
+rejects(b'\\x01a' + pointer(0), 0, 'a label whose pointer returns to it')
+""",
+    ),
 ]

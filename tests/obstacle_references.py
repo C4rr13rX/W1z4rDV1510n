@@ -11433,3 +11433,188 @@ MUTATIONS["algorithms_data_structures-0018"] = (
     "            room -= items[index - 1][0]\n",
     "            indices.append(index - 1)\n",
 )
+
+
+REFERENCES["polyglot_native_interop-0201"] = r'''
+def cobs_encode(data):
+    out = bytearray()
+    start = 0
+    total = len(data)
+    while True:
+        end = start
+        while end < total and end - start < 254 and data[end] != 0:
+            end += 1
+        gathered = end - start
+        out.append(gathered + 1)
+        out += data[start:end]
+        if gathered == 254:
+            # The block filled up, so the byte at `end` -- whether or not it
+            # is a zero -- begins the next block and is not consumed here.
+            if end == total:
+                return bytes(out)
+            start = end
+            continue
+        if end == total:
+            return bytes(out)
+        # data[end] is a zero: consume it, and a block always follows it.
+        start = end + 1
+        if start == total:
+            out.append(1)
+            return bytes(out)
+
+
+def cobs_decode(frame):
+    if not frame:
+        raise ValueError("frame is empty")
+    if 0 in frame:
+        raise ValueError("frame contains a zero byte")
+    out = bytearray()
+    index = 0
+    while index < len(frame):
+        code = frame[index]
+        index += 1
+        end = index + code - 1
+        if end > len(frame):
+            raise ValueError("block runs past the end of the frame")
+        out += frame[index:end]
+        index = end
+        if code != 0xFF and index < len(frame):
+            out.append(0)
+    return bytes(out)
+'''
+
+
+REFERENCES["polyglot_native_interop-0202"] = r'''
+def crc16(data):
+    register = 0xFFFF
+    for byte in data:
+        register ^= byte << 8
+        for _ in range(8):
+            if register & 0x8000:
+                register = ((register << 1) ^ 0x1021) & 0xFFFF
+            else:
+                register = (register << 1) & 0xFFFF
+    return register
+'''
+
+
+REFERENCES["polyglot_native_interop-0203"] = r'''
+def parse_der(data):
+    element, _ = _read_element(data, 0, len(data))
+    return element
+
+
+def _read_element(data, offset, limit):
+    if offset >= limit:
+        raise ValueError("element is truncated")
+    identifier = data[offset]
+    offset += 1
+    if offset >= limit:
+        raise ValueError("element has no length octets")
+    first = data[offset]
+    offset += 1
+    if first == 0x80:
+        raise ValueError("the indefinite length form is forbidden")
+    if first == 0xFF:
+        raise ValueError("0xFF is a reserved length octet")
+    if first < 0x80:
+        length = first
+    else:
+        count = first & 0x7F
+        if offset + count > limit:
+            raise ValueError("length octets end early")
+        chunk = bytes(data[offset:offset + count])
+        offset += count
+        if chunk[0] == 0:
+            raise ValueError("length is not minimally encoded")
+        length = int.from_bytes(chunk, "big")
+        if length < 0x80:
+            raise ValueError("a length below 128 must use the short form")
+    end = offset + length
+    if end > limit:
+        raise ValueError("contents end early")
+    if identifier & 0x20:
+        children = []
+        cursor = offset
+        while cursor < end:
+            child, cursor = _read_element(data, cursor, end)
+            children.append(child)
+        if cursor != end:
+            raise ValueError("children do not fill the constructed element")
+        return ("constructed", identifier, children), end
+    return ("primitive", identifier, bytes(data[offset:end])), end
+'''
+
+
+REFERENCES["polyglot_native_interop-0204"] = r'''
+def read_name(message, offset):
+    if offset < 0 or offset >= len(message):
+        raise ValueError("offset is outside the message")
+    parts = []
+    next_offset = None
+    seen = set()
+    cursor = offset
+    while True:
+        if cursor >= len(message):
+            raise ValueError("name runs past the end of the message")
+        if cursor in seen:
+            raise ValueError("the pointers form a cycle")
+        seen.add(cursor)
+        length = message[cursor]
+        kind = length & 0xC0
+        if kind == 0xC0:
+            if cursor + 1 >= len(message):
+                raise ValueError("pointer is truncated")
+            target = ((length & 0x3F) << 8) | message[cursor + 1]
+            if next_offset is None:
+                next_offset = cursor + 2
+            if target >= len(message):
+                raise ValueError("pointer targets a position past the end")
+            cursor = target
+            continue
+        if kind != 0:
+            raise ValueError("reserved label length prefix")
+        if length == 0:
+            if next_offset is None:
+                next_offset = cursor + 1
+            return ".".join(parts), next_offset
+        end = cursor + 1 + length
+        if end > len(message):
+            raise ValueError("label runs past the end of the message")
+        parts.append(bytes(message[cursor + 1:end]).decode("ascii"))
+        cursor = end
+'''
+
+
+# Treat a block that filled up at 254 bytes as though a zero had ended it, so
+# the next block starts one byte late. Correct for every payload shorter than
+# 254 bytes, which is every payload an author frames by hand.
+MUTATIONS["polyglot_native_interop-0201"] = (
+    "        if gathered == 254:\n",
+    "        if gathered == 255:\n",
+)
+
+# Seed the register with zero rather than all ones -- the XMODEM parameter
+# set, reached by picking the wrong row of the same table.
+MUTATIONS["polyglot_native_interop-0202"] = (
+    "    register = 0xFFFF\n",
+    "    register = 0x0000\n",
+)
+
+# Accept a length that is not minimally encoded. Every well-formed message
+# still parses; the encoding simply stops being distinguished, which is the
+# one property the D in DER stands for.
+MUTATIONS["polyglot_native_interop-0203"] = (
+    "        if length < 0x80:\n"
+    '            raise ValueError("a length below 128 must use the short form")\n',
+    "        pass\n",
+)
+
+# Report where the name ended after following the pointer instead of where it
+# ended in the record being read. The name itself is still correct, and the
+# caller's next read lands in the middle of an unrelated name.
+MUTATIONS["polyglot_native_interop-0204"] = (
+    "            if next_offset is None:\n"
+    "                next_offset = cursor + 2\n",
+    "",
+)
