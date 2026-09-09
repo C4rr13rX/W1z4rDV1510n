@@ -275,14 +275,49 @@ try:
                 newest_rust = max(newest_rust,
                                   os.path.getmtime(os.path.join(root, name)))
     binary_mtime = os.path.getmtime(BRAIN_BIN)
+    out["binary_age"] = round(time.time() - binary_mtime)
     if newest_rust:
         out["brain_unbuilt_lag"] = round(newest_rust - binary_mtime)
+    # Anchor the pattern. The supervisor's own command line carries
+    # `--node-bin /srv/wizard/project/target/release/w1z4rd_brain_server`, so
+    # an unanchored `-f` matches it too -- and it has been up for days.
+    # Measured 2026-09-09 with the loose pattern: `brain_unloaded_lag` read
+    # 196,473 s against a brain that had restarted 16 minutes earlier, because
+    # the oldest match was the supervisor. That is a permanently-true alarm,
+    # which is worse than no alarm. `PROGRAMMING_BRAIN_OPERATIONS.md` records
+    # the same trap producing a 23 MB "non-hydrating brain" reading.
     brain_pids = subprocess.run(
-        ["pgrep", "-f", "release/w1z4rd_brain_server"],
+        ["pgrep", "-f", "release/w1z4rd_brain_server$"],
         capture_output=True, text=True, timeout=30).stdout.split()
     if brain_pids:
-        started = min(os.path.getmtime(f"/proc/{pid}") for pid in brain_pids)
+        # Newest start, not oldest: the question is whether the process now
+        # serving requests predates the binary, and a lingering sibling would
+        # otherwise mask a restart that did happen.
+        started = max(os.path.getmtime(f"/proc/{pid}") for pid in brain_pids)
         out["brain_unloaded_lag"] = round(binary_mtime - started)
+        out["brain_pid_count"] = len(brain_pids)
+
+        # The lag is context; the INODE is the answer.
+        #
+        # Measured 2026-09-09: the brain started at 21:18:39 and cargo
+        # relinked at 21:18:51, so the lag was +12 s -- inside any threshold
+        # tuned for the supervisor's deploy-then-restart window. The process
+        # was nevertheless serving the previous image, and the canonical
+        # polyglot row still composed `ledger.go`. A seconds threshold cannot
+        # separate "restarted just before the relink" from "restarted just
+        # after" when both round to the same small number.
+        #
+        # Cargo relinks by creating a new file, so a process holding the old
+        # image keeps the old inode and Linux marks the unlinked image
+        # "(deleted)". That comparison is exact and needs no threshold.
+        newest = max(brain_pids, key=lambda pid: os.path.getmtime(f"/proc/{pid}"))
+        try:
+            out["brain_image_stale"] = (
+                os.stat(f"/proc/{newest}/exe").st_ino
+                != os.stat(BRAIN_BIN).st_ino)
+            out["brain_exe_link"] = os.readlink(f"/proc/{newest}/exe")
+        except OSError:
+            out["brain_image_stale"] = None
 except Exception:
     pass
 
@@ -559,13 +594,30 @@ def faults(now: dict, baseline_deferred: int) -> list[str]:
                 f"target/release/w1z4rd_brain_server while the gate is "
                 f"failing -- rebuild before scoring another capability "
                 f"verdict")
-        unloaded = now.get("brain_unloaded_lag")
-        if unloaded is not None and unloaded > 300:
-            found.append(
-                f"brain_unloaded: the brain binary is {unloaded}s newer than "
-                f"the running brain process -- restart the brain (it is "
-                f"relaunched at every memory recycle, so this does NOT need "
-                f"a supervisor restart and cannot roll back an interval)")
+    # A stale IMAGE is reported on its own terms, not behind
+    # `failed_since_deploy`. That counter filters failures newer than the
+    # binary, so it reads 0 for a while after every rebuild -- precisely the
+    # window in which a stale image invalidates each verdict. Gating on it
+    # would blind the check exactly when it matters.
+    #
+    # The bound that keeps this quiet instead is the binary's own age: a
+    # restart that follows a build promptly is normal and says nothing. Only
+    # a build that finished long ago and was never picked up is a fault.
+    if now.get("brain_image_stale") and now.get("binary_age", 0) > 900:
+        # A brain restart is cheap -- the brain is relaunched at every memory
+        # recycle, needs no supervisor restart, and cannot roll an interval
+        # back. But it must not land on top of a live replay worker: killing
+        # the brain under a pass in flight loses that pass, which is the cost
+        # this watchdog exists to avoid paying twice.
+        wait = (" -- a replay worker is in flight, so let the next memory "
+                "recycle relaunch it rather than killing the pass"
+                if now.get("worker") else
+                " -- no worker is in flight, so restart the brain now")
+        found.append(
+            f"brain_image_stale: the brain is executing "
+            f"{now.get('brain_exe_link')}, a different inode from the binary "
+            f"built {now['binary_age']}s ago; every gate verdict since is "
+            f"scored against the old code{wait}")
 
     # Did the host ever receive the fix? Both lags above are host-local, so
     # they agree perfectly when the answer is no -- exactly the 2026-09-09

@@ -463,9 +463,45 @@ verdict scored against unshipped code alarms:
 
 - `brain_unbuilt` — newest `crates/**/*.rs` mtime minus the brain binary's.
   Remedy is a rebuild.
-- `brain_unloaded` — binary mtime minus the brain process start. Remedy is a
-  brain restart, which is **cheap**: the brain is relaunched at every memory
-  recycle, so it needs no supervisor restart and cannot roll an interval back.
+- `brain_image_stale` — the running brain's `/proc/<pid>/exe` **inode**
+  against the on-disk binary's. Remedy is a brain restart, which is **cheap**:
+  the brain is relaunched at every memory recycle, so it needs no supervisor
+  restart and cannot roll an interval back.
+
+That second one is an inode comparison and not mtime arithmetic, because
+mtime arithmetic gets it wrong. Measured the same day: the rebuild landed at
+21:18:51 and the brain had restarted at 21:18:39, so binary-minus-process was
+**+12 s** — inside any threshold tuned for the supervisor's
+deploy-then-restart window. The brain was nevertheless serving the previous
+image and the canonical polyglot row still composed `ledger.go`, byte for byte
+as before. Twelve seconds cannot distinguish "restarted just after the relink"
+from "just before it". The inode can:
+
+```
+on-disk binary   inode=1616920738  mtime=21:18:51
+running brain    inode=1616894522  exe=".../w1z4rd_brain_server (deleted)"
+```
+
+Cargo relinks by creating a new file, so a process holding the old image keeps
+the old inode and Linux marks the unlinked image `(deleted)`. Exact, and no
+threshold to tune.
+
+Two conditions on the alarm, both learned here. It is **not** gated on
+`failed_since_deploy`: that counter filters failures newer than the binary, so
+it reads 0 for a while after every rebuild — exactly the window in which a
+stale image invalidates every verdict. What keeps it quiet instead is the
+binary's own age, since a restart that promptly follows a build says nothing.
+And the remedy it prints depends on whether a replay worker is in flight:
+killing the brain under a live pass loses that pass, so when one is running
+the correct action is to let the next memory recycle relaunch it.
+
+Anchor the pattern that finds the brain. `pgrep -f release/w1z4rd_brain_server`
+also matches the **supervisor**, whose command line carries
+`--node-bin .../w1z4rd_brain_server`, and the supervisor has been up for days.
+With the loose pattern this check read a lag of 196,473 s against a brain that
+had restarted sixteen minutes earlier. Use `release/w1z4rd_brain_server$` — the
+same trap this document already records producing a 23 MB "non-hydrating
+brain" reading.
 
 Neither would have fired here, because the host's own source and binary were
 consistent with each other and three days behind the repair — the fix had
