@@ -4,7 +4,12 @@ CodeSearchNet (CSN) is a publicly hosted corpus of 2M+ permissively
 licensed function ↔ docstring pairs across six languages.  We use it
 as the first proof-of-pipeline source because:
 
-  - License is already enforced upstream (permissive-only).
+  - Licensing is NOT enforced upstream. The dataset card states: "each
+    repository has its own license. Example-wise license information is
+    not (yet) included in this dataset: you will need to find out
+    yourself which license the code is using." CSN is therefore an
+    ARCHITECTURE-tier corpus: usable for proving the architecture, and
+    excluded by file from any commercial build.
   - Dedup against GitHub forks is already done upstream.
   - The (docstring, code) shape maps 1:1 to our (prompt, response)
     schema with no synthesis.
@@ -66,9 +71,15 @@ if str(_PROJECT_ROOT) not in sys.path:
 from tools.training_standard.row import (
     Row, RowRejected, RowWriter, hash_source, render_ctx,
 )
+from tools.training_standard.row import TIER_ARCHITECTURE
 from tools.training_standard.sandbox import get_sandbox
 
 # CSN languages we accept.  Map CSN labels → our sandbox lang ids.
+# CSN records no per-row licence, so the row states exactly that rather than
+# claiming terms the corpus never established. Architecture-tier corpora
+# accept it; commercial-tier corpora refuse it.
+UNKNOWN_CSN_LICENSE = "codesearchnet"
+
 LANG_MAP = {
     "python":     "python",
     "javascript": "javascript",
@@ -260,7 +271,8 @@ def ingest(
 
     with RowWriter(out_path,
                    script_id=script_id,
-                   source=f"codesearchnet:{lang}") as writer:
+                   source=f"codesearchnet:{lang}",
+                   tier=TIER_ARCHITECTURE) as writer:
         for shard in _iter_csn_files(src_dir):
             for rec in _iter_records(shard, default_lang=lang):
                 counters["seen"] += 1
@@ -302,7 +314,7 @@ def ingest(
                     # provenance claim the corpus does not support. The exact
                     # terms live with the repo named in `source` below, which
                     # keeps each row auditable to its own project.
-                    license="permissive-mixed",
+                    license=UNKNOWN_CSN_LICENSE,
                     source=f"codesearchnet:{lang}:{rec.get('repo','?')}:{rec.get('path','?')}#{func_name}",
                     source_hash=hash_source(code_stripped),
                     script_id=script_id,
