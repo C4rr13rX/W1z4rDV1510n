@@ -681,6 +681,27 @@ REVIEWED_OVERLAPS = {
         "failures. Here it is forbidden outright, and asserted directly: a "
         "refund must not be issued for a payment that was never captured."
     ),
+    "citation:RFC9110": (
+        "The POSIX case, with a real document. requirements-0003 measures "
+        "conditional-request precondition evaluation and requirements-0004 "
+        "measures Range resolution -- both are RFC 9110 BEHAVIOUR. "
+        "http-0605 cites RFC 9110 only for the definition of `token`, which "
+        "it uses to say which bytes may appear in a header NAME; what it "
+        "measures is refusing header injection, and specifically that a bare "
+        "LF is sufficient on its own. Naming the document does not imply "
+        "measuring it, and no other task refuses a value.\n\n"
+        "Recorded together with a deletion, because the same scan run showed "
+        "both outcomes. `symbol:parse_range` flagged an http Range task "
+        "against validation-0017, and reading the neighbourhood turned up a "
+        "closer duplicate the scan could not see at all: "
+        "requirements-0004 `parse_byte_range` already specifies "
+        "ignore-on-malformed, 416-on-unsatisfiable, last-byte clamping, "
+        "open-ended and suffix ranges, zero-length suffixes and a first "
+        "offset past the end -- clause for clause. Only the return encoding "
+        "differed, and an encoding is not a capability. The http task was "
+        "deleted rather than reviewed; a slot spent re-measuring covered "
+        "behaviour is one the contract's 1,000 distinct tasks does not have."
+    ),
     "citation:RFC3986": (
         "validation-0007 resolves a reference against a base, validation-0008 "
         "is the percent-encoding and form-decoding primitives, and "

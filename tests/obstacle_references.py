@@ -13070,3 +13070,161 @@ MUTATIONS["concurrency_async_distributed-0310"] = (
     "                return EMPTY\n"
     "            return self._items.pop()",
 )
+
+
+# --------------------------------------------------------------------------
+# http_apis_authn_appsec-0601, -0602, -0605, -0606
+#
+# Four behaviours where the safe answer and the obvious answer differ, and
+# the difference is a vulnerability rather than a rough edge: ignoring an
+# unparsable Range instead of rejecting it, reading a forwarding chain from
+# the right instead of the left, treating a lone LF as a line break, and
+# cutting a base name at a backslash as well as a slash.
+
+REFERENCES["http_apis_authn_appsec-0602"] = r'''
+def client_address(remote_addr, forwarded_for, trusted_proxies):
+    trusted = set(trusted_proxies or ())
+
+    # The header is a claim made by whoever we are actually talking to. If
+    # that peer is not one of our own proxies, the claim is unverifiable and
+    # the peer IS the client.
+    if remote_addr not in trusted:
+        return remote_addr
+    if forwarded_for is None:
+        return remote_addr
+
+    entries = [entry.strip() for entry in forwarded_for.split(",")]
+    if not entries or any(not entry for entry in entries):
+        return remote_addr
+
+    # RIGHT TO LEFT. Each proxy appends, so entries to the right were added
+    # by infrastructure we operate and entries to the left are whatever
+    # arrived from outside. The first untrusted address walking inward is the
+    # last one a trusted proxy vouched for; anything further left was typed
+    # by the client.
+    for entry in reversed(entries):
+        if entry not in trusted:
+            return entry
+    return entries[0]
+'''
+
+
+REFERENCES["http_apis_authn_appsec-0605"] = r'''
+#: RFC 9110 tchar. The separators are precisely the characters that would let
+#: a name end early and start something else.
+_TOKEN = frozenset(
+    "abcdefghijklmnopqrstuvwxyz"
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "0123456789"
+    "!#$%&'*+-.^_`|~"
+)
+
+#: Every C0 control and DEL. HTAB is removed below because it is ordinary
+#: field content; CR and LF are NOT, and each is independently sufficient to
+#: start a new header line.
+_UNSENDABLE = frozenset(chr(code) for code in range(0x20)) | {"\x7f"}
+_UNSENDABLE = _UNSENDABLE - {"\t"}
+
+
+def build_headers(pairs):
+    lines = []
+    for name, value in pairs:
+        if not isinstance(name, str) or not isinstance(value, str):
+            raise ValueError("header name and value must be str: %r" % (name,))
+        if not name or any(character not in _TOKEN for character in name):
+            raise ValueError("not a token: %r" % (name,))
+
+        trimmed = value.strip(" \t")
+        if any(character in _UNSENDABLE for character in trimmed):
+            raise ValueError("unsendable control character in %r" % (name,))
+        try:
+            trimmed.encode("latin-1")
+        except UnicodeEncodeError:
+            raise ValueError("value for %r is not latin-1" % (name,)) from None
+
+        lines.append("%s: %s\r\n" % (name, trimmed))
+    return "".join(lines)
+'''
+
+
+REFERENCES["http_apis_authn_appsec-0606"] = r'''
+#: RFC 8187 attr-char. Deliberately not urllib.parse.quote's safe set: quote
+#: escapes '&' and '!' which are legal here, so using it produces a different
+#: header.
+_ATTR_CHAR = frozenset(
+    "abcdefghijklmnopqrstuvwxyz"
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "0123456789"
+    "!#$&+-.^_`|~"
+)
+
+_TOKEN = frozenset(
+    "abcdefghijklmnopqrstuvwxyz"
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "0123456789"
+    "!#$%&'*+-.^_`|~"
+)
+
+
+def _printable(character):
+    return "\x20" <= character <= "\x7e"
+
+
+def content_disposition(filename, disposition="attachment"):
+    if not isinstance(disposition, str) or not disposition or \
+            any(character not in _TOKEN for character in disposition):
+        raise ValueError("not a disposition token: %r" % (disposition,))
+    if not isinstance(filename, str):
+        raise ValueError("filename must be str: %r" % (filename,))
+
+    # BOTH separators. The recipient writes this to disk, and on Windows the
+    # backslash is the separator -- cutting only at '/' leaves the traversal
+    # intact for exactly the platform it works on.
+    cut = max(filename.rfind("/"), filename.rfind("\\"))
+    base = filename[cut + 1:]
+    if base in ("", ".", ".."):
+        raise ValueError("no usable base name in %r" % (filename,))
+
+    fallback = "".join(
+        character if _printable(character) else "_" for character in base)
+    # Backslash first: escaping quotes first would then double the backslash
+    # this step introduces.
+    fallback = fallback.replace("\\", "\\\\").replace('"', '\\"')
+    header = '%s; filename="%s"' % (disposition, fallback)
+
+    if all(_printable(character) for character in base):
+        return header
+
+    encoded = "".join(
+        character if character in _ATTR_CHAR
+        else "".join("%%%02X" % byte for byte in character.encode("utf-8"))
+        for character in base
+    )
+    return header + "; filename*=UTF-8''" + encoded
+'''
+
+
+# Read the forwarding chain left to right. Identical whenever the client sent
+# no X-Forwarded-For of its own -- which is every honest request, and so every
+# request anyone tests with -- and it returns an attacker-chosen string the
+# moment one does.
+MUTATIONS["http_apis_authn_appsec-0602"] = (
+    "    for entry in reversed(entries):",
+    "    for entry in entries:",
+)
+
+# Look for CRLF as a pair. Catches the textbook injection string and misses
+# the one that actually works: a lone LF is a line break to essentially every
+# server and log parser, so a single unescaped newline still appends headers.
+MUTATIONS["http_apis_authn_appsec-0605"] = (
+    "        if any(character in _UNSENDABLE for character in trimmed):",
+    '        if "\\r\\n" in trimmed:',
+)
+
+# Cut the base name at '/' only. Correct on the POSIX paths every fixture is
+# written with, and it leaves '..\\..\\evil.exe' whole for the one platform
+# where a backslash is a directory separator.
+MUTATIONS["http_apis_authn_appsec-0606"] = (
+    '    cut = max(filename.rfind("/"), filename.rfind("\\\\"))',
+    '    cut = filename.rfind("/")',
+)

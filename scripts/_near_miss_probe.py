@@ -300,6 +300,91 @@ class WorkStealingDeque:
 ''')
 
 
+# Walks the chain from the right, correctly, and never asks whether the peer
+# it is talking to is a proxy at all. This is what most middleware does out of
+# the box, and it means anyone connecting directly can name their own address.
+NEAR_MISSES["http_apis_authn_appsec-0602"] = ("trusts the header from any peer", r'''
+def client_address(remote_addr, forwarded_for, trusted_proxies):
+    trusted = set(trusted_proxies or ())
+    if forwarded_for is None:
+        return remote_addr
+    entries = [entry.strip() for entry in forwarded_for.split(",")]
+    if not entries or any(not entry for entry in entries):
+        return remote_addr
+    for entry in reversed(entries):
+        if entry not in trusted:
+            return entry
+    return entries[0]
+''')
+
+# Sanitises instead of refusing. Nothing is injected, so it looks like the
+# safer choice; what it actually does is silently ship a Location header that
+# is not the one the application asked for, with no error anywhere.
+NEAR_MISSES["http_apis_authn_appsec-0605"] = ("strips controls instead of raising", r'''
+_TOKEN = frozenset(
+    "abcdefghijklmnopqrstuvwxyz"
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "0123456789"
+    "!#$%&'*+-.^_`|~"
+)
+_UNSENDABLE = (frozenset(chr(code) for code in range(0x20))
+               | {"\x7f"}) - {"\t"}
+
+
+def build_headers(pairs):
+    lines = []
+    for name, value in pairs:
+        if not isinstance(name, str) or not isinstance(value, str):
+            raise ValueError("must be str")
+        if not name or any(character not in _TOKEN for character in name):
+            raise ValueError("not a token")
+        cleaned = "".join(
+            character for character in value.strip(" \t")
+            if character not in _UNSENDABLE
+        )
+        lines.append("%s: %s\r\n" % (name, cleaned.encode(
+            "latin-1", "replace").decode("latin-1")))
+    return "".join(lines)
+''')
+
+# Percent-encodes with urllib.parse.quote. The obvious tool, and its safe set
+# is not RFC 8187's attr-char: it escapes '&' and '!', which are legal
+# literally, so the header differs from the one the prompt specifies.
+NEAR_MISSES["http_apis_authn_appsec-0606"] = ("urllib quote, not attr-char", r'''
+from urllib.parse import quote
+
+_TOKEN = frozenset(
+    "abcdefghijklmnopqrstuvwxyz"
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "0123456789"
+    "!#$%&'*+-.^_`|~"
+)
+
+
+def _printable(character):
+    return "\x20" <= character <= "\x7e"
+
+
+def content_disposition(filename, disposition="attachment"):
+    if not isinstance(disposition, str) or not disposition or \
+            any(character not in _TOKEN for character in disposition):
+        raise ValueError("bad disposition")
+    if not isinstance(filename, str):
+        raise ValueError("bad filename")
+    cut = max(filename.rfind("/"), filename.rfind("\\"))
+    base = filename[cut + 1:]
+    if base in ("", ".", ".."):
+        raise ValueError("no base name")
+    fallback = "".join(
+        character if _printable(character) else "_" for character in base)
+    fallback = fallback.replace("\\", "\\\\").replace('"', '\\"')
+    header = '%s; filename="%s"' % (disposition, fallback)
+    if all(_printable(character) for character in base):
+        return header
+    return header + "; filename*=UTF-8''" + quote(base, safe="")
+''')
+
+
 def main() -> int:
     tasks = {item.task_id: item for item in load_authored_tasks()}
     escaped = 0

@@ -1888,4 +1888,267 @@ assert request_framing([("Content-Length", "\t42 ")]) == ("length", 42)
 # Leading zeros alone are unambiguous.
 assert request_framing([("Content-Length", "0006")]) == ("length", 6)
 '''),
+    task(
+        f"{FAMILY}-0602", FAMILY,
+        prompt=(
+            "Implement a Python function client_address(remote_addr, "
+            "forwarded_for, trusted_proxies) returning the address to "
+            "attribute a request to. `remote_addr` is the peer this server "
+            "actually accepted the connection from. `forwarded_for` is the "
+            "X-Forwarded-For header value -- a comma-separated list that "
+            "each proxy APPENDS to, so the leftmost entry is whatever the "
+            "original client sent and is entirely under its control -- or "
+            "None. `trusted_proxies` is a container of addresses this "
+            "deployment operates. If remote_addr is not itself a trusted "
+            "proxy, the header is hearsay from an untrusted peer: return "
+            "remote_addr. Otherwise walk the chain of forwarded entries "
+            "followed by remote_addr from the RIGHT, skipping addresses "
+            "that are trusted proxies, and return the first one that is "
+            "not. If every entry is a trusted proxy, return the leftmost "
+            "forwarded entry. Entries may carry surrounding whitespace; an "
+            "empty or whitespace-only entry makes the header unusable, so "
+            "return remote_addr."
+        ),
+        validator=LOAD_CANDIDATE + require("client_address") + SHAPE_GUARDS
+        + r'''
+client_address = returning(client_address, 'client_address(...)')
+EDGE = {'10.0.0.1', '10.0.0.2', '10.0.0.3'}
+
+# No header at all: the peer is the client.
+assert client_address('203.0.113.9', None, EDGE) == '203.0.113.9'
+assert client_address('10.0.0.1', None, EDGE) == '10.0.0.1'
+
+# One trusted hop: the entry it appended is the client.
+assert client_address('10.0.0.1', '1.2.3.4', EDGE) == '1.2.3.4'
+
+# Two trusted hops: skip the proxy, keep the client.
+assert client_address('10.0.0.1', '1.2.3.4, 10.0.0.2', EDGE) == '1.2.3.4'
+assert client_address('10.0.0.1', '1.2.3.4,10.0.0.2,10.0.0.3', EDGE) == \
+    '1.2.3.4'
+
+# THE SPOOF. The client sent its own X-Forwarded-For before the header ever
+# reached the edge, so the real client's address is the one the trusted proxy
+# APPENDED -- the rightmost untrusted entry, not the leftmost. Taking the
+# leftmost returns an attacker-chosen string, which is how an IP allowlist or
+# a per-address rate limit is bypassed with one header.
+assert client_address('10.0.0.1', '9.9.9.9, 1.2.3.4', EDGE) == '1.2.3.4', \
+    'the leftmost entry is whatever the client typed'
+assert client_address('10.0.0.1', '9.9.9.9, 8.8.8.8, 1.2.3.4, 10.0.0.2',
+                      EDGE) == '1.2.3.4'
+# ...including when the attacker forges an internal address to look trusted.
+assert client_address('10.0.0.1', '10.0.0.2, 1.2.3.4', EDGE) == '1.2.3.4'
+
+# A DIRECT CONNECTION FROM AN UNTRUSTED PEER. Nothing vouches for the header,
+# so it is discarded entirely rather than being walked.
+assert client_address('203.0.113.9', '1.2.3.4', EDGE) == '203.0.113.9'
+assert client_address('203.0.113.9', '1.2.3.4, 5.6.7.8', EDGE) == \
+    '203.0.113.9'
+
+# Every entry trusted: there is no client in the chain, so the leftmost is
+# the best available answer.
+assert client_address('10.0.0.1', '10.0.0.2, 10.0.0.3', EDGE) == '10.0.0.2'
+assert client_address('10.0.0.1', '10.0.0.3', EDGE) == '10.0.0.3'
+
+# Whitespace is incidental; an empty entry is not.
+assert client_address('10.0.0.1', '   1.2.3.4   ', EDGE) == '1.2.3.4'
+for unusable in ('', '   ', ',', '1.2.3.4,', ', 1.2.3.4', '1.2.3.4,,5.6.7.8'):
+    assert client_address('10.0.0.1', unusable, EDGE) == '10.0.0.1', \
+        f'{unusable!r} is not a usable chain'
+
+# An empty trust set means no header is ever believed.
+assert client_address('10.0.0.1', '1.2.3.4', set()) == '10.0.0.1'
+''',
+    ),
+    task(
+        f"{FAMILY}-0605", FAMILY,
+        prompt=(
+            "Implement a Python function build_headers(pairs) serialising "
+            "response headers safely. `pairs` is a sequence of (name, "
+            "value) string pairs. Return the concatenation of "
+            "'Name: value\\r\\n' for each pair, in order. Raise ValueError "
+            "if a name is not a non-empty RFC 9110 token -- the allowed "
+            "characters are ASCII letters, digits, and "
+            "!#$%&'*+-.^_`|~ -- or if a value cannot be sent safely. Strip "
+            "spaces and tabs from both ends of a value before checking it. "
+            "A value is unsafe if it contains a carriage return, a line "
+            "feed, a NUL, any other C0 control character, or DEL, or if it "
+            "cannot be encoded as latin-1. Note that a bare line feed and a "
+            "bare carriage return are each enough to inject a header on "
+            "their own; do not look only for the pair. Non-string names or "
+            "values raise ValueError too."
+        ),
+        validator=LOAD_CANDIDATE + require("build_headers") + SHAPE_GUARDS
+        + r'''
+build_headers = returning(build_headers, 'build_headers(...)')
+
+assert build_headers([]) == ''
+assert build_headers([('Content-Type', 'text/plain')]) == \
+    'Content-Type: text/plain\r\n'
+assert build_headers([('X-A', '1'), ('X-B', '2')]) == \
+    'X-A: 1\r\nX-B: 2\r\n'
+# The name is emitted as given; this function does not normalise case.
+assert build_headers([('x-weird-CASE', 'v')]) == 'x-weird-CASE: v\r\n'
+# Every token character is legal in a name.
+assert build_headers([("!#$%&'*+-.^_`|~9aZ", 'v')]) == \
+    "!#$%&'*+-.^_`|~9aZ: v\r\n"
+
+# Surrounding whitespace is stripped rather than rejected.
+assert build_headers([('X-A', '  spaced  ')]) == 'X-A: spaced\r\n'
+assert build_headers([('X-A', '\tvalue\t')]) == 'X-A: value\r\n'
+# ...but an interior tab is ordinary field content.
+assert build_headers([('X-A', 'a\tb')]) == 'X-A: a\tb\r\n'
+# A value that is only whitespace becomes empty, which is legal.
+assert build_headers([('X-A', '   ')]) == 'X-A: \r\n'
+
+
+def refused(pairs, why):
+    try:
+        build_headers(pairs)
+    except ValueError:
+        return
+    raise AssertionError(why)
+
+
+# A BARE LINE FEED IS ENOUGH. Checking for '\r\n' and nothing else is the
+# plausible wrong move, and it is the actual response-splitting bug: most
+# servers and every log parser treat a lone LF as a line break, so one
+# unescaped newline in a redirect target appends headers of the attacker's
+# choosing.
+refused([('Location', '/a\nSet-Cookie: admin=1')], 'a bare LF was accepted')
+refused([('Location', '/a\rSet-Cookie: admin=1')], 'a bare CR was accepted')
+refused([('Location', '/a\r\nSet-Cookie: admin=1')], 'a CRLF was accepted')
+refused([('Location', '/a\r\n\r\n<html>')], 'a body injection was accepted')
+# An obs-fold continuation is a line break followed by whitespace.
+refused([('X-A', 'one\r\n two')], 'an obs-fold was accepted')
+
+# Other C0 controls, NUL and DEL are equally unsendable.
+refused([('X-A', 'a\x00b')], 'a NUL was accepted')
+refused([('X-A', 'a\x0bb')], 'a vertical tab was accepted')
+refused([('X-A', 'a\x0cb')], 'a form feed was accepted')
+refused([('X-A', 'a\x1bb')], 'an escape was accepted')
+refused([('X-A', 'a\x7fb')], 'a DEL was accepted')
+
+# The header charset is latin-1. A value outside it cannot be transmitted,
+# and guessing an encoding here is how a smuggled byte appears downstream.
+refused([('X-A', 'naïve — dash')], 'a non-latin-1 value was accepted')
+# ...while latin-1 that happens to be non-ASCII is fine.
+assert build_headers([('X-A', 'naïve')]) == 'X-A: naïve\r\n'
+
+# Names are tokens, and the separators are exactly what a name may not hold.
+for bad_name in ('', 'X A', 'X:A', 'X\nA', 'X\r\nA', 'X(A)', 'X,A', 'X@A',
+                 'X/A', 'X[A]', 'X{A}', 'X"A"', 'X;A', 'X=A', 'X?A', 'X\\A',
+                 'X<A>', 'X\tA', ' X', 'X ', 'Xé'):
+    refused([(bad_name, 'v')], f'name {bad_name!r} was accepted')
+
+# Non-strings are refused rather than coerced.
+for bad in ((None, 'v'), ('X-A', None), (b'X-A', 'v'), ('X-A', b'v'),
+            ('X-A', 1), (1, 'v')):
+    refused([bad], f'{bad!r} was accepted')
+
+# A later bad pair still refuses the whole block.
+refused([('X-Ok', 'fine'), ('X-Bad', 'a\nb')], 'a later bad pair passed')
+''',
+    ),
+    task(
+        f"{FAMILY}-0606", FAMILY,
+        prompt=(
+            "Implement a Python function content_disposition(filename, "
+            "disposition='attachment') returning a Content-Disposition "
+            "header value that names a downloaded file safely. First reduce "
+            "`filename` to its base name by discarding everything up to and "
+            "including the last '/' or '\\\\', whichever appears later, so a "
+            "traversal sequence cannot survive. A name that is empty after "
+            "that, or that is '.' or '..', raises ValueError, as does a "
+            "disposition that is not a non-empty ASCII token. Emit "
+            "'<disposition>; filename=\"<fallback>\"' where the fallback "
+            "replaces every character outside printable ASCII (U+0020 "
+            "through U+007E) with '_', and then backslash-escapes any '\"' "
+            "and '\\\\'. When the base name contains any character outside "
+            "printable ASCII, additionally append '; filename*=UTF-8''<enc>' "
+            "where <enc> is the base name encoded as UTF-8 and "
+            "percent-encoded, leaving literal only the RFC 8187 attr-char "
+            "set -- ASCII letters, digits, and !#$&+-.^_`|~ -- and encoding "
+            "every other byte as a percent sign and two UPPERCASE hex "
+            "digits."
+        ),
+        validator=LOAD_CANDIDATE + require("content_disposition")
+        + SHAPE_GUARDS + r'''
+content_disposition = returning(content_disposition,
+                                'content_disposition(...)')
+
+assert content_disposition('report.pdf') == \
+    'attachment; filename="report.pdf"'
+assert content_disposition('report.pdf', 'inline') == \
+    'inline; filename="report.pdf"'
+
+# TRAVERSAL DIES AT THE BASE NAME, ON BOTH SEPARATORS. Stripping only '/' is
+# the plausible wrong move: the header is consumed by a browser that will
+# write the file to disk, and on Windows a backslash is the separator, so
+# '..\\..\\evil.exe' escapes the download directory.
+assert content_disposition('/etc/passwd') == 'attachment; filename="passwd"'
+assert content_disposition('../../etc/passwd') == \
+    'attachment; filename="passwd"'
+assert content_disposition('..\\..\\Windows\\evil.exe') == \
+    'attachment; filename="evil.exe"'
+assert content_disposition('a/b\\c.txt') == 'attachment; filename="c.txt"'
+assert content_disposition('a\\b/c.txt') == 'attachment; filename="c.txt"'
+
+# The quote and the backslash are the two characters that can end the
+# quoted-string early, so they are escaped rather than replaced.
+assert content_disposition('say "hi".txt') == \
+    'attachment; filename="say \\"hi\\".txt"'
+
+# Anything outside printable ASCII becomes '_' in the fallback -- including
+# the control characters that would otherwise split the header. A control
+# character is outside U+0020..U+007E, so it also triggers the extended form;
+# the rule is "outside printable ASCII", not "non-ASCII".
+assert content_disposition('a\tb.txt') == (
+    'attachment; filename="a_b.txt"; ' + "filename*=UTF-8''a%09b.txt")
+assert content_disposition('a\r\nb.txt') == (
+    'attachment; filename="a__b.txt"; ' + "filename*=UTF-8''a%0D%0Ab.txt")
+
+# A non-ASCII name gets BOTH forms: the lossy fallback for old clients and
+# the exact one for everything else.
+assert content_disposition('résumé.pdf') == (
+    'attachment; filename="r_sum_.pdf"; '
+    "filename*=UTF-8''r%C3%A9sum%C3%A9.pdf")
+assert content_disposition('日本語.txt') == (
+    'attachment; filename="___.txt"; '
+    "filename*=UTF-8''%E6%97%A5%E6%9C%AC%E8%AA%9E.txt")
+
+# attr-char is NOT urllib.parse.quote's safe set, and the difference is
+# visible in both directions: '&' stays literal while '~' does too, and a
+# space becomes %20 rather than '+'.
+assert content_disposition('a b&c~d.txt') == 'attachment; filename="a b&c~d.txt"'
+assert content_disposition('café a&b~c.txt') == (
+    'attachment; filename="caf_ a&b~c.txt"; '
+    "filename*=UTF-8''caf%C3%A9%20a&b~c.txt")
+# Hex digits are upper case.
+assert content_disposition('ÿ.bin').endswith("UTF-8''%C3%BF.bin")
+
+# A purely ASCII name never grows the extended form, however awkward it is.
+assert '; filename*=' not in content_disposition('a b&c.txt')
+assert '; filename*=' not in content_disposition('say "hi".txt')
+# ...but a name whose only non-ASCII was replaced still gets it.
+assert '; filename*=' in content_disposition('aéb.txt')
+# A control character alone does not make it non-ASCII-printable in the
+# extended sense the prompt names: it is outside U+0020..U+007E, so it does.
+assert '; filename*=' in content_disposition('a\tb.txt')
+
+
+def refused(*args):
+    try:
+        content_disposition(*args)
+    except ValueError:
+        return
+    raise AssertionError(f'accepted {args!r}')
+
+
+for bad in ('', '/', '\\', 'a/', 'a\\', '.', '..', '/etc/.', 'x/..'):
+    refused(bad)
+for bad_disposition in ('', 'attach ment', 'attach;ment', 'attach\nment',
+                        'attachément'):
+    refused('a.txt', bad_disposition)
+''',
+    ),
 ]

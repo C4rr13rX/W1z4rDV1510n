@@ -529,6 +529,30 @@ compensation failures.
 The lesson is the mechanism, not the verdict: the guard does not decide whether
 two tasks are the same, it refuses to let the question go unanswered.
 
+The same day it produced the other outcome, and that one ended in a deletion.
+`symbol:parse_range` flagged a new `http_apis_authn_appsec` Range task against
+`validation_parsing_serialization-0017`. Reading the neighbourhood the flag
+pointed at turned up a *closer* duplicate the scan could not see at all:
+`requirements_api_contracts-0004` is named `parse_byte_range`, so no symbol
+matched, and it already specifies ignore-on-malformed, 416-on-unsatisfiable,
+last-byte clamping, open-ended and suffix ranges, zero-length suffixes, and a
+first offset past the end — clause for clause, including the
+ignore-versus-reject distinction the new task had been built around. The only
+difference was the return encoding: sentinel strings versus `None` and
+`ValueError`.
+
+**An encoding is not a capability.** The new task was deleted rather than
+recorded as reviewed. Three tasks resolving Range headers would have spent
+three of a fixed 1,000 slots on one behaviour, and the two that already exist
+cover it. Recording an overlap is for tasks that genuinely differ; when they do
+not, the entry in `REVIEWED_OVERLAPS` is just a signed permission slip for
+double-counting.
+
+Note what actually did the work. The scan matched the wrong pair — it never saw
+`parse_byte_range` — and it was still what found the duplicate, because a flag
+is an instruction to go and read the neighbouring families. Treating a flag as
+a question about the two tasks it names is how the real one gets missed.
+
 The scan is a net, not a proof, and its blind spot is exactly the case that
 motivated this section. `RateLimiter` and `TokenBucket` share no symbol and
 cite no document, so nothing would have fired. The same is true of a live
