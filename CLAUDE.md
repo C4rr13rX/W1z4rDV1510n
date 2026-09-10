@@ -96,12 +96,45 @@ Verify, do not assume:
 - **An 11/12 enterprise gate names no suite in the ledger.** The
   `enterprise_gate_confirmation` record carries only counts, so a drought
   looks causeless from `curriculum-health.jsonl` alone. The per-suite verdict
-  is in `<phase>.enterprise-gate.json` next to it, under `results[].name`.
-  Measured 2026-09-09: 127 gate runs, exactly one pass ever, `polyglot`
-  failing every time on a single row — `javascript_go_order_workers`
-  canonical composing `ledger.go` where the prompt asked for a deduplicator,
-  so `go_deduplication` died on `stat dedup.go: no such file`. One row of one
-  suite held every admission for over four days.
+  is in `<phase>.enterprise-gate.json` next to it, under `results[].name`,
+  and the PER-CASE verdict is one level further out in the suite's own
+  `polyglot.json` under `results[].executes` — `results[].name` carries only
+  a boolean, so a walk looking for `passed` inside it finds nothing and
+  reports a vacuous zero. Measured 2026-09-09: 127 gate runs, exactly one
+  pass ever, `polyglot` failing every time on a single row —
+  `javascript_go_order_workers` canonical composing `ledger.go` where the
+  prompt asked for a deduplicator, so `go_deduplication` died on
+  `stat dedup.go: no such file`. One row of one suite held every admission
+  for over four days.
+
+  **RESOLVED 2026-09-10, and the shape of the fix is the lesson.** The cause
+  was not routing, ranking or composition order — every repair attempted on
+  those was inert. Go had no grounded corpus at all, so the outbox behaviour
+  had only ever been observed in JavaScript. `go_systems_001` (328k
+  gofmt-validated CodeSearchNet rows) fixed it: the 8.8 h `polyglot.json`
+  shows that case `executes=False` at projects 5/6, components 11/12; the
+  1.9 h `_pretest_polyglot.json`, after ~99k go-systems rows had trained,
+  shows the same case `executes=True` at 6/6, 12/12, OOV 2/2. **Check corpus
+  coverage per requested language before theorising about the router.**
+
+- **A forward stage does not admit intervals.** `hours_since_admission` says
+  nothing about health while `service_stage` is `forward`: that stage
+  harvests rows and admission belongs to deferred replay. Read the stage
+  first. Measured 2026-09-10: an alarm at 102.7 h fired on a block advancing
+  normally at row 82,960 of 131,072 with `accepted_episodes` rising in
+  lockstep, whose named `last_failure` was a registry SchemaError repaired
+  and redeployed 5.8 h earlier. Timestamp `last_failure` against process
+  start before re-debugging it.
+
+- **The row moves once per COMMITTED BATCH, not continuously.** Between
+  commits the progress file is byte-identical, so any sample shorter than the
+  commit period reads 0 rows/s on a perfectly healthy block. Measured
+  2026-09-10: 32 rows per commit at 0.355 rows/s is one commit every ~90 s,
+  and the watchdog's fixed 6 s sample caught it about 7 % of the time. The
+  sample is now adaptive up to `HEARTBEAT_SAMPLE_SECONDS` (120 s) with early
+  exit. Sampled four hours apart the same block read 0.355 and then 7.99
+  rows/s — instantaneous rate is a duty cycle, so never extrapolate an ETA
+  from one window.
 - **Onboarding a corpus requires a registry `.toml`.** Without it the driver
   exits 2 on `unknown script` and the supervisor retry-loops, stopping ALL
   training. `scripts/onboard_corpus.py` writes it; deploy it with the corpus.
