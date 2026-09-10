@@ -572,6 +572,46 @@ One transport note, because it silently produces the wrong table: events in
 `r.get("unix")` matches nothing and reports a quiet, empty window regardless of
 what happened in it — `vacuous_zero_signals` again, in a new key.
 
+The filename is the same trap one level up. `append_health_event` writes
+`curriculum-health.jsonl`; there is no `curriculum-admissions.jsonl`. A probe
+in this session opened the latter, found nothing, and reported *zero* failures
+of *every* kind — not one empty bucket but a uniformly empty table, which is
+the shape to distrust. Before believing an absence, confirm the pattern can be
+non-zero: `kind_counts` over the whole ledger is one line and settles it.
+
+### Re-measured 2026-09-10: 324 failures, and the named one is 20 % of them
+
+A second application of this discipline, on a 101.2 h drought, produced a
+different dominant cause than the table above — which is the point of
+re-measuring rather than citing it:
+
+| Count | Cause |
+|---:|---|
+| 123 | enterprise regression (41 `csn_python_full`, 36 `jupyter…para`, 31 `jupyter…full`, 15 `csn_python_para`) |
+| 119 | timeout |
+| 65 | worker exit or signal |
+| 8 | gate command failed |
+| 9 | foundation/code regression, route sentinel, retained terminals |
+
+`last_failure` named the worker exit — 65 of 324, **20 %**. Not representative,
+but not noise either, and this is where the 2026-09-05 lesson needs a caveat
+rather than a repeat: that worker exit's stderr named a root cause nothing else
+in the ledger did. It was a third `SchemaError` in `go_systems_001.toml`
+(`category='systems_programming_go'`), the all-or-nothing registry fault that
+kills every corpus at driver startup. So read the named failure's stderr for
+*diagnosis* even when the bucket count says it is a minority — a cause and a
+frequency are different questions. Just do not size the repair from it.
+
+The 123 enterprise regressions resolve further, and to a single case. The last
+seven gates all recorded `first_passed_suites: 11, confirm_passed_suites: 11,
+passed: false`, and both current gate artifacts name one failing suite:
+`polyglot`. Not the `platform`/`cross_project`/`composition`/`semantic_stress`
+quartet of the fortnight above — those now pass. A drought that looks like
+"the enterprise gate rejects everything" was one suite, and inside it one case,
+`javascript_go_order_workers`, whose Go component had never been observed in
+Go. That is the same collapse-to-one-cell shape as `composition_coverage_not_
+order`, and the reason the fix is a corpus rather than an architecture change.
+
 ## A rising row counter does not mean the interval is converging
 
 The two sections above establish that the yield misattribution was real and
@@ -830,20 +870,39 @@ is still training*, and it answers "will this admit?" hours early. Measured
 | stage | command | result |
 |---|---|---|
 | foundation | `programming_brain_eval.py --details` | toddler 32/32, k12 16/16, oov 3/3 |
-| code | `programming_code_eval.py --details` | trained 5/5, novel paraphrase 5/5 |
+| code | `programming_code_eval.py --details --no-train` | trained 5/5, novel paraphrase 5/5 |
 | typescript | `programming_typescript_enterprise.py --no-train` | 3/3, 3/3, oov 3/3, exit 0 |
 | enterprise | `<phase>.enterprise-gate.json` | 12/12 suites |
 
 Only `interval_recall` cannot be pre-run, because it samples rows the replay
 has not posted yet.
 
-Two things make this safe rather than another mutation of the thing being
-measured. The eval scripts take `--no-train`/`--details` and do not observe;
-the enterprise report carries `tick_before`, `tick_after` and
-`structure_unchanged`, and the run above recorded `tick_delta: 0` with
-`structure_unchanged: true`. And the enterprise gate need not even be re-run
-if a recent artifact exists — reading the 15:11 report cost nothing where
-re-running it is budgeted at four hours.
+**`--no-train` on the code stage is load-bearing, and this table omitted it
+until 2026-09-10.** "Every stage of that gate is a read-only probe" is true of
+the gate's *purpose* but not of its commands. `programming_code_eval.py`
+calls `refresh_routes()` unless `--no-train` is passed, and that function
+POSTs `/brain/observe` three times plus `/brain/tick` once per case per
+repeat — at the default `--repeats 8` over 5 cases, 160 writes into the brain.
+`run_completion_gate` deliberately omits the flag (supervisor
+`programming_code_eval` stage), because re-advertising the protected routes
+before checking them is what the gate is for. Copying the gate's argv into a
+pre-test inherits the writes without inheriting the reason, so the pre-test
+mutates the brain in the middle of the replay it is trying to predict.
+
+That asymmetry also bounds what a pre-test can conclude. With `--no-train` the
+pre-test measures the brain *without* the route refresh the real gate performs
+first, so it is a **lower bound**: passing predicts the gate passes, but
+failing does not predict the gate fails. Do not roll back an interval on a
+`--no-train` code-stage failure alone.
+
+What does make the rest safe is verified per run, not assumed: the enterprise
+report carries `tick_before`, `tick_after` and `structure_unchanged`, and the
+2026-09-05 run recorded `tick_delta: 0` with `structure_unchanged: true`.
+Expect `tick_delta` to be non-zero when pre-testing *during* a live block —
+that is the training loop advancing the tick underneath the measurement, not
+the suite writing. And the enterprise gate need not even be re-run if a recent
+artifact exists — reading the 15:11 report cost nothing where re-running it is
+budgeted at four hours.
 
 Worth recording separately: that report is **12/12**. `enterprise_gate_confirmed`
 documents 6, 5, 7, 8, 7, 6, 6, 8 of 12 across consecutive runs on one brain,
