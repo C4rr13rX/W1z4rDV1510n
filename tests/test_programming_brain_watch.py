@@ -1434,3 +1434,85 @@ def test_the_probe_publishes_the_staleness_fields_it_is_classified_on() -> None:
     # And the failure's own timestamp has to be captured where the failure is
     # read, not inferred later from file mtimes.
     assert "recent_fail_unix = when" in body
+
+
+def rate_helper() -> object:
+    """Exec the probe's own `_rate` out of the shipped body.
+
+    Extracted rather than reimplemented, so the escaping is exercised the way
+    production renders it.
+    """
+    body = remote_probe_body()
+    segment = body[body.index("def _rate(first, last, elapsed):"):
+                   body.index("def _row_now(path):")]
+    namespace: dict = {}
+    exec(compile(segment, "<rate-helper>", "exec"), namespace)
+    return namespace["_rate"]
+
+
+def test_a_counter_that_went_backwards_is_a_reset_not_a_negative_rate() -> None:
+    """`accepted_episodes` and `durable_next_row` restart with the worker.
+
+    A `deferred_replay_resource_yield` kills the replay worker and relaunches
+    it, so a sample straddling one sees the counter fall rather than rise.
+    Measured 2026-09-10 against the live host during a yield: the episode
+    count went 712 -> 8 and the payload published
+    `accepted_per_second: -42.4` -- which the drought annex renders as "still
+    accepting -42.4 episodes/s, so the block is training".
+
+    An unknown rate is not a zero rate, and it is certainly not a negative
+    one, so the reset reports absence.
+    """
+    rate = rate_helper()
+    # The measurement that motivated this, to the sample that produced it.
+    assert rate(712, 8, 36.0) is None
+    assert rate(208648, 201376, 36.0) is None
+    # An ordinary forward sample is unaffected.
+    assert rate(100, 136, 2.0) == 18.0
+    # A genuinely frozen row is still zero, which is a real fact and must
+    # NOT be collapsed into the reset case -- settlement and the admission
+    # gate both freeze the row by design and still have to read as frozen.
+    assert rate(100, 100, 2.0) == 0.0
+    # Absence stays absence.
+    assert rate(None, 5, 2.0) is None
+    assert rate(5, None, 2.0) is None
+
+
+def test_a_mid_sample_worker_restart_is_named_in_the_drought_alarm() -> None:
+    """The freeze branch must not present a reset as a stalled block.
+
+    A frozen row has three by-design causes the alarm already names. A worker
+    that restarted mid-sample is a fourth, and the only one where the number
+    is not merely uninformative but actively wrong.
+    """
+    live = probe("deferred_replay_resource_yield")
+    live["admissions"] = {"hours_since_admission": 111.6, "gate_artifacts": 49}
+    live["status"].update({
+        "interval_id": "jupyter-scientific-full:201344:262144",
+        "end_row": 262144,
+    })
+    live["heartbeat"] = {"source": "replay_progress", "row": 208648,
+                         "rows_per_second": None, "accepted_per_second": None,
+                         "counter_reset": True, "age_seconds": 45.0,
+                         "row_source_lag_seconds": 0.6, "sample_seconds": 36.0}
+
+    reason = classify_probe(live, stall_seconds=1800).reason
+    assert "restarted mid-window" in reason
+    assert "this rate measures nothing" in reason
+    # And a plain freeze, with no reset, must not claim a restart happened.
+    live["heartbeat"]["counter_reset"] = False
+    assert "restarted mid-window" not in classify_probe(
+        live, stall_seconds=1800).reason
+
+
+def test_the_probe_publishes_the_reset_flag_it_is_classified_on() -> None:
+    """The annex reads `counter_reset`, so the shipped probe must emit it."""
+    body = remote_probe_body()
+    assert "'counter_reset'" in body, "the shipped probe never publishes it"
+    # And both rates must go through the guard, or one of them still
+    # publishes a negative number.
+    assert "'rows_per_second': _rate(first_row, last_row, elapsed)" in body
+    assert (
+        "'accepted_per_second': _rate(first_accepted, last_accepted, elapsed)"
+        in body
+    )

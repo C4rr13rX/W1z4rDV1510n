@@ -417,6 +417,16 @@ def classify_probe(probe: dict, *, stall_seconds: float,
                     "canary each freeze the row by design, so confirm the "
                     "freeze is not one of those before repairing anything"
                 )
+                if beat.get("counter_reset"):
+                    # A fourth by-design reason the row reads as frozen, and
+                    # the only one where the sample is not merely
+                    # uninformative but actively misleading: the worker
+                    # restarted mid-sample and its counters began again.
+                    converging += (
+                        "; the worker's counters went backwards during the "
+                        "sample, so it restarted mid-window (a resource yield "
+                        "does exactly this) and this rate measures nothing"
+                    )
             elif beat.get("no_row_writer"):
                 # The third case the two branches above cannot express, and
                 # the one that used to fall through to silence: no writer on
@@ -744,6 +754,24 @@ def _file_age(path):
         return None
 
 
+# Per-second change, or None when the counter went BACKWARDS.
+#
+# Both counters sampled here live in the worker's progress file and restart
+# with the worker, so a sample straddling a `deferred_replay_resource_yield`
+# sees the value fall rather than rise. That is a reset, not a negative rate,
+# and the difference matters because every consumer downstream reads a number
+# here as a measurement of throughput.
+#
+# Comments rather than a docstring: this body is interpolated into a
+# triple-quoted f-string, so a `\"\"\"` here would close the probe source.
+def _rate(first, last, elapsed):
+    if first is None or last is None:
+        return None
+    if last < first:
+        return None
+    return round((last - first) / elapsed, 2)
+
+
 def _row_now(path):
     try:
         row = json.loads(path.read_text()).get('durable_next_row')
@@ -935,15 +963,28 @@ try:
             # happens to be live.
             'block_target_row': _block_target(status),
             'sample_seconds': round(elapsed, 1),
-            'rows_per_second': (
-                round((last_row - first_row) / elapsed, 2)
-                if first_row is not None and last_row is not None else None),
+            # A NEGATIVE RATE IS A COUNTER RESET, NOT A MEASUREMENT.
+            # Both counters live in the worker's progress file and restart
+            # with the worker. A `deferred_replay_resource_yield` kills and
+            # relaunches it, so a sample straddling one sees the value fall
+            # to near zero. Measured 2026-09-10 against the live host during
+            # a yield: `accepted_episodes` went 712 -> 8 and the payload
+            # published `accepted_per_second: -42.4`, which the drought annex
+            # would have rendered as "still accepting -42.4 episodes/s, so
+            # the block is training". Publishing None and saying the counter
+            # reset is the honest reading -- an unknown rate is not a zero
+            # rate, and it is certainly not a negative one.
+            'rows_per_second': _rate(first_row, last_row, elapsed),
             # Whether the rows being consumed are being LEARNED.
             'accepted_episodes': last_accepted,
-            'accepted_per_second': (
-                round((last_accepted - first_accepted) / elapsed, 2)
-                if first_accepted is not None and last_accepted is not None
-                else None),
+            'accepted_per_second': _rate(first_accepted, last_accepted, elapsed),
+            'counter_reset': (
+                _rate(first_row, last_row, elapsed) is None
+                and first_row is not None and last_row is not None
+            ) or (
+                _rate(first_accepted, last_accepted, elapsed) is None
+                and first_accepted is not None and last_accepted is not None
+            ),
             # How far behind the freshest writer this row-carrying file sits.
             # 0 means it IS the freshest. A large value means the only file
             # exposing a row is a leftover, and its rate describes the past.
