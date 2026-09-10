@@ -1,0 +1,12 @@
+instance_id = "market-predictor-v4-meta"
+identity_path = "brains/market_predictor_v4_meta.identity.toml"
+data_dir = "runtime/brains/market-predictor-v4-meta"
+
+[resource_budget]
+max_resident_bytes = 4294967296
+max_neurons = 1500000
+max_propagation_steps = 64
+max_learning_steps_per_second = 2000
+
+# Prediction error feedback stays OFF, as in v2: that pathway previously
+# reduced market-brain recall from 100% to 30%.

@@ -1,0 +1,327 @@
+name = "market_predictor_v4_meta"
+version = "0.1.0"
+binding_emergence_threshold = 3
+moment_history_window = 256
+min_atom_score = 0.94
+
+# Every view remains byte/character atom grounded.  The pools separate causal
+# feature families so the binding fabric can learn which combinations matter
+# without flattening OHLCV, news, horizon, and instrument identity together.
+[[pools]]
+name = "ohlcv_geometry"
+id = 1
+prototype = "byte-passthrough"
+atom_encoding_prefix = "market_geometry"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 65536
+max_concept_member_count = 24
+concept_emergence_threshold = 5
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "temporal_returns"
+id = 2
+prototype = "byte-passthrough"
+atom_encoding_prefix = "market_temporal"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 65536
+max_concept_member_count = 24
+concept_emergence_threshold = 5
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "volume_flow"
+id = 3
+prototype = "byte-passthrough"
+atom_encoding_prefix = "market_flow"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 32768
+max_concept_member_count = 16
+concept_emergence_threshold = 5
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "volatility_range"
+id = 4
+prototype = "byte-passthrough"
+atom_encoding_prefix = "market_volatility"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 32768
+max_concept_member_count = 16
+concept_emergence_threshold = 5
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "market_regime"
+id = 5
+prototype = "byte-passthrough"
+atom_encoding_prefix = "market_regime"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 16384
+max_concept_member_count = 12
+concept_emergence_threshold = 5
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "cross_market"
+id = 6
+prototype = "byte-passthrough"
+atom_encoding_prefix = "market_cross"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 32768
+max_concept_member_count = 16
+concept_emergence_threshold = 5
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "news_entities"
+id = 7
+prototype = "byte-passthrough"
+atom_encoding_prefix = "market_news_entities"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 65536
+max_concept_member_count = 24
+concept_emergence_threshold = 5
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "news_state"
+id = 8
+prototype = "byte-passthrough"
+atom_encoding_prefix = "market_news_state"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 32768
+max_concept_member_count = 16
+concept_emergence_threshold = 5
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "forecast_horizon"
+id = 9
+prototype = "byte-passthrough"
+atom_encoding_prefix = "market_horizon"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 4096
+max_concept_member_count = 8
+concept_emergence_threshold = 5
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "instrument_context"
+id = 10
+prototype = "byte-passthrough"
+atom_encoding_prefix = "market_instrument"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 16384
+max_concept_member_count = 12
+concept_emergence_threshold = 5
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "future_outcome"
+id = 11
+prototype = "byte-passthrough"
+atom_encoding_prefix = "market_future"
+kind = "Action"
+frame_rate = 1
+recent_atoms_window = 16384
+max_concept_member_count = 16
+concept_emergence_threshold = 3
+decay_rate = 0.00002
+prune_floor = 0.001
+
+# --- CLIENT-COMPUTED RELATION POOLS (pass 106, Cove) ----------------------
+# The association layer. Pools 1-11 above are flat sensory siblings that meet
+# only at the Action pool: a flat set can carry "return = x" and "range = y",
+# but never "x is large FOR y". That conjunction exists only if something
+# writes it down, so these three pools carry it explicitly.
+#
+# They are declared SensoryInput ON PURPOSE, not Internal. PoolKind::Internal
+# is inert -- it is matched 0 times in crates/brain (the only behavioural
+# match on PoolKind is Action, brain.rs:7417) and its own doc comment says
+# "future composite layers". Marking these Internal would buy nothing and
+# would risk a silent-drop path if observe() ever routes by kind.
+# See data/brain_experiments/TOPOLOGY-DESIGN-pass106-cove.md in
+# CoolCryptoUtilities for the proof.
+#
+# Every knob is set explicitly: bare defaults truncate frames to 19% recall.
+
+[[pools]]
+name = "rel_move_vs_vol"
+id = 12
+prototype = "byte-passthrough"
+atom_encoding_prefix = "market_rel_move_vol"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 32768
+max_concept_member_count = 16
+concept_emergence_threshold = 5
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "rel_shape_vs_flow"
+id = 13
+prototype = "byte-passthrough"
+atom_encoding_prefix = "market_rel_shape_flow"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 32768
+max_concept_member_count = 16
+concept_emergence_threshold = 5
+decay_rate = 0.00002
+prune_floor = 0.001
+
+[[pools]]
+name = "rel_trend_vs_noise"
+id = 14
+prototype = "byte-passthrough"
+atom_encoding_prefix = "market_rel_trend_noise"
+kind = "SensoryInput"
+frame_rate = 1
+recent_atoms_window = 32768
+max_concept_member_count = 16
+concept_emergence_threshold = 5
+decay_rate = 0.00002
+prune_floor = 0.001
+
+# ---------------------------------------------------------------------------
+# METACOGNITION AND TEMPORAL STRUCTURE  (pools 15-19)
+#
+# Everything above is SensoryInput: fourteen views of one instant, flat
+# siblings that never relate to each other except through the outcome. Pools
+# 12-14 were added as relations but declared SensoryInput too, so they are a
+# fifteenth, sixteenth and seventeenth view of the same instant rather than an
+# association between pools.
+#
+# These five are `Internal`, which identity.rs reserves for "binding,
+# integration, future composite layers" and pool.rs:683 describes as frames
+# that RE-STIMULATE semantic atoms grounded by other pools. That is what makes
+# them different in kind: their content is not a measurement of the market, it
+# is a statement ABOUT the other pools or about this brain's own history.
+#
+# WHY THIS IS THE MECHANISM THAT CAPTURES A TEMPORAL TREND. A sensory pool
+# holds one instant. Every temporal fact the brain currently has -- ret6,
+# ret24, vol24 -- is a scalar summary computed OUTSIDE and handed in already
+# flattened, so the fabric never sees a SEQUENCE, only a number that happens
+# to summarise one. A trend is an ordered relation between instants, and there
+# was no pool whose job was to carry order. Pools 17 and 18 carry it directly;
+# pools 15, 16 and 19 carry the brain's own trajectory of being right and
+# wrong, which is itself a time series and the one nothing else can see.
+# ---------------------------------------------------------------------------
+
+# What did I predict, and was I right? The brain's own track record as a
+# bindable thing. Not confidence -- confidence was measured worthless as a
+# correctness gate here (+0.030 on train recall, -0.002 held out) -- but the
+# OUTCOME of past predictions under conditions the other pools describe.
+# A window of 65536 because this is the pool most worth remembering deeply:
+# it is the only one carrying whether the brain has been wrong lately.
+[[pools]]
+name = "self_outcome"
+id = 15
+prototype = "byte-passthrough"
+atom_encoding_prefix = "meta_self_outcome"
+kind = "Internal"
+frame_rate = 1
+recent_atoms_window = 65536
+max_concept_member_count = 24
+concept_emergence_threshold = 5
+decay_rate = 0.00002
+prune_floor = 0.001
+
+# Do my own views AGREE with each other? Measured on this substrate:
+# agreement across query sets separates right from wrong at 99.4% unanimous
+# versus 73.3% split, while confidence separates nothing. That signal is
+# computed outside the brain today and thrown away after the decision. This
+# pool puts it inside, so the fabric can learn "when geometry and temporal
+# disagree, my read is worth less" as a bound concept rather than as a
+# post-hoc filter.
+[[pools]]
+name = "self_agreement"
+id = 16
+prototype = "byte-passthrough"
+atom_encoding_prefix = "meta_agreement"
+kind = "Internal"
+frame_rate = 1
+recent_atoms_window = 32768
+max_concept_member_count = 16
+concept_emergence_threshold = 5
+decay_rate = 0.00002
+prune_floor = 0.001
+
+# ORDER, not magnitude. The sign path of the last N bars as a token sequence:
+# up-up-down-flat is a different thing from down-flat-up-up even when the
+# summary returns match. This is the pool that makes a trend representable at
+# all -- a scalar ret24 cannot distinguish a steady climb from a spike and a
+# drift, and those are opposite trades.
+[[pools]]
+name = "temporal_sequence"
+id = 17
+prototype = "byte-passthrough"
+atom_encoding_prefix = "meta_sequence"
+kind = "Internal"
+frame_rate = 1
+recent_atoms_window = 65536
+max_concept_member_count = 32
+concept_emergence_threshold = 5
+decay_rate = 0.00002
+prune_floor = 0.001
+
+# The SAME structure read at several scales at once, so the fabric can bind
+# "short-term down inside long-term up" -- a pullback -- as one concept
+# instead of two contradictory numbers. Kept separate from temporal_sequence
+# because scale agreement and path shape are different questions and mixing
+# them into one frame would make both undiscriminating.
+[[pools]]
+name = "temporal_scale"
+id = 18
+prototype = "byte-passthrough"
+atom_encoding_prefix = "meta_scale"
+kind = "Internal"
+frame_rate = 1
+recent_atoms_window = 32768
+max_concept_member_count = 16
+concept_emergence_threshold = 5
+decay_rate = 0.00002
+prune_floor = 0.001
+
+# Where am I in my own error history? Not "was I right last time" but the
+# RUN: how long the current streak of correct or incorrect reads has lasted,
+# and whether my recent error is drifting one way. A model that has been
+# wrong in the same direction for twenty bars is in a regime it does not
+# model, and that is knowable from its own output without any new market data.
+# Small window and member count on purpose: this is a short summary, and a
+# near-unique frame here would maximise recall while destroying
+# generalisation -- the trap this substrate punishes hardest.
+[[pools]]
+name = "self_error_run"
+id = 19
+prototype = "byte-passthrough"
+atom_encoding_prefix = "meta_error_run"
+kind = "Internal"
+frame_rate = 1
+recent_atoms_window = 8192
+max_concept_member_count = 8
+concept_emergence_threshold = 4
+decay_rate = 0.00002
+prune_floor = 0.001
