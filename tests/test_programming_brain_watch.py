@@ -914,3 +914,73 @@ def test_the_transport_bound_clears_the_heartbeat_sample() -> None:
     source = Path(watch.__file__).read_text(encoding="utf-8")
     assert "int(HEARTBEAT_SAMPLE_SECONDS) + 300" in source, (
         "the SSM timeout no longer accounts for the heartbeat sample")
+
+
+def _resume_probe_segment() -> str:
+    """The shipped probe's resume-row selection, as executable source."""
+    source = Path(watch.__file__).parent.joinpath(
+        "admission_watchdog.py").read_text(encoding="utf-8")
+    start = source.index('resume = _glob.glob(R + "/deferred-replay-')
+    return source[start:source.index("# A gate legitimately freezes the tick")]
+
+
+def test_the_resume_row_falls_back_to_the_forward_writer(tmp_path) -> None:
+    """A forward stage writes no replay resume file, so the old rule froze.
+
+    `replay_advancing` is one of the three conditions guarding the
+    `no_admission` alarm, and it was computed only from
+    `deferred-replay-*.resume.json`. A forward block writes its own
+    `<phase>.progress.json` and leaves the replay resume file untouched, so
+    that value is a CONSTANT for the whole block and `replay_advancing` is
+    False for days on a run that is training perfectly.
+
+    Measured 2026-09-10: 102.7 h of reported drought while the go-systems
+    block advanced 82,960 -> 100,128 with `accepted_episodes` rising in
+    lockstep. Same false-positive class as the vacuous glob, one file over.
+
+    This runs the shipped selection against a real directory rather than
+    grepping for a filename, because a glob that cannot match reports nothing
+    forever and asserting on source text would not have caught the original.
+    """
+    stale = tmp_path / "deferred-replay-abc.resume.json"
+    stale.write_text(json.dumps({"durable_next_row": 201344}))
+    live = tmp_path / "go-systems.progress.json"
+    live.write_text(json.dumps({"durable_next_row": 100128}))
+    old = time.time() - 362_000
+    os.utime(stale, (old, old))
+
+    namespace = {"R": str(tmp_path), "out": {}, "os": os, "json": json,
+                 "_glob": __import__("glob")}
+    exec(compile(_resume_probe_segment(), "<resume>", "exec"), namespace)
+    out = namespace["out"]
+    assert out["resume_source"] == "forward_progress", out
+    assert out["replay_resume_row"] == "forward_progress:100128", out
+
+    # A live replay pass must still win: the forward file is then the leftover.
+    os.utime(stale, None)
+    os.utime(live, (old, old))
+    namespace["out"] = {}
+    exec(compile(_resume_probe_segment(), "<resume>", "exec"), namespace)
+    assert namespace["out"]["resume_source"] == "replay_resume"
+    assert namespace["out"]["replay_resume_row"] == "replay_resume:201344"
+
+
+def test_a_forward_block_that_is_advancing_is_not_a_drought() -> None:
+    """End to end through `faults`, on rows measured from the live host."""
+    from scripts.aws.admission_watchdog import faults
+
+    drought = {
+        "unit": "active", "brain_up": True, "failed_since_deploy": 0,
+        "last_admission_age": 369_720, "tick_delta": 12, "deferred": 3,
+        "disk_free_gb": 200, "mem_free_gb": 9, "progress_age": 2,
+        "status_age": 30, "state": "continuous_canary", "stale_code_lag": 0,
+    }
+    advancing = faults({**drought, "replay_advancing": True},
+                       baseline_deferred=3)
+    assert not any(f.startswith("no_admission") for f in advancing), advancing
+
+    # And a forward row that genuinely does not move still alarms: the fix
+    # must not have made the drought check unfireable.
+    frozen = faults({**drought, "replay_advancing": False},
+                    baseline_deferred=3)
+    assert any(f.startswith("no_admission") for f in frozen), frozen

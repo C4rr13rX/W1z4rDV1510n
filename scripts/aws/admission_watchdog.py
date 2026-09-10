@@ -176,16 +176,44 @@ if progress:
 else:
     out["progress_age"] = -1
     out["progress_row"] = None
-# The resume row is the only MONOTONIC evidence that a long interval is
+# The resume row is the only MONOTONIC evidence that a long REPLAY interval is
 # converging. The progress file above restarts at 0 with every pass, so it
 # cannot distinguish a run accumulating rows across yields from one replaying
 # the same prefix forever -- which is precisely what happened for 13 passes.
+#
+# But a forward stage writes no replay resume file at all. It leaves whatever
+# the last replay pass produced, so `replay_resume_row` is a constant for the
+# whole forward block -- and `replay_advancing`, computed from it in main(), is
+# then False for days on a run that is training perfectly. That flag is one of
+# the three conditions guarding `no_admission`, so this is the difference
+# between an alarm that fires on a stall and one that fires on a healthy
+# forward block. Measured 2026-09-10: 102.7 h of "drought" while the
+# go-systems block advanced 82,960 -> 100,128 with accepted_episodes rising in
+# lockstep.
+#
+# So fall back to the forward driver's own <phase>.progress.json when the
+# replay resume file is STALE relative to it. Prefixing the value keeps the
+# two sources from being compared against each other across a stage change --
+# a forward row and a replay row are different coordinates, and a switch
+# between them is not progress.
 resume = _glob.glob(R + "/deferred-replay-*.resume.json")
+forward = [p for p in _glob.glob(R + "/*.progress.json")
+           if "deferred-replay-" not in os.path.basename(p)]
 out["replay_resume_row"] = None
-if resume:
+out["resume_source"] = None
+newest_resume = max(resume, key=os.path.getmtime) if resume else None
+newest_forward = max(forward, key=os.path.getmtime) if forward else None
+chosen, label = newest_resume, "replay_resume"
+if newest_forward is not None and (
+        newest_resume is None
+        or os.path.getmtime(newest_forward) > os.path.getmtime(newest_resume)):
+    chosen, label = newest_forward, "forward_progress"
+if chosen is not None:
     try:
-        out["replay_resume_row"] = json.load(
-            open(max(resume, key=os.path.getmtime))).get("durable_next_row")
+        row = json.load(open(chosen)).get("durable_next_row")
+        if row is not None:
+            out["replay_resume_row"] = f"{label}:{row}"
+            out["resume_source"] = label
     except Exception:
         pass
 # A gate legitimately freezes the tick: it settles the brain first. Treating
@@ -675,12 +703,22 @@ def main() -> int:
         # next one's resume row to a lower value, and that rollover is
         # progress too. Only a row that has not moved at all between polls
         # means the run is replaying the same prefix.
+        #
+        # The value carries its SOURCE, because a forward row and a replay row
+        # are different coordinates. Treating a stage change as movement would
+        # excuse exactly one poll for the wrong reason; a stage change is not
+        # evidence either way, so it neither confirms nor denies progress and
+        # the next poll decides on like-for-like.
         row = now.get("replay_resume_row")
-        now["replay_advancing"] = (
+        same_source = (
             row is not None and last_resume_row is not None
-            and row != last_resume_row
+            and str(row).split(":", 1)[0] == str(last_resume_row).split(":", 1)[0]
         )
+        now["replay_advancing"] = same_source and row != last_resume_row
         if row is not None:
+            if last_resume_row is not None and not same_source:
+                # Neither advancing nor stalled: re-baseline and say so.
+                now["replay_advancing"] = True
             last_resume_row = row
 
         problems = faults(now, baseline_deferred)
