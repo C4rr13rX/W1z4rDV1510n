@@ -11618,3 +11618,196 @@ MUTATIONS["polyglot_native_interop-0204"] = (
     "                next_offset = cursor + 2\n",
     "",
 )
+
+
+REFERENCES["databases_migrations_transactions-0301"] = r'''
+def reserve_stock(connection, sku, quantity):
+    if isinstance(quantity, bool) or not isinstance(quantity, int) or quantity <= 0:
+        raise ValueError("quantity must be a positive integer")
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        row = connection.execute(
+            "SELECT available FROM inventory WHERE sku = ?", (sku,)
+        ).fetchone()
+        if row is None:
+            raise ValueError("unknown sku %r" % (sku,))
+        cursor = connection.execute(
+            "UPDATE inventory SET available = available - ?"
+            " WHERE sku = ? AND available >= ?",
+            (quantity, sku, quantity),
+        )
+        reserved = cursor.rowcount == 1
+        connection.execute("COMMIT")
+        return reserved
+    except BaseException:
+        connection.execute("ROLLBACK")
+        raise
+'''
+
+
+REFERENCES["databases_migrations_transactions-0302"] = r'''
+def merge_counters(connection, rows):
+    prepared = []
+    for name, delta in rows:
+        if isinstance(delta, bool) or not isinstance(delta, int):
+            raise ValueError("delta must be an integer")
+        prepared.append((name, delta))
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        for name, delta in prepared:
+            connection.execute(
+                "INSERT INTO counters (name, total) VALUES (?, ?)"
+                " ON CONFLICT(name) DO UPDATE SET total = total + excluded.total",
+                (name, delta),
+            )
+        totals = {}
+        for name, _ in prepared:
+            totals[name] = connection.execute(
+                "SELECT total FROM counters WHERE name = ?", (name,)
+            ).fetchone()[0]
+        connection.execute("COMMIT")
+        return totals
+    except BaseException:
+        connection.execute("ROLLBACK")
+        raise
+'''
+
+
+REFERENCES["databases_migrations_transactions-0303"] = r'''
+import sqlite3
+
+
+def run_steps(connection, steps):
+    applied = []
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        for index, (name, sql) in enumerate(steps):
+            point = "step_%d" % index
+            connection.execute("SAVEPOINT %s" % point)
+            try:
+                connection.execute(sql)
+            except sqlite3.Error:
+                connection.execute("ROLLBACK TO %s" % point)
+                connection.execute("RELEASE %s" % point)
+            else:
+                connection.execute("RELEASE %s" % point)
+                applied.append(name)
+        connection.execute("COMMIT")
+    except BaseException:
+        connection.execute("ROLLBACK")
+        raise
+    return applied
+'''
+
+
+REFERENCES["databases_migrations_transactions-0304"] = r'''
+def purge_duplicates(connection, table, key_columns):
+    if not key_columns:
+        raise ValueError("at least one key column is required")
+
+    def quote(name):
+        return '"%s"' % str(name).replace('"', '""')
+
+    keys = ", ".join(quote(column) for column in key_columns)
+    target = quote(table)
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        cursor = connection.execute(
+            "DELETE FROM %s WHERE rowid NOT IN"
+            " (SELECT MIN(rowid) FROM %s GROUP BY %s)" % (target, target, keys)
+        )
+        deleted = cursor.rowcount
+        connection.execute("COMMIT")
+        return deleted
+    except BaseException:
+        connection.execute("ROLLBACK")
+        raise
+'''
+
+
+REFERENCES["databases_migrations_transactions-0305"] = r'''
+def delete_author(connection, author_id):
+    connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        books = connection.execute(
+            "SELECT COUNT(*) FROM books WHERE author_id = ?", (author_id,)
+        ).fetchone()[0]
+        cursor = connection.execute(
+            "DELETE FROM authors WHERE id = ?", (author_id,))
+        if cursor.rowcount == 0:
+            raise ValueError("unknown author %r" % (author_id,))
+        connection.execute("COMMIT")
+        return books
+    except BaseException:
+        connection.execute("ROLLBACK")
+        raise
+'''
+
+
+# Decide the reservation from the value already read instead of re-checking
+# the invariant in the UPDATE itself. Every uncontended case still agrees --
+# the row has not moved between the read and the write -- so this passes any
+# single-session test and oversells only under the interleaving.
+MUTATIONS["databases_migrations_transactions-0301"] = (
+    "        cursor = connection.execute(\n"
+    '            "UPDATE inventory SET available = available - ?"\n'
+    '            " WHERE sku = ? AND available >= ?",\n'
+    "            (quantity, sku, quantity),\n"
+    "        )\n"
+    "        reserved = cursor.rowcount == 1",
+    "        reserved = row[0] >= quantity\n"
+    "        if reserved:\n"
+    "            connection.execute(\n"
+    '                "UPDATE inventory SET available = ? WHERE sku = ?",\n'
+    "                (row[0] - quantity, sku),\n"
+    "            )",
+)
+
+# Upsert with INSERT OR REPLACE, which deletes the conflicting row and
+# inserts a new one. Totals for a counter this batch creates are identical,
+# and so is every first write; only an existing row loses the columns the
+# statement did not supply, and stops accumulating.
+MUTATIONS["databases_migrations_transactions-0302"] = (
+    "            connection.execute(\n"
+    '                "INSERT INTO counters (name, total) VALUES (?, ?)"\n'
+    '                " ON CONFLICT(name) DO UPDATE SET total = total + '
+    'excluded.total",\n'
+    "                (name, delta),\n"
+    "            )",
+    "            current = connection.execute(\n"
+    '                "SELECT total FROM counters WHERE name = ?", (name,)\n'
+    "            ).fetchone()\n"
+    "            connection.execute(\n"
+    '                "INSERT OR REPLACE INTO counters (name, total)'
+    ' VALUES (?, ?)",\n'
+    "                (name, (current[0] if current else 0) + delta),\n"
+    "            )",
+)
+
+# Undo a failed step with a bare ROLLBACK. It does undo the step, which is
+# why it survives a one-step test, but it ends the outer transaction as well
+# and takes every earlier step with it.
+MUTATIONS["databases_migrations_transactions-0303"] = (
+    '                connection.execute("ROLLBACK TO %s" % point)',
+    '                connection.execute("ROLLBACK")',
+)
+
+# Exclude NULL keys from the set of rows to keep. Every row whose key is
+# filled in behaves identically; a group of rows that never had the key set
+# loses all of its members instead of keeping the first.
+MUTATIONS["databases_migrations_transactions-0304"] = (
+    '            " (SELECT MIN(rowid) FROM %s GROUP BY %s)" % (target, target, keys)',
+    '            " (SELECT MIN(rowid) FROM %s WHERE %s IS NOT NULL GROUP BY %s)"\n'
+    "            % (target, target, quote(key_columns[0]), keys)",
+)
+
+# Turn foreign keys on after opening the transaction. SQLite makes that a
+# silent no-op rather than an error, so the DELETE succeeds, reports the same
+# count, and simply orphans the children.
+MUTATIONS["databases_migrations_transactions-0305"] = (
+    '    connection.execute("PRAGMA foreign_keys = ON")\n'
+    '    connection.execute("BEGIN IMMEDIATE")',
+    '    connection.execute("BEGIN IMMEDIATE")\n'
+    '    connection.execute("PRAGMA foreign_keys = ON")',
+)

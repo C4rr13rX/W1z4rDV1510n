@@ -1010,4 +1010,515 @@ bare.execute("INSERT INTO orders VALUES (99, 42, '2026-09-01')")
 bare.commit()
 assert lapsed_customers(bare, SINCE) == ["solo"]
 '''),
+
+    # Ids from 0301 so that a session authoring 0001.. or 0101.. concurrently
+    # cannot land on the same number. Two sessions already collided once, and
+    # the later block silently shadowed the earlier for all eight tasks.
+    task(
+        f"{FAMILY}-0301", FAMILY,
+        prompt=(
+            "Implement a Python function reserve_stock(connection, sku, "
+            "quantity) that reserves stock without ever overselling. "
+            "`connection` is a sqlite3 connection opened with "
+            "isolation_level=None, so your function issues its own "
+            "transaction statements. The database has a table inventory(sku "
+            "TEXT PRIMARY KEY, available INTEGER NOT NULL). Reserve "
+            "`quantity` units of `sku`: return True when the reservation "
+            "succeeded and available was reduced by exactly that many units, "
+            "and False when the sku exists but does not currently have "
+            "enough stock, in which case available is unchanged. Raise "
+            "ValueError when quantity is not a positive integer, and "
+            "ValueError when the sku is not present. `available` must never "
+            "be left negative, and the decision to reserve must be settled "
+            "against the row as it stands when the write happens rather than "
+            "against a value read earlier in the transaction -- another "
+            "session may have reserved the same sku in between. Leave no "
+            "transaction open on the connection, on any path."
+        ),
+        validator=LOAD_CANDIDATE + require("reserve_stock") + r'''
+import sqlite3
+
+# A connection that lets a DIFFERENT session's reservation land in the middle
+# of the candidate's transaction. Firing after the first read of `inventory`
+# is what makes the lost update observable: an implementation that decides
+# from the value it read, then writes that arithmetic back, silently discards
+# the interfering reservation. An implementation that instead re-checks the
+# invariant in the UPDATE's own WHERE clause sees the row as it now stands.
+#
+# A candidate that never reads at all is not penalised -- it simply never
+# arms the interference, and the conservation assertion below is written in
+# terms of whether it fired rather than assuming it did.
+
+
+class RacingCursor(sqlite3.Cursor):
+    def execute(self, sql, parameters=()):
+        result = super().execute(sql, parameters)
+        self.connection.interfere(sql)
+        return result
+
+
+class Racing(sqlite3.Connection):
+    armed = False
+    fired = False
+
+    def cursor(self, factory=RacingCursor):
+        return super().cursor(factory)
+
+    def execute(self, sql, parameters=()):
+        # Route Connection.execute through the racing cursor too: the C
+        # implementation does not necessarily dispatch back to this class.
+        handle = self.cursor()
+        handle.execute(sql, parameters)
+        return handle
+
+    def interfere(self, sql):
+        text = " ".join(str(sql).lower().split())
+        if not self.armed or self.fired or not text.startswith("select"):
+            return
+        if "inventory" not in text:
+            return
+        self.fired = True
+        sqlite3.Connection.execute(
+            self,
+            "UPDATE inventory SET available = available - 4 "
+            "WHERE sku = 'widget'",
+        )
+
+
+def fresh(factory=sqlite3.Connection):
+    handle = sqlite3.connect(":memory:", isolation_level=None, factory=factory)
+    sqlite3.Connection.execute(
+        handle,
+        "CREATE TABLE inventory (sku TEXT PRIMARY KEY, available INTEGER NOT NULL)",
+    )
+    sqlite3.Connection.execute(
+        handle, "INSERT INTO inventory VALUES ('widget', 5), ('gizmo', 0)")
+    return handle
+
+
+def stock(handle, sku="widget"):
+    return sqlite3.Connection.execute(
+        handle, "SELECT available FROM inventory WHERE sku = ?", (sku,)
+    ).fetchone()[0]
+
+
+# Uncontended: a reservation that fits succeeds and deducts exactly.
+plain = fresh()
+assert reserve_stock(plain, "widget", 3) is True
+assert stock(plain) == 2
+assert plain.in_transaction is False
+
+# A reservation larger than the remaining stock is refused, not clamped.
+assert reserve_stock(plain, "widget", 3) is False
+assert stock(plain) == 2, "a refused reservation must not change the row"
+
+# Exactly the remaining stock is still a fit.
+assert reserve_stock(plain, "widget", 2) is True
+assert stock(plain) == 0
+assert reserve_stock(plain, "gizmo", 1) is False
+
+# Bad inputs are rejected, and none of them poison the connection.
+for bad in (0, -1, 2.5, True, "3"):
+    try:
+        reserve_stock(plain, "widget", bad)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("quantity %r must raise ValueError" % (bad,))
+    assert plain.in_transaction is False, (
+        "a rejected quantity must not leave a transaction open"
+    )
+
+try:
+    reserve_stock(plain, "absent", 1)
+except ValueError:
+    pass
+else:
+    raise AssertionError("an unknown sku must raise ValueError")
+assert plain.in_transaction is False
+
+# Contended: four units are reserved by someone else mid-transaction.
+racing = fresh(Racing)
+racing.armed = True
+result = reserve_stock(racing, "widget", 3)
+remaining = stock(racing)
+
+assert remaining >= 0, (
+    "available went to %d: the write was not guarded by the invariant"
+    % remaining
+)
+# Conservation. Five units existed; four left if the interference fired, and
+# three more only if this call reported that it reserved them. Any other
+# number means units were handed out twice or vanished.
+expected = 5 - (4 if racing.fired else 0) - (3 if result else 0)
+assert remaining == expected, (
+    "expected %d units left after fired=%s result=%s, found %d: the "
+    "reservation was decided against a stale read"
+    % (expected, racing.fired, result, remaining)
+)
+assert racing.in_transaction is False
+'''),
+
+    task(
+        f"{FAMILY}-0302", FAMILY,
+        prompt=(
+            "Implement a Python function merge_counters(connection, rows) "
+            "that accumulates counter deltas. `connection` is a sqlite3 "
+            "connection opened with isolation_level=None, so your function "
+            "issues its own transaction statements. The database has a table "
+            "counters(name TEXT PRIMARY KEY, total INTEGER NOT NULL DEFAULT "
+            "0 CHECK (total >= 0), label TEXT). `rows` is a list of (name, "
+            "delta) pairs where delta is an integer. For each pair, add "
+            "delta to that counter's total, inserting the counter with total "
+            "= delta when it does not exist yet. A name that appears more "
+            "than once in `rows` accumulates each of its deltas. Columns "
+            "other than total belong to whoever set them: an existing row's "
+            "label must still hold the same value afterwards. Apply the "
+            "whole batch in one transaction, so a delta that would drive a "
+            "total below zero leaves none of the batch applied and no "
+            "transaction open. Raise ValueError when a delta is not an "
+            "integer. Return a dict mapping each name in `rows` to its total "
+            "after the batch."
+        ),
+        validator=LOAD_CANDIDATE + require("merge_counters") + r'''
+import sqlite3
+
+
+def fresh():
+    handle = sqlite3.connect(":memory:", isolation_level=None)
+    handle.execute(
+        "CREATE TABLE counters (name TEXT PRIMARY KEY, "
+        "total INTEGER NOT NULL DEFAULT 0 CHECK (total >= 0), label TEXT)"
+    )
+    return handle
+
+
+def rowsof(handle):
+    return {
+        row[0]: (row[1], row[2])
+        for row in handle.execute("SELECT name, total, label FROM counters")
+    }
+
+
+connection = fresh()
+
+# Counters that do not exist yet are created at their delta.
+assert merge_counters(connection, [("hits", 3), ("misses", 1)]) == \
+    {"hits": 3, "misses": 1}
+assert rowsof(connection) == {"hits": (3, None), "misses": (1, None)}
+
+# A second batch ACCUMULATES rather than overwriting.
+assert merge_counters(connection, [("hits", 4)]) == {"hits": 7}
+assert rowsof(connection)["hits"] == (7, None)
+
+# A label set by someone else survives the upsert. An implementation built on
+# INSERT OR REPLACE deletes the row and reinserts it, so the column it was
+# not given comes back NULL -- the update looks right and the record is gone.
+connection.execute("UPDATE counters SET label = 'page views' WHERE name = 'hits'")
+assert merge_counters(connection, [("hits", 1)]) == {"hits": 8}
+assert rowsof(connection)["hits"] == (8, "page views"), (
+    "the upsert discarded a column it was never asked to change"
+)
+
+# A repeated name accumulates every one of its deltas.
+assert merge_counters(connection, [("dupe", 2), ("dupe", 3), ("dupe", 5)]) == \
+    {"dupe": 10}
+assert rowsof(connection)["dupe"] == (10, None)
+
+# The returned mapping covers the names in this batch, not the whole table.
+assert merge_counters(connection, [("misses", 2)]) == {"misses": 3}
+
+# Atomicity: the second delta violates the CHECK, so neither applies.
+before = rowsof(connection)
+try:
+    merge_counters(connection, [("hits", 5), ("misses", -100)])
+except ValueError:
+    raise AssertionError("a CHECK violation is not an invalid delta")
+except Exception:
+    pass
+else:
+    raise AssertionError("driving a total below zero must not report success")
+assert rowsof(connection) == before, (
+    "a failed batch left part of its work behind"
+)
+assert connection.in_transaction is False
+
+# A non-integer delta is refused before anything is written.
+for bad in (1.5, "2", None, True):
+    guard = rowsof(connection)
+    try:
+        merge_counters(connection, [("hits", 1), ("misses", bad)])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("delta %r must raise ValueError" % (bad,))
+    assert rowsof(connection) == guard, (
+        "an invalid batch must not apply its earlier pairs"
+    )
+    assert connection.in_transaction is False
+
+# Still usable afterwards.
+assert merge_counters(connection, [("hits", 1)])["hits"] == 9
+'''),
+
+    task(
+        f"{FAMILY}-0303", FAMILY,
+        prompt=(
+            "Implement a Python function run_steps(connection, steps) that "
+            "applies as many steps as it can within a single transaction. "
+            "`connection` is a sqlite3 connection opened with "
+            "isolation_level=None, so your function issues its own "
+            "transaction statements. `steps` is a list of (name, sql) pairs, "
+            "each sql a single statement. Run the steps in order inside one "
+            "outer transaction. A step that raises sqlite3.Error is "
+            "individually undone and skipped, while every step that already "
+            "succeeded keeps its effect and later steps still run -- undoing "
+            "one step must not discard the others. Commit at the end and "
+            "return the list of names that were applied, in order. If the "
+            "outer transaction cannot be committed, roll it back and let the "
+            "exception propagate. Leave no transaction open on any path."
+        ),
+        validator=LOAD_CANDIDATE + require("run_steps") + r'''
+import sqlite3
+
+
+def fresh():
+    handle = sqlite3.connect(":memory:", isolation_level=None)
+    handle.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, tag TEXT)")
+    return handle
+
+
+def ids(handle):
+    return [row[0] for row in handle.execute("SELECT id FROM t ORDER BY id")]
+
+
+# The middle step fails. The point of the contract is that step one survives
+# it: an implementation that undoes a failed step with a bare ROLLBACK
+# discards the whole outer transaction, so the work before the failure
+# disappears and every later statement runs outside a transaction.
+connection = fresh()
+applied = run_steps(connection, [
+    ("first", "INSERT INTO t VALUES (1, 'a')"),
+    ("broken", "INSERT INTO t VALUES (1, 'duplicate primary key')"),
+    ("third", "INSERT INTO t VALUES (3, 'c')"),
+])
+assert applied == ["first", "third"], applied
+assert ids(connection) == [1, 3], (
+    "undoing the failed step discarded the steps around it"
+)
+assert connection.in_transaction is False
+
+# The effects are committed, not merely visible to the same handle.
+assert connection.execute("SELECT COUNT(*) FROM t").fetchone()[0] == 2
+
+# Consecutive failures each undo only themselves.
+connection = fresh()
+applied = run_steps(connection, [
+    ("a", "INSERT INTO t VALUES (1, 'a')"),
+    ("bad1", "INSERT INTO nonexistent VALUES (1)"),
+    ("bad2", "INSERT INTO t VALUES (1, 'again')"),
+    ("d", "INSERT INTO t VALUES (4, 'd')"),
+])
+assert applied == ["a", "d"], applied
+assert ids(connection) == [1, 4]
+assert connection.in_transaction is False
+
+# A step that fails partway through its own effect leaves nothing of it.
+connection = fresh()
+applied = run_steps(connection, [
+    ("seed", "INSERT INTO t VALUES (1, 'a'), (2, 'b')"),
+    ("half", "INSERT INTO t VALUES (9, 'ok'), (1, 'clash')"),
+])
+assert applied == ["seed"], applied
+assert ids(connection) == [1, 2], (
+    "the failed step's first row was left behind"
+)
+
+# Every step failing is still a clean, committed, empty result.
+connection = fresh()
+assert run_steps(connection, [("x", "SELECT * FROM absent")]) == []
+assert ids(connection) == []
+assert connection.in_transaction is False
+
+# No steps at all is not an error.
+connection = fresh()
+assert run_steps(connection, []) == []
+assert connection.in_transaction is False
+
+# Names are reported, not indices, and duplicates are not collapsed.
+connection = fresh()
+assert run_steps(connection, [
+    ("same", "INSERT INTO t VALUES (1, 'a')"),
+    ("same", "INSERT INTO t VALUES (2, 'b')"),
+]) == ["same", "same"]
+'''),
+
+    task(
+        f"{FAMILY}-0304", FAMILY,
+        prompt=(
+            "Implement a Python function purge_duplicates(connection, table, "
+            "key_columns) that removes duplicate rows. `connection` is a "
+            "sqlite3 connection opened with isolation_level=None, so your "
+            "function issues its own transaction statements. Two rows are "
+            "duplicates when they agree on every column in `key_columns`, "
+            "and for this purpose two NULLs in the same key column count as "
+            "agreeing -- a batch of rows that never had the key filled in is "
+            "exactly the case a de-duplication pass exists to clean up. Keep "
+            "the row with the smallest rowid in each group and delete the "
+            "rest, in one transaction. Return the number of rows deleted. "
+            "Raise ValueError when key_columns is empty. Column names come "
+            "from the caller and may need quoting. Leave no transaction open."
+        ),
+        validator=LOAD_CANDIDATE + require("purge_duplicates") + r'''
+import sqlite3
+
+
+def fresh():
+    handle = sqlite3.connect(":memory:", isolation_level=None)
+    handle.execute(
+        'CREATE TABLE people (id INTEGER PRIMARY KEY, email TEXT, '
+        '"first name" TEXT, note TEXT)'
+    )
+    return handle
+
+
+def rows(handle):
+    return [
+        tuple(row) for row in handle.execute(
+            "SELECT id, email, note FROM people ORDER BY id")
+    ]
+
+
+connection = fresh()
+connection.execute(
+    "INSERT INTO people (id, email, note) VALUES "
+    "(1, 'a@example.com', 'first'), "
+    "(2, 'b@example.com', 'other'), "
+    "(3, 'a@example.com', 'later duplicate')"
+)
+assert purge_duplicates(connection, "people", ["email"]) == 1
+assert rows(connection) == [
+    (1, "a@example.com", "first"), (2, "b@example.com", "other")
+], "the surviving row must be the one with the smallest rowid"
+assert connection.in_transaction is False
+
+# Nothing to do is zero, not an error.
+assert purge_duplicates(connection, "people", ["email"]) == 0
+
+# NULL keys. `GROUP BY` treats NULLs as one group but `=` never matches them,
+# so an implementation that pairs rows with an equality join finds no
+# duplicates here at all and leaves every one of them in place.
+connection = fresh()
+connection.execute(
+    "INSERT INTO people (id, email, note) VALUES "
+    "(1, NULL, 'unfilled'), (2, NULL, 'unfilled too'), "
+    "(3, NULL, 'and again'), (4, 'set@example.com', 'has one')"
+)
+assert purge_duplicates(connection, "people", ["email"]) == 2, (
+    "rows whose key is NULL are duplicates of each other"
+)
+assert rows(connection) == [
+    (1, None, "unfilled"), (4, "set@example.com", "has one")
+]
+
+# A composite key, mixing a NULL component with a present one.
+connection = fresh()
+connection.execute(
+    'INSERT INTO people (id, email, "first name", note) VALUES '
+    "(1, 'x@example.com', NULL, 'keep'), "
+    "(2, 'x@example.com', NULL, 'drop'), "
+    "(3, 'x@example.com', 'Ada', 'keep too')"
+)
+assert purge_duplicates(connection, "people", ["email", "first name"]) == 1
+assert rows(connection) == [
+    (1, "x@example.com", "keep"), (3, "x@example.com", "keep too")
+], "a differing component must keep the rows apart"
+
+# An empty key list would delete all but one row of the table.
+try:
+    purge_duplicates(connection, "people", [])
+except ValueError:
+    pass
+else:
+    raise AssertionError("an empty key_columns must raise ValueError")
+assert connection.in_transaction is False
+assert len(rows(connection)) == 2, "the rejected call must not have deleted"
+'''),
+
+    task(
+        f"{FAMILY}-0305", FAMILY,
+        prompt=(
+            "Implement a Python function delete_author(connection, "
+            "author_id) that removes an author and everything that hangs off "
+            "them. `connection` is a sqlite3 connection opened with "
+            "isolation_level=None, so your function issues its own "
+            "transaction statements. The database has authors(id INTEGER "
+            "PRIMARY KEY, name TEXT) and books(id INTEGER PRIMARY KEY, "
+            "author_id INTEGER REFERENCES authors(id) ON DELETE CASCADE, "
+            "title TEXT). SQLite does not enforce foreign keys unless the "
+            "connection is told to, and it will not change that setting "
+            "while a transaction is open, so the cascade only happens if "
+            "enforcement is turned on at the right moment. Delete the "
+            "author, let the declared cascade remove that author's books, "
+            "and return the number of books removed. Raise ValueError when "
+            "no author has that id, leaving the database untouched. Leave no "
+            "transaction open on any path."
+        ),
+        validator=LOAD_CANDIDATE + require("delete_author") + r'''
+import sqlite3
+
+
+def fresh():
+    handle = sqlite3.connect(":memory:", isolation_level=None)
+    handle.executescript(
+        "CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT);"
+        "CREATE TABLE books (id INTEGER PRIMARY KEY, "
+        "author_id INTEGER REFERENCES authors(id) ON DELETE CASCADE, "
+        "title TEXT);"
+        "INSERT INTO authors VALUES (1, 'Ada'), (2, 'Grace');"
+        "INSERT INTO books VALUES (10, 1, 'Notes'), (11, 1, 'More notes'),"
+        " (12, 2, 'Compilers');"
+    )
+    return handle
+
+
+def titles(handle):
+    return sorted(row[0] for row in handle.execute("SELECT title FROM books"))
+
+
+connection = fresh()
+# The default really is off, which is what makes the ordering matter: a
+# PRAGMA issued after BEGIN is silently ignored, the DELETE succeeds, and the
+# child rows are simply orphaned. Nothing raises.
+assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 0
+
+assert delete_author(connection, 1) == 2
+assert titles(connection) == ["Compilers"], (
+    "the cascade did not run: foreign keys were not enforced for the DELETE"
+)
+assert [row[0] for row in connection.execute("SELECT id FROM authors")] == [2]
+assert connection.in_transaction is False
+
+# An author with no books is a zero, not a failure.
+connection.execute("INSERT INTO authors VALUES (3, 'Barbara')")
+assert delete_author(connection, 3) == 0
+assert titles(connection) == ["Compilers"]
+
+# An unknown id changes nothing.
+before = titles(connection)
+try:
+    delete_author(connection, 99)
+except ValueError:
+    pass
+else:
+    raise AssertionError("an unknown author must raise ValueError")
+assert titles(connection) == before
+assert [row[0] for row in connection.execute("SELECT id FROM authors")] == [2]
+assert connection.in_transaction is False
+
+# And the remaining author still cascades on a fresh call.
+assert delete_author(connection, 2) == 1
+assert titles(connection) == []
+assert connection.in_transaction is False
+'''),
 ]
