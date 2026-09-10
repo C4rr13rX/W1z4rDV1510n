@@ -1671,3 +1671,30 @@ A larger volume buys time proportional to the training rate and never fixes
 this. The fix is a compaction pass that rewrites live records only; it needs
 free space of about the live-set size to run, which is an argument for building
 it while headroom still exists rather than after the next ENOSPC.
+
+### The burn rate is what sizes the alarm
+
+Measured over a 420 s window during deferred replay, immediately after the
+rollback:
+
+| | value |
+|---|---|
+| volume loss | 125.37 GB/h |
+| checkpoint growth | 125.39 GB/h |
+| row rate | 3.218 rows/s |
+| implied cost | ~10.8 MB per trained row |
+| free at end | 619.39 GB |
+| projected time to full | 4.9 h |
+
+The five-week average implied by a 1068 GB file is closer to 1.2 GB/h, so this
+window is ~100x that and may be a post-rollback rehydration burst: a restored
+brain pages neurons in and appends a fresh record for each one it sleeps again.
+CLAUDE.md's own rule applies -- **the instantaneous rate is a duty cycle, so
+never extrapolate an ETA from one window** -- and the disagreement between the
+two figures is itself the reason to sample again rather than to pick one.
+
+What the measurement does settle is the alarm floor. `DISK_ALARM_FLOOR_GB` is
+48 GB: about 23 minutes at the burst rate and about 40 days at the average, so
+it leaves room to act without chattering. The supervisor's own 8 GB yield guard
+is under four minutes at burst, and `admission_watchdog`'s 20 GB is under ten --
+neither is a warning, both are epitaphs.

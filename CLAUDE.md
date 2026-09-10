@@ -278,7 +278,12 @@ Verify, do not assume:
   `brain/brain.wbrain` was **1068.79 GB** against a brain of 4.81 M neurons
   whose resident RSS was 11.77 GB. Growth tracks TRAINING ACTIVITY, not brain
   size, so a bigger volume buys time and never a fix. The WAL has compaction
-  (`store/wal.rs`); the neuron store does not — do not confuse the two.
+  (`store/wal.rs`); the neuron store does not — do not confuse the two. Burn
+  rate measured over 420 s of deferred replay: **125.4 GB/h**, ~10.8 MB per
+  trained row at 3.2 rows/s, against a five-week average nearer 1.2 GB/h — so
+  sample it twice before quoting a runway, and size disk alarms from the burn
+  rate, not from the supervisor's 8 GB yield guard, which is under four minutes
+  of warning at burst.
 
 - **`worker_count: 0` during a replay is the NORMAL reading, not a stall.**
   The deferred-replay worker is `tools.training_standard.drive_corpora_brain`,

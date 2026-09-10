@@ -172,11 +172,18 @@ def event_fingerprint(kind: str, probe: dict) -> str:
 
 
 #: The supervisor is launched with `--min-free-disk-gb 8`, so it yields rather
-#: than trains below that. Alarming at the same number would fire on the guard
-#: doing its job; alarming far below it would fire only once the wrapper is
-#: already crash-looping. Half the supervisor's own floor names the fault while
-#: there is still room to reclaim.
-DISK_ALARM_FLOOR_GB = 4.0
+#: than trains below that, and the wrapper crash-loops once a 6-byte PID file
+#: will not fit. A floor near either number is far too late to act on.
+#:
+#: The floor is set by the MEASURED burn rate, not by the guard it backs up.
+#: Measured 2026-09-10 over a 420 s window during deferred replay: the volume
+#: lost 125.4 GB/h while the checkpoint grew 125.4 GB/h -- about 10.8 MB per
+#: trained row at 3.2 rows/s, because the `.wbrain` neuron store is append-only
+#: with no compactor. At that rate an 8 GB floor is under four minutes of
+#: warning and a 20 GB floor is under ten. 48 GB is ~23 minutes at that burn
+#: and ~40 days at the 1.2 GB/h five-week average, so it buys time to act
+#: without chattering on a healthy host.
+DISK_ALARM_FLOOR_GB = 48.0
 
 
 def disk_exhaustion_fault(probe: dict, *,

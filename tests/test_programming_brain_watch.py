@@ -1572,9 +1572,12 @@ def test_a_reclaim_after_the_crash_still_reports_the_failing_unit() -> None:
     alarm while the service is still down, which is how a disk outage becomes a
     silent one.
     """
+    # 599 GB free is the real post-rollback reading on this host: the reclaim
+    # more than succeeded, and the unit was still down. Free bytes alone would
+    # have called that healthy.
     reclaimed = {
         **probe("deferred_replay_resource_yield", supervisors=0, wrappers=0),
-        "disk": {"free_gb": 10.0, "total_gb": 1099.5, "used_percent": 99.0,
+        "disk": {"free_gb": 599.0, "total_gb": 1099.5, "used_percent": 43.0,
                  "free_inodes": 119561, "inodes_used_percent": 37.0,
                  "wrapper_enospc": True},
     }
@@ -1626,3 +1629,23 @@ def test_both_watchdog_emitters_agree_that_a_full_volume_is_a_fault() -> None:
     ).read_text(encoding="utf-8")
     assert "disk_exhaustion_fault" in source
     assert "DISK_ALARM_FLOOR_GB" in source
+
+
+def test_the_disk_floor_leaves_time_to_act_at_the_measured_burn_rate() -> None:
+    """A floor is only useful relative to how fast the volume drains.
+
+    Measured 2026-09-10 over a 420 s window during deferred replay: 125.4 GB/h,
+    about 10.8 MB per trained row, because the `.wbrain` neuron store is
+    append-only with no compactor. At that rate the supervisor's own 8 GB guard
+    is under four minutes of warning and `admission_watchdog`'s 20 GB is under
+    ten -- both too late to do anything but watch the wrapper crash-loop.
+    """
+    burn_gb_per_hour = 125.4
+    minutes = watch.DISK_ALARM_FLOOR_GB / burn_gb_per_hour * 60.0
+    assert minutes >= 20.0, (
+        f"a {watch.DISK_ALARM_FLOOR_GB} GB floor is only {minutes:.1f} minutes "
+        f"at the measured {burn_gb_per_hour} GB/h burn rate"
+    )
+    # And it must sit well clear of the supervisor's own yield floor, or the
+    # alarm fires on the guard doing its job rather than on the guard failing.
+    assert watch.DISK_ALARM_FLOOR_GB > 8.0 * 2
