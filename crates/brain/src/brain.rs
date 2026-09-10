@@ -12,7 +12,7 @@
 #[path = "streaming_migration.rs"]
 mod streaming_migration;
 #[path = "wbrain_metadata.rs"]
-mod wbrain_metadata;
+pub(crate) mod wbrain_metadata;
 
 use ahash::AHashMap;
 use std::collections::VecDeque;

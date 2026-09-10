@@ -18,9 +18,9 @@ use crate::store::container::{
     AuxiliaryRecordRef, BrainContainer, BrainContainerManifest, PoolContainerManifest,
 };
 
-const NEURON_SLOT_TABLE_KIND: u32 = 0x534C_4F54; // "SLOT"
-const NEURON_SLOT_BYTES: u64 = 24;
-const SLOT_PRESENT: u8 = 0b0000_0001;
+pub(crate) const NEURON_SLOT_TABLE_KIND: u32 = 0x534C_4F54; // "SLOT"
+pub(crate) const NEURON_SLOT_BYTES: u64 = 24;
+pub(crate) const SLOT_PRESENT: u8 = 0b0000_0001;
 const SLOT_CONCEPT: u8 = 0b0000_0010;
 const SLOT_WRITE_BATCH: usize = 65_536;
 const AUXILIARY_HEADER_BYTES: u64 = 24;

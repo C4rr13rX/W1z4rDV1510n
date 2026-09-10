@@ -22,6 +22,7 @@
 
 pub mod bloom;
 pub mod cold;
+pub mod compaction;
 pub mod container;
 pub mod control;
 pub mod event;
@@ -34,6 +35,7 @@ pub mod wbrain_store;
 
 pub use bloom::CountingBloom;
 pub use cold::ColdTier;
+pub use compaction::{CompactionReport, compact, compact_in_place, verify as verify_compaction};
 pub use container::{
     AuxiliaryRecordRef, BrainContainer, BrainContainerManifest, PoolContainerManifest,
 };

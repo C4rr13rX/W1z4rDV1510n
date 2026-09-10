@@ -475,6 +475,144 @@ impl BrainContainer {
         self.file.flush()?;
         self.file.sync_all()
     }
+
+    /// Byte length of every record header: magic, two u32 fields, then a u64
+    /// body length. Neuron and auxiliary records share this shape.
+    pub(crate) const RECORD_HEADER_BYTES: u64 = 24;
+
+    /// Copy one neuron record verbatim into `destination`, returning its new
+    /// offset.
+    ///
+    /// The bincode body is deliberately NOT decoded. Compaction moves bytes,
+    /// so a body this build cannot deserialize still round-trips intact
+    /// instead of being silently re-serialized into whatever the current
+    /// `Neuron` layout happens to be. It also means a compaction pass cannot
+    /// corrupt a field it does not know exists.
+    pub(crate) fn copy_neuron_record_into(
+        &mut self,
+        offset: u64,
+        destination: &mut BrainContainer,
+        buffer: &mut [u8],
+    ) -> io::Result<u64> {
+        self.copy_record_into(offset, NEURON_RECORD, destination, buffer)
+            .map(|(new_offset, _len)| new_offset)
+    }
+
+    /// Pool and kind fields of an auxiliary record header.
+    pub(crate) fn auxiliary_header(
+        &mut self,
+        reference: AuxiliaryRecordRef,
+    ) -> io::Result<(PoolId, u32)> {
+        self.file.seek(SeekFrom::Start(reference.offset))?;
+        let mut header = [0_u8; Self::RECORD_HEADER_BYTES as usize];
+        self.file.read_exact(&mut header)?;
+        if &header[0..8] != AUXILIARY_RECORD {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "auxiliary marker mismatch",
+            ));
+        }
+        if u64::from_le_bytes(header[16..24].try_into().unwrap()) != reference.len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "auxiliary length mismatch",
+            ));
+        }
+        Ok((
+            u32::from_le_bytes(header[8..12].try_into().unwrap()),
+            u32::from_le_bytes(header[12..16].try_into().unwrap()),
+        ))
+    }
+
+    /// Copy an auxiliary record verbatim, returning its reference in
+    /// `destination`. Suitable only for bodies that are position independent;
+    /// bodies that nest absolute offsets must be rewritten by the caller.
+    pub(crate) fn copy_auxiliary_record_into(
+        &mut self,
+        reference: AuxiliaryRecordRef,
+        destination: &mut BrainContainer,
+        buffer: &mut [u8],
+    ) -> io::Result<AuxiliaryRecordRef> {
+        let (offset, len) =
+            self.copy_record_into(reference.offset, AUXILIARY_RECORD, destination, buffer)?;
+        if len != reference.len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "auxiliary body length disagreed with its reference",
+            ));
+        }
+        Ok(AuxiliaryRecordRef { offset, len })
+    }
+
+    /// Read at most `limit` bytes from the start of an auxiliary body. Used to
+    /// classify a record by its magic without hydrating a multi-gigabyte body.
+    pub(crate) fn read_auxiliary_prefix(
+        &mut self,
+        reference: AuxiliaryRecordRef,
+        limit: usize,
+    ) -> io::Result<Vec<u8>> {
+        let take = (reference.len as usize).min(limit);
+        let mut body = vec![0_u8; take];
+        if take > 0 {
+            self.file
+                .seek(SeekFrom::Start(reference.offset + Self::RECORD_HEADER_BYTES))?;
+            self.file.read_exact(&mut body)?;
+        }
+        Ok(body)
+    }
+
+    /// Shared verbatim record copy. Streams the body through `buffer` so a
+    /// record larger than RAM still moves.
+    fn copy_record_into(
+        &mut self,
+        offset: u64,
+        expected_magic: &[u8; 8],
+        destination: &mut BrainContainer,
+        buffer: &mut [u8],
+    ) -> io::Result<(u64, u64)> {
+        self.file.seek(SeekFrom::Start(offset))?;
+        let mut header = [0_u8; Self::RECORD_HEADER_BYTES as usize];
+        self.file.read_exact(&mut header)?;
+        if &header[0..8] != expected_magic {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "record marker mismatch during compaction",
+            ));
+        }
+        let body_len = u64::from_le_bytes(header[16..24].try_into().unwrap());
+        let new_offset = destination.file.seek(SeekFrom::End(0))?;
+        destination.file.write_all(&header)?;
+        let mut remaining = body_len;
+        while remaining > 0 {
+            let take = remaining.min(buffer.len() as u64) as usize;
+            let slice = &mut buffer[..take];
+            self.file.read_exact(slice)?;
+            destination.file.write_all(slice)?;
+            remaining -= take as u64;
+        }
+        Ok((new_offset, body_len))
+    }
+
+    /// Append an auxiliary record whose body is already materialized.
+    pub(crate) fn append_auxiliary_body(
+        &mut self,
+        pool: PoolId,
+        kind: u32,
+        body: &[u8],
+    ) -> io::Result<AuxiliaryRecordRef> {
+        self.append_auxiliary(pool, kind, |writer| writer.write_all(body))
+    }
+
+    /// Total bytes currently occupied by the container.
+    pub fn byte_len(&self) -> io::Result<u64> {
+        Ok(self.file.metadata()?.len())
+    }
+}
+
+/// Bytes reserved for the fixed header and its two alternating manifest slots.
+/// A container of exactly this length holds no records.
+pub(crate) fn header_bytes() -> u64 {
+    HEADER_BYTES
 }
 
 #[cfg(test)]

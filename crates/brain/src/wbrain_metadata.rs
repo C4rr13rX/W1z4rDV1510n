@@ -40,3 +40,73 @@ pub(crate) struct WbrainBrainMetadata {
     pub eem: EemSnapshot,
     pub annealer: AnnealerSnapshot,
 }
+
+/// Rewrite every container offset held inside a serialized brain metadata blob.
+///
+/// `binding_posting_indexes` is the only persisted reference vector here:
+/// `fingerprint_posting_indexes` and `fingerprint_candidate_indexes` are
+/// DERIVED from generation markers on restore (see `brain.rs`), so they hold no
+/// durable offsets and must not be re-derived by a compactor.
+///
+/// As in `pool::remap_pool_metadata_refs`, the destructuring is exhaustive on
+/// purpose: a future reference field added to [`WbrainBrainMetadata`] becomes a
+/// compile error here rather than a brain whose binding recall silently reads
+/// whatever bytes landed at a stale offset.
+pub(crate) fn remap_brain_metadata_refs(
+    blob: &[u8],
+    remap: &mut dyn FnMut(AuxiliaryRecordRef) -> std::io::Result<AuxiliaryRecordRef>,
+) -> std::io::Result<Vec<u8>> {
+    if blob.is_empty() {
+        return Ok(Vec::new());
+    }
+    let decoded: WbrainBrainMetadata = bincode::deserialize(blob)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let WbrainBrainMetadata {
+        config,
+        binding_pool_id,
+        moment_history,
+        binding_recurrences,
+        lifetime_recurrences,
+        tentative_promoted,
+        promoted_fingerprints,
+        binding_sequence_index,
+        binding_feature_atom_index,
+        binding_motif_index,
+        binding_posting_indexes,
+        total_observations,
+        current_threshold,
+        last_pressure_check_obs,
+        action_pool_id,
+        pending_actions,
+        next_action_id,
+        eem,
+        annealer,
+    } = decoded;
+    let mut moved = Vec::with_capacity(binding_posting_indexes.len());
+    for reference in binding_posting_indexes {
+        moved.push(remap(reference)?);
+    }
+    let rebuilt = WbrainBrainMetadata {
+        config,
+        binding_pool_id,
+        moment_history,
+        binding_recurrences,
+        lifetime_recurrences,
+        tentative_promoted,
+        promoted_fingerprints,
+        binding_sequence_index,
+        binding_feature_atom_index,
+        binding_motif_index,
+        binding_posting_indexes: moved,
+        total_observations,
+        current_threshold,
+        last_pressure_check_obs,
+        action_pool_id,
+        pending_actions,
+        next_action_id,
+        eem,
+        annealer,
+    };
+    bincode::serialize(&rebuilt)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}

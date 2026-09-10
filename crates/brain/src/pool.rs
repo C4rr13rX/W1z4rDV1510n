@@ -1393,6 +1393,76 @@ struct WbrainPoolMetadata {
     total_terminals: usize,
 }
 
+/// Rewrite every container offset held inside a serialized pool metadata blob.
+///
+/// Compaction moves records, so any `AuxiliaryRecordRef` that survives the move
+/// unchanged points at whatever bytes now occupy the old offset. The manifest's
+/// own references are visible to the compactor; these are NOT — they are buried
+/// inside an opaque `pool_metadata: Vec<u8>`, which is exactly why they are
+/// remapped here, next to the struct that defines them, rather than in the
+/// compactor where a new field would be missed.
+///
+/// The destructuring below is deliberately exhaustive: adding a field to
+/// [`WbrainPoolMetadata`] breaks this function at COMPILE time. A compactor
+/// that silently ignored a new reference field would corrupt recall in a way
+/// no test that predates the field could detect.
+pub(crate) fn remap_pool_metadata_refs(
+    blob: &[u8],
+    remap: &mut dyn FnMut(AuxiliaryRecordRef) -> std::io::Result<AuxiliaryRecordRef>,
+) -> std::io::Result<Vec<u8>> {
+    if blob.is_empty() {
+        return Ok(Vec::new());
+    }
+    let decoded: WbrainPoolMetadata = bincode::deserialize(blob)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let WbrainPoolMetadata {
+        config,
+        recent_atoms,
+        sequences,
+        legacy_sequence_ledger,
+        concept_multiset_to_id,
+        concept_sequence_to_id,
+        legacy_concept_sequence_index,
+        neuron_kinds,
+        concept_slots,
+        born_ticks,
+        concept_count,
+        total_terminals,
+    } = decoded;
+    let legacy_sequence_ledger = match legacy_sequence_ledger {
+        Some(reference) => Some(remap(reference)?),
+        None => None,
+    };
+    let legacy_concept_sequence_index = match legacy_concept_sequence_index {
+        Some(reference) => Some(remap(reference)?),
+        None => None,
+    };
+    let rebuilt = WbrainPoolMetadata {
+        config,
+        recent_atoms,
+        sequences,
+        legacy_sequence_ledger,
+        concept_multiset_to_id,
+        concept_sequence_to_id,
+        legacy_concept_sequence_index,
+        neuron_kinds,
+        concept_slots,
+        born_ticks,
+        concept_count,
+        total_terminals,
+    };
+    bincode::serialize(&rebuilt)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+/// Magics of auxiliary bodies that nest absolute references to OTHER records.
+/// Compaction must rewrite these bodies; every other auxiliary body addresses
+/// itself relatively and copies verbatim.
+pub(crate) const GENERATION_DIRECTORY_MAGICS: [&[u8; 8]; 2] = [
+    CONCEPT_GENERATION_DIRECTORY_MAGIC,
+    SEQUENCE_GENERATION_DIRECTORY_MAGIC,
+];
+
 pub(crate) struct StreamedPoolMetadata {
     pub config: PoolConfig,
     pub recent_atoms: VecDeque<NeuronId>,
