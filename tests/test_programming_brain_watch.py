@@ -1058,3 +1058,43 @@ def test_the_forward_suppression_cannot_silence_a_frozen_block() -> None:
     stale_source["heartbeat"] = {**stale_source["heartbeat"],
                                  "source": "replay_progress"}
     assert classify_probe(stale_source, stall_seconds=1800).kind == "fix_required"
+
+
+def test_a_drought_alarm_says_so_when_no_writer_exposes_a_row() -> None:
+    """The third case, and the one that fell through to silence.
+
+    Selecting the heartbeat purely on mtime picks the supervisor status file
+    whenever it is freshest -- and during a REPLAY that file carries
+    `resume_row`/`end_row`, never `durable_next_row`. So `row` is None, both
+    annex branches are gated on `row is not None`, and the alarm goes out as a
+    bare drought with no convergence evidence at all.
+
+    Measured 2026-09-10: published `row: null, rows_per_second: null` against a
+    replay converging at 14.0 rows/s with zero rollback exposure, 82,272 rows
+    from its gate. An unknown rate is not a zero rate, and neither is silence.
+    """
+    blind = probe("deferred_replay_training")
+    blind["admissions"] = {"hours_since_admission": 111.6, "gate_artifacts": 47}
+    blind["heartbeat"] = {"source": None, "file": "curriculum-supervisor.status.json",
+                          "age_seconds": 8.6, "row": None, "rows_per_second": None,
+                          "no_row_writer": True, "freshest_writer": "status"}
+    blind["status"]["block_target_row"] = 131072
+    decision = classify_probe(blind, stall_seconds=1800)
+    assert decision.kind == "fix_required"
+    assert "no interval admitted for 111.6h" in decision.reason
+    # The annex must name the blindness rather than implying a dead curriculum.
+    assert "no writer currently exposes a row" in decision.reason
+    assert "carries no convergence evidence" in decision.reason
+    assert "status" in decision.reason
+
+    # And it must not fire when a row IS available: that payload has evidence,
+    # so it gets the existing frozen/converging annex instead.
+    seeing = probe("deferred_replay_training")
+    seeing["admissions"] = {"hours_since_admission": 111.6, "gate_artifacts": 47}
+    seeing["heartbeat"] = {"source": "replay_progress", "row": 48800,
+                           "rows_per_second": 14.0, "age_seconds": 0.4,
+                           "row_source_lag_seconds": 0.0}
+    seeing["status"]["block_target_row"] = 131072
+    reason = classify_probe(seeing, stall_seconds=1800).reason
+    assert "no writer currently exposes a row" not in reason
+    assert "advancing 14.0 rows/s at row 48800" in reason

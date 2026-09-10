@@ -1497,3 +1497,58 @@ No supervisor restart was needed — the gate spawns
 the next gate run reads the new file. Restarting would have discarded the
 in-flight replay interval, which `deferred-replay-active.json` reported as
 `state: training`.
+
+## A heartbeat needs a row, and the freshest writer often has none
+
+The heartbeat source is chosen by `min(ages)` — the freshest of the supervisor
+status file, the replay progress file and the forward progress file. That rule
+exists for a good reason: it was what stopped a 100.7 h leftover replay file
+from being read as live beside a moving status.
+
+It has a hole. During a **replay**, `curriculum-supervisor.status.json`
+carries `resume_row` and `end_row` — never `durable_next_row`. So whenever the
+supervisor touches it last, `_row_now()` returns None, the sample loop waits
+the entire 120 s bound for a row that file cannot contain, and the payload
+publishes:
+
+```json
+"heartbeat": {"source": "status", "row": null, "rows_per_second": null,
+              "accepted_per_second": null, "sample_seconds": 120.1}
+```
+
+That is worse than a wrong rate, because `classify_probe()` builds its
+convergence annex only when `row is not None`. Both branches fall through, and
+the alarm ships as a bare `no interval admitted for 111.6h while the
+curriculum reports itself active` — which reads as a dead curriculum. The
+comment directly above that annex already forbids exactly this: *"A zero rate
+and an unknown rate are different facts, and neither one is silence."* The
+silence was being manufactured upstream, in the source selection.
+
+Measured 2026-09-10: published against a go-systems quarantine replay that was
+converging at 14.0 rows/s, `durable_next_row == ram_next_row` (zero rollback
+exposure), 82,272 rows from its gate.
+
+### Require the row; publish the lag
+
+Choose the freshest file that actually exposes `durable_next_row`, and publish
+`row_source_lag_seconds` — how far behind the freshest writer overall that
+file sits. Zero means it *is* the freshest. A large value means the only file
+carrying a row is a leftover and its rate describes the past, which is the
+100.7 h case the original rule was built for, now stated in the payload
+instead of inferred from mtimes by whoever reads it.
+
+When nothing exposes a row, say so (`no_row_writer: true`) and let the annex
+name the blindness rather than emitting a drought with no evidence attached.
+
+Verified live during the replay, before and after:
+
+| | before | after |
+|---|---|---|
+| `source` | `status` | `replay_progress` |
+| `row` | `null` | 51464 |
+| `rows_per_second` | `null` | 11.99 |
+| `accepted_per_second` | `null` | 11.99 |
+| `sample_seconds` | 120.1 | 2.0 |
+
+The sample cost also drops, because the loop now exits as soon as a row moves
+instead of blocking on a file that will never move one.

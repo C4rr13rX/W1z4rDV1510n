@@ -387,6 +387,20 @@ def classify_probe(probe: dict, *, stall_seconds: float,
                     "canary each freeze the row by design, so confirm the "
                     "freeze is not one of those before repairing anything"
                 )
+            elif beat.get("no_row_writer"):
+                # The third case the two branches above cannot express, and
+                # the one that used to fall through to silence: no writer on
+                # the host exposes `durable_next_row` at all, so the payload
+                # knows nothing about convergence either way. Say that, rather
+                # than publishing a bare drought that reads as a dead
+                # curriculum -- an unknown rate is not a zero rate.
+                converging = (
+                    f"; no writer currently exposes a row (freshest is "
+                    f"{beat.get('freshest_writer')} at "
+                    f"{float(beat.get('age_seconds') or 0):.0f}s), so this "
+                    f"payload carries no convergence evidence -- read the "
+                    f"replay progress file directly before repairing anything"
+                )
             return Decision(
                 "fix_required",
                 f"no interval admitted for {float(since):.1f}h while the "
@@ -701,6 +715,28 @@ except Exception:
 # The bound is what a zero now MEANS -- "did not move in 120 s", not "did not
 # move in 6 s" -- so it must stay well above the slowest observed commit
 # period rather than being tuned down to save probe time.
+#
+# ...BUT THE FRESHEST WRITER IS NOT ALWAYS A WRITER OF ROWS. Selecting purely
+# on mtime picks `curriculum-supervisor.status.json` whenever the supervisor
+# happens to have touched it most recently -- and during a REPLAY that file
+# carries `resume_row`/`end_row`, not `durable_next_row`. `_row_now()` returns
+# None, so the sample loop waits the full bound for a row that file will never
+# contain and publishes `row: null, rows_per_second: null`.
+#
+# That is worse than a wrong rate. `classify_probe()` builds its convergence
+# annex only when `row is not None`, so BOTH branches fall through and the
+# alarm goes out as a bare "no interval admitted for 111.6h" -- the exact
+# silence the comment above that annex forbids ("A zero rate and an unknown
+# rate are different facts, and neither one is silence"). Measured 2026-09-10:
+# published against a replay converging at 14.0 rows/s with zero rollback
+# exposure, 82,272 rows from its gate.
+#
+# So require a row. Choose the freshest file that HAS one, and publish how far
+# behind the freshest writer overall it is, because that lag is what stops a
+# leftover from masquerading as live -- the 100.7 h replay file above still
+# loses to a live status whenever the status file carries a row, and when it
+# does not, `row_source_lag_seconds` says so out loud instead of implying
+# currency by silence.
 heartbeat = {{}}
 try:
     ages = [(age, name, path) for age, name, path in (
@@ -710,8 +746,22 @@ try:
         (_file_age(forward_file) if forward_file is not None else None,
          'forward_progress', forward_file),
     ) if age is not None]
-    if ages:
-        age, source, path = min(ages, key=lambda item: item[0])
+    rowed = [item for item in ages if _row_now(item[2]) is not None]
+    if ages and not rowed:
+        freshest = min(ages, key=lambda item: item[0])
+        heartbeat = {{
+            'source': None, 'file': freshest[2].name,
+            'age_seconds': freshest[0], 'row': None,
+            'rows_per_second': None, 'accepted_episodes': None,
+            'accepted_per_second': None, 'sample_seconds': 0.0,
+            # Name the blindness rather than reporting a null that reads as a
+            # measured zero: no writer on this host exposes durable_next_row.
+            'no_row_writer': True,
+            'freshest_writer': freshest[1],
+        }}
+    if rowed:
+        age, source, path = min(rowed, key=lambda item: item[0])
+        freshest_age = min(item[0] for item in ages)
         first_row, first_at = _row_now(path), time.time()
         first_accepted = _accepted_now(path)
         last_row, last_at = first_row, first_at
@@ -739,6 +789,10 @@ try:
                 round((last_accepted - first_accepted) / elapsed, 2)
                 if first_accepted is not None and last_accepted is not None
                 else None),
+            # How far behind the freshest writer this row-carrying file sits.
+            # 0 means it IS the freshest. A large value means the only file
+            # exposing a row is a leftover, and its rate describes the past.
+            'row_source_lag_seconds': round(age - freshest_age, 1),
         }}
         if throughput and source != 'replay_progress':
             # Say it in the payload, not just in this comment.

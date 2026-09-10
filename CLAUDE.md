@@ -93,6 +93,20 @@ Verify, do not assume:
   normal: settlement, the admission gate and the continuous canary all freeze
   the row by design.
 
+  **The freshest writer is not always a writer of ROWS.** Selecting on mtime
+  alone picked `curriculum-supervisor.status.json`, which during a replay
+  carries `resume_row`/`end_row` and never `durable_next_row` — so the probe
+  waited the full 120 s bound for a row that file cannot contain and published
+  `row: null, rows_per_second: null`. That is worse than a wrong rate:
+  `classify_probe` gates its convergence annex on `row is not None`, so BOTH
+  branches fell through and the alarm went out as a bare "no interval admitted
+  for 111.6h" — against a replay converging at 14.0 rows/s with zero rollback
+  exposure, 82,272 rows from its gate. The selector now requires a row and
+  publishes `row_source_lag_seconds` (0 means it IS the freshest; large means
+  the only file exposing a row is a leftover, so its rate describes the past),
+  plus `no_row_writer: true` when nothing exposes one. Verified live: source
+  `replay_progress`, row 51,464, 11.99 rows/s, `sample_seconds` 2.0.
+
 - **An 11/12 enterprise gate names no suite in the ledger.** The
   `enterprise_gate_confirmation` record carries only counts, so a drought
   looks causeless from `curriculum-health.jsonl` alone. The per-suite verdict
