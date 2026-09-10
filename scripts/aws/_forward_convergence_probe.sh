@@ -136,9 +136,23 @@ if len(mems) >= 2:
 # vacuous-zero shape, distinct from one empty bucket. The kind_counts line
 # below exists to prove the pattern CAN be non-zero before any absence here is
 # believed. Events also carry `updated_unix`, not `unix`.
+#
+# The cause is under `error`, NOT `reason`. `deferred_replay_failed` is written
+# by the replay pass (supervisor line ~3947) with keys kind/phase/interval_id/
+# passed/evidence_dir/error; only `record_deferred_failure`'s
+# `fully_deferred_failure_absorbed` carries a `reason`. Reading reason/detail
+# alone bucketed all 324 failures as `no_reason_recorded` -- a UNIFORMLY empty
+# table, which the comment above already names as the shape that means the
+# probe is wrong rather than the field absent. It was believed anyway for a
+# whole cycle. Read every candidate key and record which one supplied the text,
+# so a future rename shows up as a changed `cause_key` instead of a silent
+# uniform zero.
+CAUSE_KEYS = ("error", "reason", "detail")
 ledger = os.path.join(R, "curriculum-health.jsonl")
 buckets = collections.Counter()
 kinds_seen = collections.Counter()
+cause_keys_seen = collections.Counter()
+failing_suites = collections.Counter()
 recent = []
 first_seen = {}
 if os.path.exists(ledger):
@@ -154,7 +168,15 @@ if os.path.exists(ledger):
         kinds_seen[event] += 1
         if event != "deferred_replay_failed":
             continue
-        reason = str(row.get("reason") or row.get("detail") or "")
+        cause_key = next((k for k in CAUSE_KEYS if row.get(k)), "")
+        reason = str(row.get(cause_key) or "") if cause_key else ""
+        cause_keys_seen[cause_key or "<none>"] += 1
+        # A failing suite name is the actionable part of a gate rejection, and
+        # it is embedded in a repr of the gate report rather than its own
+        # field. The 11/12 lesson: counts alone make a drought look causeless.
+        suites = re.findall(r"'name':\s*'([^']+)'[^}]*?'passed':\s*False", reason)
+        for suite in suites:
+            failing_suites[suite] += 1
         if "exited" in reason or "signal" in reason or "stderr" in reason:
             bucket = "worker_exit_or_signal"
         elif "yield" in reason or "memory" in reason or "resource" in reason:
@@ -166,13 +188,18 @@ if os.path.exists(ledger):
         elif reason:
             bucket = "other:" + re.sub(r"[^a-z ]", "", reason.lower())[:40]
         else:
-            bucket = "no_reason_recorded"
+            bucket = "no_cause_recorded_under_" + "_or_".join(CAUSE_KEYS)
         buckets[bucket] += 1
         first_seen.setdefault(bucket, row.get("updated_unix") or row.get("unix"))
         recent.append((row.get("updated_unix") or row.get("unix") or 0, bucket, reason[:200]))
 recent.sort()
 out["ledger_kind_counts"] = dict(kinds_seen.most_common(30))
 out["failure_buckets"] = dict(buckets.most_common(15))
+# Which key actually carried the cause. If this is all "<none>" the schema
+# moved and the buckets below mean nothing -- that is the check the previous
+# revision lacked.
+out["failure_cause_keys"] = dict(cause_keys_seen.most_common())
+out["failing_suites"] = dict(failing_suites.most_common(15))
 out["failure_bucket_first_seen"] = first_seen
 out["failure_recent"] = [
     {"age_h": round((out["now"] - t) / 3600.0, 1), "bucket": b, "reason": r}
