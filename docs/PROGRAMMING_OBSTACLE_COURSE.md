@@ -436,6 +436,72 @@ claim is part of the contract, assert it structurally — count comparisons or
 element reads — never by wall-clock time, which would make the verdict depend
 on host load.
 
+#### Check the symbol inventory BEFORE authoring, not after
+
+The manifest's distinctness check is keyed on the **behaviour contract** —
+the normalized validator plus its fixtures — so it catches cosmetic clones
+and nothing else. Two tasks that ask for the same function in different
+words, with different fixtures, are textually distinct and pass it.
+
+Measured 2026-09-10: ten tasks authored for
+`validation_parsing_serialization` in one sitting, and **four** of them
+reused a symbol the course already had — `decode_utf8` (0018),
+`decode_chunked` (0019), `canonical_json` (0005) and `parse_byte_range`
+(`requirements_api_contracts-0004`). Every one passed `build_manifest`,
+passed the attribution audit, and passed a hand-written reference in both
+directions. Nothing in the authoring path objected.
+
+Two of the four were worse than redundant — they demanded the **opposite**
+behaviour from the same function name:
+
+| symbol | existing task | the duplicate |
+|---|---|---|
+| `parse_byte_range` | raise `ValueError` when every range is unsatisfiable | return `[]` when every range is unsatisfiable |
+| `canonical_json` | return `bytes`, sort keys by code **point**, accept integral floats | return `str`, sort keys by UTF-16 code **unit**, reject floats |
+
+A course containing both cannot be passed: whichever contract the brain
+learns, the other scores it a capability failure, and the repair effort goes
+to a capability that was never missing. This is the same shape as the
+`polyglot` drought — a fault that reads as a ranking or routing problem and
+is really a coverage problem in the material.
+
+`test_every_capability_overlap_has_been_reviewed` is what caught it, and it
+only reports; the decision is yours to make and record. Ask for the inventory
+first:
+
+```bash
+python - <<'PY'
+import sys, re, collections; sys.path.insert(0, '.')
+from scripts.programming_obstacle_tasks import load_authored_tasks
+syms = collections.defaultdict(list)
+for t in load_authored_tasks():
+    for m in re.finditer(r"assert hasattr\(candidate, '([^']+)'\)", t.validator):
+        syms[m.group(1)].append(t.task_id)
+print(sorted(syms))
+PY
+```
+
+A genuine second task on a symbol is legitimate — `apply_patch` and
+`run_saga` each carry one, reviewed and recorded in `REVIEWED_OVERLAPS`. What
+is never legitimate is two tasks whose prompts contradict each other. Read
+the existing prompt before reusing its name, and if the capability is already
+covered, spend the slot on one that is not.
+
+#### Prove the SHAPE before doing arithmetic on a return value
+
+`_blames_candidate` attributes an exception to the candidate only when a
+candidate frame appears in the traceback. `AssertionError` is always a
+capability verdict, but `abs(got - expected)` against a candidate that
+returned `None` raises `TypeError` in validator frames alone — scored
+`validator_error`, which the contract treats as a harness fault that blocks
+admission, for what is an ordinary wrong answer. Measured 2026-09-10 on
+`parse_rfc3339`, caught by
+`scripts/audit_obstacle_validator_attribution.py`. Comparisons (`==`, `is`)
+are safe against `None`; arithmetic, indexing and attribute access are not,
+so assert the type first or wrap the callable with the `SHAPE_GUARDS`
+helpers. Run that audit after authoring — it is cheap and it is the only
+thing that distinguishes the two.
+
 #### Count the operation the claim is about, and put the budget in the prompt
 
 "Assert it structurally" leaves open *what* to count, and counting the wrong

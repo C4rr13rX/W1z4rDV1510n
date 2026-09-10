@@ -229,6 +229,33 @@ Verify, do not assume:
   the continuous canary each freeze it by design — so **do not collapse a
   frozen row into a reset**; they are different facts with different actions.
 
+- **`worker_count: 0` during a replay is the NORMAL reading, not a stall.**
+  The deferred-replay worker is `tools.training_standard.drive_corpora_brain`,
+  and `run_deferred_replay_worker` stops and respawns it once per cooperative
+  memory yield, so an instantaneous process census lands in a trough most of
+  the time. Measured 2026-09-10 on the `quarantine_ready` wake-up: two
+  censuses 90 s apart both read `worker 0`, while the same progress file
+  advanced 217,024 → 217,192 (1.87 rows/s) and `accepted_episodes` reset
+  344 → 168 — a worker demonstrably running and demonstrably restarting.
+  **Liveness is the ROW DELTA; the census only distinguishes a yield cycle
+  from a host that has lost its supervisor.** The watchdog is right to gate
+  on `wrapper_count` (`bash run_programming_curriculum_service.sh`) rather
+  than on the worker. And guessed `pgrep` patterns (`deferred_replay_worker`,
+  `deferred_replay`) match no process at all, so they report 0 forever —
+  copy the patterns from `watch_programming_brain.py`'s `/proc` scan rather
+  than inventing them.
+
+- **`deferred-replay-active.json` carries the rejection that SENT an interval
+  to quarantine, not the state of the retry now running.** The record for
+  `jupyter-scientific-full:201344:262144` quoted an `enterprise regression`
+  with `polyglot` at 11/12 — the four-day drought signature — whose inner
+  `updated_unix` was **73.4 h** old, three days before the Go corpus closed
+  it, beside an outer record 33 days old and a `created_unix` 1.0 h old.
+  The same file therefore holds three different clocks. Read `created_unix`
+  and `state` for what is running; treat `interval.error` as the reason it
+  was queued, and date it before re-debugging it. Same rule as
+  `last_failure`: a ledger entry is not evidence about the running process.
+
 - **Onboarding a corpus requires a registry `.toml`.** Without it the driver
   exits 2 on `unknown script` and the supervisor retry-loops, stopping ALL
   training. `scripts/onboard_corpus.py` writes it; deploy it with the corpus.

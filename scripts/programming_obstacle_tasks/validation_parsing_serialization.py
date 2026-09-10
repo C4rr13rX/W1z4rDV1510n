@@ -1654,4 +1654,618 @@ assert parse_traceparent(" " + VALID) is None
 assert parse_traceparent(VALID + " ") is None
 """,
     ),
+    task(
+        f"{FAMILY}-0021", FAMILY,
+        prompt=(
+            "Implement a Python function resolve_json_pointer(document, "
+            "pointer) evaluating an RFC 6901 JSON Pointer against a document "
+            "built from dicts, lists, strings, numbers, booleans and None. "
+            "The pointer is a string. The empty string refers to the whole "
+            "document. Otherwise the pointer must begin with '/' and is split "
+            "on '/' into reference tokens; within a token '~1' decodes to '/' "
+            "and '~0' decodes to '~', and the two must be applied in that "
+            "order so that '~01' decodes to '~1'. A token addressing a dict "
+            "selects that exact key, including the empty key. A token "
+            "addressing a list must be either '0' or a non-zero digit string "
+            "with no leading zeros. Raise ValueError if the pointer is "
+            "syntactically invalid, including a non-empty pointer that does "
+            "not start with '/' and a '~' not followed by '0' or '1'. Raise "
+            "LookupError if the pointer is well-formed but does not resolve, "
+            "including a list index out of range, the token '-', and any "
+            "token applied to a value that is not a dict or list."
+        ),
+        validator=LOAD_CANDIDATE + require("resolve_json_pointer") + r'''
+# The example document from RFC 6901 section 5, verbatim.
+DOC = {
+    "foo": ["bar", "baz"],
+    "": 0,
+    "a/b": 1,
+    "c%d": 2,
+    "e^f": 3,
+    "g|h": 4,
+    "i\\j": 5,
+    "k\"l": 6,
+    " ": 7,
+    "m~n": 8,
+}
+
+assert resolve_json_pointer(DOC, "") == DOC
+assert resolve_json_pointer(DOC, "/foo") == ["bar", "baz"]
+assert resolve_json_pointer(DOC, "/foo/0") == "bar"
+assert resolve_json_pointer(DOC, "/foo/1") == "baz"
+assert resolve_json_pointer(DOC, "/") == 0, 'the empty key is a real key'
+assert resolve_json_pointer(DOC, "/a~1b") == 1
+assert resolve_json_pointer(DOC, "/c%d") == 2
+assert resolve_json_pointer(DOC, "/e^f") == 3
+assert resolve_json_pointer(DOC, "/g|h") == 4
+assert resolve_json_pointer(DOC, "/i\\j") == 5
+assert resolve_json_pointer(DOC, "/k\"l") == 6
+assert resolve_json_pointer(DOC, "/ ") == 7
+assert resolve_json_pointer(DOC, "/m~0n") == 8
+
+# Escape ORDER. Decoding '~0' first would turn '~01' into '~1' and then into
+# '/', reaching the wrong member; the RFC fixes the order for this reason.
+assert resolve_json_pointer({"~1": "tilde-one"}, "/~01") == "tilde-one"
+assert resolve_json_pointer({"/": "slash"}, "/~1") == "slash"
+assert resolve_json_pointer({"~": "tilde"}, "/~0") == "tilde"
+
+NESTED = {"a": {"b": [{"c": [10, 20, 30]}]}, "n": None, "t": True, "s": "xy"}
+assert resolve_json_pointer(NESTED, "/a/b/0/c/2") == 30
+assert resolve_json_pointer(NESTED, "/n") is None
+assert resolve_json_pointer(NESTED, "/t") is True
+
+
+def raises(kind, pointer, why, document=NESTED):
+    try:
+        resolve_json_pointer(document, pointer)
+    except kind:
+        return
+    except Exception as exc:
+        raise AssertionError(
+            f'{pointer!r}: raised {type(exc).__name__}, want '
+            f'{kind.__name__} ({why})') from None
+    raise AssertionError(f'{pointer!r}: accepted, want {kind.__name__} ({why})')
+
+
+# Syntax is a different fault from a miss, and the two have different fixes.
+raises(ValueError, "foo", 'no leading slash')
+raises(ValueError, "a/b", 'no leading slash')
+raises(ValueError, "/~2", 'a tilde must be followed by 0 or 1')
+raises(ValueError, "/~", 'trailing tilde')
+raises(ValueError, "/a~", 'trailing tilde in a token')
+
+# Well-formed but unresolvable.
+raises(LookupError, "/missing", 'absent key')
+raises(LookupError, "/a/b/1", 'list index out of range')
+raises(LookupError, "/a/b/-", 'the - token never resolves on read')
+raises(LookupError, "/a/b/00", 'leading zero is not a valid index')
+raises(LookupError, "/a/b/01", 'leading zero is not a valid index')
+raises(LookupError, "/a/b/+1", 'a sign is not a valid index')
+raises(LookupError, "/a/b/ 0", 'whitespace is not a valid index')
+raises(LookupError, "/a/b/x", 'a non-numeric token on a list')
+raises(LookupError, "/n/anything", 'None has no members')
+raises(LookupError, "/t/anything", 'a bool has no members')
+
+# A string is not a container, so indexing one must MISS rather than slice.
+# A resolver written with plain subscripting returns 'x' here instead.
+raises(LookupError, "/s/0", 'a string is not an addressable container')
+''',
+    ),
+    task(
+        f"{FAMILY}-0022", FAMILY,
+        prompt=(
+            "Implement a Python function negotiate_language(header, "
+            "supported) implementing HTTP Accept-Language negotiation. header "
+            "is the field value or None; supported is a list of language tags "
+            "the server can serve, in the server's own order of preference. "
+            "Return the best supported tag, preserving the spelling given in "
+            "supported, or None if nothing is acceptable. Each element of the "
+            "header is a tag or '*' with an optional ';q=' weight between 0 "
+            "and 1 with up to three decimal places, defaulting to 1. Matching "
+            "is case-insensitive. A header tag matches a supported tag that "
+            "equals it, or that extends it at a subtag boundary, so 'en' "
+            "matches 'en-US' but not 'english'. A weight of 0 makes a tag "
+            "unacceptable, and an explicit 0 for a specific tag overrides a "
+            "wildcard that would otherwise allow it. Among acceptable tags "
+            "choose the highest weight; break a tie on weight by the more "
+            "specific header match, preferring an exact tag over a prefix and "
+            "a prefix over '*'; break any remaining tie by the order of "
+            "supported. Return None when header is None or empty, since the "
+            "caller treats that as no preference, and ignore elements that "
+            "are syntactically invalid."
+        ),
+        validator=LOAD_CANDIDATE + require("negotiate_language") + r'''
+def check(header, supported, expected):
+    got = negotiate_language(header, supported)
+    assert got == expected, (
+        f'{header!r} over {supported!r}: got {got!r}, want {expected!r}')
+
+
+check('en-US', ['en-US', 'de'], 'en-US')
+check('en-US,en;q=0.9', ['en-GB', 'en-US'], 'en-US')
+check('fr;q=0.9,en;q=0.8', ['en-US', 'de'], 'en-US')
+check('de,en;q=0.7', ['en-US', 'de-DE'], 'de-DE')
+
+# Prefix matching happens at a SUBTAG BOUNDARY. A startswith() check accepts
+# 'english' for 'en', which is a different language.
+check('en', ['en-US'], 'en-US')
+check('en', ['english'], None)
+check('en', ['en'], 'en')
+check('en-US', ['en'], None)
+check('zh', ['zh-Hant-TW'], 'zh-Hant-TW')
+
+# Case-insensitive matching, but the SERVER's spelling is returned.
+check('EN-us', ['en-US'], 'en-US')
+check('en-us', ['EN-US'], 'EN-US')
+check('DE', ['de-DE'], 'de-DE')
+
+# Weights.
+check('en;q=0.5,de;q=0.8', ['en-US', 'de-DE'], 'de-DE')
+check('en;q=0.5, de;q=0.8', ['en-US', 'de-DE'], 'de-DE')
+check('en;q=1,de;q=0.999', ['de-DE', 'en-US'], 'en-US')
+check('en;q=0.001,de;q=0', ['de-DE', 'en-US'], 'en-US')
+
+# q=0 is a refusal, not a low score.
+check('en;q=0', ['en-US'], None)
+check('en;q=0,de', ['en-US', 'de-DE'], 'de-DE')
+check('en;q=0.000', ['en-US'], None)
+
+# The wildcard, and a specific refusal that overrides it.
+check('*', ['de', 'fr'], 'de')
+check('*', ['fr', 'de'], 'fr')
+check('de,*;q=0.1', ['fr', 'de'], 'de')
+check('*;q=0.5,en;q=0.9', ['de', 'en-US'], 'en-US')
+check('en;q=0,*', ['en-US', 'de'], 'de')
+check('en;q=0,*;q=0.5', ['en-US'], None)
+
+# Tie on weight: exact beats prefix, prefix beats wildcard.
+check('en-US;q=0.8,en;q=0.8', ['en-US'], 'en-US')
+check('en;q=0.8,*;q=0.8', ['de', 'en-GB'], 'en-GB')
+
+# Tie on weight AND specificity: the server's order decides.
+check('en,de', ['de-DE', 'en-US'], 'de-DE')
+check('en,de', ['en-US', 'de-DE'], 'en-US')
+
+# No preference expressed.
+check(None, ['en', 'de'], None)
+check('', ['en', 'de'], None)
+
+# Nothing acceptable.
+check('fr', ['en-US', 'de'], None)
+check('en', [], None)
+
+# Invalid elements are ignored, and must not take the valid ones with them.
+check('en;q=bad,de', ['en-US', 'de-DE'], 'de-DE')
+check('en;q=2,de', ['en-US', 'de-DE'], 'de-DE')
+check('en;q=-1,de', ['en-US', 'de-DE'], 'de-DE')
+check(';q=0.5,de', ['en-US', 'de-DE'], 'de-DE')
+check('en;;q=0.5,de', ['en-US', 'de-DE'], 'de-DE')
+''',
+    ),
+    task(
+        f"{FAMILY}-0023", FAMILY,
+        prompt=(
+            "Implement a Python function decode_base32(text) decoding RFC "
+            "4648 base32 with the standard alphabet A-Z and 2-7 and '=' "
+            "padding, without using the base64 module. text is a str. Return "
+            "the decoded bytes. The input length must be a multiple of 8. "
+            "Padding may only appear as a suffix, and only in the lengths a "
+            "real encoding can produce: 6, 4, 3 or 1 padding characters, "
+            "corresponding to 1, 2, 3 and 4 input bytes in the final group. "
+            "Raise ValueError on a character outside the alphabet, on a "
+            "length that is not a multiple of 8, on a padding count that no "
+            "encoding produces, on padding that is not a suffix, and on a "
+            "final group whose trailing bits are non-zero, since those bits "
+            "carry no data and a decoder that discards them accepts several "
+            "distinct strings for the same bytes. Return b'' for empty input."
+        ),
+        validator=LOAD_CANDIDATE + require("decode_base32") + r'''
+source = RESPONSE_TEXT
+for banned in ('base64', 'b32decode'):
+    assert banned not in source, f'the prompt forbids {banned}'
+
+# The test vectors from RFC 4648 section 10.
+assert decode_base32('') == b''
+assert decode_base32('MY======') == b'f'
+assert decode_base32('MZXQ====') == b'fo'
+assert decode_base32('MZXW6===') == b'foo'
+assert decode_base32('MZXW6YQ=') == b'foob'
+assert decode_base32('MZXW6YTB') == b'fooba'
+assert decode_base32('MZXW6YTBOI======') == b'foobar'
+
+# Every byte value round-trips against the reference encoder, at every
+# length that exercises a different padding count.
+import base64 as _reference
+for length in range(0, 17):
+    for start in (0, 71, 200):
+        raw = bytes((start + i) % 256 for i in range(length))
+        encoded = _reference.b32encode(raw).decode('ascii')
+        assert decode_base32(encoded) == raw, f'round trip failed for {raw!r}'
+
+
+def rejects(text, why):
+    try:
+        decode_base32(text)
+    except ValueError:
+        return
+    raise AssertionError(f'accepted {text!r}: {why}')
+
+
+# Length must be a multiple of 8.
+rejects('MZXW6YT', 'length 7 is not a multiple of 8')
+rejects('M', 'length 1 is not a multiple of 8')
+rejects('MZXW6YTBO', 'length 9 is not a multiple of 8')
+
+# Alphabet.
+rejects('mzxw6ytb', 'lowercase is not the standard alphabet')
+rejects('MZXW6YT0', '0 is not in the alphabet')
+rejects('MZXW6YT1', '1 is not in the alphabet')
+rejects('MZXW6YT8', '8 is not in the alphabet')
+rejects('MZXW6YT+', '+ is not in the alphabet')
+rejects('MZXW 6YT', 'space is not in the alphabet')
+
+# Padding counts an encoder never emits.
+rejects('MZXW6Y==', '2 padding characters are impossible')
+rejects('MZX=====', '5 padding characters are impossible')
+rejects('M=======', '7 padding characters are impossible')
+rejects('========', '8 padding characters are impossible')
+
+# Padding must be a suffix.
+rejects('MZ=XW6YT', 'padding in the middle')
+rejects('=MZXW6YT', 'leading padding')
+rejects('MY======MY======', 'padding inside a multi-group input')
+
+# Non-canonical trailing bits. 'MZXW6YR=' differs from the canonical
+# 'MZXW6YQ=' only in bits that carry no data; accepting both means two
+# distinct strings decode to b'foob', which breaks any signature or cache
+# key computed over the encoded form.
+rejects('MZXW6YR=', 'non-zero trailing bits')
+rejects('MZXW6YZ=', 'non-zero trailing bits')
+rejects('MZ======', 'non-zero trailing bits')
+rejects('MZXR====', 'non-zero trailing bits')
+# A legal padding count does NOT make a group legal: 'MZXW====' has the four
+# data characters a 2-byte group needs, and still carries 4 junk bits.
+rejects('MZXW====', 'legal padding count, non-zero trailing bits')
+''',
+    ),
+    task(
+        f"{FAMILY}-0024", FAMILY,
+        prompt=(
+            "Implement a Python function match_glob(pattern, path) matching a "
+            "slash-separated path against a shell-style glob, returning a "
+            "bool. Do not use fnmatch, glob, pathlib or re. '?' matches "
+            "exactly one character other than '/'. '*' matches any run of "
+            "characters, including none, other than '/'. '**' as a COMPLETE "
+            "path segment matches zero or more whole segments, so 'a/**/b' "
+            "matches 'a/b' as well as 'a/x/y/b'. A character class in square "
+            "brackets matches one character other than '/', supports ranges "
+            "with '-', is negated by a leading '!' or '^', treats a ']' "
+            "immediately after the opening bracket or the negation as a "
+            "literal, and treats a '-' first or last as a literal. A "
+            "backslash escapes the next character so it is matched literally. "
+            "Matching is over the whole path, not a prefix. Raise ValueError "
+            "on an unterminated class, a trailing backslash, and on '**' "
+            "appearing adjacent to other characters within a segment. That "
+            "last check is made on the segment's unescaped structure, so an "
+            "escaped star is an ordinary literal and does not combine with a "
+            "neighbouring star to form a '**': the escapes must be resolved "
+            "before the segment is judged."
+        ),
+        timeout_seconds=60.0,
+        validator=LOAD_CANDIDATE + require("match_glob") + r'''
+source = RESPONSE_TEXT
+for banned in ('fnmatch', 'import re', 'import glob', 'pathlib'):
+    assert banned not in source, f'the prompt forbids {banned}'
+
+
+def yes(pattern, path):
+    assert match_glob(pattern, path) is True, f'{pattern!r} should match {path!r}'
+
+
+def no(pattern, path):
+    assert match_glob(pattern, path) is False, (
+        f'{pattern!r} should not match {path!r}')
+
+
+# Literals, and whole-path matching.
+yes('a', 'a')
+no('a', 'ab')
+no('a', 'ba')
+no('a/b', 'a/b/c')
+yes('a/b/c', 'a/b/c')
+
+# '?' and '*' stop at the separator. This is the property that makes a glob
+# a path matcher rather than a string matcher.
+yes('a?c', 'abc')
+no('a?c', 'ac')
+no('a?c', 'abbc')
+no('a?c', 'a/c')
+yes('*.txt', 'notes.txt')
+yes('*', 'anything')
+yes('*', '')
+no('*', 'a/b')
+no('*.txt', 'sub/notes.txt')
+yes('a/*/c', 'a/b/c')
+no('a/*/c', 'a/b/x/c')
+yes('*/*', 'a/b')
+
+# Multiple stars in one segment need real backtracking.
+yes('*a*b*', 'xxayybzz')
+no('*a*b*', 'xxbyyazz')
+yes('a*a*a', 'aaa')
+yes('*x*x*x*', 'xxx')
+
+# '**' spans segments, including zero of them.
+yes('a/**/b', 'a/b')
+yes('a/**/b', 'a/x/b')
+yes('a/**/b', 'a/x/y/z/b')
+no('a/**/b', 'a/x/y/z/c')
+yes('**', 'a')
+yes('**', 'a/b/c')
+yes('**/b', 'b')
+yes('**/b', 'a/b')
+yes('a/**', 'a')
+yes('a/**', 'a/b/c')
+yes('**/*.txt', 'notes.txt')
+yes('**/*.txt', 'a/b/notes.txt')
+no('**/*.txt', 'a/b/notes.md')
+yes('src/**/test/**/*.py', 'src/test/a.py')
+yes('src/**/test/**/*.py', 'src/x/test/y/z/a.py')
+
+# Character classes.
+yes('[abc]', 'b')
+no('[abc]', 'd')
+yes('[a-z]', 'q')
+no('[a-z]', 'Q')
+yes('[a-zA-Z0-9]', 'M')
+yes('[!abc]', 'd')
+no('[!abc]', 'a')
+yes('[^abc]', 'd')
+no('[^abc]', 'a')
+no('[!abc]', '/')
+yes('[]]', ']')
+yes('[!]]', 'a')
+no('[!]]', ']')
+yes('[-a]', '-')
+yes('[a-]', '-')
+yes('[a-]', 'a')
+yes('file[0-9].txt', 'file7.txt')
+no('file[0-9].txt', 'filex.txt')
+
+# Escapes make a metacharacter literal.
+yes(r'a\*b', 'a*b')
+no(r'a\*b', 'axb')
+yes(r'a\?b', 'a?b')
+yes(r'\[abc\]', '[abc]')
+yes(r'a\\b', 'a\\b')
+yes(r'\**', '*xyz')
+
+# Errors.
+def rejects(pattern, path, why):
+    try:
+        match_glob(pattern, path)
+    except ValueError:
+        return
+    raise AssertionError(f'accepted {pattern!r}: {why}')
+
+
+rejects('[abc', 'a', 'unterminated class')
+rejects('[!', 'a', 'unterminated class')
+rejects('[]', 'a', 'unterminated class: ] after [ is a literal')
+rejects('a\\', 'a', 'trailing backslash')
+rejects('a**', 'ab', '** adjacent to other characters in a segment')
+rejects('**b', 'ab', '** adjacent to other characters in a segment')
+rejects('a/**b/c', 'a/b/c', '** adjacent to other characters in a segment')
+rejects('a/x**/c', 'a/xy/c', '** adjacent to other characters in a segment')
+''',
+    ),
+    task(
+        f"{FAMILY}-0025", FAMILY,
+        prompt=(
+            "Implement a Python function parse_media_type(value) parsing an "
+            "HTTP media type such as a Content-Type field value. Return a "
+            "tuple (type, subtype, parameters). type and subtype are "
+            "lowercased str. parameters is a dict mapping lowercased "
+            "parameter names to their values as str, with quoted-string "
+            "values unquoted and their backslash escapes resolved; parameter "
+            "values are NOT lowercased. Optional whitespace is permitted "
+            "around the semicolons and around the '=' is NOT permitted. When "
+            "a parameter name repeats, the first occurrence wins. Raise "
+            "ValueError if the type or subtype is missing or contains a "
+            "character outside the HTTP token set, if a parameter has no "
+            "value, if a quoted string is unterminated, or if a parameter "
+            "name is not a valid token."
+        ),
+        validator=LOAD_CANDIDATE + require("parse_media_type") + r'''
+def check(value, expected):
+    got = parse_media_type(value)
+    assert got == expected, f'{value!r}: got {got!r}, want {expected!r}'
+
+
+check('text/plain', ('text', 'plain', {}))
+check('TEXT/PLAIN', ('text', 'plain', {}))
+check('application/json', ('application', 'json', {}))
+check('application/vnd.api+json', ('application', 'vnd.api+json', {}))
+check('*/*', ('*', '*', {}))
+
+# Parameters. The NAME lowercases, the VALUE does not: a boundary and a
+# filename are case-sensitive, and folding them corrupts the message.
+check('text/plain;charset=UTF-8', ('text', 'plain', {'charset': 'UTF-8'}))
+check('text/plain; charset=UTF-8', ('text', 'plain', {'charset': 'UTF-8'}))
+check('text/plain ; charset=UTF-8', ('text', 'plain', {'charset': 'UTF-8'}))
+check('text/plain;CHARSET=UTF-8', ('text', 'plain', {'charset': 'UTF-8'}))
+check('text/plain;charset=utf-8', ('text', 'plain', {'charset': 'utf-8'}))
+check(
+    'multipart/form-data; boundary=AaB03x',
+    ('multipart', 'form-data', {'boundary': 'AaB03x'}))
+check(
+    'text/plain;a=1;b=2',
+    ('text', 'plain', {'a': '1', 'b': '2'}))
+
+# Quoted strings, including escapes and metacharacters that would otherwise
+# terminate the parse.
+check('text/plain;charset="UTF-8"', ('text', 'plain', {'charset': 'UTF-8'}))
+check('text/plain;x=""', ('text', 'plain', {'x': ''}))
+check('text/plain;x="a;b"', ('text', 'plain', {'x': 'a;b'}))
+check('text/plain;x="a=b"', ('text', 'plain', {'x': 'a=b'}))
+check('text/plain;x="a b"', ('text', 'plain', {'x': 'a b'}))
+check(r'text/plain;x="a\"b"', ('text', 'plain', {'x': 'a"b'}))
+check(r'text/plain;x="a\\b"', ('text', 'plain', {'x': 'a\\b'}))
+check(r'text/plain;x="\a"', ('text', 'plain', {'x': 'a'}))
+check(
+    'multipart/form-data; boundary="a;b=c"; charset=utf-8',
+    ('multipart', 'form-data', {'boundary': 'a;b=c', 'charset': 'utf-8'}))
+
+# First occurrence wins: taking the last lets a request smuggle a second
+# charset past a filter that inspected the first.
+check('text/plain;charset=utf-8;charset=ascii',
+      ('text', 'plain', {'charset': 'utf-8'}))
+check('text/plain;A=1;a=2', ('text', 'plain', {'a': '1'}))
+
+
+def rejects(value, why):
+    try:
+        parse_media_type(value)
+    except ValueError:
+        return
+    raise AssertionError(f'accepted {value!r}: {why}')
+
+
+rejects('', 'empty')
+rejects('text', 'no subtype')
+rejects('text/', 'empty subtype')
+rejects('/plain', 'empty type')
+rejects('/', 'both empty')
+rejects('text/plain/extra', 'a slash is not a token character')
+rejects('te xt/plain', 'space is not a token character')
+rejects('text/pl ain', 'space is not a token character')
+rejects('text@x/plain', '@ is not a token character')
+rejects('text/plain;charset', 'parameter with no value')
+rejects('text/plain;charset=', 'parameter with an empty unquoted value')
+rejects('text/plain;=utf-8', 'parameter with no name')
+rejects('text/plain;charset="utf-8', 'unterminated quoted string')
+rejects(r'text/plain;charset="utf-8\"', 'unterminated: the quote is escaped')
+rejects('text/plain;char set=utf-8', 'space in a parameter name')
+rejects('text/plain;charset =utf-8', 'space before = is not permitted')
+rejects('text/plain;charset= utf-8', 'space after = is not permitted')
+''',
+    ),
+    task(
+        f"{FAMILY}-0026", FAMILY,
+        prompt=(
+            "Implement a Python function parse_rfc3339(text) parsing an RFC "
+            "3339 timestamp and returning the number of seconds since the "
+            "Unix epoch as a float, computed without the datetime, time or "
+            "calendar modules. The format is a four-digit year, '-', "
+            "two-digit month, '-', two-digit day, then 'T' or 't' as the "
+            "separator, then two-digit hour, ':', minute, ':', second, an "
+            "optional fractional part of a '.' followed by one or more "
+            "digits, and finally an offset that is 'Z', 'z', or a sign "
+            "followed by two-digit hours, ':' and two-digit minutes. The "
+            "result is the instant in UTC, so a positive offset is "
+            "subtracted. Validate the calendar: reject a month outside 1 to "
+            "12, a day outside the real length of that month in that year "
+            "under the proleptic Gregorian leap rule, an hour above 23, and a "
+            "minute or second above 59. Reject a leap second value of 60, and "
+            "reject an offset whose minutes exceed 59. Raise ValueError on "
+            "any input that does not match this grammar exactly, including "
+            "missing padding, a missing offset, and trailing characters."
+        ),
+        validator=LOAD_CANDIDATE + require("parse_rfc3339") + r'''
+source = RESPONSE_TEXT
+for banned in ('datetime', 'import time', 'import calendar', 'dateutil'):
+    assert banned not in source, f'the prompt forbids {banned}'
+
+
+def check(text, expected):
+    got = parse_rfc3339(text)
+    # Prove the SHAPE before doing arithmetic on it. A candidate whose
+    # parse_rfc3339 falls through and returns None makes `abs(got - expected)`
+    # raise TypeError in validator frames alone, which the contract scores
+    # validator_error -- a harness fault that blocks admission -- when it is
+    # an ordinary wrong answer.
+    assert isinstance(got, (int, float)) and not isinstance(got, bool), (
+        f'{text!r}: parse_rfc3339 returned {got!r}, want a number')
+    assert abs(got - expected) < 1e-6, (
+        f'{text!r}: got {got!r}, want {expected!r}')
+
+
+check('1970-01-01T00:00:00Z', 0.0)
+check('1970-01-01t00:00:00z', 0.0)
+check('1970-01-02T00:00:00Z', 86400.0)
+check('1969-12-31T23:59:59Z', -1.0)
+check('2000-01-01T00:00:00Z', 946684800.0)
+check('2001-09-09T01:46:40Z', 1000000000.0)
+check('2038-01-19T03:14:08Z', 2147483648.0)
+check('1900-01-01T00:00:00Z', -2208988800.0)
+
+# Offsets: a positive offset means local time is AHEAD, so the UTC instant
+# is EARLIER. Adding instead of subtracting is the classic sign inversion.
+check('1970-01-01T01:00:00+01:00', 0.0)
+check('1969-12-31T23:00:00-01:00', 0.0)
+check('1996-12-19T16:39:57-08:00', 851042397.0)
+check('1970-01-01T00:00:00+00:00', 0.0)
+check('1970-01-01T00:00:00-00:00', 0.0)
+check('1970-01-01T05:30:00+05:30', 0.0)
+check('1970-01-01T00:00:00+14:00', -50400.0)
+
+# Fractional seconds, at several precisions.
+check('1970-01-01T00:00:00.5Z', 0.5)
+check('1970-01-01T00:00:00.25Z', 0.25)
+check('1970-01-01T00:00:00.000Z', 0.0)
+check('1970-01-01T00:00:00.123456Z', 0.123456)
+check('1970-01-01T00:00:00.000000001Z', 0.000000001)
+
+# The leap rule: divisible by 4, except centuries, except those by 400.
+check('2000-02-29T00:00:00Z', 951782400.0)
+check('2024-02-29T00:00:00Z', 1709164800.0)
+check('1996-02-29T00:00:00Z', 825552000.0)
+
+
+def rejects(text, why):
+    try:
+        parse_rfc3339(text)
+    except ValueError:
+        return
+    raise AssertionError(f'accepted {text!r}: {why}')
+
+
+# 1900 and 2100 are NOT leap years; 2000 is. A `year % 4` test accepts the
+# first two and a `year % 100` test rejects the third.
+rejects('1900-02-29T00:00:00Z', '1900 is not a leap year')
+rejects('2100-02-29T00:00:00Z', '2100 is not a leap year')
+rejects('2023-02-29T00:00:00Z', '2023 is not a leap year')
+rejects('2023-02-30T00:00:00Z', 'February never has 30 days')
+rejects('2023-04-31T00:00:00Z', 'April has 30 days')
+rejects('2023-06-31T00:00:00Z', 'June has 30 days')
+rejects('2023-09-31T00:00:00Z', 'September has 30 days')
+rejects('2023-11-31T00:00:00Z', 'November has 30 days')
+rejects('2023-01-32T00:00:00Z', 'January has 31 days')
+rejects('2023-00-10T00:00:00Z', 'month 0')
+rejects('2023-13-10T00:00:00Z', 'month 13')
+rejects('2023-01-00T00:00:00Z', 'day 0')
+rejects('2023-01-01T24:00:00Z', 'hour 24')
+rejects('2023-01-01T00:60:00Z', 'minute 60')
+rejects('2023-01-01T00:00:60Z', 'a leap second is rejected by this contract')
+rejects('2023-01-01T00:00:61Z', 'second 61')
+
+# Grammar.
+rejects('', 'empty')
+rejects('2023-01-01', 'no time or offset')
+rejects('2023-01-01T00:00:00', 'no offset')
+rejects('2023-1-01T00:00:00Z', 'month is not zero-padded')
+rejects('2023-01-1T00:00:00Z', 'day is not zero-padded')
+rejects('23-01-01T00:00:00Z', 'two-digit year')
+rejects('2023-01-01 00:00:00Z', 'space instead of T')
+rejects('2023-01-01X00:00:00Z', 'invalid separator')
+rejects('2023-01-01T00:00:00.Z', 'a dot with no digits')
+rejects('2023-01-01T00:00:00Z ', 'trailing whitespace')
+rejects('2023-01-01T00:00:00ZZ', 'trailing character')
+rejects('2023-01-01T00:00:00+0100', 'offset needs a colon')
+rejects('2023-01-01T00:00:00+01', 'offset needs minutes')
+rejects('2023-01-01T00:00:00+01:60', 'offset minutes above 59')
+rejects('2023-01-01T00:00:00%01:00', 'invalid offset sign')
+rejects('+2023-01-01T00:00:00Z', 'leading sign on the year')
+''',
+    ),
 ]

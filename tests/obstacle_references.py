@@ -13682,3 +13682,513 @@ MUTATIONS["testing_debugging_repair_refactoring-0212"] = (
     "    if isinstance(test, ast.Tuple):\n        return len(test.elts) > 0",
     "    if isinstance(test, ast.Tuple):\n        return False",
 )
+
+
+REFERENCES["validation_parsing_serialization-0021"] = r'''
+def resolve_json_pointer(document, pointer):
+    if not isinstance(pointer, str):
+        raise ValueError("pointer must be a string")
+    if pointer == "":
+        return document
+    if not pointer.startswith("/"):
+        raise ValueError("pointer must start with /")
+    current = document
+    for raw in pointer.split("/")[1:]:
+        token = []
+        i = 0
+        while i < len(raw):
+            ch = raw[i]
+            if ch == "~":
+                if i + 1 >= len(raw) or raw[i + 1] not in "01":
+                    raise ValueError("bad escape")
+                token.append("/" if raw[i + 1] == "1" else "~")
+                i += 2
+            else:
+                token.append(ch)
+                i += 1
+        token = "".join(token)
+        if isinstance(current, dict):
+            if token not in current:
+                raise LookupError(token)
+            current = current[token]
+        elif isinstance(current, list):
+            if token == "0":
+                index = 0
+            elif (token and token[0] in "123456789"
+                  and all(c in "0123456789" for c in token)):
+                index = int(token)
+            else:
+                raise LookupError(token)
+            if index >= len(current):
+                raise LookupError(token)
+            current = current[index]
+        else:
+            raise LookupError(token)
+    return current
+'''
+
+# Swap the two escapes. Every unescaped pointer still resolves, so a suite
+# that only walked ordinary keys would still pass; '/a~1b' now looks for the
+# key 'a~b' instead of 'a/b'.
+MUTATIONS["validation_parsing_serialization-0021"] = (
+    '                token.append("/" if raw[i + 1] == "1" else "~")',
+    '                token.append("~" if raw[i + 1] == "1" else "/")',
+)
+
+
+REFERENCES["validation_parsing_serialization-0022"] = r'''
+def _valid_q(text):
+    if not text:
+        return False
+    if text[0] not in "01":
+        return False
+    rest = text[1:]
+    if rest == "":
+        return True
+    if rest[0] != ".":
+        return False
+    digits = rest[1:]
+    if not digits or len(digits) > 3:
+        return False
+    if not all(c in "0123456789" for c in digits):
+        return False
+    if text[0] == "1" and any(c != "0" for c in digits):
+        return False
+    return True
+
+
+def _valid_tag(tag):
+    if tag == "*":
+        return True
+    if not tag:
+        return False
+    for segment in tag.split("-"):
+        if not segment or not segment.isascii() or not segment.isalnum():
+            return False
+    return True
+
+
+def negotiate_language(header, supported):
+    if not isinstance(header, str) or not header:
+        return None
+    entries = []
+    for element in header.split(","):
+        element = element.strip()
+        if not element:
+            continue
+        parts = element.split(";")
+        tag = parts[0].strip()
+        weight = 1.0
+        acceptable = True
+        for param in parts[1:]:
+            param = param.strip()
+            if not param:
+                acceptable = False
+                break
+            name, sep, value = param.partition("=")
+            if not sep or name.strip().lower() != "q":
+                acceptable = False
+                break
+            value = value.strip()
+            if not _valid_q(value):
+                acceptable = False
+                break
+            weight = float(value)
+        if not acceptable or not _valid_tag(tag):
+            continue
+        entries.append((tag.lower(), weight))
+    best = None
+    for order, candidate in enumerate(supported):
+        low = candidate.lower()
+        match_weight = None
+        match_spec = None
+        for tag, weight in entries:
+            if tag == "*":
+                spec = 0
+            elif low == tag:
+                spec = 2
+            elif low.startswith(tag + "-"):
+                spec = 1
+            else:
+                continue
+            if match_spec is None or spec > match_spec:
+                match_spec = spec
+                match_weight = weight
+        if match_weight is None or match_weight <= 0:
+            continue
+        key = (match_weight, match_spec, -order)
+        if best is None or key > best[0]:
+            best = (key, candidate)
+    return best[1] if best else None
+'''
+
+# Treat q=0 as merely the lowest score rather than a refusal. Ordinary
+# preference ordering is untouched; the client's explicit "not this one"
+# stops being honoured, which is the half of the contract that matters.
+MUTATIONS["validation_parsing_serialization-0022"] = (
+    "        if match_weight is None or match_weight <= 0:",
+    "        if match_weight is None:",
+)
+
+
+REFERENCES["validation_parsing_serialization-0023"] = r'''
+_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+_BYTES_FOR_PAD = {0: 5, 1: 4, 3: 3, 4: 2, 6: 1}
+
+
+def decode_base32(text):
+    if not isinstance(text, str):
+        raise ValueError("expected str")
+    if len(text) % 8 != 0:
+        raise ValueError("length must be a multiple of 8")
+    out = bytearray()
+    for start in range(0, len(text), 8):
+        group = text[start:start + 8]
+        pad = 0
+        while pad < 8 and group[7 - pad] == "=":
+            pad += 1
+        data = group[:8 - pad]
+        if "=" in data:
+            raise ValueError("padding is not a suffix")
+        if pad not in _BYTES_FOR_PAD:
+            raise ValueError("impossible padding count")
+        if pad and start + 8 != len(text):
+            raise ValueError("padding before the final group")
+        value = 0
+        bits = 0
+        for ch in data:
+            index = _ALPHABET.find(ch)
+            if index < 0:
+                raise ValueError("character outside the alphabet")
+            value = (value << 5) | index
+            bits += 5
+        count = _BYTES_FOR_PAD[pad]
+        extra = bits - count * 8
+        if value & ((1 << extra) - 1):
+            raise ValueError("non-canonical trailing bits")
+        out += (value >> extra).to_bytes(count, "big")
+    return bytes(out)
+'''
+
+# Stop rejecting non-zero trailing bits. Every RFC 4648 vector still decodes
+# correctly -- this mutation is invisible to a round-trip suite -- but
+# several distinct strings now decode to the same bytes, which is exactly
+# what breaks a signature computed over the encoded form.
+MUTATIONS["validation_parsing_serialization-0023"] = (
+    "        if value & ((1 << extra) - 1):",
+    "        if False:",
+)
+
+
+REFERENCES["validation_parsing_serialization-0024"] = r'''
+def _validate(segment):
+    shape = []
+    i = 0
+    while i < len(segment):
+        ch = segment[i]
+        if ch == "\\":
+            if i + 1 >= len(segment):
+                raise ValueError("trailing backslash")
+            shape.append("c")
+            i += 2
+        elif ch == "[":
+            j = i + 1
+            if j < len(segment) and segment[j] in "!^":
+                j += 1
+            if j < len(segment) and segment[j] == "]":
+                j += 1
+            while j < len(segment) and segment[j] != "]":
+                if segment[j] == "\\":
+                    j += 1
+                j += 1
+            if j >= len(segment):
+                raise ValueError("unterminated class")
+            shape.append("c")
+            i = j + 1
+        else:
+            shape.append("*" if ch == "*" else "c")
+            i += 1
+    shape = "".join(shape)
+    if "**" in shape and shape != "**":
+        raise ValueError("** must be a whole segment")
+
+
+def _tokens(segment):
+    toks = []
+    i = 0
+    while i < len(segment):
+        ch = segment[i]
+        if ch == "\\":
+            toks.append(("lit", segment[i + 1]))
+            i += 2
+        elif ch == "*":
+            toks.append(("star",))
+            i += 1
+        elif ch == "?":
+            toks.append(("any",))
+            i += 1
+        elif ch == "[":
+            j = i + 1
+            negated = False
+            if j < len(segment) and segment[j] in "!^":
+                negated = True
+                j += 1
+            items = []
+            first = True
+            while j < len(segment) and (segment[j] != "]" or first):
+                first = False
+                if segment[j] == "\\" and j + 1 < len(segment):
+                    low = segment[j + 1]
+                    j += 2
+                else:
+                    low = segment[j]
+                    j += 1
+                if (j + 1 < len(segment) and segment[j] == "-"
+                        and segment[j + 1] != "]"):
+                    items.append((low, segment[j + 1]))
+                    j += 2
+                else:
+                    items.append((low, low))
+            toks.append(("class", negated, items))
+            i = j + 1
+        else:
+            toks.append(("lit", ch))
+            i += 1
+    return toks
+
+
+def _match_tokens(toks, text):
+    memo = {}
+
+    def go(ti, si):
+        key = (ti, si)
+        if key in memo:
+            return memo[key]
+        if ti == len(toks):
+            result = si == len(text)
+        else:
+            token = toks[ti]
+            if token[0] == "star":
+                result = False
+                for k in range(si, len(text) + 1):
+                    if go(ti + 1, k):
+                        result = True
+                        break
+            elif si >= len(text):
+                result = False
+            elif token[0] == "any":
+                result = go(ti + 1, si + 1)
+            elif token[0] == "lit":
+                result = text[si] == token[1] and go(ti + 1, si + 1)
+            else:
+                hit = any(low <= text[si] <= high for low, high in token[2])
+                if token[1]:
+                    hit = not hit
+                result = hit and go(ti + 1, si + 1)
+        memo[key] = result
+        return result
+
+    return go(0, 0)
+
+
+def _match_segments(pat, pi, path, si):
+    while pi < len(pat):
+        if pat[pi] == "**":
+            if pi + 1 == len(pat):
+                return True
+            for k in range(si, len(path) + 1):
+                if _match_segments(pat, pi + 1, path, k):
+                    return True
+            return False
+        if si >= len(path):
+            return False
+        if not _match_tokens(_tokens(pat[pi]), path[si]):
+            return False
+        pi += 1
+        si += 1
+    return si == len(path)
+
+
+def match_glob(pattern, path):
+    segments = pattern.split("/")
+    for segment in segments:
+        _validate(segment)
+    return _match_segments(segments, 0, path.split("/"), 0)
+'''
+
+# Compare only the low end of a class range. Single-character classes such
+# as [abc] and [!abc] keep working, so most of the suite is unaffected;
+# ranges like [a-z] silently shrink to their first character.
+MUTATIONS["validation_parsing_serialization-0024"] = (
+    "                hit = any(low <= text[si] <= high for low, high in token[2])",
+    "                hit = any(low == text[si] for low, high in token[2])",
+)
+
+
+REFERENCES["validation_parsing_serialization-0025"] = r'''
+_TOKEN = set(
+    "!#$%&'*+-.^_`|~0123456789"
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+
+
+def parse_media_type(value):
+    if not isinstance(value, str) or not value:
+        raise ValueError("empty media type")
+    head, sep, rest = value.partition(";")
+    kind, slash, sub = head.strip().partition("/")
+    if not slash:
+        raise ValueError("no subtype")
+    if not kind or not sub:
+        raise ValueError("empty type or subtype")
+    for part in (kind, sub):
+        for ch in part:
+            if ch not in _TOKEN and ch != "*":
+                raise ValueError("invalid token character")
+    params = {}
+    text = rest
+    while sep:
+        j = 0
+        while j < len(text) and text[j] in " \t":
+            j += 1
+        k = j
+        while k < len(text) and text[k] in _TOKEN:
+            k += 1
+        name = text[j:k]
+        if not name:
+            raise ValueError("parameter without a name")
+        if k >= len(text) or text[k] != "=":
+            raise ValueError("parameter without a value")
+        k += 1
+        if k < len(text) and text[k] == '"':
+            k += 1
+            buf = []
+            while True:
+                if k >= len(text):
+                    raise ValueError("unterminated quoted string")
+                ch = text[k]
+                if ch == "\\":
+                    if k + 1 >= len(text):
+                        raise ValueError("unterminated quoted string")
+                    buf.append(text[k + 1])
+                    k += 2
+                elif ch == '"':
+                    k += 1
+                    break
+                else:
+                    buf.append(ch)
+                    k += 1
+            parsed = "".join(buf)
+        else:
+            m = k
+            while m < len(text) and text[m] in _TOKEN:
+                m += 1
+            parsed = text[k:m]
+            if not parsed:
+                raise ValueError("empty parameter value")
+            k = m
+        low = name.lower()
+        if low not in params:
+            params[low] = parsed
+        while k < len(text) and text[k] in " \t":
+            k += 1
+        if k >= len(text):
+            break
+        if text[k] != ";":
+            raise ValueError("junk after parameter")
+        text = text[k + 1:]
+    return (kind.lower(), sub.lower(), params)
+'''
+
+# Fold parameter VALUES to lower case along with their names. Every
+# case-insensitive parameter still compares equal, so a charset-only suite
+# passes; a multipart boundary and a filename are corrupted.
+MUTATIONS["validation_parsing_serialization-0025"] = (
+    "            params[low] = parsed",
+    "            params[low] = parsed.lower()",
+)
+
+
+REFERENCES["validation_parsing_serialization-0026"] = r'''
+def _leap(year):
+    return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+
+
+def _days_in(year, month):
+    if month == 2:
+        return 29 if _leap(year) else 28
+    return 31 if month in (1, 3, 5, 7, 8, 10, 12) else 30
+
+
+def _days_from_civil(year, month, day):
+    year -= month <= 2
+    era = (year if year >= 0 else year - 399) // 400
+    yoe = year - era * 400
+    shifted = month + (-3 if month > 2 else 9)
+    doy = (153 * shifted + 2) // 5 + day - 1
+    doe = yoe * 365 + yoe // 4 - yoe // 100 + doy
+    return era * 146097 + doe - 719468
+
+
+def parse_rfc3339(text):
+    if not isinstance(text, str):
+        raise ValueError("expected str")
+
+    def digits(part, count):
+        if len(part) != count or not all(c in "0123456789" for c in part):
+            raise ValueError("expected digits")
+        return int(part)
+
+    if len(text) < 20:
+        raise ValueError("too short")
+    if text[4] != "-" or text[7] != "-":
+        raise ValueError("bad date separators")
+    year = digits(text[0:4], 4)
+    month = digits(text[5:7], 2)
+    day = digits(text[8:10], 2)
+    if text[10] not in "Tt":
+        raise ValueError("bad date-time separator")
+    if text[13] != ":" or text[16] != ":":
+        raise ValueError("bad time separators")
+    hour = digits(text[11:13], 2)
+    minute = digits(text[14:16], 2)
+    second = digits(text[17:19], 2)
+    rest = text[19:]
+    fraction = 0.0
+    if rest.startswith("."):
+        i = 1
+        while i < len(rest) and rest[i] in "0123456789":
+            i += 1
+        if i == 1:
+            raise ValueError("dot with no digits")
+        fraction = int(rest[1:i]) / (10 ** (i - 1))
+        rest = rest[i:]
+    if rest in ("Z", "z"):
+        offset = 0
+    elif len(rest) == 6 and rest[0] in "+-" and rest[3] == ":":
+        off_hour = digits(rest[1:3], 2)
+        off_minute = digits(rest[4:6], 2)
+        if off_minute > 59:
+            raise ValueError("offset minutes above 59")
+        offset = (off_hour * 3600 + off_minute * 60)
+        if rest[0] == "-":
+            offset = -offset
+    else:
+        raise ValueError("bad offset")
+    if not 1 <= month <= 12:
+        raise ValueError("month out of range")
+    if not 1 <= day <= _days_in(year, month):
+        raise ValueError("day out of range")
+    if hour > 23 or minute > 59 or second > 59:
+        raise ValueError("time out of range")
+    epoch_days = _days_from_civil(year, month, day)
+    return (epoch_days * 86400 + hour * 3600 + minute * 60 + second
+            + fraction - offset)
+'''
+
+# Negate the offset on '+' instead of '-'. Every Z-suffixed vector is
+# unaffected, which is most of what a hand-written suite tends to contain;
+# only the offset instants move, and they move by twice the offset.
+MUTATIONS["validation_parsing_serialization-0026"] = (
+    '        if rest[0] == "-":',
+    '        if rest[0] == "+":',
+)
