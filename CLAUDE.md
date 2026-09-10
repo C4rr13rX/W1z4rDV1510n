@@ -279,11 +279,17 @@ Verify, do not assume:
   whose resident RSS was 11.77 GB. Growth tracks TRAINING ACTIVITY, not brain
   size, so a bigger volume buys time and never a fix. The WAL has compaction
   (`store/wal.rs`); the neuron store does not — do not confuse the two. Burn
-  rate measured over 420 s of deferred replay: **125.4 GB/h**, ~10.8 MB per
-  trained row at 3.2 rows/s, against a five-week average nearer 1.2 GB/h — so
-  sample it twice before quoting a runway, and size disk alarms from the burn
-  rate, not from the supervisor's 8 GB yield guard, which is under four minutes
-  of warning at burst.
+  rate measured across four windows: 125.4, 147.2, 73.8, 102.7 GB/h —
+  **sustained ~112 GB/h**, not a burst. Dividing the 1068 GB file by five weeks
+  to get "1.2 GB/h" is wrong; the checkpoint is rolled back and regrown, so its
+  size is not a running total. **The bytes are not new information**: over 301 s
+  the file grew 8.59 GB while `total_neurons` rose by 1,040 — 8.26 MB per
+  neuron, 8.45 MB per tick. Growth tracks TICKS. The brain sits at 11.57 GB RSS
+  on a 15.26 GB host with 3.02 GB free against a 3 GB floor, so it evicts
+  continuously and each eviction appends a body that is never reclaimed —
+  **memory pressure is converted into permanent disk growth**, which is why more
+  disk is the wrong purchase. Size disk alarms from the burn rate, not from the
+  supervisor's 8 GB yield guard, which is under four minutes of warning.
 
 - **`worker_count: 0` during a replay is the NORMAL reading, not a stall.**
   The deferred-replay worker is `tools.training_standard.drive_corpora_brain`,

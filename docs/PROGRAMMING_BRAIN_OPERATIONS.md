@@ -1686,12 +1686,48 @@ rollback:
 | free at end | 619.39 GB |
 | projected time to full | 4.9 h |
 
-The five-week average implied by a 1068 GB file is closer to 1.2 GB/h, so this
-window is ~100x that and may be a post-rollback rehydration burst: a restored
-brain pages neurons in and appends a fresh record for each one it sleeps again.
-CLAUDE.md's own rule applies -- **the instantaneous rate is a duty cycle, so
-never extrapolate an ETA from one window** -- and the disagreement between the
-two figures is itself the reason to sample again rather than to pick one.
+The first reading looked like it might be a post-rollback rehydration burst, so
+it was sampled again. It is not a burst. Four windows:
+
+| window | GB/h | rows/s |
+|---|---|---|
+| 1 | 125.4 | 3.218 |
+| 2 | 147.2 | 2.438 |
+| 3 | 73.8 | 3.028 |
+| 4 | 102.7 | — |
+
+Mean ~112 GB/h, sustained across ~50 minutes. An earlier estimate of 1.2 GB/h,
+derived by dividing the 1068 GB file by five weeks, was simply wrong: the
+checkpoint is rolled back and regrown repeatedly, so its size is not a running
+total and file-size-over-time is not a growth rate.
+
+### The bytes are not new information
+
+The fourth window measured the brain's own counters over the same 301 s:
+
+| | delta |
+|---|---|
+| checkpoint growth | 8.59 GB |
+| `total_neurons` | +1,040 |
+| `total_concepts` | +1,040 |
+| `total_binding` | +1,014 |
+| `total_terminals` | +134,226 |
+| `tick` | +1,016 |
+
+That is **8.26 MB per new neuron** and **8.45 MB per tick**. A thousand new
+neurons cannot legitimately require 8.59 GB, so the bytes are overwhelmingly
+re-appended copies of state that already existed. Growth tracks TICKS, not
+learning.
+
+The mechanism follows from the memory geometry: the brain sits at 11.57 GB RSS
+on a 15.26 GB host with 3.02 GB available against a 3 GB floor, so the
+orchestrator evicts continuously to stay under it. Every eviction appends a full
+neuron body, every page-in brings it back, and the append-only store makes each
+cycle permanent. **Memory pressure is converted into unbounded disk growth.**
+
+This is why a larger volume is the wrong purchase. Disk buys hours per terabyte
+at this rate; the leverage is more RAM (fewer evictions) and a compactor
+(reclaim what eviction already wrote).
 
 What the measurement does settle is the alarm floor. `DISK_ALARM_FLOOR_GB` is
 48 GB: about 23 minutes at the burst rate and about 40 days at the average, so
