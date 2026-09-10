@@ -28,7 +28,11 @@ twice. Nothing in a fixture is a hint.
 from __future__ import annotations
 
 from scripts.programming_obstacle_tasks import task
-from scripts.programming_obstacle_tasks._support import LOAD_CANDIDATE, require
+from scripts.programming_obstacle_tasks._support import (
+    LOAD_CANDIDATE,
+    SHAPE_GUARDS,
+    require,
+)
 
 FAMILY = "architecture_multifile_integration"
 
@@ -554,8 +558,12 @@ for bad in (
             "naming the source and the key when a value cannot be coerced, "
             "and leave every source mapping unmodified."
         ),
-        validator=LOAD_CANDIDATE + require("compose") + r'''
+        validator=LOAD_CANDIDATE + require("compose") + SHAPE_GUARDS + r'''
 import copy
+
+# Every call is checked, not just the first: this validator
+# calls compose repeatedly and subscripts each result.
+compose = returning(compose, 'compose(schema, sources)')
 
 schema = {
     'host': {'type': 'str', 'default': 'localhost'},
@@ -656,7 +664,7 @@ for bad in ({'port': 'nine'}, {'port': '9.5'}, {'ratio': 'half'},
             "legacy_store.py": _LEGACY_STORE,
             "cache_api.py": _CACHE_API,
         },
-        validator=LOAD_CANDIDATE + require("LegacyBackedCache") + r'''
+        validator=LOAD_CANDIDATE + require("LegacyBackedCache") + SHAPE_GUARDS + r'''
 import base64
 import cache_api
 import legacy_store
@@ -672,7 +680,8 @@ class Clock:
 
 store = legacy_store.LegacyStore()
 clock = Clock()
-cache = LegacyBackedCache(store, clock)
+cache = having(LegacyBackedCache(store, clock), 'get', 'set',
+               what='LegacyBackedCache(store, clock)')
 
 # Arbitrary bytes, not text: the legacy store would refuse these directly.
 payload = b'\x00\xff\xfe binary \x80'
@@ -767,7 +776,7 @@ assert (store.fetches, store.puts) == before, \
         ),
         fixtures={"stores.py": _STORES},
         validator=LOAD_CANDIDATE + require("UnitOfWork")
-        + require("PartialCommitError") + r'''
+        + require("PartialCommitError") + SHAPE_GUARDS + r'''
 import stores as store_module
 
 
@@ -779,7 +788,8 @@ def build(*failing):
 
 
 registry = build()
-work = UnitOfWork(registry)
+work = having(UnitOfWork(registry), 'stage', 'commit',
+               what='UnitOfWork(registry)')
 work.stage('accounts', 'a', 1)
 work.stage('ledger', 'l', 2)
 assert work.commit() == ['accounts', 'ledger', 'audit']
@@ -1000,7 +1010,7 @@ assert seen == [{'k': 'v'}], 'the payload is passed through unchanged'
             "call. A catch-up must read only from next_offset."
         ),
         fixtures={"event_log.py": _EVENT_LOG},
-        validator=LOAD_CANDIDATE + require("BalanceProjection") + r'''
+        validator=LOAD_CANDIDATE + require("BalanceProjection") + SHAPE_GUARDS + r'''
 import event_log
 
 EVENTS = [
@@ -1012,7 +1022,8 @@ EVENTS = [
 ]
 
 log = event_log.EventLog(EVENTS)
-projection = BalanceProjection(log)
+projection = having(BalanceProjection(log), 'balances',
+                    what='BalanceProjection(log)')
 assert projection.catch_up() == 5, 'not every event was applied'
 assert projection.balances == {'alice': 100, 'bob': 40}, projection.balances
 assert projection.next_offset == 5
@@ -1121,7 +1132,7 @@ assert BalanceProjection(event_log.EventLog([])).catch_up() == 0
             "earlier calls stay open and registered."
         ),
         fixtures={"components.py": _COMPONENTS},
-        validator=LOAD_CANDIDATE + require("Container") + r'''
+        validator=LOAD_CANDIDATE + require("Container") + SHAPE_GUARDS + r'''
 import components
 
 
@@ -1138,7 +1149,8 @@ specs = {
     'cache': spec('cache', trace, ['config']),
     'api': spec('api', trace, ['pool', 'cache']),
 }
-container = Container(specs)
+container = having(Container(specs), 'get',
+                   what='Container(specs)')
 api = container.get('api')
 assert api.name == 'api'
 
@@ -1349,7 +1361,7 @@ for field, value in (('state', 'X'), ('state', ''), ('state', None),
             "too."
         ),
         fixtures={"pricers.py": _PRICERS},
-        validator=LOAD_CANDIDATE + require("StranglerPricer") + r'''
+        validator=LOAD_CANDIDATE + require("StranglerPricer") + SHAPE_GUARDS + r'''
 import pricers
 
 
@@ -1366,7 +1378,8 @@ def record(*args):
 
 legacy = pricers.LegacyPricer()
 modern = pricers.ModernPricer()
-router = StranglerPricer(legacy, modern, 'legacy', record)
+router = having(StranglerPricer(legacy, modern, 'legacy', record), 'price',
+                 what='StranglerPricer(...)')
 assert router.price(order('a')) == 200
 assert legacy.calls == ['a'] and modern.calls == [], \
     'legacy mode must not reach the modern pricer'
@@ -1474,12 +1487,13 @@ for bad in ('canary', '', None, 'Shadow'):
             "reference must never capture the money twice."
         ),
         fixtures={"gateway.py": _GATEWAY},
-        validator=LOAD_CANDIDATE + require("charge_once") + r'''
+        validator=LOAD_CANDIDATE + require("charge_once") + SHAPE_GUARDS + r'''
 import gateway as gw
 
 # A retry presents the same key, so the money moves exactly once.
 service = gw.Gateway(transient_failures=2)
-record = charge_once(service, 'order-1', 500)
+record = built(charge_once(service, 'order-1', 500),
+               "charge_once(service, 'order-1', 500)")
 assert record['amount_cents'] == 500
 assert service.attempts == 3, f'{service.attempts} attempts, expected 3'
 assert service.captured_total == 500, \
@@ -2014,7 +2028,7 @@ for bad in ({'schema_version': 1, 'name': 'x'},
             "not a positive integer raises ValueError."
         ),
         fixtures={"rowstore.py": _ROW_STORE},
-        validator=LOAD_CANDIDATE + require("iterate") + r'''
+        validator=LOAD_CANDIDATE + require("iterate") + SHAPE_GUARDS + r'''
 import rowstore
 
 
@@ -2025,6 +2039,7 @@ def advance(walk, label):
     StopIteration is raised in validator frames and the harness scores it
     validator_error, which blocks admission instead of recording the miss.
     """
+    iterating(walk, 'iterate(store, page_size)')
     try:
         return next(walk)
     except StopIteration:
@@ -2033,7 +2048,7 @@ def advance(walk, label):
 
 def row_ids(rows):
     collected = []
-    for row in rows:
+    for row in iterating(rows, 'iterate(store, page_size)'):
         assert isinstance(row, dict), f'yielded {row!r}, not a row'
         collected.append(row.get('row_id'))
     return collected
@@ -2115,7 +2130,7 @@ for bad in (0, -1, 2.5, 'two', None):
             "write returns the version the primary reported."
         ),
         fixtures={"replication.py": _REPLICATION},
-        validator=LOAD_CANDIDATE + require("Session") + r'''
+        validator=LOAD_CANDIDATE + require("Session") + SHAPE_GUARDS + r'''
 import replication
 
 primary = replication.Primary()
@@ -2123,7 +2138,8 @@ replica = replication.Replica(primary)
 primary.write('k', 'v0')
 replica.catch_up()
 
-session = Session(primary, replica)
+session = having(Session(primary, replica), 'read', 'write',
+                 what='Session(primary, replica)')
 
 # Nothing written by this session yet, so the replica may serve the read.
 assert session.read('k') == 'v0'
