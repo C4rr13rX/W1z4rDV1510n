@@ -3328,4 +3328,454 @@ for bad in ('open', 'close', '', None):
         raise AssertionError('accepted the unknown action %r' % (bad,))
 ''',
     ),
+    task(
+        f"{FAMILY}-0210", FAMILY,
+        prompt=(
+            "Implement a Python function render_hunks(old_lines, new_lines, "
+            "context=3) that groups a line-level diff into unified-diff "
+            "hunks. old_lines and new_lines are lists of strings.\n\n"
+            "Return a list of hunks in ascending order of position. A hunk is "
+            "a dict with keys old_start, old_count, new_start, new_count and "
+            "lines. lines is a list of (tag, text) pairs where tag is ' ' for "
+            "an unchanged line, '-' for a line only in old_lines, and '+' for "
+            "a line only in new_lines; a replaced region emits its '-' lines "
+            "before its '+' lines. old_start and new_start are 1-based line "
+            "numbers of the hunk's first line on that side, and are 0 when "
+            "that side contributes no lines. old_count is the number of ' ' "
+            "and '-' entries, new_count the number of ' ' and '+' entries.\n\n"
+            "Each changed region carries up to context unchanged lines before "
+            "and after it, clipped at the start and end of the input. Two "
+            "changed regions belong to the SAME hunk when at most 2 * context "
+            "unchanged lines separate them, and the unchanged lines between "
+            "them appear once; with more than 2 * context between them they "
+            "are separate hunks. Return an empty list when old_lines and "
+            "new_lines are equal. Raise ValueError if context is negative.\n\n"
+            "The diff must be minimal: the total number of '-' and '+' "
+            "entries across all hunks must equal the smallest number of line "
+            "deletions and insertions that turns old_lines into new_lines."
+        ),
+        timeout_seconds=120.0,
+        validator=LOAD_CANDIDATE + require("render_hunks") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError or a subscript on the result is raised in validator
+# frames alone -- which the contract scores as a broken COURSE.
+render_hunks = returning(render_hunks, 'render_hunks(...)')
+
+
+def hunks_of(old, new, context=3):
+    """Call the candidate and prove the result's SHAPE before reading it.
+
+    Every access below this point is on something already asserted to be
+    the right kind of object, so a wrong answer raises AssertionError
+    naming what was missing rather than TypeError in validator frames.
+    """
+    result = iterating(render_hunks(old, new, context), 'render_hunks(...)')
+    result = list(result)
+    for hunk in result:
+        assert isinstance(hunk, dict), f'a hunk is {type(hunk).__name__}, not a dict'
+        for key in ('old_start', 'old_count', 'new_start', 'new_count', 'lines'):
+            assert key in hunk, f'a hunk has no {key}'
+        assert isinstance(hunk['lines'], list), "a hunk's lines is not a list"
+        for entry in hunk['lines']:
+            assert isinstance(entry, (tuple, list)) and len(entry) == 2, (
+                f'a hunk line is {entry!r}, not a (tag, text) pair')
+            assert entry[0] in (' ', '-', '+'), f'unknown tag {entry[0]!r}'
+    return result
+
+
+def rebuild(old, hunks):
+    """Apply the hunks back onto `old`; the result must be `new`.
+
+    This is the check that a hunk list cannot fake: the headers, the
+    ordering and the context all have to be right simultaneously for the
+    reconstruction to land.
+    """
+    out = []
+    cursor = 0
+    for hunk in hunks:
+        old_count = int(hunk['old_count'])
+        start = int(hunk['old_start'])
+        begin = cursor if old_count == 0 and start == 0 else start - 1
+        assert begin >= cursor, 'hunks are not in ascending, non-overlapping order'
+        out.extend(old[cursor:begin])
+        cursor = begin
+        for tag, text in hunk['lines']:
+            if tag == ' ':
+                assert cursor < len(old) and old[cursor] == text, (
+                    f'context line {text!r} does not match old_lines[{cursor}]')
+                out.append(text)
+                cursor += 1
+            elif tag == '-':
+                assert cursor < len(old) and old[cursor] == text, (
+                    f'deleted line {text!r} does not match old_lines[{cursor}]')
+                cursor += 1
+            else:
+                out.append(text)
+    out.extend(old[cursor:])
+    return out
+
+
+def minimal_edits(old, new):
+    """The exact minimum, from an LCS table rather than from difflib.
+
+    `SequenceMatcher` finds the longest contiguous matching block
+    recursively -- tuned to read well to a human, and NOT guaranteed to
+    yield a maximum common subsequence. Measuring minimality against it
+    would reject a candidate whose diff is genuinely smaller than the
+    heuristic's, which is the wrong direction for a validator to err in.
+    """
+    n, m = len(old), len(new)
+    table = [[0] * (m + 1) for _ in range(n + 1)]
+    for i in range(n - 1, -1, -1):
+        row, nxt = table[i], table[i + 1]
+        for j in range(m - 1, -1, -1):
+            if old[i] == new[j]:
+                row[j] = nxt[j + 1] + 1
+            else:
+                row[j] = nxt[j] if nxt[j] >= row[j + 1] else row[j + 1]
+    return (n - table[0][0]) + (m - table[0][0])
+
+
+def check(old, new, context=3):
+    hunks = hunks_of(old, new, context)
+    assert rebuild(old, hunks) == new, (
+        'applying the hunks to old_lines did not produce new_lines')
+    changed = 0
+    for hunk in hunks:
+        tags = [tag for tag, _ in hunk['lines']]
+        assert tags, 'a hunk carries no lines'
+        assert int(hunk['old_count']) == tags.count(' ') + tags.count('-'), (
+            "old_count does not match the hunk's ' ' and '-' lines")
+        assert int(hunk['new_count']) == tags.count(' ') + tags.count('+'), (
+            "new_count does not match the hunk's ' ' and '+' lines")
+        # A replaced region lists its removals before its additions.
+        for index in range(1, len(tags)):
+            assert not (tags[index] == '-' and tags[index - 1] == '+'), (
+                "a '-' line follows a '+' line inside one changed region")
+        # The context bound: an edge run of unchanged lines may not exceed
+        # `context`, which is what stops a candidate emitting the whole file.
+        leading = 0
+        while leading < len(tags) and tags[leading] == ' ':
+            leading += 1
+        trailing = 0
+        while trailing < len(tags) and tags[-1 - trailing] == ' ':
+            trailing += 1
+        assert leading <= context, f'{leading} leading context lines exceeds {context}'
+        assert trailing <= context, f'{trailing} trailing context lines exceeds {context}'
+        changed += tags.count('-') + tags.count('+')
+    assert changed == minimal_edits(old, new), (
+        f'{changed} changed lines against a minimum of {minimal_edits(old, new)}; '
+        'the diff is not minimal')
+    return hunks
+
+
+# --- an unchanged file has no hunks at all --------------------------------
+same = [f'line {n}' for n in range(20)]
+assert check(same, list(same)) == [], 'an unchanged file produced a hunk'
+
+# --- one edit in the middle of a long file -------------------------------
+old = [f'line {n}' for n in range(40)]
+new = list(old)
+new[20] = 'CHANGED'
+hunks = check(old, new)
+assert len(hunks) == 1, f'one edit produced {len(hunks)} hunks'
+only = hunks[0]
+# Lines 18..24 one-based: three context, the replacement, three context.
+assert int(only['old_start']) == 18, f"old_start is {only['old_start']}, want 18"
+assert int(only['new_start']) == 18, f"new_start is {only['new_start']}, want 18"
+assert int(only['old_count']) == 7 and int(only['new_count']) == 7, only
+
+# --- the merge rule, at the boundary and one line past it ----------------
+# Exactly 2*context unchanged lines between two edits: ONE hunk, and the
+# lines between them appear once rather than twice.
+old = [f'line {n}' for n in range(40)]
+new = list(old)
+new[10] = 'FIRST'
+new[17] = 'SECOND'            # six unchanged lines (11..16) between them
+merged = check(old, new)
+assert len(merged) == 1, f'a gap of 2*context produced {len(merged)} hunks'
+texts = [text for tag, text in merged[0]['lines'] if tag == ' ']
+assert len(texts) == len(set(texts)), 'the shared context was emitted twice'
+
+# One line more than 2*context: two separate hunks.
+new = list(old)
+new[10] = 'FIRST'
+new[18] = 'SECOND'            # seven unchanged lines (11..17)
+split = check(old, new)
+assert len(split) == 2, f'a gap of 2*context+1 produced {len(split)} hunks'
+
+# --- pure insertion, pure deletion, and the empty-side encoding ----------
+grown = check(['a', 'b'], ['a', 'x', 'b'])
+assert sum(1 for h in grown for tag, _ in h['lines'] if tag == '+') == 1
+
+from_empty = check([], ['only'])
+assert len(from_empty) == 1, from_empty
+assert int(from_empty[0]['old_count']) == 0, from_empty
+assert int(from_empty[0]['old_start']) == 0, (
+    'a hunk that consumes no old line must report old_start 0')
+
+to_empty = check(['only'], [])
+assert int(to_empty[0]['new_count']) == 0 and int(to_empty[0]['new_start']) == 0, to_empty
+
+# --- clipping at the file edges ------------------------------------------
+edge = check(['a', 'b', 'c'], ['CHANGED', 'b', 'c'])
+assert int(edge[0]['old_start']) == 1, 'context must clip at the first line'
+
+# --- a replacement of unequal length, checked by reconstruction ----------
+check(['a', 'b', 'c', 'd', 'e'], ['a', 'x', 'y', 'z', 'e'])
+check(list('abcdefghij'), list('afbcgdehij'))
+check([str(n % 7) for n in range(60)], [str(n % 5) for n in range(60)])
+
+# --- context=0 emits no unchanged lines anywhere -------------------------
+tight = check(old, new, 0)
+assert all(tag != ' ' for hunk in tight for tag, _ in hunk['lines']), (
+    'context=0 still emitted unchanged lines')
+
+# --- stated error behaviour ----------------------------------------------
+try:
+    render_hunks(['a'], ['b'], -1)
+except ValueError:
+    pass
+else:
+    raise AssertionError('a negative context was accepted')
+''',
+    ),
+    task(
+        f"{FAMILY}-0211", FAMILY,
+        prompt=(
+            "Implement a Python function select_impacted_tests(changed_files, "
+            "file_dependencies, test_files, always_run) that decides which "
+            "tests a change can affect.\n\n"
+            "file_dependencies maps a file to the collection of files it "
+            "directly depends on, meaning it must be re-examined when any of "
+            "them changes. test_files maps a test name to the collection of "
+            "files that test directly exercises. changed_files and always_run "
+            "are collections of file paths and test names respectively.\n\n"
+            "A test is impacted when any file reachable from its direct files "
+            "by following file_dependencies zero or more times is in "
+            "changed_files. Return the sorted list of impacted test names "
+            "unioned with always_run.\n\n"
+            "file_dependencies may contain cycles and may name files that "
+            "have no entry of their own; neither is an error and neither may "
+            "cause the function to loop forever. A changed file that no test "
+            "reaches simply impacts nothing. Raise ValueError if a name in "
+            "always_run is not a key of test_files."
+        ),
+        timeout_seconds=90.0,
+        validator=LOAD_CANDIDATE + require("select_impacted_tests") + SHAPE_GUARDS + r'''
+# Guard every call: a candidate whose function has a `pass` body returns
+# None, and `sorted(None)` raises TypeError in validator frames alone.
+select_impacted_tests = returning(
+    select_impacted_tests, 'select_impacted_tests(...)')
+
+
+def selected(changed, deps, tests, always=()):
+    result = iterating(
+        select_impacted_tests(changed, deps, tests, always),
+        'select_impacted_tests(...)')
+    result = list(result)
+    for name in result:
+        assert isinstance(name, str), f'a returned test name is {name!r}'
+    assert result == sorted(result), f'the result is not sorted: {result}'
+    assert len(result) == len(set(result)), f'the result repeats a test: {result}'
+    return result
+
+
+DEPS = {
+    'app/api.py': ['app/service.py', 'app/schema.py'],
+    'app/service.py': ['app/repo.py'],
+    'app/repo.py': ['app/db.py'],
+    'app/schema.py': [],
+    'app/db.py': [],
+    'app/unused.py': ['app/db.py'],
+}
+TESTS = {
+    'test_api': ['app/api.py'],
+    'test_schema': ['app/schema.py'],
+    'test_repo': ['app/repo.py'],
+    'test_smoke': [],
+}
+
+# --- transitivity is the whole point -------------------------------------
+# app/db.py is four edges from test_api, and nothing declares it directly.
+assert selected(['app/db.py'], DEPS, TESTS) == ['test_api', 'test_repo'], (
+    'a change four edges away did not reach the tests that depend on it')
+
+# A direct dependency, and a leaf that only one test reaches.
+assert selected(['app/schema.py'], DEPS, TESTS) == ['test_api', 'test_schema']
+assert selected(['app/api.py'], DEPS, TESTS) == ['test_api']
+
+# --- the edges must not be followed BACKWARDS ----------------------------
+# app/api.py depends on app/repo.py transitively, not the other way round,
+# so changing api must not select test_repo. A candidate that walks the
+# graph in the wrong direction passes every check above and fails here.
+assert 'test_repo' not in selected(['app/api.py'], DEPS, TESTS)
+
+# --- nothing reaches it, so nothing is impacted --------------------------
+assert selected(['app/unused.py'], DEPS, TESTS) == []
+assert selected(['app/never_heard_of.py'], DEPS, TESTS) == []
+assert selected([], DEPS, TESTS) == []
+
+# --- always_run is a union, not a replacement ----------------------------
+assert selected([], DEPS, TESTS, ['test_smoke']) == ['test_smoke']
+assert selected(['app/schema.py'], DEPS, TESTS, ['test_smoke']) == [
+    'test_api', 'test_schema', 'test_smoke']
+# A test that is BOTH impacted and always-run appears once, not twice.
+assert selected(['app/schema.py'], DEPS, TESTS, ['test_schema']) == [
+    'test_api', 'test_schema']
+
+# --- a cycle must terminate rather than recurse forever ------------------
+cyclic = {
+    'a.py': ['b.py'],
+    'b.py': ['c.py'],
+    'c.py': ['a.py', 'd.py'],
+    'd.py': [],
+}
+cyclic_tests = {'test_a': ['a.py'], 'test_d': ['d.py']}
+assert selected(['d.py'], cyclic, cyclic_tests) == ['test_a', 'test_d']
+# A file inside the cycle reaches the test that enters the cycle.
+assert selected(['c.py'], cyclic, cyclic_tests) == ['test_a']
+# And d.py depends on nothing, so a change to a.py cannot reach test_d.
+assert selected(['a.py'], cyclic, cyclic_tests) == ['test_a']
+
+# A self-edge is the smallest cycle there is.
+assert selected(['s.py'], {'s.py': ['s.py']}, {'t': ['s.py']}) == ['t']
+
+# --- a file with no entry of its own is not an error ---------------------
+assert selected(['ghost.py'], {'a.py': ['ghost.py']}, {'t': ['a.py']}) == ['t']
+
+# --- scale, so an exponential walk over a shared subgraph times out ------
+# A diamond chain: every level depends on both nodes of the level below, so
+# a candidate that re-walks instead of memoising sees 2**60 paths.
+wide = {}
+for level in range(60):
+    wide[f'L{level}a'] = [f'L{level + 1}a', f'L{level + 1}b']
+    wide[f'L{level}b'] = [f'L{level + 1}a', f'L{level + 1}b']
+wide['L60a'] = []
+wide['L60b'] = []
+assert selected(['L60b'], wide, {'deep': ['L0a']}) == ['deep']
+assert selected(['L60b'], wide, {'deep': ['L0a']}, ['deep']) == ['deep']
+
+# --- stated error behaviour ----------------------------------------------
+try:
+    select_impacted_tests([], DEPS, TESTS, ['test_does_not_exist'])
+except ValueError:
+    pass
+else:
+    raise AssertionError('always_run named an unknown test and was accepted')
+''',
+    ),
+    task(
+        f"{FAMILY}-0212", FAMILY,
+        prompt=(
+            "Implement a Python function find_vacuous_assertions(source) that "
+            "reports assert statements which cannot fail. Parse source with "
+            "the ast module and return the sorted, duplicate-free list of "
+            "1-based line numbers of assert statements whose test is always "
+            "truthy.\n\n"
+            "Report exactly these forms: a literal constant that is truthy "
+            "(True, a non-zero number, a non-empty string or bytes); a tuple "
+            "display with at least one element, whatever the elements are; "
+            "and a non-empty list, set, or dict display. Also report a "
+            "comparison of a bare name against itself using == or is, such as "
+            "assert total == total.\n\n"
+            "Report nothing else. In particular an assert that always FAILS "
+            "(False, 0, an empty string, an empty tuple or list) is not "
+            "vacuous and must not be reported, and neither is a comparison "
+            "between two different names or between two calls, even identical "
+            "ones, because a call can return a different value each time. An "
+            "assert carrying a message is judged only on its test. Raise "
+            "ValueError if source does not parse."
+        ),
+        timeout_seconds=90.0,
+        validator=LOAD_CANDIDATE + require("find_vacuous_assertions") + SHAPE_GUARDS + r'''
+# Guard every call: a `pass` body returns None and `list(None)` raises
+# TypeError in validator frames alone, which is scored against the course.
+find_vacuous_assertions = returning(
+    find_vacuous_assertions, 'find_vacuous_assertions(...)')
+
+
+def found(source):
+    result = list(iterating(find_vacuous_assertions(source),
+                            'find_vacuous_assertions(...)'))
+    for line in result:
+        assert isinstance(line, int) and not isinstance(line, bool), (
+            f'a returned line number is {line!r}')
+    assert result == sorted(result), f'the result is not sorted: {result}'
+    assert len(result) == len(set(result)), f'the result repeats a line: {result}'
+    return result
+
+
+def one(expression):
+    """A single assert on line 2, so a hit is unambiguous."""
+    return found(f'def f():\n    assert {expression}\n')
+
+
+# --- the always-truthy constants -----------------------------------------
+for truthy in ('True', '1', '-3', '2.5', '"text"', "b'bytes'", '3j'):
+    assert one(truthy) == [2], f'assert {truthy} was not reported'
+
+# --- displays that are truthy by construction ----------------------------
+# The classic: a parenthesised "two-argument assert" is a non-empty tuple.
+assert one('(x == 1, "x must be one")') == [2], (
+    'a non-empty tuple display is always truthy and was not reported')
+for display in ('(0,)', '(False,)', '[1]', '[None]', '{1}', "{'k': 0}",
+                '(a, b)', '[1, 2]'):
+    assert one(display) == [2], f'assert {display} was not reported'
+
+# --- a name compared against itself --------------------------------------
+for self_comparison in ('total == total', 'total is total'):
+    assert one(self_comparison) == [2], f'assert {self_comparison} was not reported'
+
+# --- and everything that must NOT be reported ----------------------------
+# An assert that always fails is a bug, but it is not a VACUOUS one: it
+# reports failure rather than silently passing, which is the opposite
+# defect. A candidate keying on "the truthiness is knowable" reports these.
+for falsy in ('False', '0', '0.0', '""', "b''", '()', '[]', '{}', 'None'):
+    assert one(falsy) == [], f'assert {falsy} always fails and is not vacuous'
+
+# Ordinary assertions, including the ones that merely LOOK like the
+# self-comparison. Two calls to one function may return different values,
+# and an attribute may be a property, so neither is knowable statically.
+for real in ('x == y', 'f() == f()', 'a.value == a.value', 'x', 'not x',
+             'x == 1', 'len(items) == 3', 'x != x', 'x < x',
+             'items', 'x == total'):
+    assert one(real) == [], f'assert {real} is not vacuous but was reported'
+
+# --- a message does not change the verdict on the test -------------------
+assert found('def f():\n    assert (1, 2), "boom"\n') == [2]
+assert found('def f():\n    assert x == y, "boom"\n') == []
+
+# --- several statements, reported in ascending order, deduplicated -------
+module = (
+    'def a():\n'
+    '    assert True\n'          # 2  vacuous
+    '    assert x == y\n'        # 3
+    '\n'
+    '\n'
+    'def b():\n'
+    '    assert (cond, "msg")\n' # 7  vacuous
+    '    assert 0\n'             # 8  always fails
+    '    assert total is total\n' # 9 vacuous
+    '    if x:\n'
+    '        assert "why"\n'     # 11 vacuous, and nested
+    '    return 1\n'
+)
+assert found(module) == [2, 7, 9, 11], found(module)
+
+# A file with no asserts at all reports nothing rather than raising.
+assert found('x = 1\n') == []
+assert found('') == []
+
+# --- stated error behaviour ----------------------------------------------
+for broken in ('def f(:\n', 'assert (\n', 'class:\n'):
+    try:
+        find_vacuous_assertions(broken)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f'unparseable source {broken!r} was accepted')
+''',
+    ),
 ]

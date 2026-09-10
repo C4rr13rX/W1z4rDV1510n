@@ -13466,3 +13466,219 @@ MUTATIONS["reliability_observability_performance-0103"] = (
     "        elif value <= self._clear:\n            kind = \"low\"\n        else:\n            kind = None",
     "        else:\n            kind = \"low\"",
 )
+
+
+# --------------------------------------------------------------------------
+# testing_debugging_repair_refactoring-0210 .. -0212
+#
+# The diff reference deliberately does NOT use difflib. SequenceMatcher finds
+# the longest contiguous matching block recursively, which is tuned to look
+# reasonable to a human and is not guaranteed to yield a maximum common
+# subsequence -- so a reference built on it can emit more changed lines than
+# the minimum the prompt requires, and would fail its own validator on inputs
+# where the heuristic loses. The LCS table below is exact.
+# --------------------------------------------------------------------------
+
+REFERENCES["testing_debugging_repair_refactoring-0210"] = r'''
+def _opcodes(old, new):
+    """Maximal equal runs and the changed spans between them, from an LCS."""
+    n, m = len(old), len(new)
+    table = [[0] * (m + 1) for _ in range(n + 1)]
+    for i in range(n - 1, -1, -1):
+        row, nxt = table[i], table[i + 1]
+        for j in range(m - 1, -1, -1):
+            if old[i] == new[j]:
+                row[j] = nxt[j + 1] + 1
+            else:
+                row[j] = nxt[j] if nxt[j] >= row[j + 1] else row[j + 1]
+
+    ops = []
+    i = j = 0
+    while i < n and j < m:
+        if old[i] == new[j]:
+            start_i, start_j = i, j
+            while i < n and j < m and old[i] == new[j]:
+                i += 1
+                j += 1
+            ops.append(("equal", start_i, i, start_j, j))
+        else:
+            start_i, start_j = i, j
+            while i < n and j < m and old[i] != new[j]:
+                # Follow the larger remaining LCS; ties drop the old line.
+                if table[i + 1][j] >= table[i][j + 1]:
+                    i += 1
+                else:
+                    j += 1
+            ops.append(("change", start_i, i, start_j, j))
+    if i < n or j < m:
+        ops.append(("change", i, n, j, m))
+    return [op for op in ops if op[1] != op[2] or op[3] != op[4]]
+
+
+def render_hunks(old_lines, new_lines, context=3):
+    if context < 0:
+        raise ValueError("context must not be negative")
+    old = list(old_lines)
+    new = list(new_lines)
+
+    changes = [op for op in _opcodes(old, new) if op[0] == "change"]
+    if not changes:
+        return []
+
+    groups = [[changes[0]]]
+    for op in changes[1:]:
+        if op[1] - groups[-1][-1][2] <= 2 * context:
+            groups[-1].append(op)
+        else:
+            groups.append([op])
+
+    hunks = []
+    for group in groups:
+        first, last = group[0], group[-1]
+        old_begin = max(0, first[1] - context)
+        old_end = min(len(old), last[2] + context)
+        new_begin = max(0, first[3] - context)
+
+        lines = []
+        for index in range(old_begin, first[1]):
+            lines.append((" ", old[index]))
+        for position, op in enumerate(group):
+            for index in range(op[1], op[2]):
+                lines.append(("-", old[index]))
+            for index in range(op[3], op[4]):
+                lines.append(("+", new[index]))
+            if position + 1 < len(group):
+                for index in range(op[2], group[position + 1][1]):
+                    lines.append((" ", old[index]))
+        for index in range(last[2], old_end):
+            lines.append((" ", old[index]))
+
+        old_count = sum(1 for tag, _ in lines if tag in (" ", "-"))
+        new_count = sum(1 for tag, _ in lines if tag in (" ", "+"))
+        hunks.append({
+            "old_start": old_begin + 1 if old_count else 0,
+            "old_count": old_count,
+            "new_start": new_begin + 1 if new_count else 0,
+            "new_count": new_count,
+            "lines": lines,
+        })
+    return hunks
+'''
+
+
+REFERENCES["testing_debugging_repair_refactoring-0211"] = r'''
+def select_impacted_tests(changed_files, file_dependencies, test_files,
+                          always_run):
+    tests = dict(test_files)
+    always = list(always_run)
+    for name in always:
+        if name not in tests:
+            raise ValueError("always_run names an unknown test: %r" % (name,))
+
+    changed = set(changed_files)
+    dependencies = {key: list(value) for key, value in file_dependencies.items()}
+
+    def reaches_change(roots):
+        # `seen` is doing two jobs: it terminates cycles, and it collapses the
+        # shared subgraph a diamond produces, which is the difference between
+        # visiting 120 nodes and 2**60 paths.
+        seen = set()
+        stack = list(roots)
+        while stack:
+            current = stack.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            if current in changed:
+                return True
+            stack.extend(dependencies.get(current, ()))
+        return False
+
+    selected = set(always)
+    for name, files in tests.items():
+        if reaches_change(files):
+            selected.add(name)
+    return sorted(selected)
+'''
+
+
+REFERENCES["testing_debugging_repair_refactoring-0212"] = r'''
+import ast
+
+_UNKNOWN = object()
+
+
+def _literal(node):
+    """The node's value if it is a literal, else _UNKNOWN.
+
+    `literal_eval` rather than an isinstance check on ast.Constant, because
+    `-3` parses as a UnaryOp over a Constant and `{'k': 0}` as a Dict; both
+    are literals whose truthiness is decidable, and neither is a Constant.
+    """
+    try:
+        return ast.literal_eval(node)
+    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+        return _UNKNOWN
+
+
+def _always_true(test):
+    value = _literal(test)
+    if value is not _UNKNOWN:
+        return bool(value)
+
+    # A display whose ELEMENTS are not literals is still truthy by
+    # construction as soon as it has one: `assert (cond, "msg")` is the
+    # two-argument assert that silently never fails.
+    if isinstance(test, ast.Tuple):
+        return len(test.elts) > 0
+    if isinstance(test, (ast.List, ast.Set)):
+        return len(test.elts) > 0
+    if isinstance(test, ast.Dict):
+        return len(test.keys) > 0
+
+    if isinstance(test, ast.Compare) and len(test.ops) == 1:
+        if isinstance(test.ops[0], (ast.Eq, ast.Is)):
+            left, right = test.left, test.comparators[0]
+            # Only a bare NAME against itself. Two calls to one function may
+            # return different values, and an attribute may be a property.
+            if isinstance(left, ast.Name) and isinstance(right, ast.Name):
+                return left.id == right.id
+    return False
+
+
+def find_vacuous_assertions(source):
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as error:
+        raise ValueError("source does not parse: %s" % (error,)) from None
+
+    lines = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assert) and _always_true(node.test):
+            lines.add(node.lineno)
+    return sorted(lines)
+'''
+
+
+# The merge threshold is the hunk-grouping rule itself: widening it swallows
+# the gap the prompt says must split, so two hunks become one.
+MUTATIONS["testing_debugging_repair_refactoring-0210"] = (
+    "        if op[1] - groups[-1][-1][2] <= 2 * context:",
+    "        if op[1] - groups[-1][-1][2] <= 3 * context:",
+)
+
+# Stop following the dependency edges and the walk still terminates, still
+# returns a sorted list and still honours always_run -- it just answers only
+# about files a test names DIRECTLY, which is the capability under test.
+MUTATIONS["testing_debugging_repair_refactoring-0211"] = (
+    "            stack.extend(dependencies.get(current, ()))",
+    "            stack.extend(())",
+)
+
+# Drop the non-literal tuple display and `assert (cond, "msg")` -- the
+# two-argument assert this task exists to catch -- stops being reported,
+# while every literal case still passes.
+MUTATIONS["testing_debugging_repair_refactoring-0212"] = (
+    "    if isinstance(test, ast.Tuple):\n        return len(test.elts) > 0",
+    "    if isinstance(test, ast.Tuple):\n        return False",
+)
