@@ -2196,6 +2196,70 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
         )
         self.assertIn('("capstone_safety"', source)
 
+    def test_enterprise_retention_deletes_every_stale_report_first(self) -> None:
+        """A leftover report must not be able to stand in for a verdict.
+
+        Each of the twelve suites writes to a FIXED path, and so does the
+        aggregate. A suite that times out, crashes, or is killed by the memory
+        guard leaves the previous run's file in place, and every reader
+        downstream treats a report's existence as proof the run happened. The
+        copy of `integrated_debug.json` beside two quarantined go-systems
+        candidates was a 769.7 h leftover reading 6/6.
+
+        Run the real `main()` with the suite runner stubbed out, rather than
+        grepping for "unlink": a grep passes on a call that deletes the wrong
+        path, and this file already carries the lesson that a check which
+        cannot fail reports success forever.
+        """
+        import json as _json
+        import tempfile
+        from unittest import mock
+
+        import scripts.programming_enterprise_retention as retention
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            aggregate = root / "go-systems.enterprise-gate.json"
+            # Two leftovers from an earlier, passing run.
+            stale = {
+                aggregate: {"passed": True, "passed_suites": 12},
+                root / "polyglot.json": {"passed": True},
+                root / "enterprise.json": {"passed": True},
+            }
+            for path, content in stale.items():
+                path.write_text(_json.dumps(content), encoding="utf-8")
+
+            seen = {}
+
+            def crashed_suite(name, command, timeout):
+                # Every suite dies before writing anything, which is exactly
+                # the case that leaves a leftover behind.
+                seen[name] = command
+                return {"name": name, "passed": False, "timed_out": True,
+                        "infrastructure_failure": True, "elapsed_seconds": 0.1}
+
+            argv = ["prog", "--endpoint", "http://127.0.0.1:1",
+                    "--output", str(aggregate)]
+            with mock.patch.object(retention, "run_suite", crashed_suite),                     mock.patch.object(retention, "brain_stats",
+                                      lambda endpoint: {"tick": 1}),                     mock.patch.object(sys, "argv", argv):
+                retention.main()
+
+            # The aggregate is rewritten by this run, so assert on its
+            # CONTENT: it must describe the failure that just happened, not
+            # the pass that used to be there.
+            report = _json.loads(aggregate.read_text(encoding="utf-8"))
+            self.assertFalse(report["passed"])
+            self.assertEqual(report["passed_suites"], 0)
+
+            # The per-suite leftovers must be gone. No suite wrote one this
+            # run, so a file here could only be the stale copy.
+            self.assertFalse((root / "polyglot.json").exists())
+            self.assertFalse((root / "enterprise.json").exists())
+
+            # And the deletion must cover every suite's declared output, not
+            # just the two this test happened to seed.
+            self.assertEqual(len(seen), report["total_suites"])
+
     def test_experiential_fixture_requires_repair_and_transfers_relation(self) -> None:
         self.assertFalse(execute_experience(EXPERIENCE, EXPERIENCE.broken)[0])
         self.assertTrue(execute_experience(EXPERIENCE, EXPERIENCE.corrected)[0])

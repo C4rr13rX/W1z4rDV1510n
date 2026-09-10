@@ -108,6 +108,30 @@ def main() -> int:
                              "--output", str(output_dir / "capstone-readiness.json")]),
     ]
 
+    # DELETE EVERY REPORT BEFORE WRITING ONE.
+    #
+    # Each suite writes to a FIXED path, and so does the aggregate. Nothing
+    # here truncates them first, so a suite that times out, crashes, or is
+    # killed by the memory guard leaves the PREVIOUS run's file in place --
+    # and every reader downstream treats a file's existence as proof that the
+    # run it names happened.
+    #
+    # That is not hypothetical: the copy of `integrated_debug.json` sitting
+    # beside two quarantined go-systems candidates was a 769.7 h leftover
+    # reading 6/6. CLAUDE.md draws the rule from it -- when a report is read
+    # from a fixed path, unlink it first -- and
+    # `programming_integrated_retention.py` was fixed accordingly; this
+    # runner, which produces twelve such reports plus the aggregate the
+    # per-suite verdict is read from, never was.
+    #
+    # After this, a missing report means "this suite did not finish", which
+    # is honest. A stale one means "it passed", which is a lie with the same
+    # shape as a real verdict.
+    for _, command in suites:
+        if "--output" in command:
+            Path(command[command.index("--output") + 1]).unlink(missing_ok=True)
+    args.output.unlink(missing_ok=True)
+
     stats_before = brain_stats(args.endpoint)
     results = []
     for index, (name, command) in enumerate(suites, 1):
