@@ -217,6 +217,18 @@ Verify, do not assume:
   exit. Sampled four hours apart the same block read 0.355 and then 7.99
   rows/s — instantaneous rate is a duty cycle, so never extrapolate an ETA
   from one window.
+- **A counter that went BACKWARDS is a reset, not a negative rate.** Both
+  heartbeat counters — `durable_next_row` and `accepted_episodes` — live in
+  the replay worker's progress file and restart with the worker, so any
+  sample straddling a `deferred_replay_resource_yield` sees the value fall.
+  Measured 2026-09-10: `accepted_episodes` went 712 → 8 and the payload
+  published `accepted_per_second: -42.4`, which the drought annex renders as
+  "still accepting -42.4 episodes/s, so the block is training". Rates now
+  report `None` on a decrease and the heartbeat carries `counter_reset`. A
+  genuinely frozen row still reads 0.0 — settlement, the admission gate and
+  the continuous canary each freeze it by design — so **do not collapse a
+  frozen row into a reset**; they are different facts with different actions.
+
 - **Onboarding a corpus requires a registry `.toml`.** Without it the driver
   exits 2 on `unknown script` and the supervisor retry-loops, stopping ALL
   training. `scripts/onboard_corpus.py` writes it; deploy it with the corpus.
