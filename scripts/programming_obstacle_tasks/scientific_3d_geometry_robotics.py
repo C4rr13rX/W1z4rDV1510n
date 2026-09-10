@@ -29,7 +29,11 @@ multiplications differently, which is the flaky case the contract refuses.
 from __future__ import annotations
 
 from scripts.programming_obstacle_tasks import task
-from scripts.programming_obstacle_tasks._support import LOAD_CANDIDATE, require
+from scripts.programming_obstacle_tasks._support import (
+    LOAD_CANDIDATE,
+    SHAPE_GUARDS,
+    require,
+)
 
 FAMILY = "scientific_3d_geometry_robotics"
 
@@ -47,7 +51,13 @@ TASKS = [
             "plain tuples rather than lists."
         ),
         validator=LOAD_CANDIDATE + require("compose") + require("apply")
-        + require("invert") + """
+        + require("invert") + SHAPE_GUARDS + """
+# Every call is checked, so a stub that returns None is a
+# contract violation rather than a validator_error.
+compose = returning(compose, 'compose(...)')
+apply = returning(apply, 'apply(...)')
+invert = returning(invert, 'invert(...)')
+
 import math
 
 def close(a, b, tol=1e-9):
@@ -134,7 +144,14 @@ assert isinstance(apply(turn, point), tuple), 'apply did not return a tuple'
             "rotated 3D vector as a tuple."
         ),
         validator=LOAD_CANDIDATE + require("normalize") + require("multiply")
-        + require("to_matrix") + require("rotate") + """
+        + require("to_matrix") + require("rotate") + SHAPE_GUARDS + """
+# Every call is checked, so a stub that returns None is a
+# contract violation rather than a validator_error.
+normalize = returning(normalize, 'normalize(...)')
+multiply = returning(multiply, 'multiply(...)')
+to_matrix = returning(to_matrix, 'to_matrix(...)')
+rotate = returning(rotate, 'rotate(...)')
+
 import math
 
 def close(a, b, tol=1e-9):
@@ -218,7 +235,11 @@ else:
             "by more than one triangle; and 'euler_characteristic', the "
             "quantity V - E + F counting undirected edges."
         ),
-        validator=LOAD_CANDIDATE + require("mesh_report") + """
+        validator=LOAD_CANDIDATE + require("mesh_report") + SHAPE_GUARDS + """
+# Every call is checked, so a stub that returns None is a
+# contract violation rather than a validator_error.
+mesh_report = returning(mesh_report, 'mesh_report(...)')
+
 # A tetrahedron, wound outward. Every undirected edge is shared by exactly
 # two faces and every directed edge is used once.
 tetra_vertices = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0),
@@ -285,8 +306,13 @@ assert empty['euler_characteristic'] == 0 and empty['boundary_edges'] == 0
             "raises ValueError when the enclosed volume is zero. Neither may "
             "assume the mesh contains or is near the coordinate origin."
         ),
-        validator=LOAD_CANDIDATE + require("signed_volume") + require("centroid")
+        validator=LOAD_CANDIDATE + require("signed_volume") + require("centroid") + SHAPE_GUARDS
         + """
+# Every call is checked, so a stub that returns None is a
+# contract violation rather than a validator_error.
+signed_volume = returning(signed_volume, 'signed_volume(...)')
+centroid = returning(centroid, 'centroid(...)')
+
 def close(a, b, tol=1e-9):
     return abs(a - b) <= tol
 
@@ -361,7 +387,12 @@ else:
             "ValueError unless the mass and all three extents are positive."
         ),
         validator=LOAD_CANDIDATE + require("box_inertia")
-        + require("translate_inertia") + """
+        + require("translate_inertia") + SHAPE_GUARDS + """
+# Every call is checked, so a stub that returns None is a
+# contract violation rather than a validator_error.
+box_inertia = returning(box_inertia, 'box_inertia(...)')
+translate_inertia = returning(translate_inertia, 'translate_inertia(...)')
+
 def close(a, b, tol=1e-9):
     return abs(a - b) <= tol
 
@@ -494,7 +525,12 @@ assert abs(z_hit - 1.5) <= 1e-9, f'hit at z={z_hit}, expected the plane z=1.5'
             "too short or its length disagrees with its own count."
         ),
         validator=LOAD_CANDIDATE + require("write_binary_stl")
-        + require("read_binary_stl") + """
+        + require("read_binary_stl") + SHAPE_GUARDS + """
+# Every call is checked, so a stub that returns None is a
+# contract violation rather than a validator_error.
+write_binary_stl = returning(write_binary_stl, 'write_binary_stl(...)')
+read_binary_stl = returning(read_binary_stl, 'read_binary_stl(...)')
+
 import struct
 
 facet = ((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0))
@@ -571,7 +607,11 @@ else:
             "4x4 row-major tuple of tuples. An empty chain returns the "
             "identity, and a length mismatch raises ValueError."
         ),
-        validator=LOAD_CANDIDATE + require("forward_kinematics") + """
+        validator=LOAD_CANDIDATE + require("forward_kinematics") + SHAPE_GUARDS + """
+# Every call is checked, so a stub that returns None is a
+# contract violation rather than a validator_error.
+forward_kinematics = returning(forward_kinematics, 'forward_kinematics(...)')
+
 import math
 
 def close(a, b, tol=1e-9):
@@ -738,7 +778,11 @@ for miss in (-1.0, 2.5, 7.0):
             "Raise ValueError for a degenerate triangle of zero area, and "
             "unless max_overhang_degrees lies in (0, 90]."
         ),
-        validator=LOAD_CANDIDATE + require("overhang_faces") + """
+        validator=LOAD_CANDIDATE + require("overhang_faces") + SHAPE_GUARDS + """
+# Every call is checked, so a stub that returns None is a
+# contract violation rather than a validator_error.
+overhang_faces = returning(overhang_faces, 'overhang_faces(...)')
+
 import math
 
 # Normals are fixed by 3-4-5 triples so the two sloped faces sit 8.13 degrees
@@ -810,7 +854,11 @@ for bad in (0.0, -5.0, 120.0):
             "target lies outside the reachable annulus, when either link "
             "length is not positive, and for any other elbow value."
         ),
-        validator=LOAD_CANDIDATE + require("inverse_kinematics") + """
+        validator=LOAD_CANDIDATE + require("inverse_kinematics") + SHAPE_GUARDS + """
+# Every call is checked, so a stub that returns None is a
+# contract violation rather than a validator_error.
+inverse_kinematics = returning(inverse_kinematics, 'inverse_kinematics(...)')
+
 import math
 
 def forward(l1, l2, theta1, theta2):
@@ -879,7 +927,11 @@ else:
             "than three points and when the points are collinear, because no "
             "single best-fit plane exists then."
         ),
-        validator=LOAD_CANDIDATE + require("fit_plane") + """
+        validator=LOAD_CANDIDATE + require("fit_plane") + SHAPE_GUARDS + """
+# Every call is checked, so a stub that returns None is a
+# contract violation rather than a validator_error.
+fit_plane = returning(fit_plane, 'fit_plane(...)')
+
 import math
 
 def residual(points, centroid, normal):
