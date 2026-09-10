@@ -18,7 +18,11 @@ cannot show.
 from __future__ import annotations
 
 from scripts.programming_obstacle_tasks import task
-from scripts.programming_obstacle_tasks._support import LOAD_CANDIDATE, require
+from scripts.programming_obstacle_tasks._support import (
+    LOAD_CANDIDATE,
+    SHAPE_GUARDS,
+    require,
+)
 
 FAMILY = "databases_migrations_transactions"
 
@@ -281,7 +285,11 @@ assert counts() == (2, 2)
             "of that group. Rows inserted before an already-returned "
             "position must not shift a later page."
         ),
-        validator=LOAD_CANDIDATE + require("page_after") + r'''
+        validator=LOAD_CANDIDATE + require("page_after") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+page_after = returning(page_after, 'page_after(...)')
 import sqlite3
 
 connection = sqlite3.connect(":memory:", isolation_level=None)
@@ -355,7 +363,11 @@ assert rows == [] and cursor is None
             "that committed, rejected the list of (id, exception class name) "
             "pairs, both in input order."
         ),
-        validator=LOAD_CANDIDATE + require("apply_batch") + r'''
+        validator=LOAD_CANDIDATE + require("apply_batch") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+apply_batch = returning(apply_batch, 'apply_batch(...)')
 import sqlite3
 
 connection = sqlite3.connect(":memory:", isolation_level=None)
@@ -541,7 +553,11 @@ assert customers() == [1]
             "acceptable amount even though it is an int. Leave no "
             "transaction open on return."
         ),
-        validator=LOAD_CANDIDATE + require("process_payment") + r'''
+        validator=LOAD_CANDIDATE + require("process_payment") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+process_payment = returning(process_payment, 'process_payment(...)')
 import sqlite3
 
 connection = sqlite3.connect(":memory:", isolation_level=None)
@@ -621,7 +637,11 @@ assert connection.in_transaction is False
             "elements, when the operator is unsupported, or when 'IN' is "
             "given something other than a list or tuple."
         ),
-        validator=LOAD_CANDIDATE + require("build_filter_query") + r'''
+        validator=LOAD_CANDIDATE + require("build_filter_query") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+build_filter_query = returning(build_filter_query, 'build_filter_query(...)')
 import sqlite3
 
 db = sqlite3.connect(":memory:")
@@ -858,7 +878,11 @@ assert total(db) == 80
             "rather than zero. A region whose rows are all unreported must "
             "still appear, with rows counted and reported zero."
         ),
-        validator=LOAD_CANDIDATE + require("summarize_regions") + r'''
+        validator=LOAD_CANDIDATE + require("summarize_regions") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+summarize_regions = returning(summarize_regions, 'summarize_regions(...)')
 import sqlite3
 
 db = sqlite3.connect(":memory:")

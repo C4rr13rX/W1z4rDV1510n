@@ -16,7 +16,11 @@ check that is only usually right is the defect, not the test.
 from __future__ import annotations
 
 from scripts.programming_obstacle_tasks import task
-from scripts.programming_obstacle_tasks._support import LOAD_CANDIDATE, require
+from scripts.programming_obstacle_tasks._support import (
+    LOAD_CANDIDATE,
+    SHAPE_GUARDS,
+    require,
+)
 
 FAMILY = "http_apis_authn_appsec"
 
@@ -500,7 +504,11 @@ assert safe_redirect("https://app.example/x", set()) == "/"
             "the application was about to use. Keys keep their original "
             "case and dict ordering is preserved."
         ),
-        validator=LOAD_CANDIDATE + require("redact") + r'''
+        validator=LOAD_CANDIDATE + require("redact") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+redact = returning(redact, 'redact(...)')
 import copy
 
 SECRETS = {"password", "token", "authorization", "secret"}
@@ -1064,7 +1072,14 @@ assert verify_webhook(BODY, good, SECRET, NOW + 1, 0) is False
             "includes the key 'user'. logout invalidates the id and returns "
             "True, or False when the id was already unknown."
         ),
-        validator=LOAD_CANDIDATE + require("SessionStore") + r'''
+        validator=LOAD_CANDIDATE + require("SessionStore") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+_SessionStore = SessionStore
+def SessionStore(*args, **kwargs):
+    return having(_SessionStore(*args, **kwargs), 'authenticate', 'create', 'get', 'logout', 'set',
+                  what='SessionStore(...)')
 store = SessionStore()
 
 anon = store.create()
@@ -1204,7 +1219,14 @@ assert has_scope("a b c", "repo:read") is False
             "every time and store nothing."
         ),
         validator=LOAD_CANDIDATE + require("IdempotentStore")
-        + require("IdempotencyConflict") + r'''
+        + require("IdempotencyConflict") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+_IdempotentStore = IdempotentStore
+def IdempotentStore(*args, **kwargs):
+    return having(_IdempotentStore(*args, **kwargs), 'execute',
+                  what='IdempotentStore(...)')
 class Counter:
     def __init__(self, value="ok"):
         self.calls = 0

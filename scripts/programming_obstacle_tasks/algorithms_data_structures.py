@@ -11,7 +11,11 @@ verdict depend on host load and the contract admits no flaky cases.
 from __future__ import annotations
 
 from scripts.programming_obstacle_tasks import task
-from scripts.programming_obstacle_tasks._support import LOAD_CANDIDATE, require
+from scripts.programming_obstacle_tasks._support import (
+    LOAD_CANDIDATE,
+    SHAPE_GUARDS,
+    require,
+)
 
 FAMILY = "algorithms_data_structures"
 
@@ -27,8 +31,8 @@ TASKS = [
             "used key. Both operations must run in amortised constant time "
             "regardless of the number of stored keys."
         ),
-        validator=LOAD_CANDIDATE + require("LRUCache") + """
-cache = LRUCache(2)
+        validator=LOAD_CANDIDATE + require("LRUCache") + SHAPE_GUARDS + """
+cache = having(LRUCache(2), 'get', 'put', what='LRUCache(2)')
 cache.put('a', 1)
 cache.put('b', 2)
 assert cache.get('a') == 1, 'stored key not returned'
@@ -43,14 +47,14 @@ assert cache.get('c') is None, 'update did not refresh recency'
 assert cache.get('a') == 10 and cache.get('d') == 4
 
 # Capacity one degenerates to "keep only the last write".
-single = LRUCache(1)
+single = having(LRUCache(1), 'get', 'put', what='LRUCache(1)')
 single.put('x', 1)
 single.put('y', 2)
 assert single.get('x') is None and single.get('y') == 2
 
 # Constant-time behaviour, asserted structurally: the cache must never hold
 # more than capacity entries no matter how many distinct keys pass through.
-big = LRUCache(50)
+big = having(LRUCache(50), 'get', 'put', what='LRUCache(50)')
 for index in range(5000):
     big.put(index, index)
     assert big.get(index) == index
@@ -69,7 +73,11 @@ assert live == 50, f'capacity not enforced: {live} live entries'
             "If the constraints cannot all be satisfied because the graph "
             "contains a cycle, raise ValueError."
         ),
-        validator=LOAD_CANDIDATE + require("topological_order") + """
+        validator=LOAD_CANDIDATE + require("topological_order") + SHAPE_GUARDS + """
+# Every call is checked: the cycle cases call it again after the first result
+# has already been indexed.
+topological_order = returning(topological_order, 'topological_order(nodes, edges)')
+
 def precedes(order, before, after):
     return order.index(before) < order.index(after)
 
@@ -173,8 +181,11 @@ for left, right in zip(merged, merged[1:]):
             "add must not re-sort the whole history on each call: adding n "
             "values in total must cost O(n log n), not O(n^2 log n)."
         ),
-        validator=LOAD_CANDIDATE + require("RunningMedian") + """
-stream = RunningMedian()
+        validator=LOAD_CANDIDATE + require("RunningMedian") + SHAPE_GUARDS + """
+def stream_of():
+    return having(RunningMedian(), 'add', 'median', what='RunningMedian()')
+
+stream = stream_of()
 try:
     stream.median()
 except ValueError:
@@ -195,7 +206,11 @@ assert stream.median() == 4
 import random
 rng = random.Random(99991)
 reference = []
-subject = RunningMedian()
+subject = stream_of()
+# A bound wrapper, never an attribute assignment: a candidate whose class uses
+# __slots__ would refuse the assignment, and that AttributeError would be
+# raised in validator frames -- the exact misattribution this guards against.
+subject_median = returning(subject.median, 'RunningMedian.median()')
 for _ in range(600):
     value = rng.randint(-500, 500)
     reference.append(value)
@@ -204,11 +219,11 @@ for _ in range(600):
     middle = len(ordered) // 2
     expected = (ordered[middle] if len(ordered) % 2
                 else (ordered[middle - 1] + ordered[middle]) / 2)
-    got = subject.median()
+    got = subject_median()
     assert abs(got - expected) < 1e-9, f'median {got} != {expected}'
 
 # Duplicates must not collapse: the median of five equal values is that value.
-flat = RunningMedian()
+flat = stream_of()
 for _ in range(5):
     flat.add(7)
 assert flat.median() == 7
@@ -224,8 +239,12 @@ assert flat.median() == 7
             "queries cheap by compressing paths, so a chain of 20000 unions "
             "still answers find without exceeding the recursion limit."
         ),
-        validator=LOAD_CANDIDATE + require("DisjointSet") + """
-sets = DisjointSet()
+        validator=LOAD_CANDIDATE + require("DisjointSet") + SHAPE_GUARDS + """
+def disjoint_set():
+    return having(DisjointSet(), 'find', 'union', 'connected', 'group_count',
+                  what='DisjointSet()')
+
+sets = disjoint_set()
 assert sets.group_count() == 0
 assert sets.find('a') == sets.find('a'), 'find is not stable'
 assert sets.group_count() == 1, 'first reference did not create a group'
@@ -247,7 +266,7 @@ for left in 'abcd':
         assert sets.connected(left, right)
 
 # A long chain must not blow the stack: path compression, not recursion depth.
-chain = DisjointSet()
+chain = disjoint_set()
 for index in range(20000):
     chain.union(index, index + 1)
 assert chain.connected(0, 20000)
@@ -311,7 +330,14 @@ assert Counting.reads < 200, \\
             "values. Total work must be linear in the number of values: "
             "re-scanning each window is not acceptable for large inputs."
         ),
-        validator=LOAD_CANDIDATE + require("window_maxima") + """
+        validator=LOAD_CANDIDATE + require("window_maxima") + SHAPE_GUARDS + """
+# Every call is wrapped rather than only the first: each one is immediately
+# passed to list(), and a non-iterable there raises in validator frames.
+_window_maxima = window_maxima
+def window_maxima(values, width):
+    return iterating(_window_maxima(values, width),
+                     f'window_maxima(values, {width})')
+
 assert list(window_maxima([1, 3, 2, 5, 4], 1)) == [1, 3, 2, 5, 4]
 assert list(window_maxima([1, 3, 2, 5, 4], 2)) == [3, 3, 5, 5]
 assert list(window_maxima([1, 3, 2, 5, 4], 3)) == [3, 5, 5]
@@ -381,8 +407,12 @@ assert Counted.comparisons < 40 * len(values), (
             "to prefix counts. The empty string is a valid prefix matching "
             "every stored word."
         ),
-        validator=LOAD_CANDIDATE + require("PrefixIndex") + """
-index = PrefixIndex()
+        validator=LOAD_CANDIDATE + require("PrefixIndex") + SHAPE_GUARDS + """
+def prefix_index():
+    return having(PrefixIndex(), 'insert', 'contains', 'count_with_prefix',
+                  'remove', what='PrefixIndex()')
+
+index = prefix_index()
 assert index.count_with_prefix('') == 0
 assert not index.contains('anything')
 assert index.remove('absent') is False
@@ -421,7 +451,7 @@ rng = random.Random(777)
 alphabet = 'abc'
 words = {''.join(rng.choice(alphabet) for _ in range(rng.randint(1, 6)))
          for _ in range(400)}
-subject = PrefixIndex()
+subject = prefix_index()
 for word in words:
     subject.insert(word)
 for prefix in ('', 'a', 'ab', 'abc', 'cba', 'bb'):
@@ -541,9 +571,10 @@ assert cost_of(base, altered) == 3
             "subsequences share that maximum length, return any one of them. "
             "Return an empty list when values is empty."
         ),
-        validator=LOAD_CANDIDATE + require("longest_increasing") + """
+        validator=LOAD_CANDIDATE + require("longest_increasing") + SHAPE_GUARDS + """
 def check(values):
-    result = list(longest_increasing(list(values)))
+    result = list(iterating(longest_increasing(list(values)),
+                            'longest_increasing(values)'))
     # A subsequence, verified by walking the original left to right.
     position = 0
     for item in result:
@@ -611,7 +642,10 @@ assert check(values) == blocks, 'block construction bound not reached'
             "sequence is allowed, and query(0, 0) is then the only legal "
             "query."
         ),
-        validator=LOAD_CANDIDATE + require("RangeSum") + """
+        validator=LOAD_CANDIDATE + require("RangeSum") + SHAPE_GUARDS + """
+def range_sum(values):
+    return having(RangeSum(values), 'update', 'query', what='RangeSum(values)')
+
 OPERATIONS = [0]
 
 class Counted:
@@ -654,17 +688,17 @@ class Counted:
         return f'Counted({self._value})'
 
 # Small cases first: correctness before any claim about how it is achieved.
-empty = RangeSum([])
+empty = range_sum([])
 assert empty.query(0, 0) == 0, 'empty range must sum to zero'
 
-single = RangeSum([Counted(7)])
+single = range_sum([Counted(7)])
 assert single.query(0, 1) == 7
 assert single.query(0, 0) == 0 and single.query(1, 1) == 0
 single.update(0, Counted(-2))
 assert single.query(0, 1) == -2, 'update did not replace the element'
 
 mirror = [3, 1, 4, 1, 5, 9, 2, 6]
-subject = RangeSum([Counted(item) for item in mirror])
+subject = range_sum([Counted(item) for item in mirror])
 for low in range(len(mirror) + 1):
     for high in range(low, len(mirror) + 1):
         assert subject.query(low, high) == sum(mirror[low:high]), \\
@@ -681,7 +715,7 @@ for low, high in ((0, 8), (3, 4), (2, 6), (4, 8), (0, 3)):
 size = 4096
 mirror = [(index * index) % 97 for index in range(size)]
 OPERATIONS[0] = 0
-big = RangeSum([Counted(item) for item in mirror])
+big = range_sum([Counted(item) for item in mirror])
 for step in range(size):
     index = (step * 1237) % size
     replacement = (step * 31) % 89
@@ -795,7 +829,12 @@ check([3, 1, 2], [(1, 2), (2, 1), (3, 1)])
             "empty or any count is not a positive integer. Several optimal "
             "codes exist for most inputs; return any of them."
         ),
-        validator=LOAD_CANDIDATE + require("prefix_code") + """
+        validator=LOAD_CANDIDATE + require("prefix_code") + SHAPE_GUARDS + """
+# Every call: the lone-symbol case below subscripts a second result.
+_prefix_code = prefix_code
+def prefix_code(frequencies):
+    return iterating(_prefix_code(frequencies), 'prefix_code(frequencies)')
+
 _SHAPES = {}
 
 def shapes(leaves):
@@ -887,7 +926,7 @@ for bad in ({}, {'a': 0}, {'a': -1}, {'a': 1.5}, {'a': True, 'b': 2}):
             "greater than or equal to end. Return an empty list for empty "
             "input."
         ),
-        validator=LOAD_CANDIDATE + require("select_compatible") + """
+        validator=LOAD_CANDIDATE + require("select_compatible") + SHAPE_GUARDS + """
 def largest_by_search(intervals):
     \"\"\"Biggest compatible subset, by enumerating every subset.\"\"\"
     best = 0
@@ -904,7 +943,8 @@ def largest_by_search(intervals):
     return best
 
 def check(intervals):
-    result = select_compatible([list(pair) for pair in intervals])
+    result = iterating(select_compatible([list(pair) for pair in intervals]),
+                       'select_compatible(intervals)')
     chosen = [tuple(pair) for pair in result]
     assert chosen == sorted(chosen, key=lambda pair: pair[0]), \\
         f'{chosen} is not sorted ascending by start'
@@ -1016,7 +1056,7 @@ for weights, parts in (([], 1), ([1, 2], 0), ([1, 2], 3), ([1, 2], -1),
             "equal to right, or height less than or equal to 0. Return an "
             "empty list when there are no buildings."
         ),
-        validator=LOAD_CANDIDATE + require("skyline") + """
+        validator=LOAD_CANDIDATE + require("skyline") + SHAPE_GUARDS + """
 def expected_outline(buildings):
     \"\"\"Sample the height function at every integer position.
 
@@ -1041,7 +1081,8 @@ def expected_outline(buildings):
     return points
 
 def check(buildings):
-    result = [tuple(pair) for pair in skyline([tuple(b) for b in buildings])]
+    result = [tuple(pair) for pair in iterating(
+        skyline([tuple(b) for b in buildings]), 'skyline(buildings)')]
     expected = expected_outline(buildings)
     assert result == expected, \\
         f'skyline({buildings}) gave {result}, expected {expected}'
@@ -1157,7 +1198,7 @@ for _ in range(12):
             "valid answer. Raise ValueError if capacity is negative or any "
             "weight or value is negative."
         ),
-        validator=LOAD_CANDIDATE + require("best_selection") + """
+        validator=LOAD_CANDIDATE + require("best_selection") + SHAPE_GUARDS + """
 def best_by_search(items, capacity):
     \"\"\"Every subset, which cannot share a defect with a table-filling scan.\"\"\"
     best = 0
@@ -1172,7 +1213,9 @@ def best_by_search(items, capacity):
     return best
 
 def check(items, capacity):
-    total, indices = best_selection([tuple(pair) for pair in items], capacity)
+    total, indices = iterating(
+        best_selection([tuple(pair) for pair in items], capacity),
+        'best_selection(items, capacity)')
     indices = list(indices)
     assert indices == sorted(indices), f'{indices} is not ascending'
     assert len(set(indices)) == len(indices), f'{indices} repeats an item'

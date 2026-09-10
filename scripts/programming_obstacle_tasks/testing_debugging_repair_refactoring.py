@@ -35,7 +35,11 @@ differs on every run. Bucketing on raw text is the defect being measured.
 from __future__ import annotations
 
 from scripts.programming_obstacle_tasks import task
-from scripts.programming_obstacle_tasks._support import LOAD_CANDIDATE, require
+from scripts.programming_obstacle_tasks._support import (
+    LOAD_CANDIDATE,
+    SHAPE_GUARDS,
+    require,
+)
 
 FAMILY = "testing_debugging_repair_refactoring"
 
@@ -263,7 +267,11 @@ else:
             "a report is missing either key, or if a traceback has no frame "
             "line."
         ),
-        validator=LOAD_CANDIDATE + require("group_failures") + r'''
+        validator=LOAD_CANDIDATE + require("group_failures") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+group_failures = returning(group_failures, 'group_failures(...)')
 def trace(directory, line_numbers, functions, files, message):
     lines = ["Traceback (most recent call last):"]
     for number, function, name in zip(line_numbers, functions, files):
@@ -391,7 +399,11 @@ for bad in ([],
             "exactly the same test names, or if any line number is not a "
             "positive integer."
         ),
-        validator=LOAD_CANDIDATE + require("rank_suspicious_lines") + r'''
+        validator=LOAD_CANDIDATE + require("rank_suspicious_lines") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+rank_suspicious_lines = returning(rank_suspicious_lines, 'rank_suspicious_lines(...)')
 import math
 
 # Line 10 runs in both failing tests and neither passing one -- the planted
@@ -744,7 +756,11 @@ for bad in (lambda: first_difference({1: "a"}, {1: "a"}),
             "exactly 'pass' or 'fail', or if any test has fewer than two "
             "recorded runs."
         ),
-        validator=LOAD_CANDIDATE + require("classify_test_history") + r'''
+        validator=LOAD_CANDIDATE + require("classify_test_history") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+classify_test_history = returning(classify_test_history, 'classify_test_history(...)')
 def runs(pattern):
     return ["fail" if character == "F" else "pass" for character in pattern]
 
@@ -933,7 +949,11 @@ for bad in ([hunk(0, [], ["x"])],
             "continue, global, or nonlocal."
         ),
         timeout_seconds=60.0,
-        validator=LOAD_CANDIDATE + require("extract_function") + r'''
+        validator=LOAD_CANDIDATE + require("extract_function") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+extract_function = returning(extract_function, 'extract_function(...)')
 import ast
 
 
@@ -1089,7 +1109,11 @@ for start, end, why in (
             "preserve behaviour."
         ),
         timeout_seconds=60.0,
-        validator=LOAD_CANDIDATE + require("inline_variable") + r'''
+        validator=LOAD_CANDIDATE + require("inline_variable") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+inline_variable = returning(inline_variable, 'inline_variable(...)')
 import ast
 
 
@@ -1780,7 +1804,11 @@ assert picked is frames[1], (
             "a function in namespace."
         ),
         timeout_seconds=45.0,
-        validator=LOAD_CANDIDATE + require("capture_call_tree") + r'''
+        validator=LOAD_CANDIDATE + require("capture_call_tree") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+capture_call_tree = returning(capture_call_tree, 'capture_call_tree(...)')
 def build(source):
     scope = {}
     exec(compile(source, "<case>", "exec"), scope)
@@ -2058,7 +2086,11 @@ no(
             "input."
         ),
         timeout_seconds=60.0,
-        validator=LOAD_CANDIDATE + require("simplify_control_flow") + r'''
+        validator=LOAD_CANDIDATE + require("simplify_control_flow") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+simplify_control_flow = returning(simplify_control_flow, 'simplify_control_flow(...)')
 import ast
 
 
@@ -2221,7 +2253,11 @@ assert "return value" not in result, (
             "differences, normalized_actual_lines) instead."
         ),
         timeout_seconds=45.0,
-        validator=LOAD_CANDIDATE + require("compare_snapshot") + r'''
+        validator=LOAD_CANDIDATE + require("compare_snapshot") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+compare_snapshot = returning(compare_snapshot, 'compare_snapshot(...)')
 TIMESTAMP = (r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", "<TS>")
 ADDRESS = (r"0x[0-9a-f]+", "<ADDR>")
 TMPDIR = (r"/tmp/[A-Za-z0-9_]+", "<TMP>")
@@ -2876,7 +2912,11 @@ assert check_equality_contract([Weird(1)]) == ['ordering']
             "and never remove a star import, whose bindings cannot be known. "
             "Leave every other line of the module exactly as it was."
         ),
-        validator=LOAD_CANDIDATE + require("tidy_imports") + r'''
+        validator=LOAD_CANDIDATE + require("tidy_imports") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+tidy_imports = returning(tidy_imports, 'tidy_imports(...)')
 import ast
 
 SOURCE = """from __future__ import annotations
@@ -3092,7 +3132,11 @@ for bad in ('x = 1', 'import os', 'a\nb', 'for x in y: pass', '('):
             "not change, and neither may a string literal, a comment, or any "
             "other line of the module."
         ),
-        validator=LOAD_CANDIDATE + require("rewrite_module_path") + r'''
+        validator=LOAD_CANDIDATE + require("rewrite_module_path") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+rewrite_module_path = returning(rewrite_module_path, 'rewrite_module_path(...)')
 import ast
 import sys
 import types
@@ -3218,7 +3262,11 @@ assert rewrite_module_path(RELATIVE, 'stale', 'fresh') == RELATIVE
             "not a defect. Raise ValueError if an action is neither "
             "'acquire' nor 'release'."
         ),
-        validator=LOAD_CANDIDATE + require("audit_resource_lifetimes") + r'''
+        validator=LOAD_CANDIDATE + require("audit_resource_lifetimes") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+audit_resource_lifetimes = returning(audit_resource_lifetimes, 'audit_resource_lifetimes(...)')
 EMPTY = {'leaked': [], 'double_released': [], 'reacquired': [],
          'out_of_order': []}
 

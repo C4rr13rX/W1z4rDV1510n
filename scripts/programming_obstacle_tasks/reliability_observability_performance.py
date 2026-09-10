@@ -23,7 +23,11 @@ two tasks against the contract's family totals.
 from __future__ import annotations
 
 from scripts.programming_obstacle_tasks import task
-from scripts.programming_obstacle_tasks._support import LOAD_CANDIDATE, require
+from scripts.programming_obstacle_tasks._support import (
+    LOAD_CANDIDATE,
+    SHAPE_GUARDS,
+    require,
+)
 
 FAMILY = "reliability_observability_performance"
 
@@ -49,7 +53,14 @@ TASKS = [
             "the observed values."
         ),
         timeout_seconds=120.0,
-        validator=LOAD_CANDIDATE + require("LatencyHistogram") + r'''
+        validator=LOAD_CANDIDATE + require("LatencyHistogram") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+_LatencyHistogram = LatencyHistogram
+def LatencyHistogram(*args, **kwargs):
+    return having(_LatencyHistogram(*args, **kwargs), 'bucket_count', 'count', 'quantile', 'record',
+                  what='LatencyHistogram(...)')
 import math
 
 # --- accuracy is a bound, not a golden value ------------------------------
@@ -201,7 +212,14 @@ else:
             "non-positive amount."
         ),
         timeout_seconds=120.0,
-        validator=LOAD_CANDIDATE + require("SlidingWindowCounter") + r'''
+        validator=LOAD_CANDIDATE + require("SlidingWindowCounter") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+_SlidingWindowCounter = SlidingWindowCounter
+def SlidingWindowCounter(*args, **kwargs):
+    return having(_SlidingWindowCounter(*args, **kwargs), 'record', 'resident_buckets', 'total',
+                  what='SlidingWindowCounter(...)')
 counter = SlidingWindowCounter(60.0, 6)   # six ten-second buckets
 
 for second in range(60):
@@ -274,7 +292,11 @@ else:
             "on an empty check list, an unknown status, a duplicate name, or "
             "a check missing any required key."
         ),
-        validator=LOAD_CANDIDATE + require("aggregate_health") + r'''
+        validator=LOAD_CANDIDATE + require("aggregate_health") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+aggregate_health = returning(aggregate_health, 'aggregate_health(...)')
 def check(name, status, critical):
     return {"name": name, "status": status, "critical": critical}
 
@@ -347,7 +369,11 @@ for bad in ([],
             "any of the four windows is missing, if any total is not "
             "positive, or if failed is negative or exceeds total."
         ),
-        validator=LOAD_CANDIDATE + require("evaluate_error_budget") + r'''
+        validator=LOAD_CANDIDATE + require("evaluate_error_budget") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+evaluate_error_budget = returning(evaluate_error_budget, 'evaluate_error_budget(...)')
 def windows(**rates):
     # Each keyword is the error rate for that window over 100000 requests.
     return {
@@ -454,7 +480,14 @@ for bad in (incomplete, bad_total, bad_failed, negative):
             "window_seconds or a max_per_window below 1."
         ),
         timeout_seconds=120.0,
-        validator=LOAD_CANDIDATE + require("EventThrottle") + r'''
+        validator=LOAD_CANDIDATE + require("EventThrottle") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+_EventThrottle = EventThrottle
+def EventThrottle(*args, **kwargs):
+    return having(_EventThrottle(*args, **kwargs), 'offer', 'tracked_keys',
+                  what='EventThrottle(...)')
 throttle = EventThrottle(60.0, 2)
 
 first = throttle.offer(0.0, "disk-full", "disk 91% full")
@@ -536,7 +569,14 @@ for bad in (lambda: EventThrottle(0.0, 1), lambda: EventThrottle(-1.0, 1),
             "1 or k is negative."
         ),
         timeout_seconds=120.0,
-        validator=LOAD_CANDIDATE + require("FrequentItems") + r'''
+        validator=LOAD_CANDIDATE + require("FrequentItems") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+_FrequentItems = FrequentItems
+def FrequentItems(*args, **kwargs):
+    return having(_FrequentItems(*args, **kwargs), 'offer', 'top', 'tracked',
+                  what='FrequentItems(...)')
 import collections
 
 # A stream with three planted heavy hitters buried in unique noise.
@@ -634,7 +674,11 @@ for bad in (lambda: FrequentItems(0), lambda: FrequentItems(-1),
             "start_ms, if a child is not fully contained in its parent's "
             "interval, or if the parent links form a cycle."
         ),
-        validator=LOAD_CANDIDATE + require("critical_path") + r'''
+        validator=LOAD_CANDIDATE + require("critical_path") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+critical_path = returning(critical_path, 'critical_path(...)')
 def span(span_id, parent_id, name, start_ms, end_ms):
     return {"span_id": span_id, "parent_id": parent_id, "name": name,
             "start_ms": start_ms, "end_ms": end_ms}
@@ -722,7 +766,12 @@ for bad in ([], cyclic, orphan, duplicate, two_roots, inverted, escaping,
             "exhaust the stack, because a logging path that crashes the "
             "process is worse than one that drops a record."
         ),
-        validator=LOAD_CANDIDATE + require("redact_record") + r'''
+        validator=LOAD_CANDIDATE + require("redact_record") + SHAPE_GUARDS + r'''
+# Guard the results this validator DEREFERENCES, and only those. A blanket
+# `returning` wrapper is wrong here: `redact_record(None, secrets) is None` is
+# required behaviour further down, so asserting every call returns something
+# would reject a correct answer. A guard must assert a strict subset of what
+# the validator already demands.
 import copy
 
 original = {
@@ -734,7 +783,8 @@ original = {
 snapshot = copy.deepcopy(original)
 secrets = {"password", "api_key", "token"}
 
-out = redact_record(original, secrets)
+out = built(redact_record(original, secrets),
+            'redact_record(record, secrets)')
 assert original == snapshot, "the input record was mutated"
 
 assert out["user"] == "ada"
@@ -776,7 +826,8 @@ assert redact_record([1, "a", None], secrets) == [1, "a", None]
 
 # An empty secret set still returns a copy rather than the original object.
 data = {"a": [1, 2]}
-copied = redact_record(data, set())
+copied = built(redact_record(data, set()),
+               'redact_record(record, set())')
 assert copied == data and copied["a"] is not data["a"], (
     "nested containers must be copied, not shared with the input"
 )
@@ -802,7 +853,14 @@ assert copied == data and copied["a"] is not data["a"], (
             "max_series + 1 entries no matter what it is fed. Raise "
             "ValueError when max_series is not a positive integer."
         ),
-        validator=LOAD_CANDIDATE + require("BoundedLabelRegistry") + r'''
+        validator=LOAD_CANDIDATE + require("BoundedLabelRegistry") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+_BoundedLabelRegistry = BoundedLabelRegistry
+def BoundedLabelRegistry(*args, **kwargs):
+    return having(_BoundedLabelRegistry(*args, **kwargs), 'observe', 'series',
+                  what='BoundedLabelRegistry(...)')
 registry = BoundedLabelRegistry(3)
 registry.observe({"route": "/a"}, 1)
 registry.observe({"route": "/b"}, 2)
@@ -869,7 +927,11 @@ for bad in (0, -1, 1.5, "3", None):
             "`size` and never otherwise -- a caller reasoning about "
             "reproducibility or entropy cost depends on that count."
         ),
-        validator=LOAD_CANDIDATE + require("reservoir_sample") + r'''
+        validator=LOAD_CANDIDATE + require("reservoir_sample") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+reservoir_sample = returning(reservoir_sample, 'reservoir_sample(...)')
 def source_factory(seed):
     state = {"v": seed}
     calls = {"n": 0}
@@ -949,7 +1011,14 @@ for bad in (0, -1, 1.5, "3", None):
             "stepping through it. Raise ValueError when half_life_seconds "
             "is not a positive number."
         ),
-        validator=LOAD_CANDIDATE + require("DecayingCounter") + r'''
+        validator=LOAD_CANDIDATE + require("DecayingCounter") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+_DecayingCounter = DecayingCounter
+def DecayingCounter(*args, **kwargs):
+    return having(_DecayingCounter(*args, **kwargs), 'add', 'value',
+                  what='DecayingCounter(...)')
 now = {"t": 0.0}
 clock = lambda: now["t"]
 
@@ -1161,7 +1230,14 @@ for bad in (
             "four on non-ASCII text, which is exactly when a crash dump "
             "matters."
         ),
-        validator=LOAD_CANDIDATE + require("LogTail") + r'''
+        validator=LOAD_CANDIDATE + require("LogTail") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+_LogTail = LogTail
+def LogTail(*args, **kwargs):
+    return having(_LogTail(*args, **kwargs), 'append', 'lines',
+                  what='LogTail(...)')
 tail = LogTail(20)
 for line in ("aaaa", "bbbb", "cccc", "dddd", "eeee"):
     tail.append(line)
@@ -1242,7 +1318,14 @@ for bad in (0, -1, 1.5, "10", None):
             "ValueError when max_items is not a positive integer or "
             "max_age_seconds is not a positive number."
         ),
-        validator=LOAD_CANDIDATE + require("BatchFlusher") + r'''
+        validator=LOAD_CANDIDATE + require("BatchFlusher") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+_BatchFlusher = BatchFlusher
+def BatchFlusher(*args, **kwargs):
+    return having(_BatchFlusher(*args, **kwargs), 'add', 'flush', 'tick',
+                  what='BatchFlusher(...)')
 now = {"t": 0.0}
 clock = lambda: now["t"]
 flushed = []

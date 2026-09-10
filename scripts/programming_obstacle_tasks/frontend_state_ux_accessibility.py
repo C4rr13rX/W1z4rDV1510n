@@ -31,7 +31,11 @@ the identifier check the contract says cannot substitute for behaviour.
 from __future__ import annotations
 
 from scripts.programming_obstacle_tasks import task
-from scripts.programming_obstacle_tasks._support import LOAD_CANDIDATE, require
+from scripts.programming_obstacle_tasks._support import (
+    LOAD_CANDIDATE,
+    SHAPE_GUARDS,
+    require,
+)
 
 FAMILY = "frontend_state_ux_accessibility"
 
@@ -55,7 +59,12 @@ TASKS = [
             "Any other level raises ValueError."
         ),
         validator=LOAD_CANDIDATE + require("contrast_ratio")
-        + require("meets_wcag") + r'''
+        + require("meets_wcag") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+contrast_ratio = returning(contrast_ratio, 'contrast_ratio(...)')
+meets_wcag = returning(meets_wcag, 'meets_wcag(...)')
 assert abs(contrast_ratio('#000000', '#ffffff') - 21.0) < 1e-9
 assert abs(contrast_ratio('#ffffff', '#000000') - 21.0) < 1e-9, \
     'the ratio must not depend on which colour is passed first'
@@ -371,7 +380,14 @@ for bad, error in (
             "outside 0..len(heights)."
         ),
         timeout_seconds=120.0,
-        validator=LOAD_CANDIDATE + require("VirtualList") + r'''
+        validator=LOAD_CANDIDATE + require("VirtualList") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+_VirtualList = VirtualList
+def VirtualList(*args, **kwargs):
+    return having(_VirtualList(*args, **kwargs), 'offset_of', 'total_height', 'window',
+                  what='VirtualList(...)')
 import random
 
 rows = VirtualList([10, 0, 20, 30, 0, 40])
@@ -460,7 +476,14 @@ for _ in range(20000):
             "unchanged. Every method returns the current text. A limit below "
             "1 raises ValueError."
         ),
-        validator=LOAD_CANDIDATE + require("EditHistory") + r'''
+        validator=LOAD_CANDIDATE + require("EditHistory") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+_EditHistory = EditHistory
+def EditHistory(*args, **kwargs):
+    return having(_EditHistory(*args, **kwargs), 'apply', 'can_redo', 'can_undo', 'current', 'redo', 'undo',
+                  what='EditHistory(...)')
 history = EditHistory('', 5)
 assert history.current() == ''
 assert history.can_undo() is False and history.can_redo() is False
@@ -777,7 +800,14 @@ else:
             "returns errors(). reset() restores the initial values and "
             "clears touched. An unknown field name raises KeyError."
         ),
-        validator=LOAD_CANDIDATE + require("FormState") + r'''
+        validator=LOAD_CANDIDATE + require("FormState") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+_FormState = FormState
+def FormState(*args, **kwargs):
+    return having(_FormState(*args, **kwargs), 'blur', 'change', 'dirty', 'errors', 'reset', 'submit', 'touched', 'values',
+                  what='FormState(...)')
 fields = {
     'email': {'required': True, 'pattern': r'[^@\s]+@[^@\s]+\.[a-z]{2,}'},
     'name': {'required': True, 'min_length': 2},

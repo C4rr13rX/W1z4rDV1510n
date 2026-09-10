@@ -29,7 +29,11 @@ reading rather than by colliding:
 from __future__ import annotations
 
 from scripts.programming_obstacle_tasks import task
-from scripts.programming_obstacle_tasks._support import LOAD_CANDIDATE, require
+from scripts.programming_obstacle_tasks._support import (
+    LOAD_CANDIDATE,
+    SHAPE_GUARDS,
+    require,
+)
 
 FAMILY = "requirements_api_contracts"
 
@@ -284,7 +288,14 @@ assert parse_byte_range("bytes= 0-49 , 100-149 ", 10000) == [(0, 49), (100, 149)
             "was present for the whole scan, however the table changes "
             "mid-scan. Do not return the cursor as a row offset."
         ),
-        validator=LOAD_CANDIDATE + require("CursorPage") + r'''
+        validator=LOAD_CANDIDATE + require("CursorPage") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+_CursorPage = CursorPage
+def CursorPage(*args, **kwargs):
+    return having(_CursorPage(*args, **kwargs), 'delete', 'insert', 'page',
+                  what='CursorPage(...)')
 def scan(table, limit):
     seen, cursor = [], None
     while True:
@@ -436,7 +447,14 @@ assert any("secret_token" in item for item in findings), findings
             "may run it again; propagate the exception. Bodies that differ "
             "only in dict key order are equal."
         ),
-        validator=LOAD_CANDIDATE + require("IdempotentEndpoint") + r'''
+        validator=LOAD_CANDIDATE + require("IdempotentEndpoint") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+_IdempotentEndpoint = IdempotentEndpoint
+def IdempotentEndpoint(*args, **kwargs):
+    return having(_IdempotentEndpoint(*args, **kwargs), 'submit',
+                  what='IdempotentEndpoint(...)')
 calls = []
 
 def handler(tag="ok"):
@@ -1056,7 +1074,11 @@ for bad_constraint in (">=1.0", "", "  ", "^1.2", "~1"):
             "to both positional lists do not keep their relative order. A "
             "changed default value is not a finding."
         ),
-        validator=LOAD_CANDIDATE + require("classify_signature_change") + r'''
+        validator=LOAD_CANDIDATE + require("classify_signature_change") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+classify_signature_change = returning(classify_signature_change, 'classify_signature_change(...)')
 def check(old, new, expected):
     compatible, reasons = classify_signature_change(old, new)
     assert list(reasons) == expected, (
@@ -1402,7 +1424,14 @@ for malformed in ("", "   ", "a,", ",a", "a(", "a)", "a()", "a//b", "a/",
             "becomes free again; a running operation never expires however "
             "old it is. poll of an unknown name raises KeyError."
         ),
-        validator=LOAD_CANDIDATE + require("OperationTracker") + r'''
+        validator=LOAD_CANDIDATE + require("OperationTracker") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+_OperationTracker = OperationTracker
+def OperationTracker(*args, **kwargs):
+    return having(_OperationTracker(*args, **kwargs), 'cancel', 'fail', 'poll', 'report', 'start', 'succeed',
+                  what='OperationTracker(...)')
 now = [1000.0]
 
 

@@ -19,7 +19,11 @@ clock duration or on threads actually overlapping.
 from __future__ import annotations
 
 from scripts.programming_obstacle_tasks import task
-from scripts.programming_obstacle_tasks._support import LOAD_CANDIDATE, require
+from scripts.programming_obstacle_tasks._support import (
+    LOAD_CANDIDATE,
+    SHAPE_GUARDS,
+    require,
+)
 
 FAMILY = "concurrency_async_distributed"
 
@@ -38,7 +42,14 @@ TASKS = [
             "bucket idles. A request whose cost exceeds `capacity` can never "
             "succeed. Time never moves backwards."
         ),
-        validator=LOAD_CANDIDATE + require("TokenBucket") + r'''
+        validator=LOAD_CANDIDATE + require("TokenBucket") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+_TokenBucket = TokenBucket
+def TokenBucket(*args, **kwargs):
+    return having(_TokenBucket(*args, **kwargs), 'allow',
+                  what='TokenBucket(...)')
 now = [0.0]
 clock = lambda: now[0]
 
@@ -110,7 +121,14 @@ assert slow.allow() is True
             "opens again with the recovery window restarted."
         ),
         validator=LOAD_CANDIDATE + require("CircuitBreaker")
-        + require("CircuitOpenError") + r'''
+        + require("CircuitOpenError") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+_CircuitBreaker = CircuitBreaker
+def CircuitBreaker(*args, **kwargs):
+    return having(_CircuitBreaker(*args, **kwargs), 'call',
+                  what='CircuitBreaker(...)')
 now = [0.0]
 clock = lambda: now[0]
 calls = []
@@ -375,7 +393,14 @@ assert compare_clocks(right, merged) == "before"
             "read-only property `pending` giving the count of buffered "
             "messages awaiting a gap."
         ),
-        validator=LOAD_CANDIDATE + require("ExactlyOnceInbox") + r'''
+        validator=LOAD_CANDIDATE + require("ExactlyOnceInbox") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+_ExactlyOnceInbox = ExactlyOnceInbox
+def ExactlyOnceInbox(*args, **kwargs):
+    return having(_ExactlyOnceInbox(*args, **kwargs), 'deliver', 'pending',
+                  what='ExactlyOnceInbox(...)')
 applied = []
 inbox = ExactlyOnceInbox(applied.append)
 
@@ -519,7 +544,14 @@ else:
             "that is True only once a value has been stored. Do not hold a "
             "lock while returning an already-computed value."
         ),
-        validator=LOAD_CANDIDATE + require("Once") + r'''
+        validator=LOAD_CANDIDATE + require("Once") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+_Once = Once
+def Once(*args, **kwargs):
+    return having(_Once(*args, **kwargs), 'do', 'done',
+                  what='Once(...)')
 import threading
 
 # Single-threaded contract first.
@@ -590,7 +622,14 @@ assert all(value is observed[0] for value in observed), \
             "each thread releases what it acquired and does not upgrade a "
             "read hold into a write hold."
         ),
-        validator=LOAD_CANDIDATE + require("ReadWriteLock") + r'''
+        validator=LOAD_CANDIDATE + require("ReadWriteLock") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+_ReadWriteLock = ReadWriteLock
+def ReadWriteLock(*args, **kwargs):
+    return having(_ReadWriteLock(*args, **kwargs), 'acquire_read', 'acquire_write', 'release_read', 'release_write',
+                  what='ReadWriteLock(...)')
 import threading
 
 lock = ReadWriteLock()
@@ -719,7 +758,14 @@ assert order == ["writer", "reader"], \
             "raises KeyError for a node that is not a member."
         ),
         timeout_seconds=90.0,
-        validator=LOAD_CANDIDATE + require("HashRing") + '''
+        validator=LOAD_CANDIDATE + require("HashRing") + SHAPE_GUARDS + '''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+_HashRing = HashRing
+def HashRing(*args, **kwargs):
+    return having(_HashRing(*args, **kwargs), 'add', 'get', 'remove',
+                  what='HashRing(...)')
 nodes = [f"node-{index}" for index in range(8)]
 keys = [f"key-{index}" for index in range(8000)]
 
@@ -801,7 +847,14 @@ else:
             "associative, so replicas that exchange states in any order, any "
             "number of times, all settle on the same value."
         ),
-        validator=LOAD_CANDIDATE + require("PNCounter") + '''
+        validator=LOAD_CANDIDATE + require("PNCounter") + SHAPE_GUARDS + '''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+_PNCounter = PNCounter
+def PNCounter(*args, **kwargs):
+    return having(_PNCounter(*args, **kwargs), 'increment', 'decrement', 'merge', 'value',
+                  what='PNCounter(...)')
 a = PNCounter("a")
 b = PNCounter("b")
 c = PNCounter("c")
@@ -885,7 +938,18 @@ for bad in (-1, -100):
             "stored value and raises KeyError when there is none."
         ),
         validator=LOAD_CANDIDATE + require("LeaseManager") + require("FencedStore")
-        + require("LeaseHeldError") + require("StaleTokenError") + '''
+        + require("LeaseHeldError") + require("StaleTokenError") + SHAPE_GUARDS + '''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+_LeaseManager = LeaseManager
+def LeaseManager(*args, **kwargs):
+    return having(_LeaseManager(*args, **kwargs), 'acquire', 'release',
+                  what='LeaseManager(...)')
+_FencedStore = FencedStore
+def FencedStore(*args, **kwargs):
+    return having(_FencedStore(*args, **kwargs), 'read', 'write',
+                  what='FencedStore(...)')
 now = [1000.0]
 manager = LeaseManager(30.0, lambda: now[0])
 store = FencedStore()
@@ -1059,7 +1123,14 @@ assert value == "winner" and stale == ["n2", "n3"], f"stale nodes {stale}"
             "allowed_lateness. dropped_count() returns how many events "
             "arrived too late to be filed."
         ),
-        validator=LOAD_CANDIDATE + require("TumblingWindows") + '''
+        validator=LOAD_CANDIDATE + require("TumblingWindows") + SHAPE_GUARDS + '''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+_TumblingWindows = TumblingWindows
+def TumblingWindows(*args, **kwargs):
+    return having(_TumblingWindows(*args, **kwargs), 'add', 'advance_watermark', 'dropped_count',
+                  what='TumblingWindows(...)')
 windows = TumblingWindows(10, 5)
 windows.add(3, "a")
 windows.add(7, "b")
@@ -1213,7 +1284,14 @@ for bad in (0, -3):
             "counted admission expires. Raise ValueError when limit is not a "
             "positive integer or window_seconds is not positive."
         ),
-        validator=LOAD_CANDIDATE + require("SlidingWindowLimiter") + r'''
+        validator=LOAD_CANDIDATE + require("SlidingWindowLimiter") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+_SlidingWindowLimiter = SlidingWindowLimiter
+def SlidingWindowLimiter(*args, **kwargs):
+    return having(_SlidingWindowLimiter(*args, **kwargs), 'allow', 'retry_after',
+                  what='SlidingWindowLimiter(...)')
 now = [0.0]
 
 

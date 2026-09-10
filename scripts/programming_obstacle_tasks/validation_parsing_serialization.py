@@ -10,7 +10,11 @@ than by the prompt's examples, so reproducing the examples is not enough.
 from __future__ import annotations
 
 from scripts.programming_obstacle_tasks import task
-from scripts.programming_obstacle_tasks._support import LOAD_CANDIDATE, require
+from scripts.programming_obstacle_tasks._support import (
+    LOAD_CANDIDATE,
+    SHAPE_GUARDS,
+    require,
+)
 
 FAMILY = "validation_parsing_serialization"
 
@@ -219,7 +223,11 @@ for malformed in ('foo', 'foo/bar', '/foo/01', '/foo/-1', '/foo/x', '/~2'):
             "including a bare P, a missing T before a time component, and "
             "components given out of order."
         ),
-        validator=LOAD_CANDIDATE + require("parse_duration") + '''
+        validator=LOAD_CANDIDATE + require("parse_duration") + SHAPE_GUARDS + '''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+parse_duration = returning(parse_duration, 'parse_duration(...)')
 def close(got, want):
     assert abs(got - want) < 1e-6, f'got {got}, want {want}'
 
@@ -1184,7 +1192,11 @@ for bad in ('kv', 'abc-kv'):
             "part's headers are not terminated by an empty line, and when a "
             "part has no Content-Disposition header or no name parameter."
         ),
-        validator=LOAD_CANDIDATE + require("parse_multipart") + r'''
+        validator=LOAD_CANDIDATE + require("parse_multipart") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+parse_multipart = returning(parse_multipart, 'parse_multipart(...)')
 BODY = (
     b'preamble is discarded\r\n'
     b'--X\r\n'
@@ -1482,7 +1494,11 @@ for code in list(range(0, 0xd800, 97)) + list(range(0xe000, 0x110000, 1013)):
             "size that is not hexadecimal, on data that is truncated, and "
             "when a chunk is not followed by CRLF."
         ),
-        validator=LOAD_CANDIDATE + require("decode_chunked") + r'''
+        validator=LOAD_CANDIDATE + require("decode_chunked") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+decode_chunked = returning(decode_chunked, 'decode_chunked(...)')
 body, trailers = decode_chunked(b'4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n')
 assert body == b'Wikipedia', body
 assert trailers == {}

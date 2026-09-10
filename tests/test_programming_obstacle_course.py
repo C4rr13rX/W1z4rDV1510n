@@ -49,6 +49,10 @@ from scripts.programming_obstacle_tasks import (
     load_authored_tasks,
     task,
 )
+from scripts.audit_obstacle_validator_attribution import (
+    required_names,
+    stub_module,
+)
 from tests.obstacle_references import MUTATIONS, REFERENCES
 
 AUTHORED = load_authored_tasks()
@@ -485,6 +489,41 @@ def test_reference_solution_passes_its_validator(item):
     assert result.outcome == PASSED, (
         f"{item.task_id} rejected its own reference solution:\n"
         f"{result.detail}"
+    )
+
+
+@pytest.mark.parametrize("item", AUTHORED, ids=lambda item: item.task_id)
+def test_an_ordinary_wrong_answer_blames_the_candidate(item):
+    """A wrong answer must score `failed`, never `validator_error`.
+
+    Attribution is decided by the traceback: the harness blames the candidate
+    for an exception passing through the candidate's file and blames ITSELF
+    for one raised purely in validator frames. `require` proves a name exists
+    and can never prove it is the right kind of thing, so a candidate whose
+    `LRUCache` returns None makes the validator's next line raise
+    `AttributeError: 'NoneType' object has no attribute 'put'` in validator
+    frames alone. The contract counts `validator_error` separately and lets it
+    block admission, so that ordinary wrong answer is recorded as the COURSE
+    being broken -- and sends the repair at the harness instead of the
+    curriculum.
+
+    Measured 2026-09-09 by `scripts/audit_obstacle_validator_attribution.py`:
+    88 of 225 authored tasks did exactly this, across all thirteen families.
+    The audit exits non-zero while any remain, but an audit nobody runs is not
+    a guard, and every one of those 88 was authored by someone who believed
+    `require` was enough. So the check runs per task, here, on every suite.
+
+    The candidate is the single most likely wrong answer a language model
+    gives: every required name defined, none of them implemented.
+    """
+    names = required_names(item.validator)
+    result = run_task(item, stub_module(names))
+    assert result.outcome != VALIDATOR_ERROR, (
+        f"{item.task_id} scored the harness for an ordinary wrong answer. "
+        f"Guard the first place the validator touches something the candidate "
+        f"PRODUCED, using _support.SHAPE_GUARDS -- and assert only a strict "
+        f"subset of what the validator already demands, or the guard rejects "
+        f"a correct answer instead: {result.detail}"
     )
 
 

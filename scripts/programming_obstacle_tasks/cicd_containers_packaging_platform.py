@@ -27,7 +27,11 @@ not about how to run it fast.
 from __future__ import annotations
 
 from scripts.programming_obstacle_tasks import task
-from scripts.programming_obstacle_tasks._support import LOAD_CANDIDATE, require
+from scripts.programming_obstacle_tasks._support import (
+    LOAD_CANDIDATE,
+    SHAPE_GUARDS,
+    require,
+)
 
 FAMILY = "cicd_containers_packaging_platform"
 
@@ -50,7 +54,11 @@ TASKS = [
             "if a path is empty."
         ),
         timeout_seconds=60.0,
-        validator=LOAD_CANDIDATE + require("build_archive") + r'''
+        validator=LOAD_CANDIDATE + require("build_archive") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+build_archive = returning(build_archive, 'build_archive(...)')
 import gzip
 import io
 import struct
@@ -223,7 +231,12 @@ for malformed in (["flask=>2.0"], ["flask>>2.0"], [">=2.0"], ["flask>=x.y"],
             "chain_ids returns an empty list for no layers."
         ),
         timeout_seconds=30.0,
-        validator=LOAD_CANDIDATE + require("chain_ids") + require("image_id") + r'''
+        validator=LOAD_CANDIDATE + require("chain_ids") + require("image_id") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+chain_ids = returning(chain_ids, 'chain_ids(...)')
+image_id = returning(image_id, 'image_id(...)')
 import hashlib
 
 
@@ -416,7 +429,11 @@ for bad in ([("COPY", "src")], [("ADD", "a b c")], [("COPY", "")]):
             "jobs share a name."
         ),
         timeout_seconds=60.0,
-        validator=LOAD_CANDIDATE + require("evaluate_pipeline") + r'''
+        validator=LOAD_CANDIDATE + require("evaluate_pipeline") + SHAPE_GUARDS + r'''
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+evaluate_pipeline = returning(evaluate_pipeline, 'evaluate_pipeline(...)')
 jobs = [
     {"name": "build"},
     {"name": "unit", "needs": ["build"]},

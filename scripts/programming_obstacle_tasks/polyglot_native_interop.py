@@ -32,7 +32,11 @@ is decidable from Python against the standard alone.
 from __future__ import annotations
 
 from scripts.programming_obstacle_tasks import task
-from scripts.programming_obstacle_tasks._support import LOAD_CANDIDATE, require
+from scripts.programming_obstacle_tasks._support import (
+    LOAD_CANDIDATE,
+    SHAPE_GUARDS,
+    require,
+)
 
 FAMILY = "polyglot_native_interop"
 
@@ -899,7 +903,11 @@ for bad in (b'', b'\\x03\\x11', b'\\x05\\x01\\x02', b'\\x02\\x00\\x01',
             "the range 0 to 65535. The check value for the nine ASCII bytes "
             "'123456789' under these parameters is 0x29B1."
         ),
-        validator=LOAD_CANDIDATE + require("crc16") + """
+        validator=LOAD_CANDIDATE + require("crc16") + SHAPE_GUARDS + """
+# Guard every call, not just the first: `require` proves a name
+# exists, never that it is the right KIND of thing, and an
+# AttributeError on the result is raised in validator frames alone.
+crc16 = returning(crc16, 'crc16(...)')
 POLYNOMIAL = (1 << 16) | 0x1021
 
 def by_long_division(data):
