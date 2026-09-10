@@ -280,6 +280,55 @@ def classify_probe(probe: dict, *, stall_seconds: float,
                 f"interval can ever admit",
                 event_fingerprint("gate_never_ran", probe),
             )
+        # A FORWARD STAGE CANNOT ADMIT, so the admission clock is the wrong
+        # instrument to point at one.
+        #
+        # Forward harvests rows into deferred intervals; every admission
+        # verdict is produced later, by the replay stage that owns those
+        # intervals. `hours_since_admission` therefore rises monotonically for
+        # the entire length of a forward phase NO MATTER HOW WELL IT IS GOING,
+        # and go-systems alone is 328k rows -- days of forward at the measured
+        # duty cycle. Left ungated, this alarm re-fires every `retry_cooldown`
+        # (1800 s) for that whole span, and each firing wakes a billed agent
+        # whose only possible finding is "healthy, wait".
+        #
+        # That is not a hypothetical. Measured 2026-09-10: 103.7 h of
+        # "drought" published as `fix_required` against `go-systems` at row
+        # 111,064 of 131,072, advancing 12.0 rows/s, `durable_next_row` equal
+        # to `ram_next_row` (zero rollback exposure), 18k rows from its gate.
+        # Nothing was wrong. `admission_watchdog.faults` had already been
+        # taught this distinction; this emitter had not, so the two halves of
+        # the same watchdog disagreed about the same host.
+        #
+        # The suppression is deliberately narrow. It requires the stage to be
+        # `forward` AND the freshest writer to be the forward driver's own
+        # progress file AND that file to have actually moved during the
+        # sample. A forward block that is genuinely frozen still alarms below,
+        # because a forward stage that never reaches its handoff never admits
+        # either -- which is the fault this check was built for.
+        beat = probe.get("heartbeat") or {}
+        forward_rate = beat.get("rows_per_second") or beat.get(
+            "accepted_per_second") or 0.0
+        forward_advancing = (
+            service_stage == "forward"
+            and beat.get("source") == "forward_progress"
+            and float(forward_rate) > 0.0
+        )
+        if since is not None and float(since) > admission_stall_hours \
+                and forward_advancing:
+            curriculum = probe.get("curriculum") or {}
+            remaining = curriculum.get("forward_remaining_rows")
+            return Decision(
+                "healthy",
+                f"forward stage {status.get('phase')!r} is harvesting at "
+                f"{float(forward_rate):.1f} rows/s (row {beat.get('row')} of "
+                f"{status.get('block_target_row')}, "
+                f"{remaining} forward rows left); admission belongs to the "
+                f"replay stage, so the {float(since):.1f}h since the last one "
+                f"is expected, not a fault",
+                event_fingerprint("healthy", probe),
+            )
+
         if since is not None and float(since) > admission_stall_hours:
             # Deliberately still a fault, not downgraded by visible progress:
             # the scar behind this rule is eight clean yield/recycle cycles and
@@ -303,7 +352,6 @@ def classify_probe(probe: dict, *, stall_seconds: float,
             # only that nothing had admitted for four days -- and establishing
             # "healthy, wait" cost a full diagnostic session. A zero rate and
             # an unknown rate are different facts, and neither one is silence.
-            beat = probe.get("heartbeat") or {}
             rate = beat.get("rows_per_second")
             row = beat.get("row")
             target = status.get("block_target_row")

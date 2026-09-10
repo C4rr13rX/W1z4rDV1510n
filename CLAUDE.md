@@ -126,6 +126,19 @@ Verify, do not assume:
   and redeployed 5.8 h earlier. Timestamp `last_failure` against process
   start before re-debugging it.
 
+  **The watchdog has TWO emitters and they drifted apart.**
+  `admission_watchdog.faults` learned to see a forward block on 2026-09-10
+  (86d5020); `watch_programming_brain.classify_probe` — the one that actually
+  publishes `fix_required` — did not, so the same host was simultaneously
+  healthy and faulted. Measured hours later: 103.7 h published as a fault
+  against `go-systems` at row 111,064 of 131,072 advancing 12.0 rows/s with
+  `durable_next_row == ram_next_row` (zero rollback exposure). Because a
+  forward phase is 328k rows and `retry_cooldown` is 1800 s, that alarm bills
+  an agent wake-up every half hour for days. Both emitters now gate on
+  `service_stage`; when changing one, change the other, and assert the
+  suppression stays narrow — a FROZEN forward block must still alarm, because
+  a forward stage that never reaches its handoff never admits either.
+
 - **The row moves once per COMMITTED BATCH, not continuously.** Between
   commits the progress file is byte-identical, so any sample shorter than the
   commit period reads 0 rows/s on a perfectly healthy block. Measured

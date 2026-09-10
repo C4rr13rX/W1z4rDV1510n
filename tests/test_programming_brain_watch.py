@@ -984,3 +984,77 @@ def test_a_forward_block_that_is_advancing_is_not_a_drought() -> None:
     frozen = faults({**drought, "replay_advancing": False},
                     baseline_deferred=3)
     assert any(f.startswith("no_admission") for f in frozen), frozen
+
+
+def _forward_drought_probe() -> dict:
+    """The live payload that woke the agent at 103.7 h, verbatim in shape."""
+    live = probe("running")
+    live["runtime"] = "/runtime"
+    live["service_stage"] = "forward"
+    live["status"].update({"phase": "go-systems", "block_target_row": 131072,
+                           "durable_next_row": 111008, "ram_next_row": 111008})
+    live["admissions"] = {"hours_since_admission": 103.7, "gate_artifacts": 47,
+                          "event_counts": {"deferred_replay_resource_yield": 191}}
+    live["heartbeat"] = {"source": "forward_progress", "rows_per_second": 11.99,
+                         "accepted_per_second": 11.99, "row": 111064,
+                         "age_seconds": 0.3, "sample_seconds": 2.0,
+                         "file": "go-systems.progress.json"}
+    live["curriculum"] = {"forward_remaining_rows": 217409}
+    live["memory"] = {"available_gb": 2.98}
+    return live
+
+
+def test_a_forward_stage_drought_is_expected_not_a_fault() -> None:
+    """A forward stage harvests rows; it is structurally unable to admit.
+
+    Every admission verdict is produced by the replay stage that owns the
+    deferred intervals forward creates, so `hours_since_admission` rises for
+    the whole length of a forward phase however well it is going -- and
+    go-systems alone is 328k rows. At a 1800 s retry cooldown an ungated alarm
+    re-fires for days, waking a billed agent whose only finding can be "wait".
+
+    Measured 2026-09-10: 103.7 h published as `fix_required` against a block
+    at row 111,064 of 131,072 advancing 12.0 rows/s with zero rollback
+    exposure. `admission_watchdog.faults` already knew this; this emitter did
+    not, so the two halves of one watchdog disagreed about the same host.
+    """
+    decision = classify_probe(_forward_drought_probe(), stall_seconds=1800)
+    assert decision.kind == "healthy", decision.reason
+    assert "go-systems" in decision.reason
+    assert "admission belongs to the replay stage" in decision.reason
+    # The numbers that decide "wait" must survive into the payload.
+    assert "row 111064 of 131072" in decision.reason
+    assert "217409 forward rows left" in decision.reason
+
+
+def test_the_forward_suppression_cannot_silence_a_frozen_block() -> None:
+    """The narrowness IS the safety property, so pin each condition.
+
+    A forward stage that never reaches its handoff never admits either, which
+    is precisely the fault this check was built for. Suppression therefore
+    requires all three of: the stage is forward, the freshest writer is the
+    forward driver, and that writer actually moved.
+    """
+    # Frozen row -- the by-design freezes are the agent's problem to rule out,
+    # but silence here would hide a real wedge.
+    frozen = _forward_drought_probe()
+    frozen["heartbeat"] = {**frozen["heartbeat"], "rows_per_second": 0.0,
+                           "accepted_per_second": 0.0}
+    assert classify_probe(frozen, stall_seconds=1800).kind == "fix_required"
+
+    # A replay stage is exactly the case the drought alarm exists for: eight
+    # clean yield/recycle cycles and 18,568 accepted episodes with zero
+    # admissions. Motion must never buy it an exemption.
+    replaying = _forward_drought_probe()
+    replaying["service_stage"] = "replay"
+    replaying["heartbeat"] = {**replaying["heartbeat"], "source": "replay_progress"}
+    decision = classify_probe(replaying, stall_seconds=1800)
+    assert decision.kind == "fix_required"
+    assert "no interval admitted for 103.7h" in decision.reason
+
+    # A stale forward file that is not the freshest writer proves nothing
+    # about the current stage -- the heartbeat lesson, one file over.
+    stale_source = _forward_drought_probe()
+    stale_source["heartbeat"] = {**stale_source["heartbeat"],
+                                 "source": "replay_progress"}
+    assert classify_probe(stale_source, stall_seconds=1800).kind == "fix_required"
