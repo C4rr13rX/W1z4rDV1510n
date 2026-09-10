@@ -177,14 +177,24 @@ if os.path.exists(ledger):
         suites = re.findall(r"'name':\s*'([^']+)'[^}]*?'passed':\s*False", reason)
         for suite in suites:
             failing_suites[suite] += 1
-        if "exited" in reason or "signal" in reason or "stderr" in reason:
+        # Order is load-bearing, and getting it wrong is not a rounding
+        # error. `replay_worker_failure` formats "deferred replay worker
+        # exited N; stderr=<path>", but a gate rejection ALSO embeds a stderr
+        # dump, so testing a bare "stderr" first swallowed the regressions and
+        # the timeouts into the worker-exit bucket: this probe reported 317 of
+        # 324 worker exits where an independent count of the same ledger found
+        # 65. Match the specific phrase, and test the more specific causes
+        # before the general ones.
+        if suites or "'passed': False" in reason:
+            bucket = "enterprise_regression"
+        elif "timeout" in reason or "timed out" in reason:
+            bucket = "timeout"
+        elif "worker exited" in reason or "signal" in reason:
             bucket = "worker_exit_or_signal"
         elif "yield" in reason or "memory" in reason or "resource" in reason:
             bucket = "resource_yield"
-        elif "timeout" in reason or "timed out" in reason:
-            bucket = "timeout"
         elif "gate" in reason or "semantic" in reason or "canary" in reason:
-            bucket = "semantic_gate"
+            bucket = "gate_command_failed"
         elif reason:
             bucket = "other:" + re.sub(r"[^a-z ]", "", reason.lower())[:40]
         else:

@@ -48,6 +48,40 @@ tests, migrations, schemas, concurrency behavior, security properties,
 performance ceilings, accessibility, reproducible builds, and repository
 changes. Identifier or formatting checks cannot substitute for behavior.
 
+### A validator must never index data the candidate controls
+
+Admission requires no `validator-error` cases, and the harness decides that
+label by attribution: an exception raised only in validator frames is a
+harness fault, while one that passed through the candidate's own code is a
+capability verdict. That makes a bare subscript in a validator dangerous in a
+specific way — it converts the very failure the task exists to catch into a
+verdict that the *course* is broken.
+
+Measured 2026-09-09 while authoring `architecture_multifile_integration`
+-0401 to -0405. Three of the five validators scored `validator_error` instead
+of `failed` against deliberately wrong solutions:
+
+| Written as | Wrong solution | Raised | Scored |
+|---|---|---|---|
+| `result['region']` | drops an unknown key | `KeyError` | `validator_error` |
+| `db.get('outbox:x')['state']` | never writes the row | `TypeError` on `None` | `validator_error` |
+| `next(walk)` | generator ends early | `StopIteration` | `validator_error` |
+
+Every one of those is the defect under test. Read through an accessor that
+asserts first — `assert isinstance(row, dict)` then `row.get(key)` — so a
+missing key, an absent row and a short generator each become an
+`AssertionError` with a message naming what the candidate failed to produce.
+
+This is why authoring is not finished when `programming_obstacle_manifest.py`
+reports `invalid_tasks: []`. That audit checks counts, behavioural
+distinctness, absence of network imports and bounded timeouts; it cannot
+check whether a validator is capable of saying no. Run every new task against
+a reference solution that must pass **and** against several
+plausible-but-wrong solutions that must return `failed` — not
+`validator_error`. A task that cannot fail is worse than a missing task,
+because it silently inflates the score toward the 1000/1000 the contract
+admits on.
+
 The held-out obstacle prompts and fixtures must never become training rows.
 On failure, cluster cases by the smallest causal capability. Repair with either
 an architecture correction or separately sourced curriculum whose license and

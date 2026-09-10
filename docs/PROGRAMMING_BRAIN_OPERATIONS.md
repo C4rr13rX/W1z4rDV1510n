@@ -639,6 +639,67 @@ quartet of the fortnight above — those now pass. A drought that looks like
 Go. That is the same collapse-to-one-cell shape as `composition_coverage_not_
 order`, and the reason the fix is a corpus rather than an architecture change.
 
+### A bucket that matches everything is as blind as one that matches nothing
+
+`vacuous_zero_signals` warns about a pattern that can never match. Re-measuring
+the same 324 failures on 2026-09-09 produced the mirror image, and it is
+harder to spot because the output looks *informative* rather than empty.
+
+`_forward_convergence_probe.sh` reported **317 of 324** as
+`worker_exit_or_signal` — a cause so dominant it would have sent the whole
+repair at the replay worker. The independent count in the table above found
+**65**. The probe was not reading the wrong ledger; it was classifying with
+
+```python
+if "exited" in reason or "signal" in reason or "stderr" in reason:
+```
+
+tested *first*. `replay_worker_failure` formats `"deferred replay worker
+exited N; stderr=<path>"`, but a gate rejection embeds a stderr dump too, and
+so does a timeout. Every message contains `stderr`, so the first arm captured
+the entire population and the arms below it were unreachable — an `if/else`
+chain where an earlier arm that matches ends it, which is the same shape
+CLAUDE.md already records for the answer branch.
+
+Two habits follow. Match the **specific phrase** a formatter actually emits
+(`"worker exited"`), not a substring that travels with every message. And
+order the arms most-specific first: an enterprise regression is identifiable
+by `'passed': False` and a suite name, so it must be tested before any
+generic transport word. A single dominant bucket deserves the same suspicion
+as a uniformly empty table — both mean the classifier, not the population,
+decided the answer. The cheap check is to compare against a count taken a
+different way; here `_replay_classifier_deploy_probe.sh` matched on
+`"exited"` alone and independently returned 65.
+
+## The forward ETA is a duty cycle, not the instantaneous row rate
+
+The watchdog that woke this session projected the `go-systems` block would
+reach its gate "in about 0.9h", from a live heartbeat advancing 20.0 rows/s
+at row 64,472 of 131,072. The arithmetic is right and the reading is wrong,
+because a forward block spends most of its wall clock *not* advancing rows.
+
+Measured across the following 1,236 s: row 65,536 -> 69,992, an effective
+**3.6 rows/s** against an instantaneous 19.98 — a duty cycle near 18 %. The
+remaining 61,080 rows are therefore about **4.7 h** away, not 0.9 h. What
+consumes the difference is not a fault: in the same window the ledger recorded
+four `continuous_canary` events and one `resource_bounded_settlement`, and
+CLAUDE.md already states that settlement, the admission gate and the canary
+all freeze the row by design.
+
+So an ETA computed from the instantaneous rate is a lower bound, and a poor
+one. A watcher that waits for a verdict on that ETA will time out on a healthy
+block and report a stall — which is what happened here: a 75-minute
+`_gate_outcome_watch.sh` run returned `status_stale`, state
+`continuous_canary`, row unchanged at 65,536, and looked exactly like a hang.
+The block had in fact passed through canary, settlement and back to `running`.
+
+To tell grinding from hung, measure a **delta on something that must move if
+work is happening** rather than the row, which is expected to freeze:
+`_canary_progress_discriminator.sh` samples the brain's `utime+stime` from
+`/proc/<pid>/stat` twice and returned 55.2 % CPU, alongside canary events
+minutes old. A frozen row plus a busy brain is a canary; a frozen row plus a
+flat CPU counter is a hang.
+
 ## A rising row counter does not mean the interval is converging
 
 The two sections above establish that the yield misattribution was real and
