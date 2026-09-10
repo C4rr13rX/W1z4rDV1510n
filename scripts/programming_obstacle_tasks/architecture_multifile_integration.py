@@ -1548,3 +1548,705 @@ assert guarded.captured_total == 0
 ''',
     ),
 ]
+
+
+# ---------------------------------------------------------------------------
+# The -04xx block. Numbered away from the -00xx run above because obstacle
+# families are authored across more than one session, and a second author
+# starting again at the next free -00xx number silently shadows the first
+# author's work when both land. The block is the collision guard.
+#
+# Every task here supplies the other side of a seam that spans a process
+# boundary or a durability boundary -- the two places where a locally correct
+# decision is most often globally wrong, and where a unit test written against
+# the module in isolation cannot see the mistake at all.
+# ---------------------------------------------------------------------------
+
+#: The persistence and messaging the application already runs on. The broker
+#: is handed the database so it can record whether a publish happened while a
+#: transaction was still open: the defect -0401 exists to catch cannot be
+#: observed from the published messages alone.
+_OUTBOX_INFRA = '''\
+"""The database and broker the service already runs on."""
+
+
+class Rejected(Exception):
+    """Raised by both the database and the broker."""
+
+
+class _Transaction:
+    def __init__(self, database):
+        self._database = database
+        self._writes = {}
+
+    def put(self, key, value):
+        if self._database._open is not self:
+            raise Rejected("write outside the open transaction")
+        self._writes[key] = value
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, kind, error, traceback):
+        self._database._open = None
+        if kind is None:
+            self._database._rows.update(self._writes)
+            self._database.commits += 1
+        else:
+            self._database.rollbacks += 1
+        return False
+
+
+class Database:
+    def __init__(self):
+        self._rows = {}
+        self._open = None
+        self.commits = 0
+        self.rollbacks = 0
+
+    @property
+    def in_transaction(self):
+        return self._open is not None
+
+    def transaction(self):
+        if self._open is not None:
+            raise Rejected("a transaction is already open")
+        self._open = _Transaction(self)
+        return self._open
+
+    def get(self, key, default=None):
+        return self._rows.get(key, default)
+
+    def rows(self):
+        return dict(self._rows)
+
+
+class Broker:
+    def __init__(self, database=None, fail_keys=()):
+        self._database = database
+        self.fail_keys = set(fail_keys)
+        self.published = []
+        self.attempts = []
+        self.published_inside_transaction = []
+
+    def publish(self, message):
+        key = message.get("order_id")
+        self.attempts.append(key)
+        self.published_inside_transaction.append(
+            bool(self._database is not None and self._database.in_transaction)
+        )
+        if key in self.fail_keys:
+            raise Rejected("broker refused " + repr(key))
+        self.published.append(message)
+'''
+
+#: Writers from three eras plus one newer than this service. The validator
+#: builds every record through these rather than hand-writing the shapes, so
+#: no expected key is asserted from memory of the format.
+_WIRE_WRITERS = '''\
+"""Writers already deployed across the fleet. Each emits its own era."""
+
+
+def write_v1(identifier, name, **extra):
+    record = {"schema_version": 1, "id": identifier, "name": name}
+    record.update(extra)
+    return record
+
+
+def write_v2(identifier, name, email, **extra):
+    record = {"schema_version": 2, "id": identifier, "name": name,
+              "email": email}
+    record.update(extra)
+    return record
+
+
+def write_v3(identifier, display_name, email, tags, **extra):
+    record = {"schema_version": 3, "id": identifier,
+              "display_name": display_name, "email": email,
+              "tags": list(tags)}
+    record.update(extra)
+    return record
+
+
+def write_future(identifier, display_name, **extra):
+    """A writer newer than this service. Its keys must survive untouched."""
+    record = {"schema_version": 4, "id": identifier,
+              "display_name": display_name, "email": "", "tags": [],
+              "locale": "en-GB"}
+    record.update(extra)
+    return record
+'''
+
+#: A keyset-paginated store. `page` counts its own calls so a per-row
+#: implementation is detectable, and it re-sorts on every call so a page
+#: taken after an insert reflects that insert.
+_ROW_STORE = '''\
+"""The reporting store. It cannot be changed."""
+
+
+class RowStore:
+    """Rows ordered by the (created_unix, row_id) pair."""
+
+    def __init__(self):
+        self._rows = {}
+        self.scans = 0
+
+    def insert(self, row_id, created_unix, body=""):
+        self._rows[row_id] = {"row_id": row_id,
+                              "created_unix": created_unix,
+                              "body": body}
+
+    def page(self, after=None, limit=10):
+        """Up to `limit` rows strictly after the (created_unix, row_id) pair."""
+        self.scans += 1
+        if not isinstance(limit, int) or limit < 1:
+            raise ValueError("limit must be a positive integer")
+        ordered = sorted(self._rows.values(),
+                         key=lambda row: (row["created_unix"], row["row_id"]))
+        if after is not None:
+            created, row_id = after
+            ordered = [row for row in ordered
+                       if (row["created_unix"], row["row_id"])
+                       > (created, row_id)]
+        return [dict(row) for row in ordered[:limit]]
+'''
+
+#: A primary with a replica that lags until it is told to catch up. The
+#: replica refuses a read below a requested version rather than silently
+#: serving stale data, so the seam is deterministic instead of probabilistic.
+_REPLICATION = '''\
+"""The database topology the service already runs against."""
+
+
+class Stale(Exception):
+    """The replica has not caught up to the requested version."""
+
+
+class Primary:
+    def __init__(self):
+        self.rows = {}
+        self.version = 0
+        self.reads = 0
+        self.writes = 0
+
+    def write(self, key, value):
+        self.writes += 1
+        self.version += 1
+        self.rows[key] = value
+        return self.version
+
+    def read(self, key):
+        self.reads += 1
+        return self.rows.get(key)
+
+
+class Replica:
+    """Lags the primary until `catch_up` is called."""
+
+    def __init__(self, primary):
+        self._primary = primary
+        self.rows = {}
+        self.version = 0
+        self.reads = 0
+
+    def catch_up(self):
+        self.rows = dict(self._primary.rows)
+        self.version = self._primary.version
+
+    def read_at_least(self, key, version):
+        self.reads += 1
+        if self.version < version:
+            raise Stale("replica at %d, need %d" % (self.version, version))
+        return self.rows.get(key)
+'''
+
+#: Saga steps that record everything into a shared trace. One of them cannot
+#: be compensated and one fails while compensating, because those are the two
+#: cases an unwind loop written for the happy path gets wrong.
+_SAGA_STEPS = '''\
+"""The steps a booking saga is composed of. They cannot be changed."""
+
+
+class StepError(Exception):
+    pass
+
+
+class Step:
+    def __init__(self, name, trace, fails=False, compensatable=True,
+                 compensation_fails=False):
+        self.name = name
+        self._trace = trace
+        self._fails = fails
+        self.compensatable = compensatable
+        self._compensation_fails = compensation_fails
+        self.ran = False
+
+    def run(self):
+        if self._fails:
+            self._trace.append(("failed", self.name))
+            raise StepError(self.name)
+        self.ran = True
+        self._trace.append(("ran", self.name))
+
+    def compensate(self):
+        if not self.ran:
+            raise StepError(self.name + " never ran")
+        if self._compensation_fails:
+            self._trace.append(("compensation-failed", self.name))
+            raise StepError(self.name)
+        self._trace.append(("compensated", self.name))
+'''
+
+
+TASKS += [
+    task(
+        f"{FAMILY}-0401", FAMILY,
+        prompt=(
+            "The module outbox_infra.py already exists and cannot be changed. "
+            "Database.transaction() returns a context manager whose put(key, "
+            "value) stages a write; leaving the block normally commits and "
+            "increments commits, leaving it by exception rolls back. Only one "
+            "transaction may be open at a time. Broker.publish(message) either "
+            "appends to published or raises Rejected. Write place_order(db, "
+            "broker, order_id, payload) and relay(db, broker). place_order "
+            "must persist the order at key 'order:<order_id>' with value "
+            "payload and an outbox row at key 'outbox:<order_id>' with value "
+            "{'order_id': order_id, 'state': 'pending'} in exactly one "
+            "transaction, and must not publish anything while that "
+            "transaction is open. After it commits, place_order attempts "
+            "broker.publish({'order_id': order_id, 'payload': payload}) once. "
+            "If that succeeds it marks the outbox row {'order_id': order_id, "
+            "'state': 'sent'} and returns True; if it raises Rejected the "
+            "order stays durable, the outbox row stays pending, and it "
+            "returns False. relay(db, broker) publishes every pending outbox "
+            "row in ascending order_id order, marking each one sent as it "
+            "succeeds, leaving a row pending if its publish raises Rejected "
+            "and continuing with the rest, and returns the list of order ids "
+            "it published. A row already sent must never be published again."
+        ),
+        fixtures={"outbox_infra.py": _OUTBOX_INFRA},
+        validator=LOAD_CANDIDATE + require("place_order") + require("relay")
+        + r'''
+import outbox_infra as infra
+
+
+def outbox_row(db, key):
+    """Read an outbox row as an assertion rather than a TypeError.
+
+    An absent row indexed directly raises TypeError on None in validator
+    frames, which the harness scores validator_error -- a harness fault that
+    blocks admission -- when what actually happened is the candidate failing
+    to write the row.
+    """
+    row = db.get(key)
+    assert isinstance(row, dict), f'{key} is {row!r}, not an outbox row'
+    return row
+
+
+def published_ids(broker):
+    ids = []
+    for message in broker.published:
+        assert isinstance(message, dict), f'published {message!r}, not a message'
+        ids.append(message.get('order_id'))
+    return ids
+
+
+# A broker that refuses must still leave the order durable, and the order and
+# its outbox row must have been written by ONE commit -- two commits would
+# mean a crash between them could lose the message forever.
+db = infra.Database()
+broker = infra.Broker(db, fail_keys={'a-1'})
+assert place_order(db, broker, 'a-1', {'sku': 'x'}) is False
+assert db.get('order:a-1') == {'sku': 'x'}
+assert db.get('outbox:a-1') == {'order_id': 'a-1', 'state': 'pending'}
+assert db.commits == 1, f'expected one commit, saw {db.commits}'
+assert broker.published == []
+assert broker.attempts == ['a-1'], broker.attempts
+assert not any(broker.published_inside_transaction), (
+    'a message was published while the transaction was still open')
+
+# The relay drains what the inline publish could not, exactly once.
+relay_broker = infra.Broker(db)
+assert relay(db, relay_broker) == ['a-1']
+assert published_ids(relay_broker) == ['a-1']
+assert relay_broker.published[0].get('payload') == {'sku': 'x'}
+assert outbox_row(db, 'outbox:a-1').get('state') == 'sent'
+assert relay(db, relay_broker) == [], 'a sent row was published twice'
+assert len(relay_broker.published) == 1
+
+# The happy path marks the row sent, in a second transaction.
+healthy_db = infra.Database()
+healthy = infra.Broker(healthy_db)
+assert place_order(healthy_db, healthy, 'b-1', {'sku': 'y'}) is True
+assert healthy_db.get('outbox:b-1') == {'order_id': 'b-1', 'state': 'sent'}
+assert healthy_db.commits == 2, healthy_db.commits
+assert not any(healthy.published_inside_transaction)
+assert relay(healthy_db, healthy) == []
+
+# Ascending order, and one refusal does not strand the rest.
+many = infra.Database()
+down = infra.Broker(many, fail_keys={'c-1', 'c-2', 'c-3'})
+for order_id in ('c-3', 'c-1', 'c-2'):
+    assert place_order(many, down, order_id, {'n': order_id}) is False
+partial = infra.Broker(many, fail_keys={'c-2'})
+assert relay(many, partial) == ['c-1', 'c-3']
+assert partial.attempts == ['c-1', 'c-2', 'c-3'], partial.attempts
+assert outbox_row(many, 'outbox:c-2').get('state') == 'pending'
+assert outbox_row(many, 'outbox:c-1').get('state') == 'sent'
+assert outbox_row(many, 'outbox:c-3').get('state') == 'sent'
+
+# Nothing was rolled back anywhere in this exercise.
+assert many.rollbacks == 0 and db.rollbacks == 0
+''',
+    ),
+    task(
+        f"{FAMILY}-0402", FAMILY,
+        prompt=(
+            "The module writers.py already exists and cannot be changed: "
+            "write_v1(id, name), write_v2(id, name, email) and "
+            "write_v3(id, display_name, email, tags) each emit a record "
+            "stamped with their schema_version, and write_future emits "
+            "schema_version 4 from a writer newer than this service. Any of "
+            "them may also carry keys this service has never heard of. Write "
+            "upgrade(record) returning a NEW record, never mutating its "
+            "argument. A version 1 or 2 record is brought to version 3: name "
+            "becomes display_name, a missing email defaults to the empty "
+            "string, missing tags default to an empty list, and schema_version "
+            "becomes 3. A record already at version 3 is returned as an equal "
+            "copy. A record at a version NEWER than 3 must be returned "
+            "unchanged rather than downgraded. At every version, any key this "
+            "service does not recognise must survive into the result "
+            "unchanged, and the result must not share the tags list with the "
+            "input. A record whose id is missing, whose schema_version is "
+            "missing or is not an integer, or which is missing the name its "
+            "own version requires, raises ValueError."
+        ),
+        fixtures={"writers.py": _WIRE_WRITERS},
+        validator=LOAD_CANDIDATE + require("upgrade") + r'''
+import writers
+
+_MISSING = object()
+
+
+def field(record, key):
+    """Read a required key as an assertion rather than a KeyError.
+
+    Dropping a key is precisely one of the failures this task scores, and a
+    bare index would raise KeyError in validator frames. The harness
+    attributes an error raised only in its own frames to itself and reports
+    validator_error, which is a harness fault that blocks admission rather
+    than the capability verdict the dropped key deserves.
+    """
+    assert isinstance(record, dict), (
+        f'expected a record, got {type(record).__name__}')
+    value = record.get(key, _MISSING)
+    assert value is not _MISSING, f'the result is missing {key!r}'
+    return value
+
+
+# Version 1 gains the later fields and keeps the key nobody knows about.
+original = writers.write_v1('u1', 'Ada', region='eu')
+snapshot = dict(original)
+result = upgrade(original)
+assert original == snapshot, 'the input record was mutated'
+assert field(result, 'schema_version') == 3
+assert field(result, 'display_name') == 'Ada'
+assert 'name' not in result, 'the superseded key survived the rename'
+assert field(result, 'email') == ''
+assert field(result, 'tags') == []
+assert field(result, 'region') == 'eu', 'an unrecognised key was dropped'
+assert field(result, 'id') == 'u1'
+
+# Version 2 already has the email; only the rename and tags are owed.
+second = writers.write_v2('u2', 'Grace', 'g@example.test', region='us')
+upgraded = upgrade(second)
+assert field(upgraded, 'display_name') == 'Grace'
+assert field(upgraded, 'email') == 'g@example.test'
+assert field(upgraded, 'tags') == []
+assert field(upgraded, 'region') == 'us', 'an unrecognised key was dropped'
+assert 'name' not in upgraded
+
+# Version 3 is returned as an equal but independent copy.
+third = writers.write_v3('u3', 'Linus', 'l@example.test', ['a'])
+same = upgrade(third)
+assert same == third and same is not third
+assert isinstance(field(same, 'tags'), list)
+same['tags'].append('b')
+assert third['tags'] == ['a'], 'the result shares the input tags list'
+
+# A newer writer must never be downgraded, and its keys must survive.
+future = writers.write_future('u4', 'Barbara', experiment='b')
+carried = upgrade(future)
+assert field(carried, 'schema_version') == 4, 'a newer record was downgraded'
+assert field(carried, 'locale') == 'en-GB', 'an unrecognised key was dropped'
+assert field(carried, 'experiment') == 'b', 'an unrecognised key was dropped'
+assert field(carried, 'display_name') == 'Barbara'
+assert carried is not future
+
+# Malformed records are refused rather than guessed at.
+for bad in ({'schema_version': 1, 'name': 'x'},
+            {'schema_version': '1', 'id': 'a', 'name': 'x'},
+            {'id': 'a', 'name': 'x'},
+            {'schema_version': 1, 'id': 'a'},
+            {'schema_version': 2, 'id': 'a', 'email': 'e'}):
+    try:
+        upgrade(bad)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f'{bad!r} was accepted')
+''',
+    ),
+    task(
+        f"{FAMILY}-0403", FAMILY,
+        prompt=(
+            "The module rowstore.py already exists and cannot be changed: "
+            "RowStore.page(after=None, limit=10) returns up to limit rows "
+            "strictly after the (created_unix, row_id) pair given as after, "
+            "ordered by that pair, and counts its calls in scans. Rows may be "
+            "inserted while a reader is part way through. Write a generator "
+            "iterate(store, page_size) yielding every row in (created_unix, "
+            "row_id) order, one page at a time, so that a row inserted ahead "
+            "of the reader's position is still visited and a row inserted "
+            "behind it is not revisited, and no row is ever yielded twice. "
+            "The generator must page by the position it has reached rather "
+            "than by how many rows it has already seen. A page_size that is "
+            "not a positive integer raises ValueError."
+        ),
+        fixtures={"rowstore.py": _ROW_STORE},
+        validator=LOAD_CANDIDATE + require("iterate") + r'''
+import rowstore
+
+
+def advance(walk, label):
+    """Pull one row, as an assertion rather than a StopIteration.
+
+    A generator that ends early is a capability failure. Left bare, the
+    StopIteration is raised in validator frames and the harness scores it
+    validator_error, which blocks admission instead of recording the miss.
+    """
+    try:
+        return next(walk)
+    except StopIteration:
+        raise AssertionError(f'the generator ended before {label}') from None
+
+
+def row_ids(rows):
+    collected = []
+    for row in rows:
+        assert isinstance(row, dict), f'yielded {row!r}, not a row'
+        collected.append(row.get('row_id'))
+    return collected
+
+
+# The ordinary case, and not one query per row.
+store = rowstore.RowStore()
+for index in range(7):
+    store.insert(f'r{index}', 100 + index)
+seen = row_ids(iterate(store, 3))
+assert seen == [f'r{index}' for index in range(7)], seen
+assert store.scans <= 4, f'{store.scans} queries for 7 rows in pages of 3'
+
+# A row inserted AHEAD of the reader must still be visited.
+ahead = rowstore.RowStore()
+for index in range(4):
+    ahead.insert(f'a{index}', 100 + index)
+collected = []
+walk = iterate(ahead, 2)
+collected.append(advance(walk, 'the first row').get('row_id'))
+collected.append(advance(walk, 'the second row').get('row_id'))
+ahead.insert('a9', 105)
+collected.extend(row_ids(walk))
+assert collected == ['a0', 'a1', 'a2', 'a3', 'a9'], collected
+
+# A row inserted BEHIND the reader must not shift the window and cause a row
+# to be yielded twice. This is what separates paging by position from paging
+# by how many rows have already been seen.
+behind = rowstore.RowStore()
+for index in range(4):
+    behind.insert(f'b{index}', 100 + index)
+collected = []
+walk = iterate(behind, 2)
+collected.append(advance(walk, 'the first row').get('row_id'))
+behind.insert('b-early', 99)
+collected.extend(row_ids(walk))
+assert collected == ['b0', 'b1', 'b2', 'b3'], collected
+
+# Ties on created_unix are broken by row_id, not left to chance.
+tied = rowstore.RowStore()
+for row_id in ('t3', 't1', 't2'):
+    tied.insert(row_id, 500)
+assert row_ids(iterate(tied, 2)) == ['t1', 't2', 't3']
+
+# An empty store yields nothing; a final page that fills exactly still ends.
+assert list(iterate(rowstore.RowStore(), 3)) == []
+exact = rowstore.RowStore()
+for index in range(4):
+    exact.insert(f'e{index}', 200 + index)
+assert len(list(iterate(exact, 2))) == 4
+
+# A generator may defer its body to first use, so the guard is forced.
+for bad in (0, -1, 2.5, 'two', None):
+    probe = rowstore.RowStore()
+    probe.insert('z', 1)
+    try:
+        list(iterate(probe, bad))
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f'page_size={bad!r} was accepted')
+''',
+    ),
+    task(
+        f"{FAMILY}-0404", FAMILY,
+        prompt=(
+            "The module replication.py already exists and cannot be changed: "
+            "Primary.write(key, value) returns the new monotonic version, "
+            "Primary.read(key) always serves the current value, and "
+            "Replica.read_at_least(key, version) either serves the value or "
+            "raises Stale when the replica has not reached that version. Both "
+            "count their reads. Write a class Session(primary, replica) with "
+            "write(key, value) and read(key). A session must always observe "
+            "its own writes: after it has written, a read the replica cannot "
+            "serve at the version this session has reached must fall back to "
+            "the primary. When the replica has caught up, reads must be "
+            "served by the replica so the primary is not needlessly loaded, "
+            "and a session that has never written must read from the replica. "
+            "write returns the version the primary reported."
+        ),
+        fixtures={"replication.py": _REPLICATION},
+        validator=LOAD_CANDIDATE + require("Session") + r'''
+import replication
+
+primary = replication.Primary()
+replica = replication.Replica(primary)
+primary.write('k', 'v0')
+replica.catch_up()
+
+session = Session(primary, replica)
+
+# Nothing written by this session yet, so the replica may serve the read.
+assert session.read('k') == 'v0'
+assert replica.reads == 1, replica.reads
+assert primary.reads == 0, 'the primary was read when the replica sufficed'
+
+# After its own write the replica is behind, so the primary must serve it.
+version = session.write('k', 'v1')
+assert version == primary.version
+assert session.read('k') == 'v1', 'a session did not observe its own write'
+assert primary.reads == 1, 'a stale replica must fall back to the primary'
+
+# Once the replica catches up, load returns to the replica.
+replica.catch_up()
+before = primary.reads
+assert session.read('k') == 'v1'
+assert primary.reads == before, 'a caught-up replica must serve the read'
+
+# The watermark is not per key: a key this session never wrote is still read
+# at the version the session has reached.
+session.write('other', 'o1')
+assert session.read('k') == 'v1'
+assert primary.reads == before + 1, (
+    'a read after an unrelated write ignored the session watermark')
+
+# A fresh session that has never written is free to use the lagging replica.
+primary.write('k', 'v2')
+observer = Session(primary, replica)
+reads_before = primary.reads
+assert observer.read('k') == 'v1', (
+    'a session with no writes must not force a primary read')
+assert primary.reads == reads_before
+
+# The writing session still sees its own latest value.
+assert session.read('other') == 'o1'
+''',
+    ),
+    task(
+        f"{FAMILY}-0405", FAMILY,
+        prompt=(
+            "The module steps.py already exists and cannot be changed: "
+            "Step.run() appends ('ran', name) to a shared trace or appends "
+            "('failed', name) and raises StepError; Step.compensate() appends "
+            "('compensated', name), or appends ('compensation-failed', name) "
+            "and raises StepError, and raises if the step never ran. Each "
+            "step also exposes a compensatable flag. Write run_saga(steps) "
+            "that runs the steps in order and returns the list of names that "
+            "ran. If a step raises StepError, every step that already ran "
+            "must be compensated in reverse order and the original StepError "
+            "re-raised. A step whose compensatable flag is false must not "
+            "have compensate() called on it, and must not stop the steps "
+            "before it from being compensated. A compensation that itself "
+            "raises StepError must not prevent the remaining compensations."
+        ),
+        fixtures={"steps.py": _SAGA_STEPS},
+        validator=LOAD_CANDIDATE + require("run_saga") + r'''
+import steps as saga
+
+# The happy path runs everything in order and compensates nothing.
+trace = []
+ordered = [saga.Step(name, trace) for name in ('a', 'b', 'c')]
+assert run_saga(ordered) == ['a', 'b', 'c']
+assert trace == [('ran', 'a'), ('ran', 'b'), ('ran', 'c')], trace
+
+# A failure unwinds in reverse, and the original error propagates.
+trace = []
+plan = [saga.Step('a', trace), saga.Step('b', trace),
+        saga.Step('c', trace, fails=True), saga.Step('d', trace)]
+try:
+    run_saga(plan)
+except saga.StepError as error:
+    assert str(error) == 'c', str(error)
+else:
+    raise AssertionError('a failing step must propagate')
+assert trace == [
+    ('ran', 'a'), ('ran', 'b'), ('failed', 'c'),
+    ('compensated', 'b'), ('compensated', 'a'),
+], trace
+
+# A step that cannot be compensated is skipped without stranding the ones
+# before it -- the case an unwind loop that stops at the first problem gets
+# wrong.
+trace = []
+plan = [saga.Step('a', trace), saga.Step('b', trace, compensatable=False),
+        saga.Step('c', trace), saga.Step('d', trace, fails=True)]
+try:
+    run_saga(plan)
+except saga.StepError:
+    pass
+else:
+    raise AssertionError('a failing step must propagate')
+assert trace == [
+    ('ran', 'a'), ('ran', 'b'), ('ran', 'c'), ('failed', 'd'),
+    ('compensated', 'c'), ('compensated', 'a'),
+], trace
+
+# A compensation that fails must not abandon the remaining compensations.
+trace = []
+plan = [saga.Step('a', trace), saga.Step('b', trace, compensation_fails=True),
+        saga.Step('c', trace), saga.Step('d', trace, fails=True)]
+try:
+    run_saga(plan)
+except saga.StepError as error:
+    assert str(error) == 'd', 'the original failure must be the one raised'
+else:
+    raise AssertionError('a failing step must propagate')
+assert trace == [
+    ('ran', 'a'), ('ran', 'b'), ('ran', 'c'), ('failed', 'd'),
+    ('compensated', 'c'), ('compensation-failed', 'b'), ('compensated', 'a'),
+], trace
+
+# The first step failing leaves nothing to unwind.
+trace = []
+try:
+    run_saga([saga.Step('a', trace, fails=True), saga.Step('b', trace)])
+except saga.StepError:
+    pass
+else:
+    raise AssertionError('a failing step must propagate')
+assert trace == [('failed', 'a')], trace
+
+# An empty saga is ordinary.
+assert run_saga([]) == []
+''',
+    ),
+]
