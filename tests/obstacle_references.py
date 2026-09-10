@@ -12591,3 +12591,482 @@ MUTATIONS["frontend_state_ux_accessibility-0506"] = (
     "                raise KeyError(name)\n"
     "            return spare",
 )
+
+
+# --------------------------------------------------------------------------
+# concurrency_async_distributed-0303..0310
+#
+# Eight behaviours whose correct form is fixed somewhere other than the code
+# -- in the HLC update rules, in the Raft RequestVote receiver rules, in the
+# Chase-Lev ownership split -- and whose plausible wrong form passes a
+# hand-run example. Each mutation below names the neighbouring technique the
+# task is meant to distinguish, because a task that cannot tell them apart is
+# scoring the neighbour rather than the capability its prompt claims.
+
+REFERENCES["concurrency_async_distributed-0303"] = r'''
+class HybridLogicalClock:
+    """Wall-clock-tracking causality, tolerant of a physical clock that lies.
+
+    The two components carry different jobs: `l` is a physical reading that
+    is only ever allowed to move forward, and `c` disambiguates events that
+    land inside the same one.
+    """
+
+    def __init__(self, physical):
+        self.physical = physical
+        self._l = 0
+        self._c = 0
+
+    def now(self):
+        return (self._l, self._c)
+
+    def local(self):
+        previous = self._l
+        # max, not assignment: a physical clock that steps backwards must not
+        # be able to re-issue a timestamp this node has already handed out.
+        self._l = max(previous, self.physical())
+        self._c = self._c + 1 if self._l == previous else 0
+        return self.now()
+
+    def receive(self, message):
+        sender_l, sender_c = message
+        previous_l, previous_c = self._l, self._c
+        self._l = max(previous_l, sender_l, self.physical())
+        if self._l == previous_l and self._l == sender_l:
+            # Both sides are in the same millisecond, so neither counter may
+            # be dropped -- taking the sender's alone can move this node back.
+            self._c = max(previous_c, sender_c) + 1
+        elif self._l == previous_l:
+            self._c = previous_c + 1
+        elif self._l == sender_l:
+            self._c = sender_c + 1
+        else:
+            self._c = 0
+        return self.now()
+
+
+def happens_before(left, right):
+    return tuple(left) < tuple(right)
+'''
+
+
+REFERENCES["concurrency_async_distributed-0304"] = r'''
+class Voter:
+    """The RequestVote receiver rules, in the order they have to happen."""
+
+    def __init__(self, node_id, log):
+        self.node_id = node_id
+        self.log = list(log)
+        self.current_term = 0
+        self.voted_for = None
+
+    def _last(self):
+        """(term, index) of the final entry -- the key up-to-dateness uses."""
+        return (self.log[-1] if self.log else 0, len(self.log))
+
+    def request_vote(self, term, candidate_id, last_log_index, last_log_term):
+        if term < self.current_term:
+            return (self.current_term, False)
+        if term > self.current_term:
+            # Adopting the term happens before deciding the vote, so a voter
+            # that refuses a candidate still stops advertising a stale term.
+            self.current_term = term
+            self.voted_for = None
+        # TERM DOMINATES INDEX. A longer log at an older term is behind, not
+        # ahead: its extra entries were written by a leader the cluster has
+        # already replaced, and electing it truncates committed entries.
+        up_to_date = (last_log_term, last_log_index) >= self._last()
+        granted = up_to_date and self.voted_for in (None, candidate_id)
+        if granted:
+            self.voted_for = candidate_id
+        return (self.current_term, granted)
+'''
+
+
+REFERENCES["concurrency_async_distributed-0305"] = r'''
+class SagaResult:
+    __slots__ = ("succeeded", "completed", "compensated", "failed_step",
+                 "error", "compensation_errors")
+
+    def __init__(self, succeeded, completed, compensated, failed_step, error,
+                 compensation_errors):
+        self.succeeded = succeeded
+        self.completed = completed
+        self.compensated = compensated
+        self.failed_step = failed_step
+        self.error = error
+        self.compensation_errors = compensation_errors
+
+
+def run_saga(steps):
+    completed = []
+    failed_step = None
+    error = None
+
+    for name, action, _compensation in steps:
+        try:
+            action()
+        except Exception as failure:  # noqa: BLE001
+            failed_step, error = name, failure
+            break
+        # Recorded only AFTER the action returns, which is what keeps the
+        # failed step out of the compensation list: its effect never landed,
+        # so undoing it would refund work nobody did.
+        completed.append(name)
+
+    compensated = []
+    compensation_errors = []
+    if failed_step is not None:
+        undo = {name: compensation for name, _action, compensation in steps}
+        for name in reversed(completed):
+            try:
+                undo[name]()
+            except Exception as failure:  # noqa: BLE001
+                # Recorded and stepped over. Abandoning the loop here would
+                # leave the EARLIEST steps uncompensated, and those are the
+                # ones holding the most state.
+                compensation_errors.append((name, failure))
+            else:
+                compensated.append(name)
+
+    return SagaResult(
+        succeeded=failed_step is None,
+        completed=completed,
+        compensated=compensated,
+        failed_step=failed_step,
+        error=error,
+        compensation_errors=compensation_errors,
+    )
+'''
+
+
+REFERENCES["concurrency_async_distributed-0306"] = r'''
+class DeadlineExceeded(Exception):
+    """Raised when a budget has nothing left to spend."""
+
+
+class Budget:
+    """An ABSOLUTE deadline, so nesting can only ever shorten it."""
+
+    def __init__(self, clock, seconds):
+        self._clock = clock
+        self._deadline = clock() + seconds
+
+    def remaining(self):
+        return max(0.0, self._deadline - self._clock())
+
+    def expired(self):
+        return self.remaining() <= 0
+
+    def check(self):
+        if self.expired():
+            raise DeadlineExceeded("the budget is spent")
+        return None
+
+    def child(self, seconds):
+        child = Budget(self._clock, seconds)
+        # min, not the requested value: a callee asking for a longer timeout
+        # than its caller has left would hold a connection open past the
+        # point the caller gave up on it.
+        child._deadline = min(self._deadline, self._clock() + seconds)
+        return child
+
+
+def run_stages(budget, stages):
+    completed = []
+    for name, work in stages:
+        try:
+            budget.check()
+        except DeadlineExceeded as exceeded:
+            exceeded.completed = completed
+            raise
+        work(budget)
+        completed.append(name)
+    return completed
+'''
+
+
+REFERENCES["concurrency_async_distributed-0307"] = r'''
+import collections
+import threading
+
+
+class QueueClosed(Exception):
+    """Raised when a producer offers work a closed queue cannot accept."""
+
+
+class QueueDrained(Exception):
+    """Raised when a consumer asks a closed, empty queue for more."""
+
+
+class BoundedQueue:
+    def __init__(self, capacity):
+        if not isinstance(capacity, int) or isinstance(capacity, bool) \
+                or capacity <= 0:
+            raise ValueError("capacity must be a positive int, got %r"
+                             % (capacity,))
+        self._capacity = capacity
+        self._items = collections.deque()
+        self._closed = False
+        self._condition = threading.Condition()
+
+    def put(self, item):
+        with self._condition:
+            while not self._closed and len(self._items) >= self._capacity:
+                self._condition.wait()
+            # Re-read after waking: the queue may have closed while blocked,
+            # and appending then would accept work nothing will ever drain.
+            if self._closed:
+                raise QueueClosed("the queue is closed")
+            self._items.append(item)
+            self._condition.notify_all()
+
+    def get(self):
+        with self._condition:
+            while not self._items and not self._closed:
+                self._condition.wait()
+            # Buffered items outlive close. The producer was already told
+            # these were accepted, so dropping them loses acknowledged work.
+            if self._items:
+                item = self._items.popleft()
+                self._condition.notify_all()
+                return item
+            raise QueueDrained("the queue is closed and empty")
+
+    def close(self):
+        with self._condition:
+            self._closed = True
+            self._condition.notify_all()
+'''
+
+
+REFERENCES["concurrency_async_distributed-0308"] = r'''
+class ClockMovedBackwards(Exception):
+    """Raised rather than minting an id in a millisecond already used."""
+
+
+class IdGenerator:
+    EPOCH_MS = 1700000000000
+    NODE_BITS = 10
+    SEQUENCE_BITS = 12
+    MAX_SEQUENCE = (1 << SEQUENCE_BITS) - 1
+
+    def __init__(self, node_id, clock):
+        if not isinstance(node_id, int) or isinstance(node_id, bool) \
+                or not 0 <= node_id <= (1 << self.NODE_BITS) - 1:
+            raise ValueError("node_id must be 0..1023, got %r" % (node_id,))
+        self.node_id = node_id
+        self._clock = clock
+        self._last_millis = -1
+        self._sequence = 0
+
+    def next_id(self):
+        millis = self._clock()
+        if millis < self._last_millis:
+            raise ClockMovedBackwards(
+                "clock went from %d to %d" % (self._last_millis, millis))
+        if millis == self._last_millis:
+            if self._sequence >= self.MAX_SEQUENCE:
+                # Wait the millisecond out. Wrapping here re-issues an id
+                # already handed out, and every other assertion still holds.
+                while millis <= self._last_millis:
+                    millis = self._clock()
+                self._sequence = 0
+            else:
+                self._sequence += 1
+        else:
+            self._sequence = 0
+        self._last_millis = millis
+        return (((millis - self.EPOCH_MS)
+                 << (self.NODE_BITS + self.SEQUENCE_BITS))
+                | (self.node_id << self.SEQUENCE_BITS)
+                | self._sequence)
+'''
+
+
+REFERENCES["concurrency_async_distributed-0309"] = r'''
+import threading
+
+
+class _Flight:
+    """One in-flight call, and the outcome its sharers are waiting on."""
+
+    __slots__ = ("done", "value", "error")
+
+    def __init__(self):
+        self.done = threading.Event()
+        self.value = None
+        self.error = None
+
+
+class SingleFlight:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._in_flight = {}
+        self.calls = 0
+
+    def do(self, key, function):
+        with self._lock:
+            flight = self._in_flight.get(key)
+            leading = flight is None
+            if leading:
+                flight = _Flight()
+                self._in_flight[key] = flight
+                self.calls += 1
+
+        if not leading:
+            flight.done.wait()
+            return self._deliver(flight)
+
+        try:
+            flight.value = function()
+        except BaseException as error:  # noqa: BLE001
+            flight.error = error
+        finally:
+            # Released BEFORE the waiters are woken, and only if this flight
+            # is still the registered one. De-duplication covers work in
+            # flight; keeping the entry would turn this into a cache that
+            # serves one stale value forever.
+            with self._lock:
+                if self._in_flight.get(key) is flight:
+                    del self._in_flight[key]
+            flight.done.set()
+        return self._deliver(flight)
+
+    @staticmethod
+    def _deliver(flight):
+        if flight.error is not None:
+            raise flight.error
+        return flight.value
+'''
+
+
+REFERENCES["concurrency_async_distributed-0310"] = r'''
+import collections
+import threading
+
+
+class _Empty:
+    """A sentinel distinct from every item a caller could legitimately push.
+
+    None is not usable here: a scheduler queues callables and results, and
+    None is an ordinary result.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self):
+        return "EMPTY"
+
+
+EMPTY = _Empty()
+
+
+class WorkStealingDeque:
+    def __init__(self):
+        self._items = collections.deque()
+        self._lock = threading.Lock()
+
+    def push_bottom(self, item):
+        with self._lock:
+            self._items.append(item)
+
+    def pop_bottom(self):
+        with self._lock:
+            if not self._items:
+                return EMPTY
+            return self._items.pop()
+
+    def steal_top(self):
+        with self._lock:
+            if not self._items:
+                return EMPTY
+            return self._items.popleft()
+
+    def __len__(self):
+        with self._lock:
+            return len(self._items)
+'''
+
+
+# Take the sender's counter instead of the larger of the two. Every case
+# where the sender is ahead agrees, and so does a fresh clock; only a message
+# from a node whose counter TRAILS this one diverges, and there it hands back
+# a timestamp this node has already issued -- two distinct events sharing an
+# identity, which is the one thing the counter exists to prevent.
+MUTATIONS["concurrency_async_distributed-0303"] = (
+    "            self._c = max(previous_c, sender_c) + 1",
+    "            self._c = sender_c + 1",
+)
+
+# Compare log length alone. This is the Raft rule people remember, it agrees
+# whenever the two candidates' last terms match, and it elects a leader whose
+# log is longer but staler -- which then truncates entries the cluster has
+# already committed.
+MUTATIONS["concurrency_async_distributed-0304"] = (
+    "        up_to_date = (last_log_term, last_log_index) >= self._last()",
+    "        up_to_date = last_log_index >= self._last()[1]",
+)
+
+# Compensate in the order the steps ran. Every saga whose steps are
+# independent still ends up fully compensated, so this passes any fixture
+# that only counts what was undone; what breaks is a saga where a later step
+# depends on an earlier one, and releasing the earlier resource first leaves
+# the later compensation with nothing to work against.
+MUTATIONS["concurrency_async_distributed-0305"] = (
+    "        for name in reversed(completed):",
+    "        for name in completed:",
+)
+
+# Give the child exactly what it asked for. Identical whenever the callee
+# asks for less than the caller has left -- the common case -- and it silently
+# discards the deadline in precisely the case propagation exists for.
+MUTATIONS["concurrency_async_distributed-0306"] = (
+    "        child._deadline = min(self._deadline, self._clock() + seconds)",
+    "        child._deadline = self._clock() + seconds",
+)
+
+# Drop the buffer on close. The queue still hands off, still blocks, still
+# wakes its waiters; what is lost is the work already accepted from a
+# producer that has been told it was queued.
+MUTATIONS["concurrency_async_distributed-0307"] = (
+    "            self._closed = True\n",
+    "            self._closed = True\n            self._items.clear()\n",
+)
+
+# Wrap the sequence instead of waiting out the millisecond. Ids keep rising
+# for the first 4096 of any millisecond and the layout stays exactly right;
+# the 4097th silently repeats the first, which is a duplicate primary key
+# under precisely the load that makes it happen.
+MUTATIONS["concurrency_async_distributed-0308"] = (
+    "                while millis <= self._last_millis:\n"
+    "                    millis = self._clock()\n",
+    "                pass\n",
+)
+
+# Keep the finished flight registered, turning de-duplication into a cache.
+# Every concurrency property still holds -- one execution, one shared result,
+# shared failures -- and the group now answers every future request for that
+# key with the first value it ever saw.
+MUTATIONS["concurrency_async_distributed-0309"] = (
+    "                if self._in_flight.get(key) is flight:\n"
+    "                    del self._in_flight[key]\n",
+    "                pass\n",
+)
+
+# Steal from the owner's end. A thief now contends for the very task the
+# owner is about to run, and takes the item whose data is warmest instead of
+# the one furthest away -- the locality argument the structure exists for,
+# inverted, with no single-threaded symptom.
+MUTATIONS["concurrency_async_distributed-0310"] = (
+    "    def steal_top(self):\n"
+    "        with self._lock:\n"
+    "            if not self._items:\n"
+    "                return EMPTY\n"
+    "            return self._items.popleft()",
+    "    def steal_top(self):\n"
+    "        with self._lock:\n"
+    "            if not self._items:\n"
+    "                return EMPTY\n"
+    "            return self._items.pop()",
+)

@@ -1488,4 +1488,972 @@ log = []
 assert acquire_all([Lock("only", log)]) == ["only"]
 assert acquisitions(log) == ["only"]
 '''),
+    task(
+        f"{FAMILY}-0303", FAMILY,
+        prompt=(
+            "Implement a Python class HybridLogicalClock(physical) and a "
+            "function happens_before(left, right). `physical` is a "
+            "zero-argument callable returning the node's wall clock as an "
+            "integer number of milliseconds; it may jump forward, stall, or "
+            "move BACKWARDS. A timestamp is a tuple (l, c) of two "
+            "integers, ordered lexicographically, and the clock starts at "
+            "(0, 0). now() returns the current timestamp without changing "
+            "it. local() stamps a local event: read the physical time pt, "
+            "set l' = max(l, pt), and set c' = c + 1 when l' equals the old "
+            "l, otherwise 0. receive(message) merges a timestamp (lm, cm) "
+            "received from another node: read pt, set "
+            "l' = max(l, lm, pt), then set c' = max(c, cm) + 1 when l' "
+            "equals BOTH the old l and lm, c' = c + 1 when it equals only "
+            "the old l, c' = cm + 1 when it equals only lm, and 0 "
+            "otherwise. local() and receive() both return the new "
+            "timestamp. happens_before(left, right) reports whether the "
+            "left timestamp is strictly less than the right one."
+        ),
+        validator=LOAD_CANDIDATE + require("HybridLogicalClock")
+        + require("happens_before") + SHAPE_GUARDS + r'''
+happens_before = returning(happens_before, 'happens_before(...)')
+
+
+class Physical:
+    """A wall clock the test drives, including backwards."""
+
+    def __init__(self, millis):
+        self.millis = millis
+
+    def __call__(self):
+        return self.millis
+
+
+def clock_at(millis):
+    physical = Physical(millis)
+    return physical, having(
+        built(HybridLogicalClock(physical), 'HybridLogicalClock(...)'),
+        'now', 'local', 'receive', what='the clock')
+
+
+# The logical part TRACKS wall time. A Lamport clock -- the neighbouring
+# technique, and the one an implementation drifts into -- counts events and
+# would report 1 here however large the physical reading is.
+physical, clock = clock_at(1_000)
+assert built(clock.now(), 'now()') == (0, 0)
+assert built(clock.local(), 'local()') == (1_000, 0)
+
+# Two events inside the same millisecond separate on the counter, not on l.
+assert clock.local() == (1_000, 1)
+assert clock.local() == (1_000, 2)
+
+# Wall time advancing resets the counter rather than continuing it.
+physical.millis = 1_005
+assert clock.local() == (1_005, 0)
+
+# THE CLOCK MOVES BACKWARDS. This is the whole reason the max is there: an
+# implementation that assigns l = pt is correct on every monotonic fixture
+# and issues a duplicate-ordered timestamp on this one.
+physical.millis = 900
+assert clock.local() == (1_005, 1), 'l may never go backwards'
+assert clock.local() == (1_005, 2)
+physical.millis = 1_005
+assert clock.local() == (1_005, 3), \
+    'wall time catching up to l is not an advance'
+
+# receive when both sides already sit at the same l keeps the LARGER
+# counter. Taking the sender's would move this node backwards from
+# (1_005, 3) to (1_005, 2).
+assert clock.receive((1_005, 1)) == (1_005, 4)
+
+# receive when only the sender is ahead adopts the sender's counter.
+physical.millis = 1_005
+assert clock.receive((2_000, 7)) == (2_000, 8)
+
+# receive when the local wall clock is ahead of both resets the counter.
+physical.millis = 3_000
+assert clock.receive((2_500, 40)) == (3_000, 0)
+
+# A message from the past cannot drag this node back.
+assert clock.receive((10, 0)) == (3_000, 1)
+
+# Causality: every stamp a node issues is strictly greater than the last,
+# and a receive is strictly greater than the message it merged.
+physical, clock = clock_at(50)
+issued = []
+for step in range(60):
+    physical.millis = [50, 51, 51, 49, 52, 40][step % 6]
+    issued.append(clock.local() if step % 2 else clock.receive((51, step)))
+for earlier, later in zip(issued, issued[1:]):
+    assert happens_before(earlier, later) is True, \
+        f'{earlier} must precede {later}'
+    assert happens_before(later, earlier) is False
+
+assert happens_before((1, 5), (2, 0)) is True
+assert happens_before((2, 0), (2, 1)) is True
+assert happens_before((2, 1), (2, 1)) is False, 'equal is not before'
+assert happens_before((2, 1), (2, 0)) is False
+''',
+    ),
+    task(
+        f"{FAMILY}-0304", FAMILY,
+        prompt=(
+            "Implement a Python class Voter(node_id, log) casting leader "
+            "election votes under the Raft rules. `log` is a list of "
+            "integers, one per entry, giving the term that entry was "
+            "created in; entries are numbered from 1, so the last log "
+            "index is len(log) and the last log term is the final element, "
+            "or 0 and 0 for an empty log. The voter exposes attributes "
+            "current_term (starting at 0) and voted_for (starting None), "
+            "and a method request_vote(term, candidate_id, "
+            "last_log_index, last_log_term) returning the tuple "
+            "(current_term, granted). Reject without any change when term "
+            "is below current_term. When term is above current_term, adopt "
+            "it and clear voted_for FIRST -- this happens even if the vote "
+            "is then refused. Grant only when the voter has not already "
+            "voted in this term for a different candidate AND the "
+            "candidate's log is at least as up to date as the voter's, "
+            "which means the candidate's last log term is higher, or the "
+            "terms are equal and the candidate's last log index is at "
+            "least the voter's. Record voted_for when granting."
+        ),
+        validator=LOAD_CANDIDATE + require("Voter") + SHAPE_GUARDS + r'''
+def voter(log, node_id='v'):
+    return having(built(Voter(node_id, list(log)), 'Voter(...)'),
+                  'current_term', 'voted_for', 'request_vote',
+                  what='the voter')
+
+
+# The voter's own log ends at index 3, term 2.
+node = voter([1, 1, 2])
+assert node.current_term == 0
+assert node.voted_for is None
+
+# A LONGER log at an OLDER term loses. This is the case the rule exists for
+# and the one a length comparison gets wrong: index 5 beats index 3, so a
+# candidate that trails the committed term wins the election and truncates
+# entries the cluster already agreed on.
+assert built(node.request_vote(1, 'a', 5, 1), 'request_vote(...)') == \
+    (1, False), 'a longer log at an older term is not up to date'
+assert node.voted_for is None, 'a refused vote is not recorded'
+assert node.current_term == 1, 'the term is adopted even when refusing'
+
+# A SHORTER log at a newer term wins, for the same reason.
+assert node.request_vote(2, 'b', 2, 3) == (2, True)
+assert node.voted_for == 'b'
+
+# One vote per term, and asking twice is idempotent rather than a second
+# vote -- a retransmitted RequestVote must not be refused.
+assert node.request_vote(2, 'b', 2, 3) == (2, True)
+assert node.request_vote(2, 'c', 9, 9) == (2, False), \
+    'the voter already voted for b in term 2'
+assert node.voted_for == 'b'
+
+# A stale term is refused and changes nothing at all.
+assert node.request_vote(1, 'c', 9, 9) == (2, False)
+assert node.current_term == 2
+assert node.voted_for == 'b'
+
+# A higher term clears the recorded vote, so c can now win.
+assert node.request_vote(3, 'c', 9, 9) == (3, True)
+assert node.voted_for == 'c'
+
+# Equal last term, equal last index: up to date, so granted.
+fresh = voter([1, 1, 2])
+assert fresh.request_vote(5, 'd', 3, 2) == (5, True)
+
+# Equal last term, shorter index: refused -- but the term still advances,
+# which is what stops a partitioned voter from staying behind forever.
+fresh = voter([1, 1, 2])
+assert fresh.request_vote(7, 'e', 2, 2) == (7, False)
+assert fresh.current_term == 7
+assert fresh.voted_for is None
+
+# An empty log is last index 0 at term 0, so anything is at least as good.
+empty = voter([])
+assert empty.request_vote(1, 'f', 0, 0) == (1, True)
+assert voter([]).request_vote(1, 'g', 4, 2) == (1, True)
+
+# ...and a voter WITH a log refuses an empty candidate.
+assert voter([1]).request_vote(4, 'h', 0, 0) == (4, False)
+''',
+    ),
+    task(
+        f"{FAMILY}-0305", FAMILY,
+        prompt=(
+            "Implement a Python function run_saga(steps) that executes a "
+            "distributed transaction as a compensating saga. `steps` is a "
+            "list of (name, action, compensation) triples of a string and "
+            "two zero-argument callables. Call each action in order. If "
+            "every action returns, the saga succeeded. If an action raises "
+            "an exception, stop: do not call any later action, and undo "
+            "the work that actually happened by calling the compensation "
+            "of each SUCCEEDED step in reverse order. The failed step's "
+            "own compensation must not be called, because its action did "
+            "not complete. A compensation that itself raises is recorded "
+            "and does not stop the remaining compensations from running. "
+            "Return an object with attributes succeeded (a bool), "
+            "completed (the names whose actions returned, in order), "
+            "compensated (the names whose compensations returned, in the "
+            "order they were called), failed_step (the name or None), "
+            "error (the exception or None), and compensation_errors (a "
+            "list of (name, exception) pairs in call order)."
+        ),
+        validator=LOAD_CANDIDATE + require("run_saga") + SHAPE_GUARDS + r'''
+run_saga = returning(run_saga, 'run_saga(...)')
+
+FIELDS = ('succeeded', 'completed', 'compensated', 'failed_step', 'error',
+          'compensation_errors')
+
+
+def step(name, log, fails=False, undo_fails=False):
+    def action():
+        log.append('do:' + name)
+        if fails:
+            raise RuntimeError('boom:' + name)
+
+    def compensation():
+        log.append('undo:' + name)
+        if undo_fails:
+            raise RuntimeError('undo-boom:' + name)
+
+    return (name, action, compensation)
+
+
+def run(steps):
+    return having(run_saga(steps), *FIELDS, what='the saga result')
+
+
+# Everything succeeds: nothing is compensated.
+log = []
+result = run([step('a', log), step('b', log), step('c', log)])
+assert result.succeeded is True
+assert list(result.completed) == ['a', 'b', 'c']
+assert list(result.compensated) == []
+assert result.failed_step is None
+assert result.error is None
+assert list(result.compensation_errors) == []
+assert log == ['do:a', 'do:b', 'do:c']
+
+# The third of four fails. Two facts are asserted here that a saga which
+# merely "undoes everything" gets wrong: d's action never runs, and c's
+# compensation never runs because c never took effect. Compensating c would
+# refund a payment that was never captured.
+log = []
+result = run([step('a', log), step('b', log), step('c', log, fails=True),
+              step('d', log)])
+assert result.succeeded is False
+assert list(result.completed) == ['a', 'b']
+assert list(result.compensated) == ['b', 'a'], 'compensate in reverse order'
+assert result.failed_step == 'c'
+assert isinstance(result.error, RuntimeError)
+assert str(result.error) == 'boom:c'
+assert log == ['do:a', 'do:b', 'do:c', 'undo:b', 'undo:a']
+assert 'undo:c' not in log, "the failed step's action never completed"
+assert 'do:d' not in log
+
+# A compensation that raises does not abandon the ones still owed. Stopping
+# there is the plausible wrong move, and it leaves the earliest steps -- the
+# ones holding the most state -- permanently uncompensated.
+log = []
+result = run([step('a', log), step('b', log, undo_fails=True),
+              step('c', log, fails=True)])
+assert list(result.completed) == ['a', 'b']
+assert list(result.compensated) == ['a'], 'b raised, so it did not compensate'
+assert log == ['do:a', 'do:b', 'do:c', 'undo:b', 'undo:a'], \
+    'a must still be compensated after b fails to'
+errors = list(result.compensation_errors)
+assert [name for name, _ in errors] == ['b']
+assert str(errors[0][1]) == 'undo-boom:b'
+
+# The very first step failing compensates nothing.
+log = []
+result = run([step('a', log, fails=True), step('b', log)])
+assert list(result.completed) == []
+assert list(result.compensated) == []
+assert result.failed_step == 'a'
+assert log == ['do:a']
+
+# An empty saga trivially succeeds.
+result = run([])
+assert result.succeeded is True
+assert list(result.completed) == []
+assert result.failed_step is None
+''',
+    ),
+    task(
+        f"{FAMILY}-0306", FAMILY,
+        prompt=(
+            "Implement a Python class Budget(clock, seconds) and an "
+            "exception DeadlineExceeded for propagating a request deadline "
+            "through nested calls. `clock` is a zero-argument callable "
+            "returning a monotonic float in seconds. The budget fixes an "
+            "ABSOLUTE deadline of clock() + seconds at construction. "
+            "remaining() returns the seconds left, never below zero; "
+            "expired() reports whether nothing is left; check() raises "
+            "DeadlineExceeded when expired and otherwise returns None. "
+            "child(seconds) returns a new Budget on the same clock whose "
+            "deadline is the EARLIER of this budget's deadline and "
+            "clock() + seconds, so a callee can shorten its own allowance "
+            "but can never extend the caller's. Also implement "
+            "run_stages(budget, stages), where `stages` is a list of "
+            "(name, work) pairs and work is called with the budget: call "
+            "budget.check() before each stage, and return the list of "
+            "names that ran. If check() raises, let DeadlineExceeded "
+            "propagate with an attribute `completed` listing the names "
+            "that did run."
+        ),
+        validator=LOAD_CANDIDATE + require("Budget")
+        + require("DeadlineExceeded") + require("run_stages")
+        + SHAPE_GUARDS + r'''
+class Clock:
+    def __init__(self, now=0.0):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+
+def budget_of(clock, seconds):
+    return having(built(Budget(clock, seconds), 'Budget(...)'),
+                  'remaining', 'expired', 'check', 'child',
+                  what='the budget')
+
+
+assert isinstance(DeadlineExceeded, type) and \
+    issubclass(DeadlineExceeded, BaseException), \
+    'DeadlineExceeded must be an exception class'
+
+clock = Clock(100.0)
+parent = budget_of(clock, 10.0)
+assert abs(built(parent.remaining(), 'remaining()') - 10.0) < 1e-9
+assert parent.expired() is False
+assert parent.check() is None
+
+# THE DEADLINE IS ABSOLUTE, not a duration that restarts on each read.
+clock.now = 104.0
+assert abs(parent.remaining() - 6.0) < 1e-9
+
+# A child may shorten...
+short = having(built(parent.child(2.0), 'child(...)'), 'remaining',
+               what='the child budget')
+assert abs(short.remaining() - 2.0) < 1e-9
+
+# ...and may NEVER lengthen. A callee that asks for a 1000 s timeout on a
+# request with 6 s left is the whole point of budget propagation: taking the
+# requested value holds the caller's connection open long after it gave up.
+patient = parent.child(1000.0)
+assert abs(patient.remaining() - 6.0) < 1e-9, \
+    'a child cannot outlive its parent'
+
+# A grandchild is bounded by the parent it can no longer see.
+assert abs(patient.child(500.0).remaining() - 6.0) < 1e-9
+
+# Time already spent is charged to the child at CREATION, so a child made
+# later gets less -- this is what distinguishes an absolute deadline from a
+# per-call timeout, which would hand out 5 s here.
+clock.now = 108.0
+late = parent.child(5.0)
+assert abs(late.remaining() - 2.0) < 1e-9
+
+# A child that expires does not expire its parent.
+clock.now = 104.0
+sibling = parent.child(1.0)
+clock.now = 105.5
+assert sibling.expired() is True
+assert parent.expired() is False
+try:
+    sibling.check()
+except DeadlineExceeded:
+    pass
+else:
+    raise AssertionError('an expired budget must raise from check()')
+
+# remaining() floors at zero rather than going negative.
+clock.now = 200.0
+assert parent.remaining() == 0
+assert parent.expired() is True
+
+# run_stages charges elapsed work against the shared deadline and stops at
+# the first stage it cannot afford to start.
+clock = Clock(0.0)
+budget = budget_of(clock, 5.0)
+ran = []
+
+
+def spend(seconds, name):
+    def work(current):
+        assert current is not None, 'the stage was not given a budget'
+        ran.append(name)
+        clock.now += seconds
+    return (name, work)
+
+
+assert list(run_stages(budget, [spend(1.0, 'a'), spend(1.0, 'b')])) == \
+    ['a', 'b']
+assert ran == ['a', 'b']
+
+clock = Clock(0.0)
+budget = budget_of(clock, 4.0)
+ran = []
+try:
+    run_stages(budget, [spend(2.0, 'a'), spend(2.0, 'b'), spend(2.0, 'c'),
+                        spend(2.0, 'd')])
+except DeadlineExceeded as exceeded:
+    assert list(getattr(exceeded, 'completed', None) or []) == ['a', 'b'], \
+        'the exception must name the stages that did run'
+else:
+    raise AssertionError('run_stages ran past its deadline')
+assert ran == ['a', 'b'], 'c must not start with a spent budget'
+
+# An empty stage list is fine and does not consult the clock.
+assert list(run_stages(budget_of(Clock(0.0), 0.0), [])) == []
+''',
+    ),
+    task(
+        f"{FAMILY}-0307", FAMILY,
+        prompt=(
+            "Implement a Python class BoundedQueue(capacity) plus "
+            "exception classes QueueClosed and QueueDrained, providing a "
+            "blocking hand-off between producer and consumer threads. "
+            "put(item) appends an item, blocking while the queue already "
+            "holds `capacity` items, and raises QueueClosed if the queue "
+            "is closed -- at call time or while it was blocked. get() "
+            "removes and returns the oldest item, blocking while the queue "
+            "is empty and still open. close() marks the queue closed, is "
+            "idempotent, and must wake every blocked caller. Closing does "
+            "NOT discard what is already buffered: get() keeps returning "
+            "buffered items in FIFO order after close, and only once the "
+            "buffer is empty does it raise QueueDrained. Use "
+            "threading primitives; do not busy-wait."
+        ),
+        validator=LOAD_CANDIDATE + require("BoundedQueue")
+        + require("QueueClosed") + require("QueueDrained")
+        + SHAPE_GUARDS + r'''
+import threading
+
+for name, kind in (('QueueClosed', QueueClosed),
+                   ('QueueDrained', QueueDrained)):
+    assert isinstance(kind, type) and issubclass(kind, BaseException), \
+        f'{name} must be an exception class'
+
+
+def queue(capacity):
+    return having(built(BoundedQueue(capacity), 'BoundedQueue(...)'),
+                  'put', 'get', 'close', what='the queue')
+
+
+def run(target):
+    """Run in a thread and re-raise whatever it did, without hanging."""
+    box = {}
+
+    def body():
+        try:
+            box['value'] = target()
+        except BaseException as error:  # noqa: BLE001
+            box['error'] = error
+
+    thread = threading.Thread(target=body, daemon=True)
+    thread.start()
+    return thread, box
+
+
+# Ordinary FIFO hand-off inside the capacity.
+q = queue(3)
+q.put('a')
+q.put('b')
+assert built(q.get(), 'get()') == 'a'
+assert q.get() == 'b'
+
+# CLOSING DOES NOT DISCARD THE BUFFER. Dropping it is the plausible wrong
+# move and it loses acknowledged work: the producer was told these were
+# accepted.
+q = queue(3)
+q.put('x')
+q.put('y')
+q.close()
+assert q.get() == 'x', 'buffered items survive close'
+assert q.get() == 'y'
+try:
+    q.get()
+except QueueDrained:
+    pass
+else:
+    raise AssertionError('a closed, empty queue must raise QueueDrained')
+
+# close() is idempotent, and put after close is refused.
+q.close()
+try:
+    q.put('z')
+except QueueClosed:
+    pass
+else:
+    raise AssertionError('put on a closed queue must raise QueueClosed')
+
+# A consumer blocked on an empty queue is woken by close, not left hanging.
+q = queue(2)
+thread, box = run(q.get)
+thread.join(0.2)
+assert thread.is_alive(), 'get must block while the queue is empty and open'
+q.close()
+thread.join(5.0)
+assert not thread.is_alive(), 'close must wake a blocked get'
+assert isinstance(box.get('error'), QueueDrained), box
+
+# A producer blocked on a full queue is woken by close too.
+q = queue(1)
+q.put('full')
+thread, box = run(lambda: q.put('blocked'))
+thread.join(0.2)
+assert thread.is_alive(), 'put must block while the queue is full'
+q.close()
+thread.join(5.0)
+assert not thread.is_alive(), 'close must wake a blocked put'
+assert isinstance(box.get('error'), QueueClosed), box
+# ...and the item it was holding was never accepted, while the one already
+# buffered still is.
+assert q.get() == 'full'
+try:
+    q.get()
+except QueueDrained:
+    pass
+else:
+    raise AssertionError('the refused put must not have been buffered')
+
+# Capacity is real: a blocked producer proceeds the moment a slot frees.
+q = queue(1)
+q.put(0)
+thread, box = run(lambda: q.put(1))
+thread.join(0.2)
+assert thread.is_alive()
+assert q.get() == 0
+thread.join(5.0)
+assert not thread.is_alive(), 'a freed slot must wake a blocked put'
+assert 'error' not in box, box
+assert q.get() == 1
+
+# Nothing is lost or duplicated across many threads.
+q = queue(4)
+produced = list(range(200))
+consumed = []
+lock = threading.Lock()
+
+
+def produce():
+    for item in produced:
+        q.put(item)
+    q.close()
+
+
+def consume():
+    while True:
+        try:
+            item = q.get()
+        except QueueDrained:
+            return
+        with lock:
+            consumed.append(item)
+
+
+workers = [threading.Thread(target=produce, daemon=True)]
+workers += [threading.Thread(target=consume, daemon=True) for _ in range(3)]
+for worker in workers:
+    worker.start()
+for worker in workers:
+    worker.join(20.0)
+    assert not worker.is_alive(), 'a worker never finished'
+assert sorted(consumed) == produced, 'every item is delivered exactly once'
+''',
+    ),
+    task(
+        f"{FAMILY}-0308", FAMILY,
+        prompt=(
+            "Implement a Python class IdGenerator(node_id, clock) plus an "
+            "exception ClockMovedBackwards, generating Snowflake-style "
+            "64-bit identifiers. `clock` is a zero-argument callable "
+            "returning the wall clock as an integer number of "
+            "milliseconds. Expose the class attribute EPOCH_MS = "
+            "1700000000000. node_id must be an integer in 0..1023, and "
+            "anything else raises ValueError. next_id() returns "
+            "((millis - EPOCH_MS) << 22) | (node_id << 12) | sequence, "
+            "where sequence starts at 0 for each new millisecond and "
+            "increments for each further id inside the same millisecond. "
+            "When the sequence would exceed 4095, do not wrap: keep "
+            "reading the clock until it reports a later millisecond, then "
+            "restart the sequence at 0. If the clock ever reports a "
+            "millisecond EARLIER than the last one used, raise "
+            "ClockMovedBackwards rather than returning an id."
+        ),
+        validator=LOAD_CANDIDATE + require("IdGenerator")
+        + require("ClockMovedBackwards") + SHAPE_GUARDS + r'''
+assert isinstance(ClockMovedBackwards, type) and \
+    issubclass(ClockMovedBackwards, BaseException), \
+    'ClockMovedBackwards must be an exception class'
+
+EPOCH = getattr(IdGenerator, 'EPOCH_MS', None)
+assert EPOCH == 1700000000000, f'EPOCH_MS is {EPOCH!r}'
+
+
+class Clock:
+    """A wall clock the test drives, and which counts its own reads."""
+
+    def __init__(self, millis, advance_after=None, step=1):
+        self.millis = millis
+        self.reads = 0
+        self.advance_after = advance_after
+        self.step = step
+
+    def __call__(self):
+        self.reads += 1
+        if self.advance_after is not None and self.reads > self.advance_after:
+            self.millis += self.step
+            self.advance_after = None
+        return self.millis
+
+
+def generator(clock, node_id=7):
+    return having(built(IdGenerator(node_id, clock), 'IdGenerator(...)'),
+                  'next_id', what='the generator')
+
+
+for bad in (-1, 1024, 5000, 'x', None, 1.5):
+    try:
+        IdGenerator(bad, Clock(EPOCH))
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f'accepted node_id {bad!r}')
+
+for good in (0, 1023):
+    generator(Clock(EPOCH), good)
+
+# The layout is exactly the one the prompt specifies.
+clock = Clock(EPOCH + 12345)
+gen = generator(clock, 7)
+first = built(gen.next_id(), 'next_id()')
+assert isinstance(first, int)
+assert first >> 22 == 12345, 'the high bits carry millis since EPOCH_MS'
+assert (first >> 12) & 0x3FF == 7, 'the middle bits carry the node id'
+assert first & 0xFFF == 0, 'the sequence starts at 0 in a new millisecond'
+
+# Inside one millisecond the sequence increments and the id still rises.
+second = gen.next_id()
+assert second & 0xFFF == 1
+assert second > first
+
+# A new millisecond restarts the sequence.
+clock.millis = EPOCH + 12346
+third = gen.next_id()
+assert third >> 22 == 12346
+assert third & 0xFFF == 0
+assert third > second
+
+# SEQUENCE EXHAUSTION MUST WAIT, NOT WRAP. Wrapping is the plausible wrong
+# move: every assertion above still passes, ids still rise for a while, and
+# the 4097th id in a millisecond silently duplicates the first.
+#
+# The threshold is chosen by tracing reads, not estimated. A generator that
+# does not spin reads the clock exactly once per id, so it has made 4097
+# reads when it issues the 4097th. The clock therefore holds its value until
+# read 4098 -- one read PAST the point a non-spinning generator ever reaches.
+# Only an implementation that keeps reading gets a fresh millisecond; a
+# wrapping one re-issues sequence 0 in the millisecond it already used, and
+# the uniqueness assertion below is what catches it.
+clock = Clock(EPOCH + 500, advance_after=4098, step=1)
+gen = generator(clock)
+issued = [gen.next_id() for _ in range(4200)]
+assert len(set(issued)) == 4200, 'ids must be unique across the boundary'
+assert issued == sorted(issued), 'ids must increase monotonically'
+assert [identifier & 0xFFF for identifier in issued[:4096]] == \
+    list(range(4096))
+assert issued[4096] >> 22 == 501, 'the 4097th id belongs to a later ms'
+assert issued[4096] & 0xFFF == 0, 'the sequence restarts at 0'
+assert issued[4097] & 0xFFF == 1
+
+# A backwards clock is refused rather than allowed to duplicate ids.
+clock = Clock(EPOCH + 9_000)
+gen = generator(clock)
+before = gen.next_id()
+clock.millis = EPOCH + 8_999
+try:
+    gen.next_id()
+except ClockMovedBackwards:
+    pass
+else:
+    raise AssertionError('a backwards clock must raise')
+
+# Recovery: once the clock passes the highest millisecond already used, ids
+# resume -- and do not collide with the ones issued before the regression.
+clock.millis = EPOCH + 9_001
+after = gen.next_id()
+assert after > before
+assert after >> 22 == 9_001
+''',
+    ),
+    task(
+        f"{FAMILY}-0309", FAMILY,
+        prompt=(
+            "Implement a Python class SingleFlight with a method "
+            "do(key, function) that collapses duplicate concurrent work. "
+            "`function` is zero-argument. When several threads call do() "
+            "with the same key while a call for that key is still "
+            "running, the function runs ONCE and every caller receives "
+            "that one result; if it raises, every caller receives that "
+            "same exception. Different keys never share a call. Once a "
+            "call finishes, the key is released: this is de-duplication of "
+            "work in flight, not a cache, so a later do() with the same "
+            "key runs the function again. Expose the count of function "
+            "invocations as the attribute calls. Use threading "
+            "primitives; do not busy-wait."
+        ),
+        validator=LOAD_CANDIDATE + require("SingleFlight") + SHAPE_GUARDS
+        + r'''
+import threading
+import time
+
+group = having(built(SingleFlight(), 'SingleFlight()'), 'do', 'calls',
+               what='the single-flight group')
+assert group.calls == 0
+
+# A lone call is ordinary, and the key is released afterwards.
+assert built(group.do('k', lambda: 'one'), "do('k', ...)") == 'one'
+assert group.calls == 1
+
+# THE KEY IS RELEASED, NOT MEMOIZED. Caching the value passes every
+# concurrency assertion below and is a different data structure: the second
+# request would serve a stale value forever.
+assert group.do('k', lambda: 'two') == 'two', \
+    'single flight de-duplicates work in flight, it does not cache'
+assert group.calls == 2
+
+# Many threads, one key, one execution. The function parks until it is
+# released, so every caller is genuinely in flight together.
+group = having(built(SingleFlight(), 'SingleFlight()'), 'do', 'calls',
+               what='the single-flight group')
+entered = threading.Event()
+release = threading.Event()
+results = {}
+lock = threading.Lock()
+# The leader parks inside the function, so the key stays in flight until this
+# test says otherwise. The only thing that has to be sequenced is that every
+# caller has REGISTERED before the leader is allowed to finish -- a straggler
+# arriving after the key is released is a second leader, and would look like
+# a candidate that failed to collapse the calls. Each caller announces itself
+# immediately before calling do(), and the settle covers the few bytecodes
+# between that announcement and taking the group's lock.
+arrived = [threading.Event() for _ in range(6)]
+
+
+def slow():
+    entered.set()
+    assert release.wait(10.0), 'the shared call was never released'
+    return 'shared'
+
+
+def caller(index):
+    def body():
+        arrived[index].set()
+        value = group.do('hot', slow)
+        with lock:
+            results[index] = value
+    return body
+
+
+threads = [threading.Thread(target=caller(index), daemon=True)
+           for index in range(6)]
+for thread in threads:
+    thread.start()
+assert entered.wait(10.0), 'no thread ever entered the function'
+for event in arrived:
+    assert event.wait(10.0), 'a caller never started'
+time.sleep(0.5)
+assert group.calls == 1, \
+    f'the function ran {group.calls} times while one call was in flight'
+release.set()
+for thread in threads:
+    thread.join(20.0)
+    assert not thread.is_alive(), 'a caller never returned'
+
+assert group.calls == 1, f'the function ran {group.calls} times, not once'
+assert results == {index: 'shared' for index in range(6)}
+
+# ...and after all of that the key is free again.
+assert group.do('hot', lambda: 'later') == 'later'
+assert group.calls == 2
+
+# Different keys do not block one another. Each parks until BOTH have
+# arrived, so a group that serialises every key deadlocks here rather than
+# quietly passing.
+group = having(built(SingleFlight(), 'SingleFlight()'), 'do', 'calls',
+               what='the single-flight group')
+together = threading.Barrier(2, timeout=10.0)
+seen = {}
+
+
+def paired(key):
+    def body():
+        seen[key] = group.do(key, lambda: (together.wait(), key)[1])
+    return body
+
+
+pair = [threading.Thread(target=paired(key), daemon=True)
+        for key in ('left', 'right')]
+for thread in pair:
+    thread.start()
+for thread in pair:
+    thread.join(20.0)
+    assert not thread.is_alive(), 'distinct keys must run concurrently'
+assert seen == {'left': 'left', 'right': 'right'}
+assert group.calls == 2
+
+# A failure is shared by every waiter, and does NOT poison the key.
+group = having(built(SingleFlight(), 'SingleFlight()'), 'do', 'calls',
+               what='the single-flight group')
+entered = threading.Event()
+release = threading.Event()
+errors = {}
+arrived = [threading.Event() for _ in range(4)]
+
+
+def failing():
+    entered.set()
+    assert release.wait(10.0)
+    raise RuntimeError('shared failure')
+
+
+def catcher(index):
+    def body():
+        arrived[index].set()
+        try:
+            group.do('bad', failing)
+        except RuntimeError as error:
+            errors[index] = str(error)
+    return body
+
+
+threads = [threading.Thread(target=catcher(index), daemon=True)
+           for index in range(4)]
+for thread in threads:
+    thread.start()
+assert entered.wait(10.0)
+for event in arrived:
+    assert event.wait(10.0), 'a caller never started'
+time.sleep(0.5)
+release.set()
+for thread in threads:
+    thread.join(20.0)
+    assert not thread.is_alive(), 'a caller never saw the failure'
+assert errors == {index: 'shared failure' for index in range(4)}, errors
+assert group.calls == 1
+assert group.do('bad', lambda: 'recovered') == 'recovered', \
+    'a failed call must not poison the key'
+''',
+    ),
+    task(
+        f"{FAMILY}-0310", FAMILY,
+        prompt=(
+            "Implement a Python class WorkStealingDeque() with the "
+            "Chase-Lev ownership split. The owning worker uses "
+            "push_bottom(item) and pop_bottom(); other threads use "
+            "steal_top(). push_bottom appends. pop_bottom removes and "
+            "returns the item pushed MOST recently, so the owner works "
+            "depth-first over the tasks whose data is still warm. "
+            "steal_top removes and returns the OLDEST item, so a thief "
+            "takes the work furthest from the owner's end. Both return "
+            "the module-level sentinel EMPTY when there is nothing to "
+            "take. When one item remains, exactly one caller may get it: "
+            "an owner and a thief racing for it must not both receive it, "
+            "and it must not be lost. Also expose __len__. Use threading "
+            "primitives; do not busy-wait."
+        ),
+        validator=LOAD_CANDIDATE + require("WorkStealingDeque")
+        + require("EMPTY") + SHAPE_GUARDS + r'''
+import threading
+
+deque = having(built(WorkStealingDeque(), 'WorkStealingDeque()'),
+               'push_bottom', 'pop_bottom', 'steal_top', '__len__',
+               what='the deque')
+assert len(deque) == 0
+assert deque.pop_bottom() is EMPTY
+assert deque.steal_top() is EMPTY
+
+# THE TWO ENDS ARE DIFFERENT ENDS. A deque whose steal_top pops the same
+# side as pop_bottom passes a single-threaded smoke test and destroys the
+# locality the structure exists for -- and, worse, makes thieves contend
+# with the owner for the very task it is about to run.
+for item in ('a', 'b', 'c', 'd'):
+    deque.push_bottom(item)
+assert len(deque) == 4
+assert deque.pop_bottom() == 'd', 'the owner takes the newest item'
+assert deque.steal_top() == 'a', 'a thief takes the oldest item'
+assert deque.pop_bottom() == 'c'
+assert deque.steal_top() == 'b'
+assert len(deque) == 0
+assert deque.pop_bottom() is EMPTY
+assert deque.steal_top() is EMPTY
+
+# Pushing again after draining works from a clean state.
+deque.push_bottom(1)
+assert deque.steal_top() == 1
+deque.push_bottom(2)
+assert deque.pop_bottom() == 2
+
+# The single-element case, taken from each side in turn: exactly one caller
+# gets it and the other sees EMPTY.
+for first, second in (('pop_bottom', 'steal_top'),
+                      ('steal_top', 'pop_bottom')):
+    solo = WorkStealingDeque()
+    solo.push_bottom('only')
+    assert getattr(solo, first)() == 'only'
+    assert getattr(solo, second)() is EMPTY, \
+        f'{second} took an item {first} had already removed'
+
+# Under contention nothing is duplicated and nothing is lost. This is the
+# assertion the single-element race actually shows up in.
+deque = WorkStealingDeque()
+ITEMS = 3000
+taken = []
+guard = threading.Lock()
+stop = threading.Event()
+
+
+def collect(values):
+    with guard:
+        taken.extend(values)
+
+
+def owner():
+    mine = []
+    for item in range(ITEMS):
+        deque.push_bottom(item)
+        if item % 3 == 0:
+            got = deque.pop_bottom()
+            if got is not EMPTY:
+                mine.append(got)
+    while True:
+        got = deque.pop_bottom()
+        if got is EMPTY:
+            break
+        mine.append(got)
+    stop.set()
+    collect(mine)
+
+
+def thief():
+    mine = []
+    while not stop.is_set() or len(deque):
+        got = deque.steal_top()
+        if got is not EMPTY:
+            mine.append(got)
+    collect(mine)
+
+
+workers = [threading.Thread(target=owner, daemon=True)]
+workers += [threading.Thread(target=thief, daemon=True) for _ in range(3)]
+for worker in workers:
+    worker.start()
+for worker in workers:
+    worker.join(30.0)
+    assert not worker.is_alive(), 'a worker never finished'
+
+assert len(deque) == 0, 'the deque must be drained'
+assert len(taken) == len(set(taken)), 'an item was taken twice'
+assert sorted(taken) == list(range(ITEMS)), 'an item was lost'
+''',
+    ),
 ]

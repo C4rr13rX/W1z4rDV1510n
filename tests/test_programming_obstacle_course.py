@@ -659,6 +659,28 @@ REVIEWED_OVERLAPS = {
         "architecture-0003 merges typed configuration sources by "
         "precedence; scientific-0001 multiplies two 4x4 rigid transforms."
     ),
+    "symbol:run_saga": (
+        "Kept after being narrowed, and the shared part is named here rather "
+        "than waved past: BOTH tasks unwind in reverse order and BOTH require "
+        "a compensation that raises not to strand the compensations still "
+        "owed. That is one clause of each prompt. What each is actually "
+        "measured on differs, and a candidate can pass either while failing "
+        "the other.\n\n"
+        "architecture-0405 is an integration task. steps.py is fixed and "
+        "cannot be edited, so the work is honouring a contract somebody else "
+        "wrote -- the `compensatable` flag that must be skipped, StepError as "
+        "the failure currency, and re-raising the ORIGINAL error so the "
+        "caller's own handler still fires. It returns names and tells the "
+        "caller nothing about the unwind.\n\n"
+        "concurrency-0305 is an outcome-reporting task. The candidate designs "
+        "the result type, returns instead of raising, and has to separate "
+        "steps that were ATTEMPTED from steps that COMPLETED -- which is the "
+        "decision 0405 cannot test, because its Step.compensate() raises when "
+        "the step never ran, so a candidate that wrongly compensates the "
+        "failed step is absorbed by the very rule about compensation "
+        "failures. Here it is forbidden outright, and asserted directly: a "
+        "refund must not be issued for a payment that was never captured."
+    ),
     "citation:RFC3986": (
         "validation-0007 resolves a reference against a base, validation-0008 "
         "is the percent-encoding and form-decoding primitives, and "

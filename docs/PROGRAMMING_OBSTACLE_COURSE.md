@@ -169,6 +169,38 @@ a `scaled` argument, and `math.isclose` failed NaN-matches-NaN.
 A task whose near-miss passes is not measuring the capability its prompt
 names, however elaborate its assertions look.
 
+That practice now has a home rather than being re-improvised per batch.
+`scripts/_near_miss_probe.py` holds a named near-miss per task and prints, for
+each, whether it was rejected and on which assertion; it exits non-zero if any
+of them passes. Run it once per authored batch and read the assertion, not just
+the verdict — a near-miss rejected on the wrong line is a task that got the
+right answer for the wrong reason, and it will let the real near-miss through.
+
+The eight `concurrency_async_distributed-0303..0310` tasks were checked this
+way, and the check is only worth the trouble because the near-miss is not the
+mutation. Two of the eight are illustrative: the Snowflake generator's
+near-miss *clamps* a backwards clock to the last millisecond used rather than
+raising — which is precisely how the duplicate id gets minted, since that
+millisecond's sequence has already been handed out — and the single-flight
+near-miss holds one global lock for the whole call, which collapses nothing and
+serialises unrelated keys. Neither is the mutation, and neither would have been
+found by a stub.
+
+### Choosing the fixture by tracing the implementation, not by estimating
+
+`concurrency_async_distributed-0308` has to separate "wait out the millisecond"
+from "wrap the sequence", and the two agree on every fixture where the clock
+advances on its own. The discriminating fixture is a clock that holds its value
+until it has been read *more times than a non-spinning generator ever reads it*.
+That threshold is not a guess: a generator that does not spin reads the clock
+exactly once per id, so it has made 4,097 reads when it issues the 4,097th id.
+The fixture therefore advances on read 4,098. One read earlier and the wrapping
+implementation gets a fresh millisecond for free and passes; the uniqueness
+assertion would then be checking nothing.
+
+This is the same rule as the pivoting fixture below — pick the margin by
+tracing or measuring — applied to a read count instead of a magnitude.
+
 ### The near-miss that passes: a task measuring a weaker capability
 
 That last sentence stopped being hypothetical on 2026-09-05.
@@ -478,6 +510,24 @@ other in beside `validation_parsing_serialization-0007`. Neither is reviewed,
 so the suite would have failed before the commit landed. Neither signal alone
 suffices: the versions pair cited no RFC, and the URI pair used two different
 function names.
+
+The net caught a live one on 2026-09-10. `concurrency_async_distributed-0305`
+was authored as a compensating saga without anyone noticing that
+`architecture_multifile_integration-0405` already asks for `run_saga`, and the
+suite refused the batch until the pair was judged in writing. Both really do
+unwind in reverse and both really do require a failed compensation not to
+strand the ones still owed — that overlap is one clause of each prompt, and the
+`REVIEWED_OVERLAPS` entry names it rather than talking around it. What kept
+both is that 0405 is an *integration* task, measured on honouring a `steps.py`
+it cannot edit and re-raising the original `StepError`, while 0305 is an
+*outcome-reporting* task, measured on separating steps that were ATTEMPTED from
+steps that COMPLETED. That second decision is one 0405 structurally cannot
+test: its `Step.compensate()` raises when the step never ran, so a candidate
+that wrongly compensates the failed step is absorbed by 0405's own rule about
+compensation failures.
+
+The lesson is the mechanism, not the verdict: the guard does not decide whether
+two tasks are the same, it refuses to let the question go unanswered.
 
 The scan is a net, not a proof, and its blind spot is exactly the case that
 motivated this section. `RateLimiter` and `TokenBucket` share no symbol and
