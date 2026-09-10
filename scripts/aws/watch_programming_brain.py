@@ -515,6 +515,16 @@ for path in pathlib.Path('/proc').glob('[0-9]*/comm'):
 status_file = runtime / 'curriculum-supervisor.status.json'
 progress_file = max(runtime.glob('deferred-replay-*.progress.json'),
                     key=lambda f: f.stat().st_mtime, default=None)
+# The forward driver writes a THIRD file, its own <phase>.progress.json --
+# the path is on its command line as --progress-path -- and it matches neither
+# candidate above. Measured 2026-09-10 during a go-systems forward block:
+# go-systems.progress.json was 7.6 s old and advancing 50192 -> 50224 while
+# the status file sat 718 s stale at 49152, so the freshest-writer rule picked
+# the status file and published rows_per_second 0.0 on a healthy run.
+forward_file = max(
+    (f for f in runtime.glob('*.progress.json')
+     if not f.name.startswith('deferred-replay-')),
+    key=lambda f: f.stat().st_mtime, default=None)
 
 
 def _file_age(path):
@@ -548,15 +558,23 @@ except Exception:
     pass
 
 # THE REPLAY PROGRESS FILE IS NOT THE ONLY HEARTBEAT, AND IS OFTEN NOT THE
-# LIVE ONE. Two different writers advance rows: the replay worker rewrites
-# deferred-replay-*.progress.json every batch, and the forward worker rewrites
-# curriculum-supervisor.status.json every batch. `throughput` above reads only
-# the first, so during a forward block it publishes whatever the last replay
-# pass left behind. Measured 2026-09-09: that file was 100.7 h old and carried
-# durable_next_row 201344 / accepted_episodes 5168, printed beside a live
-# status at row 16416. Nothing in the payload marked it stale, so the only
-# available readings of a forward block advancing at 15.3 rows/s were "the run
-# went backwards 185k rows" or "throughput has flatlined for four days".
+# LIVE ONE. THREE different writers advance rows: the replay worker rewrites
+# deferred-replay-*.progress.json every batch, the forward driver rewrites its
+# own <phase>.progress.json every batch, and the supervisor rewrites
+# curriculum-supervisor.status.json -- but only between batches, so it FREEZES
+# for minutes during a canary, a settlement or a gate. `throughput` above reads
+# only the replay file, so during a forward block it publishes whatever the
+# last replay pass left behind. Measured 2026-09-09: that file was 100.7 h old
+# and carried durable_next_row 201344 / accepted_episodes 5168, printed beside
+# a live status at row 16416. Nothing in the payload marked it stale, so the
+# only available readings of a forward block advancing at 15.3 rows/s were
+# "the run went backwards 185k rows" or "throughput has flatlined for 4 days".
+#
+# Naming the status file as the forward heartbeat fixed that case and broke
+# this one. Measured 2026-09-10, mid `continuous_canary`: status 718 s stale at
+# row 49152 while go-systems.progress.json was 7.6 s old and climbing
+# 50192 -> 50224. The rule is the freshest writer among ALL THREE, never a
+# file chosen by which stage is believed to be running.
 #
 # So take the freshest writer rather than a fixed one, and sample it twice:
 # the payload has never carried a RATE, and a rate is what separates a
@@ -570,6 +588,8 @@ try:
         (_file_age(status_file), 'status', status_file),
         (_file_age(progress_file) if progress_file is not None else None,
          'replay_progress', progress_file),
+        (_file_age(forward_file) if forward_file is not None else None,
+         'forward_progress', forward_file),
     ) if age is not None]
     if ages:
         age, source, path = min(ages, key=lambda item: item[0])

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 
 import scripts.aws.watch_programming_brain as watch
@@ -658,6 +660,51 @@ def test_the_heartbeat_is_the_freshest_writer_not_a_fixed_file() -> None:
     # A rate is the thing that separates a converging block from a live
     # process that is not training, and the payload never carried one.
     assert "'rows_per_second'" in body
+
+
+def test_the_forward_driver_progress_file_is_a_heartbeat_candidate(tmp_path) -> None:
+    """The forward block's own writer must be selectable, not just the two.
+
+    Naming the status file as "the" forward heartbeat fixed the stale-replay
+    case and created its mirror image. Measured 2026-09-10 mid
+    `continuous_canary`: `go-systems.progress.json` was 7.6 s old climbing
+    50192 -> 50224, while the status file the rule selected sat 718 s stale at
+    49152. The payload published `rows_per_second: 0.0` and woke an agent to
+    diagnose a stall on a block that was training normally.
+
+    So this runs the shipped selection code against a real directory rather
+    than grepping for a name: a glob that cannot match reports nothing forever,
+    and asserting on the source text would not have caught the original bug
+    either.
+    """
+    body = remote_probe_body()
+    start = body.index("status_file = runtime /")
+    segment = body[start:body.index("def _file_age(path):")]
+
+    # Oldest to newest, so the forward file is unambiguously the freshest and
+    # the stale replay leftover is the trap the old rule fell into.
+    (tmp_path / "deferred-replay-abc.progress.json").write_text("{}")
+    (tmp_path / "curriculum-supervisor.status.json").write_text("{}")
+    (tmp_path / "go-systems.progress.json").write_text("{}")
+    for name, age in (("deferred-replay-abc.progress.json", 362_000.0),
+                      ("curriculum-supervisor.status.json", 718.0),
+                      ("go-systems.progress.json", 7.6)):
+        target = tmp_path / name
+        os.utime(target, (time.time() - age, time.time() - age))
+
+    namespace: dict = {"runtime": tmp_path}
+    exec(compile(segment, "<selection>", "exec"), namespace)
+
+    forward = namespace["forward_file"]
+    assert forward is not None, "the forward driver's writer was not selectable"
+    assert forward.name == "go-systems.progress.json"
+    # The replay leftover must NOT be picked up by the forward glob, or the
+    # 100.7 h stale file returns through the door opened for this fix.
+    assert not forward.name.startswith("deferred-replay-")
+    assert namespace["progress_file"].name == "deferred-replay-abc.progress.json"
+
+    # And it must actually be offered to the freshest-writer rule.
+    assert "'forward_progress', forward_file" in body
 
 
 def test_a_new_probe_field_cannot_break_event_deduplication() -> None:
