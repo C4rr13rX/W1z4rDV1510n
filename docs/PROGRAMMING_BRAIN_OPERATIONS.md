@@ -1127,3 +1127,86 @@ from that empty list — that restarting the supervisor was safe — was the
 opposite of the truth, and the section above exists because the second probe
 was done by name. Verify a pattern can match something before believing it
 matched nothing, in ad-hoc probes as much as in committed ones.
+
+## One malformed registry file stops every corpus, not its own
+
+`load_registry()` walks the registry directory and raises `SchemaError` on the
+first file that fails to parse. There is no per-file skip. So a typo in one
+`.toml` is not a defect in that corpus — it is a defect in **all** of them, and
+it lands at driver startup, before a row is posted.
+
+On 2026-09-09 `go_systems_001.toml` deployed carrying
+`category = "systems_programming_go"`, which is not in `schema.CATEGORIES`.
+Every `drive_corpora_brain` invocation died in `main()` at
+`registry = load_registry(runner_mod.REGISTRY_DIR)`. Four worker stderr logs on
+the host held the identical traceback.
+
+What made a typo expensive was what the supervisor did with the exit code:
+
+- The replay worker exited 1. `run_deferred_replays()` raised a bare
+  `RuntimeError`, and the drain loop reads any non-infrastructure exception as
+  a **behavioural rejection** — a verdict that the interval's content failed
+  admission.
+- Twelve intervals across four unrelated corpora — `jupyter-scientific`,
+  `metamathqa`, `webstack` — were recorded `deferred_replay_failed` and
+  rejected. None of them trained a row or ran a gate. Their corpora were fine;
+  they were behind a Go file in the same directory.
+- The pass ended `deferred_replay_complete` with 26 rejections and returned 42.
+- `RestartPreventExitStatus=42` in the unit — correct policy, so that a genuine
+  behavioural rejection preserves its evidence instead of retraining and
+  rejecting in a loop — latched the service **stopped**.
+
+The result reads exactly like the failure mode CLAUDE.md warns about: a stage
+name that says `complete`, a `/health` that answers, 26 rejections that look
+like semantic verdicts about corpus content, and 99.9 hours without an
+admission. `supervisor_count`, `worker_count` and `wrapper_count` were all 0
+and nothing was going to restart them.
+
+The rule the supervisor now encodes: **a replay worker that exits on its own is
+infrastructure, never a verdict.** The worker only POSTs rows. Every
+judgement — `interval_recall`, settlement, the completion gate — runs in the
+supervisor *after* the training loop returns, and `drive_corpora_brain.main()`
+returns only 0, or 2 for an unknown script. Any other non-zero code is the
+driver failing to run, not the brain failing to learn.
+`replay_worker_failure()` raises `AdmissionInfrastructureError`, which
+deliberately does not inherit `RuntimeError` so no behavioural handler can
+catch it, and which stops the pass rather than burning the rest of the queue.
+
+### The obligations survive; the service does not
+
+Worth knowing before reaching for a repair script: the 26 rejections were not
+losses. `rejected_this_pass` is in-memory only, and a rejection re-appends the
+interval to the append-only ledger as `deferred`. Measured after the fix,
+`unresolved_deferred_intervals()` returned all 26, ids matching the reported
+`rejected_intervals` exactly. Nothing needed requeueing by hand — the recovery
+was `systemctl reset-failed` plus `start`.
+
+### Two fixes, because checking the first by eye is not checking it
+
+Correcting the category was not sufficient. The same file then failed to load
+on `must_be_valid = "go"`, absent from `schema.SUPPORTED_LANGS` — a second
+`SchemaError`, same all-or-nothing blast radius, same dead workers. The first
+fix had been validated by reading `CATEGORIES` and comparing strings;
+`load_registry()` itself was never re-run. One command would have found it.
+
+`tests/test_training_registry_schema.py` now loads the real registry directory
+rather than a fixture, and reports every failing file rather than stopping at
+the first — the check both outages needed and neither had. A fixture would have
+passed throughout both.
+
+### A language in SUPPORTED_LANGS with no validator arm is worse than an absent one
+
+Adding `go` to `SUPPORTED_LANGS` alone would have been a silent regression.
+`_validate_lang()` ends in `return True, ""` for any language it does not
+recognise, so a bare listing awards the full 0.5 structural weight to arbitrary
+text. Absent, the corpus is loudly blocked; present-but-unimplemented, its
+benchmarks report passes while checking nothing.
+
+Auditing for that found `bash` already in exactly that state — a `pass`-bodied
+nesting check followed by an unconditional `return True, ""`, so
+`code_gen_bash_001`'s two benchmarks had been scoring structural credit on
+prose since they were written. Both languages now discriminate, and a test
+asserts no declared language accepts a plain English sentence as source.
+
+Note when reading past bash benchmark results: they were measured against a
+validator that could not fail, so their structural axis carries no information.

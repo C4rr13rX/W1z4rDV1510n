@@ -80,6 +80,19 @@ Verify, do not assume:
 - **Onboarding a corpus requires a registry `.toml`.** Without it the driver
   exits 2 on `unknown script` and the supervisor retry-loops, stopping ALL
   training. `scripts/onboard_corpus.py` writes it; deploy it with the corpus.
+- **A malformed registry `.toml` is worse than a missing one.**
+  `load_registry()` is all-or-nothing, so one bad file kills every corpus at
+  driver startup. Measured 2026-09-09: one invented `category` rejected 12
+  intervals across 4 unrelated corpora as behavioural failures, ended the pass
+  `deferred_replay_complete`, and exit-42 latched the service stopped for four
+  days. After ANY registry edit run
+  `python -m pytest tests/test_training_registry_schema.py` — it loads the
+  real directory. Checking the field by eye is what let a second `SchemaError`
+  (`must_be_valid`) survive the fix for the first.
+- **A replay worker exit is infrastructure, never a semantic verdict.** The
+  worker only POSTs rows; every judgement runs in the supervisor after the
+  training loop returns. Before blaming an interval's content, read the
+  worker's stderr tail — `last_failure` now carries it inline.
 - **Files written over SSM land `root:root`.** The supervisor runs as
   `ec2-user` and dies with `Permission denied` on anything it must write.
   `chown ec2-user:ec2-user` after any host-side write.
