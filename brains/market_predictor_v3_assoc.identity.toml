@@ -193,10 +193,10 @@ decay_rate = 0.00002
 prune_floor = 0.001
 
 [[pools]]
-name = "rel_sym_vs_mkt"
+name = "rel_trend_vs_noise"
 id = 14
 prototype = "byte-passthrough"
-atom_encoding_prefix = "market_rel_sym_mkt"
+atom_encoding_prefix = "market_rel_trend_noise"
 kind = "SensoryInput"
 frame_rate = 1
 recent_atoms_window = 32768
