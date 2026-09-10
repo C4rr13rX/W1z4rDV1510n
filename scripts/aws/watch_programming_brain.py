@@ -171,9 +171,57 @@ def event_fingerprint(kind: str, probe: dict) -> str:
     return f"{kind}:{digest}"
 
 
+#: The supervisor is launched with `--min-free-disk-gb 8`, so it yields rather
+#: than trains below that. Alarming at the same number would fire on the guard
+#: doing its job; alarming far below it would fire only once the wrapper is
+#: already crash-looping. Half the supervisor's own floor names the fault while
+#: there is still room to reclaim.
+DISK_ALARM_FLOOR_GB = 4.0
+
+
+def disk_exhaustion_fault(probe: dict, *,
+                          disk_floor_gb: float = DISK_ALARM_FLOOR_GB) -> str:
+    """Name a full volume, or return '' when the volume is not the problem.
+
+    Bytes and inodes both surface as ENOSPC, but only one of them shows up in
+    `df -h`, so an inode-exhausted host reads as having free space while every
+    write fails. `wrapper_enospc` is carried separately because a reclaim that
+    lands between the crash and the probe leaves free bytes beside a service
+    that is still failing on the evidence in its own log.
+    """
+    disk = probe.get("disk") or {}
+    if disk.get("error"):
+        return ""
+
+    free_gb = disk.get("free_gb")
+    if free_gb is not None and float(free_gb) < disk_floor_gb:
+        return (
+            f"/srv/wizard has {float(free_gb):.2f} GB free, below the "
+            f"{disk_floor_gb:.1f} GB alarm floor "
+            f"({disk.get('used_percent')}% used)"
+        )
+
+    inodes_used = disk.get("inodes_used_percent")
+    if inodes_used is not None and float(inodes_used) >= 95.0:
+        return (
+            f"/srv/wizard has {float(inodes_used):.1f}% of its inodes used "
+            f"({disk.get('free_inodes')} free) -- writes fail with ENOSPC even "
+            f"though {disk.get('free_gb')} GB is free"
+        )
+
+    if disk.get("wrapper_enospc"):
+        return (
+            "the curriculum wrapper logged 'No space left on device' "
+            f"(now {disk.get('free_gb')} GB free) -- reclaim happened after the "
+            "failure, so the unit needs restarting"
+        )
+    return ""
+
+
 def classify_probe(probe: dict, *, stall_seconds: float,
                    admission_stall_hours: float = 6.0,
-                   memory_floor_gb: float = 1.5) -> Decision:
+                   memory_floor_gb: float = 1.5,
+                   disk_floor_gb: float = DISK_ALARM_FLOOR_GB) -> Decision:
     """Classify only deterministic lifecycle evidence, never model quality."""
     host_state = str(probe.get("host_state") or "unknown")
     if host_state != "running":
@@ -479,7 +527,26 @@ def classify_probe(probe: dict, *, stall_seconds: float,
                 f"{memory_floor_gb:.1f} GB alarm floor",
                 event_fingerprint("memory_low", probe),
             )
+        disk_fault = disk_exhaustion_fault(probe, disk_floor_gb=disk_floor_gb)
+        if disk_fault:
+            return Decision(
+                "fix_required", disk_fault, event_fingerprint("disk_low", probe),
+            )
         return Decision("healthy", f"automation owns {state}")
+
+    # No supervisor and no wrapper. Name the CAUSE if the host can still state
+    # it: a full volume stops the wrapper before it ever launches a supervisor,
+    # so "nothing owns this state" is the symptom of the fault below, not a
+    # separate diagnosis. Checked here as well as on the owned path because the
+    # two arms are reached under opposite process censuses.
+    disk_fault = disk_exhaustion_fault(probe, disk_floor_gb=disk_floor_gb)
+    if disk_fault:
+        return Decision(
+            "fix_required",
+            f"{disk_fault}; nothing owns terminal state {state} because the "
+            f"wrapper cannot write its runtime identity files",
+            event_fingerprint("disk_low", probe),
+        )
     return Decision(
         "fix_required",
         f"no curriculum supervisor or wrapper owns terminal state {state}",
@@ -711,6 +778,50 @@ try:
         meminfo[key] = int(rest.split()[0])
 except Exception:
     pass
+
+# The payload reported memory and never disk, so a FULL VOLUME was invisible to
+# the classifier. Measured 2026-09-10: /srv/wizard hit 20 KB free on 1.0 TB, the
+# wrapper could not write its 6-byte node.pid, systemd restarted it 115 times at
+# RestartSec=10, and the census landed between restarts -- so the alarm read
+# "no curriculum supervisor or wrapper owns terminal state
+# deferred_replay_resource_yield", naming the symptom while the cause was one
+# statvfs call away. `admission_watchdog.faults` already had `disk_low`; this
+# emitter did not, which is the two-emitter drift CLAUDE.md names.
+disk = {{}}
+try:
+    stat = os.statvfs(str(runtime))
+    disk = {{
+        'free_gb': round(stat.f_bavail * stat.f_frsize / 1e9, 2),
+        'total_gb': round(stat.f_blocks * stat.f_frsize / 1e9, 2),
+        'used_percent': (
+            round(100.0 * (1.0 - stat.f_bavail / stat.f_blocks), 1)
+            if stat.f_blocks else None),
+        # Inode exhaustion presents identically to byte exhaustion (ENOSPC) but
+        # df -h shows free space, so report both or the next outage reads as a
+        # contradiction.
+        'free_inodes': stat.f_favail,
+        'inodes_used_percent': (
+            round(100.0 * (1.0 - stat.f_favail / stat.f_files), 1)
+            if stat.f_files else None),
+    }}
+except Exception as exc:
+    disk = {{'error': f'{{type(exc).__name__}}: {{exc}}'}}
+
+# A crash-looping wrapper writes its reason to the unit's stderr log. Carry the
+# ENOSPC verdict itself rather than making the reader infer it from free_gb,
+# because a reclaim that lands between the crash and the probe leaves free space
+# beside a service that is still failing.
+wrapper_enospc = False
+try:
+    log = runtime / 'curriculum-service.stderr.log'
+    with log.open('rb') as handle:
+        handle.seek(0, 2)
+        handle.seek(max(0, handle.tell() - 65536))
+        tail = handle.read().decode('utf-8', 'replace')
+    wrapper_enospc = 'No space left on device' in tail
+except Exception:
+    pass
+disk['wrapper_enospc'] = wrapper_enospc
 brain_rss_kb = 0
 brain_age_s = 0.0
 for path in pathlib.Path('/proc').glob('[0-9]*/comm'):
@@ -1059,6 +1170,7 @@ print(json.dumps({{
             round((time.time() - supervisor_started_unix) / 3600.0, 2)
             if supervisor_started_unix else None),
     }},
+    'disk': disk,
     'memory': {{
         'available_gb': round(meminfo.get('MemAvailable', 0) / 2**20, 2),
         'total_gb': round(meminfo.get('MemTotal', 0) / 2**20, 2),

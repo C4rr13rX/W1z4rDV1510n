@@ -229,6 +229,57 @@ Verify, do not assume:
   the continuous canary each freeze it by design — so **do not collapse a
   frozen row into a reset**; they are different facts with different actions.
 
+- **A census of wrapper 0 / supervisor 0 / worker 0 can mean the VOLUME is
+  full, not that the stage ended.** Measured 2026-09-10: `/srv/wizard` reached
+  20 KB free on 1.0 TB, so the wrapper died writing its 6-byte `node.pid`
+  (`OSError: [Errno 28] No space left on device` on `node.pid.<pid>.tmp`),
+  systemd restarted it 115 times at `RestartSec=10`, and the probe's census
+  landed between restarts. The alarm therefore read "no curriculum supervisor
+  or wrapper owns terminal state `deferred_replay_resource_yield`" — true, and
+  useless. The unit was `activating (auto-restart)`, never `dead`, and the
+  supervisor's own `--min-free-disk-gb 8` guard is DOWNSTREAM of a crash that
+  happens before any supervisor is launched. The payload reported memory and
+  never disk, so the cause was one `statvfs` away and cost two SSM round trips
+  to rediscover from a 57 MB traceback log. `classify_probe` now publishes a
+  `disk` block and names the fault; `admission_watchdog.faults` already had
+  `disk_low`, which is the two-emitter drift again — **change both.** Read
+  `systemctl show -p ActiveState -p SubState -p NRestarts` before believing a
+  zero census: `auto-restart` is a crash loop, not an absence.
+
+- **`du` inflates on XFS reflink; only `df` measures a reclaim.** The same
+  volume reported 2.48 TB of `st_blocks` inside 1.0 TB, because `reflink=1`
+  shares extents and every file counts them in full. Measured 2026-09-10:
+  deleting nine deferred directories holding ~560 GB of apparent `st_blocks`
+  returned **0.00 GB** — the causal bases are `os.link` hardlinks to the
+  last-good guard (`st_nlink` 85, 17, 4, 3, 2 on single inodes) and reflink
+  clones of the live brain, so their size is almost entirely shared. **Predict
+  reclaim from `df` before and after, never from summing file sizes**, and
+  check `st_nlink` before assuming a name owns its bytes.
+
+- **One undeletable directory stopped ALL disk reclaim for five weeks.**
+  `prune_resolved_deferred_bases` is the only routine that frees multi-gigabyte
+  causal bases, and its `shutil.rmtree` sat bare in the loop. Exactly ONE
+  deferred directory was `root:root` — the SSM ownership trap — and unlinking
+  needs write permission on the DIRECTORY, not the file, so the supervisor
+  (which runs as `ec2-user`) raised `PermissionError` out of the loop before
+  reaching any later digest. A single `chown` was the entire repair. The reclaim
+  is now per-directory and publishes `deferred_base_prune_blocked` naming what
+  it could not remove: **a partial reclaim that reports nothing is
+  indistinguishable from a complete one**, which is exactly how this ran for
+  five weeks under a policy that was working as designed.
+
+- **The `.wbrain` neuron store is append-only and has NO compactor.** This is
+  the standing cause of disk growth, and the code says so: `store/cold.rs`
+  lines 7–10 ("no LSM compaction in this first cut: every eviction appends …
+  reclaimed by a future compaction pass (Stage 17.4 follow-up)") and
+  `store/neuron_store.rs:325` ("Old records become garbage; a future compaction
+  pass reclaims"). That follow-up was never built, so every sleep/evict appends
+  a fresh record and superseded ones are never returned. Measured 2026-09-10:
+  `brain/brain.wbrain` was **1068.79 GB** against a brain of 4.81 M neurons
+  whose resident RSS was 11.77 GB. Growth tracks TRAINING ACTIVITY, not brain
+  size, so a bigger volume buys time and never a fix. The WAL has compaction
+  (`store/wal.rs`); the neuron store does not — do not confuse the two.
+
 - **`worker_count: 0` during a replay is the NORMAL reading, not a stall.**
   The deferred-replay worker is `tools.training_standard.drive_corpora_brain`,
   and `run_deferred_replay_worker` stops and respawns it once per cooperative

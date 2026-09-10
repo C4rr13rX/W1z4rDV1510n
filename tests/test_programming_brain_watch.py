@@ -1516,3 +1516,113 @@ def test_the_probe_publishes_the_reset_flag_it_is_classified_on() -> None:
         "'accepted_per_second': _rate(first_accepted, last_accepted, elapsed)"
         in body
     )
+
+
+def test_a_full_volume_is_named_as_the_cause_not_the_missing_owner() -> None:
+    """Measured 2026-09-10: /srv/wizard reached 20 KB free on a 1.0 TB volume.
+
+    The wrapper could not write its 6-byte `node.pid`, systemd restarted it 115
+    times at RestartSec=10, and the process census landed between restarts. The
+    alarm therefore read "no curriculum supervisor or wrapper owns terminal
+    state deferred_replay_resource_yield" -- which is true, and useless: it
+    names the symptom while the cause was one statvfs call away. Two SSM round
+    trips went to rediscovering ENOSPC from a 57 MB traceback log.
+    """
+    orphaned = {
+        **probe("deferred_replay_resource_yield", supervisors=0, wrappers=0),
+        "disk": {"free_gb": 0.0, "total_gb": 1099.5, "used_percent": 100.0,
+                 "free_inodes": 7105, "inodes_used_percent": 91.0},
+    }
+    decision = classify_probe(orphaned, stall_seconds=1800)
+    assert decision.kind == "fix_required"
+    assert "0.00 GB free" in decision.reason
+    # The symptom must survive too -- it is what the operator sees first.
+    assert "nothing owns terminal state" in decision.reason
+
+    # Without disk evidence the message must fall back, never invent a cause.
+    blind = {**probe("deferred_replay_resource_yield",
+                     supervisors=0, wrappers=0)}
+    assert "no curriculum supervisor or wrapper owns terminal state" in (
+        classify_probe(blind, stall_seconds=1800).reason)
+
+
+def test_inode_exhaustion_is_enospc_even_though_df_shows_free_space() -> None:
+    """Bytes and inodes both surface as ENOSPC; only one shows in `df -h`.
+
+    An inode-exhausted host reads as healthy on free bytes while every write
+    fails, so classifying on `free_gb` alone would report a contradiction.
+    """
+    starved = {
+        **probe("deferred_replay_training"),
+        "admissions": {"gate_artifacts": 6, "hours_since_admission": 0.2,
+                       "event_counts": {}},
+        "disk": {"free_gb": 400.0, "total_gb": 1099.5, "used_percent": 63.0,
+                 "free_inodes": 12, "inodes_used_percent": 99.9},
+    }
+    decision = classify_probe(starved, stall_seconds=1800)
+    assert decision.kind == "fix_required"
+    assert "inodes" in decision.reason
+    assert "400.0 GB is free" in decision.reason
+
+
+def test_a_reclaim_after_the_crash_still_reports_the_failing_unit() -> None:
+    """Free bytes beside a crash-looping unit is the post-reclaim reading.
+
+    Space recovered between the failure and the probe would otherwise clear the
+    alarm while the service is still down, which is how a disk outage becomes a
+    silent one.
+    """
+    reclaimed = {
+        **probe("deferred_replay_resource_yield", supervisors=0, wrappers=0),
+        "disk": {"free_gb": 10.0, "total_gb": 1099.5, "used_percent": 99.0,
+                 "free_inodes": 119561, "inodes_used_percent": 37.0,
+                 "wrapper_enospc": True},
+    }
+    decision = classify_probe(reclaimed, stall_seconds=1800)
+    assert decision.kind == "fix_required"
+    assert "No space left on device" in decision.reason
+    assert "needs restarting" in decision.reason
+
+
+def test_a_healthy_volume_never_manufactures_a_disk_fault() -> None:
+    """The supervisor's own floor is 8 GB; alarming at or above it would fire
+    on the guard doing its job."""
+    healthy = {
+        **probe("deferred_replay_training"),
+        "admissions": {"gate_artifacts": 6, "hours_since_admission": 0.2,
+                       "event_counts": {}},
+        "disk": {"free_gb": 599.0, "total_gb": 1099.5, "used_percent": 42.0,
+                 "free_inodes": 119561, "inodes_used_percent": 37.0,
+                 "wrapper_enospc": False},
+    }
+    assert classify_probe(healthy, stall_seconds=1800).kind == "healthy"
+    # A probe that could not stat the volume must not alarm on a missing key.
+    errored = {**healthy, "disk": {"error": "OSError: boom"}}
+    assert classify_probe(errored, stall_seconds=1800).kind == "healthy"
+
+
+def test_the_probe_publishes_the_disk_fields_it_is_classified_on() -> None:
+    """The vacuous-signal rule: a key the shipped probe never emits classifies
+    nothing forever. `admission_watchdog.faults` had `disk_low` while this
+    emitter had no disk telemetry at all -- the two-emitter drift CLAUDE.md
+    names, recurring on a new axis."""
+    body = remote_probe_body()
+    assert "os.statvfs" in body, "the shipped probe never measures the volume"
+    for field in ("'free_gb'", "'used_percent'", "'free_inodes'",
+                  "'inodes_used_percent'", "'wrapper_enospc'"):
+        assert field in body, f"the shipped probe never publishes {field}"
+    assert "'disk': disk," in body, "the payload never carries the disk block"
+
+
+def test_both_watchdog_emitters_agree_that_a_full_volume_is_a_fault() -> None:
+    """CLAUDE.md: when changing one emitter, change the other. The same host
+    must not be simultaneously healthy and faulted."""
+    watchdog = (
+        Path(__file__).parents[1] / "scripts/aws/admission_watchdog.py"
+    ).read_text(encoding="utf-8")
+    assert "disk_low" in watchdog
+    source = (
+        Path(__file__).parents[1] / "scripts/aws/watch_programming_brain.py"
+    ).read_text(encoding="utf-8")
+    assert "disk_exhaustion_fault" in source
+    assert "DISK_ALARM_FLOOR_GB" in source

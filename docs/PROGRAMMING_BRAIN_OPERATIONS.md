@@ -1552,3 +1552,122 @@ Verified live during the replay, before and after:
 
 The sample cost also drops, because the loop now exits as soon as a row moves
 instead of blocking on a file that will never move one.
+
+## A full volume looks exactly like a finished stage
+
+The watchdog woke on `fix_required: no curriculum supervisor or wrapper owns
+terminal state deferred_replay_resource_yield`, with a census of wrapper 0,
+supervisor 0, worker 0 and a row frozen at 241,048 of 262,144 across a 120 s
+adaptive sample.
+
+Every one of those readings was correct. The diagnosis they invited was wrong.
+
+`/srv/wizard` had reached **20 KB free on a 1.0 TB volume**. The wrapper's
+identity step writes `node.pid` through a temporary file, so it died on
+
+```
+OSError: [Errno 28] No space left on device:
+  .../node.pid.2251924.tmp
+```
+
+`Restart=on-failure` with `RestartSec=10` and `StartLimitIntervalSec=0` means
+systemd retried forever: `NRestarts=115`, `ActiveState=activating`,
+`SubState=auto-restart`. The census landed in the gap between restarts, so it
+read zero — the same numbers a completed stage produces, and the same numbers
+a cooperative memory yield produces.
+
+### Why the guard did not catch it
+
+The supervisor is launched with `--min-free-disk-gb 8` and `disk_floor_breached`
+works. It never ran. The wrapper crashes *before* it launches a supervisor, so
+the disk guard sits downstream of the failure it was written for. A guard
+inside the thing that cannot start is not a guard.
+
+### Why the alarm could not name it
+
+The probe payload carried a `memory` block and no `disk` block at all, so the
+classifier had nothing to test. `admission_watchdog.faults` had carried
+`disk_low` since it was written; `watch_programming_brain.classify_probe` — the
+emitter that actually publishes `fix_required` — had never learned it. This is
+the two-emitter drift already recorded for `service_stage`, recurring on a new
+axis. Both now gate on the same evidence.
+
+The payload publishes `free_gb`, `used_percent`, `free_inodes`,
+`inodes_used_percent` and `wrapper_enospc`. Inodes are there because byte
+exhaustion and inode exhaustion both surface as ENOSPC while only one appears
+in `df -h`; `wrapper_enospc` is there because a reclaim landing between the
+crash and the probe leaves free space beside a unit that is still failing.
+
+Read `systemctl show -p ActiveState -p SubState -p NRestarts` before believing
+a zero census. `auto-restart` is a crash loop, not an absence.
+
+## Reclaim is measured by `df`, never by adding up file sizes
+
+The volume is XFS with `reflink=1`. `du` reported **2.48 TB of `st_blocks`
+inside 1.0 TB**, because shared extents are counted in full by every file that
+references them, and `preserve_deferred_base` deliberately uses `os.link` so a
+quarantined interval's causal base costs nothing:
+
+```
+  1068.79 GB  nlink=1   brain/brain.wbrain
+   423.69 GB  nlink=1   brain/brain.last-good.wbrain
+    57.50 GB  nlink=85  deferred/fb37ca16d84c742f/brain.base.wbrain
+```
+
+A first pass predicted 618 GB of reclaim from summing `st_blocks` over
+resolved directories. Deleting nine of them — ~560 GB apparent — returned
+**0.00 GB**. Check `st_nlink` before assuming a name owns its bytes, and put
+`df` on both sides of any cleanup.
+
+What actually returned space: `target/debug` (8.5 GB, rebuildable) and, far
+larger, the supervisor's own rollback of the interrupted interval, which
+replaced the 1068 GB live checkpoint with the guard and freed 589 GB.
+
+## One root-owned directory stopped every reclaim for five weeks
+
+`prune_resolved_deferred_bases` is the only routine that frees causal bases. Its
+`shutil.rmtree` sat bare inside the loop:
+
+```python
+for digest in sorted(known - active):
+    ...
+    shutil.rmtree(resolved)      # one PermissionError ends the whole pass
+```
+
+Exactly **one** of 135 deferred directories was `root:root` — the SSM ownership
+trap, landing on the reclaim path instead of on a supervisor write. Unlinking a
+file needs write permission on its *directory*, so the supervisor (running as
+`ec2-user`) raised `PermissionError` before reaching any later digest. Five
+weeks of bases accumulated behind a policy that was working exactly as designed.
+
+A single `chown -R ec2-user:ec2-user` was the entire repair.
+
+The loop is now per-directory and publishes `deferred_base_prune_blocked` with
+the digests and errors it could not clear. A partial reclaim that reports
+nothing is indistinguishable from a complete one — which is precisely how this
+survived undetected.
+
+## The `.wbrain` neuron store is append-only and has no compactor
+
+This is the standing cause of disk growth, and it is documented in the source
+rather than inferred:
+
+- `crates/brain/src/store/cold.rs:7` — *"no seeking, no LSM compaction in this
+  first cut: every eviction appends"*, *"reclaimed by a future compaction pass
+  (Stage 17.4 follow-up)"*
+- `crates/brain/src/store/neuron_store.rs:325` — *"Old records become garbage;
+  a future compaction pass reclaims"*
+
+That follow-up was never built. Every sleep/evict appends a fresh neuron record
+and the superseded one is never returned, so the file grows with **training
+activity, not with brain size**. Measured 2026-09-10: `brain.wbrain` at
+1068.79 GB for a 4.81 M-neuron brain whose resident RSS was 11.77 GB — a ratio
+of roughly 90×.
+
+The WAL *does* compact (`store/wal.rs`, `compact_after_checkpoint`). The neuron
+store does not. Do not read one as evidence about the other.
+
+A larger volume buys time proportional to the training rate and never fixes
+this. The fix is a compaction pass that rewrites live records only; it needs
+free space of about the live-set size to run, which is an argument for building
+it while headroom still exists rather than after the next ENOSPC.

@@ -1738,6 +1738,7 @@ def prune_resolved_deferred_bases(runtime: Path) -> list[Path]:
             if base_parent.parent == resolved_root:
                 active.add(base_parent.name)
     removed: list[Path] = []
+    failed: list[tuple[str, str]] = []
     for digest in sorted(known - active):
         directory = root / digest
         try:
@@ -1749,13 +1750,47 @@ def prune_resolved_deferred_bases(runtime: Path) -> list[Path]:
                 f"refusing deferred-base cleanup outside {resolved_root}: "
                 f"{resolved}"
             )
-        if not any(
-            child.is_file() and child.name.startswith("brain.base.")
-            for child in resolved.iterdir()
-        ):
+        try:
+            has_base = any(
+                child.is_file() and child.name.startswith("brain.base.")
+                for child in resolved.iterdir()
+            )
+        except OSError as error:
+            failed.append((digest, f"{type(error).__name__}: {error}"))
             continue
-        shutil.rmtree(resolved)
+        if not has_base:
+            continue
+        # One undeletable directory must not stop the reclaim for every other
+        # directory. Measured 2026-09-10: exactly ONE deferred directory was
+        # root:root (files written over SSM land root-owned, and unlinking
+        # needs write permission on the DIRECTORY, not the file). The
+        # supervisor runs as ec2-user, so `shutil.rmtree` raised PermissionError
+        # out of this loop before it reached the rest -- and because this is the
+        # only routine that reclaims multi-gigabyte causal bases, /srv/wizard
+        # filled to 20 KB free on a 1.0 TB volume over five weeks. The wrapper
+        # then could not write a 6-byte node.pid and systemd restarted it 115
+        # times. A single chown was the whole repair; a loop that could not
+        # survive one bad inode was the whole defect.
+        try:
+            shutil.rmtree(resolved)
+        except OSError as error:
+            failed.append((digest, f"{type(error).__name__}: {error}"))
+            continue
         removed.append(resolved)
+
+    if failed:
+        # Silent partial reclaim is what made this cost five weeks. Publish the
+        # blocked directories so the drought/disk alarm can name an owner
+        # instead of reporting a symptom.
+        append_health_event(runtime, {
+            "event": "deferred_base_prune_blocked",
+            "blocked_count": len(failed),
+            "removed_count": len(removed),
+            "blocked": [
+                {"digest": digest, "error": error}
+                for digest, error in failed[:20]
+            ],
+        })
     return removed
 
 

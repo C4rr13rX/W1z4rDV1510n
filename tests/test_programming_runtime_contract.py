@@ -2965,6 +2965,109 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             self.assertFalse(second.parent.exists())
             self.assertTrue(unknown.exists())
 
+    def test_one_undeletable_base_does_not_stop_every_other_reclaim(self) -> None:
+        """Measured 2026-09-10: exactly ONE deferred directory was root:root.
+
+        Files written over SSM land root-owned, and unlinking needs write
+        permission on the DIRECTORY, not the file. The supervisor runs as
+        ec2-user, so `shutil.rmtree` raised PermissionError out of the loop
+        before it reached any later digest. Because this is the only routine
+        that reclaims multi-gigabyte causal bases, /srv/wizard filled to 20 KB
+        free on a 1.0 TB volume over five weeks; the wrapper could then not
+        write a 6-byte node.pid and systemd restarted it 115 times.
+
+        A single chown was the whole repair. A loop that could not survive one
+        bad inode was the whole defect -- so the contract is that reclaim is
+        per-directory, and what it could NOT remove gets published rather than
+        silently ending the pass.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            brain = runtime / "brain"
+            brain.mkdir()
+            guard = brain / "brain.last-good.wbrain"
+            guard.write_bytes(b"accepted-container")
+            publish(brain / "brain.last-good.json", {"guard": str(guard)})
+
+            made = []
+            for index in range(4):
+                interval = deferred_interval_id("corpus", index * 10,
+                                                index * 10 + 10)
+                base = preserve_deferred_base(runtime, interval)
+                append_deferred_event(runtime, {
+                    "interval_id": interval, "phase": "corpus",
+                    "start_row": index * 10, "end_row": index * 10 + 10,
+                    "status": "deferred", "base_snapshot": str(base),
+                })
+                append_deferred_event(runtime, {
+                    "interval_id": interval, "phase": "corpus",
+                    "status": "resolved",
+                })
+                made.append(base.parent)
+
+            # Make the FIRST directory in sort order undeletable, so a loop
+            # that aborts on error reclaims nothing at all. The failure is
+            # injected rather than created with chmod, because the host failure
+            # was a root-owned PARENT directory on Linux and Windows chmod does
+            # not model that -- there, rmtree removes the contents first and the
+            # test would assert against a leak the incident never had.
+            blocked = sorted(made, key=lambda path: path.name)[0]
+            real_rmtree = sup.shutil.rmtree
+
+            def refusing_rmtree(path, *args, **kwargs):
+                if Path(path).name == blocked.name:
+                    raise PermissionError(
+                        13, "Permission denied", "brain.base.wbrain")
+                return real_rmtree(path, *args, **kwargs)
+
+            sup.shutil.rmtree = refusing_rmtree
+            try:
+                removed = prune_resolved_deferred_bases(runtime)
+            finally:
+                sup.shutil.rmtree = real_rmtree
+
+            # Every other directory still went, and the blocked one survived.
+            self.assertEqual(len(removed), 3, removed)
+            self.assertTrue(blocked.exists())
+            for path in made:
+                if path != blocked:
+                    self.assertFalse(path.exists(), path)
+
+            # The blockage is published, not swallowed: a silent partial
+            # reclaim is exactly what made this cost five weeks.
+            events = [
+                json.loads(line)
+                for line in (runtime / "curriculum-health.jsonl")
+                .read_text(encoding="utf-8").splitlines() if line.strip()
+            ]
+            blockages = [
+                event for event in events
+                if event.get("event") == "deferred_base_prune_blocked"
+            ]
+            self.assertEqual(len(blockages), 1, events)
+            self.assertEqual(blockages[0]["blocked_count"], 1)
+            self.assertEqual(blockages[0]["removed_count"], 3)
+            self.assertEqual(blockages[0]["blocked"][0]["digest"], blocked.name)
+            self.assertIn("Error", blockages[0]["blocked"][0]["error"])
+
+            # Once the ownership is repaired the base is reclaimed on the very
+            # next pass -- the host repair was a single chown, and the contract
+            # is that no manual bookkeeping is needed to resume reclaim.
+            self.assertEqual(
+                [path.name for path in prune_resolved_deferred_bases(runtime)],
+                [blocked.name],
+            )
+            self.assertFalse(blocked.exists())
+            # A clean pass must not publish a blockage event at all.
+            events = [
+                json.loads(line)
+                for line in (runtime / "curriculum-health.jsonl")
+                .read_text(encoding="utf-8").splitlines() if line.strip()
+            ]
+            self.assertEqual(
+                len([e for e in events
+                     if e.get("event") == "deferred_base_prune_blocked"]), 1)
+
     def test_regenerated_guard_for_same_proven_state_reuses_causal_base(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runtime = Path(directory)
