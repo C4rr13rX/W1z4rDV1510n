@@ -77,6 +77,15 @@ Verify, do not assume:
   than inferring which route ran.
 - **A live curriculum trains underneath any measurement.** Sample repeatedly;
   one probe is not verification.
+- **The heartbeat is whichever writer is freshest, not a fixed file.** The
+  replay worker writes `deferred-replay-*.progress.json`; the FORWARD worker
+  writes `curriculum-supervisor.status.json`. During a forward block the
+  newest progress file is a leftover — measured 2026-09-09 at 100.7 h old,
+  reporting `durable_next_row` 201344 beside a live status at row 16,416 while
+  the block advanced at 15.3 rows/s. Read `heartbeat.rows_per_second` and
+  check `throughput.is_live_heartbeat` before believing a throughput number.
+  A rate of 0 is normal: settlement, the admission gate and the continuous
+  canary all freeze the row by design.
 - **Onboarding a corpus requires a registry `.toml`.** Without it the driver
   exits 2 on `unknown script` and the supervisor retry-loops, stopping ALL
   training. `scripts/onboard_corpus.py` writes it; deploy it with the corpus.

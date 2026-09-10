@@ -941,6 +941,42 @@ heartbeat's answer. Whether that liveness *converges* is a different question,
 and the admission-drought check already answers it. Both must be stale before
 control is actually gone.
 
+### …and during a forward block the two swap roles
+
+The rule above holds for a replay pass. It inverts during a forward one, and
+reading it as universal is what made the 2026-09-09 wake-up expensive.
+
+Two different writers advance rows. The replay worker rewrites
+`deferred-replay-<digest>.progress.json` every batch. The **forward** worker
+rewrites `curriculum-supervisor.status.json` every batch — measured 1–2 s old
+across 125 s while rows went 19,624 → 21,544. During a forward block, no
+replay progress file is being written at all, so the newest one on disk is
+whatever the last replay pass left behind.
+
+Measured 2026-09-09: that leftover was **100.7 h old**, carrying
+`durable_next_row` 201344 and `accepted_episodes` 5168, published in the
+watcher payload beside a live status at row 16,416 with nothing marking it
+stale. The two readings the evidence supported were "the run went backwards
+185k rows" and "throughput has flatlined for four days". The truth was 15.3
+rows/s, and establishing it cost two SSM round trips against a 1,800 s retry
+cooldown.
+
+So the heartbeat is **whichever writer is freshest**, not a fixed filename.
+`watch_programming_brain.py` now picks it by age, samples it twice, and
+publishes `heartbeat.rows_per_second`; a superseded progress file carries
+`is_live_heartbeat: false` and `superseded_by` in the JSON rather than only in
+a comment. A zero rate is deliberately not a fault — settlement and the
+admission gate both freeze the row for minutes by design, and the continuous
+canary does the same, so this is exactly where a liveness alarm would fire on
+a healthy host.
+
+The drought alarm itself was left alone on purpose. The scar behind it is
+eight clean yield/recycle cycles and 18,568 accepted episodes across two weeks
+with zero admissions, so "rows are moving" is precisely the evidence that
+fooled a watcher once already. What changed is that the alarm now carries the
+rate and the ETA to its own gate, so the woken agent can tell "repair it" from
+"wait" without measuring it again.
+
 ## The admitted event was written after the part that can die
 
 `edadb33` made the watcher read the admission drought from the ledger. This is
