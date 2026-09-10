@@ -13228,3 +13228,55 @@ MUTATIONS["http_apis_authn_appsec-0606"] = (
     '    cut = max(filename.rfind("/"), filename.rfind("\\\\"))',
     '    cut = filename.rfind("/")',
 )
+
+
+REFERENCES["validation_parsing_serialization-0020"] = r'''
+_HEX = frozenset("0123456789abcdef")
+
+
+def _is_hex(value, length):
+    return len(value) == length and all(c in _HEX for c in value)
+
+
+def parse_traceparent(header):
+    if not isinstance(header, str):
+        return None
+    fields = header.split("-")
+    if len(fields) < 4:
+        return None
+    version, trace_id, parent_id, flags = fields[:4]
+    if not _is_hex(version, 2) or version == "ff":
+        return None
+    if not _is_hex(trace_id, 32) or trace_id == "0" * 32:
+        return None
+    if not _is_hex(parent_id, 16) or parent_id == "0" * 16:
+        return None
+    if not _is_hex(flags, 2):
+        return None
+    if version == "00":
+        if len(fields) != 4:
+            return None
+    elif any(field == "" for field in fields[4:]):
+        return None
+    return {
+        "version": version,
+        "trace_id": trace_id,
+        "parent_id": parent_id,
+        "sampled": bool(int(flags, 16) & 1),
+    }
+'''
+
+# Validate the hex fields with int(value, 16) and a length check. It is the
+# reading of "is this a hex number of the right length" that a developer
+# actually writes, it accepts every example in the spec, and it quietly
+# accepts three spellings the spec calls invalid: uppercase digits, a leading
+# sign, and PEP 515 underscores. Two peers that disagree about case do not
+# error -- they attribute the same request to two different traces.
+MUTATIONS["validation_parsing_serialization-0020"] = (
+    '    return len(value) == length and all(c in _HEX for c in value)',
+    "    try:\n"
+    "        int(value, 16)\n"
+    "    except (TypeError, ValueError):\n"
+    "        return False\n"
+    "    return len(value) == length",
+)

@@ -1547,4 +1547,111 @@ encoded += b'0\r\n\r\n'
 assert decode_chunked(bytes(encoded))[0] == payload, 'round trip lost data'
 ''',
     ),
+    task(
+        f"{FAMILY}-0020", FAMILY,
+        prompt=(
+            "Implement a Python function parse_traceparent(header) that "
+            "validates a W3C Trace Context `traceparent` header and returns "
+            "a dict with keys 'version', 'trace_id', 'parent_id' and "
+            "'sampled', or returns None when the header must be discarded "
+            "and a new trace started. The header is hyphen-separated fields: "
+            "a 2-digit version, a 32-digit trace-id, a 16-digit parent-id, "
+            "and 2-digit trace-flags. Every field is LOWERCASE hexadecimal "
+            "and must be exactly its stated length; uppercase hex is invalid, "
+            "as is any other spelling of a hex number. Version 'ff' is "
+            "reserved and invalid. A trace-id of all zeros is invalid, and so "
+            "is a parent-id of all zeros. Version '00' defines exactly four "
+            "fields, so anything after trace-flags makes the header invalid. "
+            "A higher version may define further hyphen-separated fields: "
+            "accept those and ignore them, but the header is still invalid "
+            "if any of them is empty, which is what a trailing hyphen "
+            "produces. 'sampled' is True when the low bit of trace-flags is "
+            "set. Anything that is not a string returns None."
+        ),
+        validator=LOAD_CANDIDATE + require("parse_traceparent") + r"""
+VALID = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+parsed = parse_traceparent(VALID)
+assert isinstance(parsed, dict), f'a valid traceparent returned {parsed!r}'
+for key in ('version', 'trace_id', 'parent_id', 'sampled'):
+    assert key in parsed, f'result has no {key}'
+assert parsed['version'] == '00'
+assert parsed['trace_id'] == '4bf92f3577b34da6a3ce929d0e0e4736'
+assert parsed['parent_id'] == '00f067aa0ba902b7'
+assert parsed['sampled'] is True, 'flags 01 is sampled'
+
+# The low bit alone decides sampling; the other seven are not ours to read.
+assert parse_traceparent(VALID[:-2] + "00")['sampled'] is False
+assert parse_traceparent(VALID[:-2] + "fe")['sampled'] is False
+assert parse_traceparent(VALID[:-2] + "ff")['sampled'] is True
+
+# Uppercase is a DIFFERENT header, not a lenient spelling of this one. A
+# check built on int(field, 16) accepts it, and two peers that disagree about
+# case silently split one trace into two.
+assert parse_traceparent(VALID.upper()) is None, 'uppercase hex is invalid'
+assert parse_traceparent(
+    "00-4BF92F3577B34DA6A3CE929D0E0E4736-00f067aa0ba902b7-01"
+) is None, 'an uppercase trace-id is invalid'
+assert parse_traceparent(
+    "00-4bf92f3577b34da6a3ce929d0e0e4736-00F067AA0BA902B7-01"
+) is None, 'an uppercase parent-id is invalid'
+
+# int(x, 16) also accepts these spellings at the right length.
+assert parse_traceparent(
+    "00-4bf92f3577b34da6a3ce929d0e0e47_6-00f067aa0ba902b7-01"
+) is None, 'an underscore is not a hex digit'
+assert parse_traceparent(
+    "00-+bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+) is None, 'a sign is not a hex digit'
+
+# All-zero identifiers are the spec's explicit "invalid" case, and they are
+# exactly what a caller that forgot to seed its generator emits.
+assert parse_traceparent(
+    "00-" + "0" * 32 + "-00f067aa0ba902b7-01"
+) is None, 'an all-zero trace-id is invalid'
+assert parse_traceparent(
+    "00-4bf92f3577b34da6a3ce929d0e0e4736-" + "0" * 16 + "-01"
+) is None, 'an all-zero parent-id is invalid'
+# A zero somewhere in the id is ordinary.
+assert parse_traceparent(
+    "00-00000000000000000000000000000001-0000000000000001-01"
+) is not None
+
+assert parse_traceparent(
+    "ff-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+) is None, 'version ff is reserved'
+
+# Version 00 is exactly four fields. A future version may add more.
+assert parse_traceparent(VALID + "-cc") is None, 'version 00 takes no extras'
+future = parse_traceparent(
+    "01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-cc-dd"
+)
+assert isinstance(future, dict), 'a higher version must still parse'
+assert future['version'] == '01'
+assert future['trace_id'] == '4bf92f3577b34da6a3ce929d0e0e4736'
+assert future['sampled'] is True
+assert parse_traceparent(
+    "01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-"
+) is None, 'a trailing hyphen leaves an empty field'
+
+# Lengths are fixed, so a short or long field is not merely padded.
+assert parse_traceparent(
+    "0-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01") is None
+assert parse_traceparent(
+    "00-4bf92f3577b34da6a3ce929d0e0e473-00f067aa0ba902b7-01") is None
+assert parse_traceparent(
+    "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b-01") is None
+assert parse_traceparent(
+    "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-1") is None
+assert parse_traceparent("00-4bf92f3577b34da6a3ce929d0e0e4736") is None
+assert parse_traceparent("") is None
+assert parse_traceparent(None) is None
+assert parse_traceparent(b"00-4bf92f3577b34da6a3ce929d0e0e4736") is None
+assert parse_traceparent(1234) is None
+
+# Whitespace is not trimmed: the header value is the field, and a parser that
+# strips it disagrees with one that does not about the same trace.
+assert parse_traceparent(" " + VALID) is None
+assert parse_traceparent(VALID + " ") is None
+""",
+    ),
 ]
