@@ -143,6 +143,25 @@ Verify, do not assume:
   error, never on the display summary**, or trimming for readability silently
   moves the worker-vs-gate split.
 
+  **A ledger entry is not evidence about the process that is running.**
+  `curriculum-health.jsonl` is append-only and outlives every writer, so its
+  newest record can name a cause repaired generations ago — and an instruction
+  to "timestamp `last_failure` against process start" is unusable when the
+  payload carries no timestamp. Measured 2026-09-10 on the `quarantine_ready`
+  wake-up: `last_failure` was a worker exit **19.6 h** old, quoted against a
+  supervisor **0.14 h** old, whose registry `SchemaError` had been redeployed
+  **16.6 h** earlier. Two SSM round trips went to proving the text was
+  history. Worse, the natural hypothesis was wrong in an instructive way: 65
+  worker exits with a 137-character maximum, beside 1116-byte stderr logs,
+  reads exactly like the tail append being inert — but the deployed supervisor
+  has it (`defines`/`calls`/`marks`/`appends` all true) and simply has not
+  failed since. **Check whether a suspect code path has had the OPPORTUNITY to
+  run before concluding it is broken**; a count of zero across a window where
+  nothing happened is not a defect. The payload now publishes
+  `last_failure_age_hours`, `supervisor_age_hours` and
+  `last_failure_predates_supervisor`, and the drought alarm appends both ages
+  when the named failure predates the supervisor.
+
 - **An 11/12 enterprise gate names no suite in the ledger.** The
   `enterprise_gate_confirmation` record carries only counts, so a drought
   looks causeless from `curriculum-health.jsonl` alone. The per-suite verdict
