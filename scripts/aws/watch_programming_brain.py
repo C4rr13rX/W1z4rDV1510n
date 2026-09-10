@@ -33,6 +33,17 @@ DEFAULT_INSTANCE = "i-0d7a6deeb0ead2dfc"
 DEFAULT_RUNTIME = "/srv/wizard/runtime/programming-integrated-20260713"
 COMPLETE_STATES = {"all_complete", "deferred_replay_complete"}
 
+#: How long the heartbeat probe will wait for the row to move before calling
+#: the rate zero. The row advances once per COMMITTED BATCH, not continuously,
+#: so this is really "the longest commit period we are willing to mistake for a
+#: freeze". Measured 2026-09-10 on a go-systems forward block: 32 rows per
+#: commit at 0.355 rows/s is one commit every ~90 s. The previous fixed 6 s
+#: sample resolved that ~7 % of the time and published `rows_per_second: 0.0`
+#: for the rest, which is what suppressed the convergence annex and woke an
+#: agent against a healthy block. Sampling stops early the moment the row
+#: moves, so a fast pass pays ~2 s and only a genuinely frozen row pays it all.
+HEARTBEAT_SAMPLE_SECONDS = 120.0
+
 
 @dataclass(frozen=True)
 class Decision:
@@ -283,10 +294,20 @@ def classify_probe(probe: dict, *, stall_seconds: float,
             # no rate, so establishing "wait" instead of "repair" cost two SSM
             # round trips. The `retry_cooldown` is 1800 s, so that bill would
             # have been paid roughly three more times before the gate ran.
+            # THE ANNEX MUST NOT VANISH WHEN THE RATE IS ZERO. That is exactly
+            # the case where the woken agent most needs to know where the block
+            # stands, and dropping it publishes an unqualified "no interval
+            # admitted for 102.7h" that reads as a dead curriculum. Measured
+            # 2026-09-10: the block was at row 82,896 of 131,072 and advancing,
+            # but the 6 s sample caught no batch commit, so the payload said
+            # only that nothing had admitted for four days -- and establishing
+            # "healthy, wait" cost a full diagnostic session. A zero rate and
+            # an unknown rate are different facts, and neither one is silence.
             beat = probe.get("heartbeat") or {}
             rate = beat.get("rows_per_second")
             row = beat.get("row")
             target = status.get("block_target_row")
+            sampled = beat.get("sample_seconds")
             converging = ""
             if rate and float(rate) > 0 and row is not None and target:
                 remaining = int(target) - int(row)
@@ -298,6 +319,26 @@ def classify_probe(probe: dict, *, stall_seconds: float,
                         f"{remaining / float(rate) / 3600.0:.1f}h -- confirm "
                         f"convergence before repairing anything"
                     )
+            elif row is not None and target:
+                # Name the state, because settlement, the admission gate and
+                # the continuous canary all freeze the row BY DESIGN, and the
+                # right action under a by-design freeze is to wait.
+                frozen = (
+                    f"; the live heartbeat ({beat.get('source')}) sits at row "
+                    f"{row} of {target} in state {state!r} and did not move "
+                    f"in {float(sampled or 0):.0f}s"
+                )
+                accepted = beat.get("accepted_per_second")
+                if accepted:
+                    frozen += (
+                        f", though it is still accepting {float(accepted):.1f} "
+                        f"episodes/s, so the block is training"
+                    )
+                converging = frozen + (
+                    " -- settlement, the admission gate and the continuous "
+                    "canary each freeze the row by design, so confirm the "
+                    "freeze is not one of those before repairing anything"
+                )
             return Decision(
                 "fix_required",
                 f"no interval admitted for {float(since):.1f}h while the "
@@ -330,6 +371,7 @@ def remote_probe(profile: str, instance_id: str, runtime: str) -> dict:
     if instance != "running":
         return {"host_state": instance, "observed_unix": time.time()}
 
+    heartbeat_sample_seconds = HEARTBEAT_SAMPLE_SECONDS
     remote = f"""python3 - <<'PY'
 import json, os, pathlib, sys, time
 runtime = pathlib.Path({runtime!r})
@@ -542,6 +584,17 @@ def _row_now(path):
         return None
 
 
+# The second liveness signal in the same file. A row that advances while
+# `accepted_episodes` does not is a driver skipping rows rather than training
+# on them, and the row count alone cannot tell those two apart.
+def _accepted_now(path):
+    try:
+        value = json.loads(path.read_text()).get('accepted_episodes')
+        return int(value) if value is not None else None
+    except Exception:
+        return None
+
+
 throughput = {{}}
 try:
     if progress_file is not None:
@@ -582,6 +635,24 @@ except Exception:
 # a zero rate is deliberately NOT a fault here, because settlement and the
 # admission gate both freeze the row for minutes by design, and alarming on
 # that is the false-positive class this file already carries two scars from.
+#
+# THE SAMPLE MUST BE LONGER THAN ONE BATCH COMMIT, or the rate is 0.0 on a
+# perfectly healthy block. The row does not advance continuously: the driver
+# rewrites the file once per committed batch, so between commits it is
+# BYTE-IDENTICAL and a short sample sees nothing. Measured 2026-09-10 on a
+# go-systems forward block: 32 rows per commit at 0.355 rows/s is one commit
+# every ~90 s, so a fixed 6 s window observed movement roughly 7 % of the
+# time. The other 93 % published `rows_per_second: 0.0`, which suppressed the
+# convergence annex in `decide()` -- the one thing in the payload that tells a
+# woken agent to WAIT rather than repair -- and woke an agent against a block
+# that was converging normally, 37 h from its gate.
+#
+# So sample adaptively: poll until the row actually changes, bounded. A fast
+# replay pass returns in one interval and costs nothing; a slow forward block
+# pays up to the bound and returns a real rate instead of a misleading zero.
+# The bound is what a zero now MEANS -- "did not move in 120 s", not "did not
+# move in 6 s" -- so it must stay well above the slowest observed commit
+# period rather than being tuned down to save probe time.
 heartbeat = {{}}
 try:
     ages = [(age, name, path) for age, name, path in (
@@ -594,8 +665,16 @@ try:
     if ages:
         age, source, path = min(ages, key=lambda item: item[0])
         first_row, first_at = _row_now(path), time.time()
-        time.sleep(6.0)
-        last_row, last_at = _row_now(path), time.time()
+        first_accepted = _accepted_now(path)
+        last_row, last_at = first_row, first_at
+        last_accepted = first_accepted
+        deadline = first_at + {heartbeat_sample_seconds:.1f}
+        while time.time() < deadline:
+            time.sleep(2.0)
+            last_row, last_at = _row_now(path), time.time()
+            last_accepted = _accepted_now(path)
+            if last_row is not None and last_row != first_row:
+                break
         elapsed = max(1e-6, last_at - first_at)
         heartbeat = {{
             'source': source,
@@ -606,6 +685,12 @@ try:
             'rows_per_second': (
                 round((last_row - first_row) / elapsed, 2)
                 if first_row is not None and last_row is not None else None),
+            # Whether the rows being consumed are being LEARNED.
+            'accepted_episodes': last_accepted,
+            'accepted_per_second': (
+                round((last_accepted - first_accepted) / elapsed, 2)
+                if first_accepted is not None and last_accepted is not None
+                else None),
         }}
         if throughput and source != 'replay_progress':
             # Say it in the payload, not just in this comment.
@@ -658,7 +743,12 @@ print(json.dumps({{
 }}, separators=(',', ':')))
 PY"""
     invocation = send_and_wait(
-        profile, instance_id, [remote], 300,
+        # The heartbeat sample can hold the probe for HEARTBEAT_SAMPLE_SECONDS
+        # on a frozen row, so the transport bound has to clear that by enough
+        # for the rest of the probe. A probe that times out publishes nothing,
+        # which reads exactly like a dead host.
+        profile, instance_id, [remote],
+        int(HEARTBEAT_SAMPLE_SECONDS) + 300,
         comment="Probe Wizard programming brain watchdog state",
     )
     output = str(invocation.get("StandardOutputContent") or "").strip().splitlines()

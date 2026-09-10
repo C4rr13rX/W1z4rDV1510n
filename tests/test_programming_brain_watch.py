@@ -828,3 +828,89 @@ def test_the_drought_alarm_carries_the_convergence_evidence() -> None:
     legacy = probe("midphase_gate_failed")
     legacy["admissions"] = {"hours_since_admission": 100.7, "gate_artifacts": 47}
     assert classify_probe(legacy, stall_seconds=1800).kind == "fix_required"
+
+
+def _drought(beat: dict, *, state: str = "continuous_canary") -> str:
+    """A live curriculum four days into an admission drought."""
+    payload = {**probe(state),
+               "admissions": {"gate_artifacts": 6,
+                              "hours_since_admission": 102.7,
+                              "event_counts": {}},
+               "memory": {"available_gb": 6.0},
+               "heartbeat": beat}
+    payload["status"]["block_target_row"] = 131072
+    decision = classify_probe(payload, stall_seconds=1800.0,
+                              admission_stall_hours=6.0)
+    assert decision.kind == "fix_required"
+    return decision.reason
+
+
+def test_a_drought_alarm_still_locates_the_block_when_the_rate_reads_zero() -> None:
+    """A zero rate is when the annex matters most, and it used to delete it.
+
+    The row advances once per COMMITTED BATCH, so between commits the progress
+    file is byte-identical and any short sample reads zero. Measured 2026-09-10
+    on a go-systems forward block: 32 rows per commit at 0.355 rows/s is one
+    commit every ~90 s, which a 6 s sample caught roughly 7 % of the time. The
+    other 93 % published `rows_per_second: 0.0`, and the annex in `decide()`
+    was gated on a positive rate -- so the payload that woke the agent said
+    only "no interval admitted for 102.7h while the curriculum reports itself
+    active", with no hint that the block sat at row 82,896 of 131,072 and was
+    still accepting episodes. Establishing "healthy, wait" cost a full session.
+
+    A zero rate and an unknown rate are different facts. Neither is silence.
+    """
+    reason = _drought({"source": "forward_progress", "row": 82896,
+                       "rows_per_second": 0.0, "sample_seconds": 120.0,
+                       "accepted_per_second": 0.36})
+    assert "82896" in reason and "131072" in reason, reason
+    # The state is named, because settlement, the gate and the canary each
+    # freeze the row by design and the right action under those is to wait.
+    assert "continuous_canary" in reason, reason
+    assert "did not move in 120s" in reason, reason
+    # Rows moving is not the same as rows being learned; say which happened.
+    assert "accepting 0.4 episodes/s" in reason, reason
+    assert "before repairing anything" in reason, reason
+
+
+def test_a_converging_block_still_reports_its_eta() -> None:
+    """The positive-rate annex is the case that already worked: keep it."""
+    reason = _drought({"source": "forward_progress", "row": 82896,
+                       "rows_per_second": 0.355, "sample_seconds": 120.0})
+    assert "0.4 rows/s at row 82896 of 131072" in reason, reason
+    assert "reaches its gate in about 37.7h" in reason, reason
+
+
+def test_a_drought_with_no_heartbeat_at_all_is_still_reported() -> None:
+    """No annex is correct only when there is genuinely nothing to say."""
+    reason = _drought({})
+    assert "no interval admitted for 102.7h" in reason, reason
+    assert "row" not in reason.split("--")[0].replace("curriculum", ""), reason
+
+
+def test_the_heartbeat_sample_outlasts_a_batch_commit() -> None:
+    """A fixed 6 s window cannot resolve a row that moves every ~90 s.
+
+    This is the defect one layer below the annex: the consumer could not
+    report a rate the producer never measured. The sample must therefore be
+    adaptive -- poll until the row changes, bounded -- so that a zero means
+    "did not move in two minutes" rather than "did not move in six seconds".
+    """
+    assert watch.HEARTBEAT_SAMPLE_SECONDS >= 90.0, (
+        "the bound must exceed the slowest observed commit period (~90 s), "
+        "or a zero rate is meaningless again")
+    body = remote_probe_body()
+    assert "time.sleep(6.0)" not in body, "the fixed short sample is back"
+    # Adaptive: it stops early the moment the row moves, so a fast pass pays
+    # ~2 s and only a genuinely frozen row pays the whole bound.
+    assert "while time.time() < deadline:" in body
+    assert "if last_row is not None and last_row != first_row:" in body
+    # The second liveness signal in the same file: rows consumed vs learned.
+    assert "'accepted_per_second'" in body
+
+
+def test_the_transport_bound_clears_the_heartbeat_sample() -> None:
+    """A probe that times out publishes nothing, which reads as a dead host."""
+    source = Path(watch.__file__).read_text(encoding="utf-8")
+    assert "int(HEARTBEAT_SAMPLE_SECONDS) + 300" in source, (
+        "the SSM timeout no longer accounts for the heartbeat sample")
