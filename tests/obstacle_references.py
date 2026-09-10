@@ -12177,3 +12177,417 @@ MUTATIONS["architecture_multifile_integration-0405"] = (
     "        for step in reversed(ran):",
     "        for step in ran:",
 )
+
+
+# --------------------------------------------------------------------------
+# frontend_state_ux_accessibility-0501..0506
+# --------------------------------------------------------------------------
+
+REFERENCES["frontend_state_ux_accessibility-0501"] = r'''
+WINDOW_MS = 200
+
+
+def announce(region, updates):
+    politeness = region.get("politeness")
+    if politeness not in ("polite", "assertive"):
+        raise ValueError("politeness must be 'polite' or 'assertive'")
+    relevant = list(region.get("relevant") or [])
+    if not relevant:
+        raise ValueError("a live region must be relevant to something")
+    atomic = bool(region.get("atomic"))
+
+    previous_time = None
+    for update in updates:
+        moment = update["time_ms"]
+        if previous_time is not None and moment < previous_time:
+            raise ValueError("time_ms decreased")
+        previous_time = moment
+
+    # Filtering happens BEFORE coalescing. An ignored update that anchored a
+    # run would let a stream of removals swallow the additions behind it.
+    interesting = [u for u in updates if u["kind"] in relevant]
+
+    runs = []
+    for update in interesting:
+        if (politeness == "assertive" or not runs
+                or update["time_ms"] - runs[-1][0]["time_ms"] > WINDOW_MS):
+            runs.append([update])
+        else:
+            runs[-1].append(update)
+
+    spoken = []
+    # The text of the last update that actually produced an announcement --
+    # not the last update seen, which may have been coalesced away or have
+    # produced an empty diff.
+    said = None
+    for run in runs:
+        text = run[-1]["text"]
+        if atomic or said is None or not text.startswith(said):
+            message = text
+        else:
+            message = text[len(said):]
+        if message:
+            spoken.append(message)
+            said = text
+    return spoken
+'''
+
+# Measure the coalescing window from the PREVIOUS update instead of the first
+# of the run. Every burst that arrives faster than the window still collapses
+# to one announcement, so the ordinary case agrees exactly; what breaks is a
+# steady trickle, which extends one run forever and never speaks until it
+# stops.
+MUTATIONS["frontend_state_ux_accessibility-0501"] = (
+    'or update["time_ms"] - runs[-1][0]["time_ms"] > WINDOW_MS',
+    'or update["time_ms"] - runs[-1][-1]["time_ms"] > WINDOW_MS',
+)
+
+
+REFERENCES["frontend_state_ux_accessibility-0502"] = r'''
+import urllib.parse
+
+LITERAL, PARAM, WILDCARD = 0, 1, 2
+
+
+def _segments(text):
+    trimmed = text.strip("/")
+    return trimmed.split("/") if trimmed else []
+
+
+def _compile(pattern):
+    segments = _segments(pattern)
+    names = []
+    for index, segment in enumerate(segments):
+        if segment.startswith("*"):
+            if index != len(segments) - 1:
+                raise ValueError("a wildcard segment must be last: " + pattern)
+            names.append(segment[1:])
+        elif segment.startswith(":"):
+            names.append(segment[1:])
+    if len(names) != len(set(names)):
+        raise ValueError("a capture name is used twice: " + pattern)
+    return segments
+
+
+def match_route(routes, path):
+    compiled = [(pattern, _compile(pattern)) for pattern in routes]
+    requested = _segments(path)
+
+    best = None
+    for order, (pattern, segments) in enumerate(compiled):
+        params = {}
+        # The specificity of each segment, compared left to right: this is
+        # what makes the decision at the FIRST differing segment rather than
+        # by counting literals across the whole pattern.
+        rank = []
+        matched = True
+        absorbed = False
+        for index, segment in enumerate(segments):
+            if segment.startswith("*"):
+                rest = requested[index:]
+                params[segment[1:]] = "/".join(
+                    urllib.parse.unquote(part) for part in rest)
+                rank.append(WILDCARD)
+                absorbed = True
+                break
+            if index >= len(requested):
+                matched = False
+                break
+            if segment.startswith(":"):
+                if requested[index] == "":
+                    matched = False
+                    break
+                # Decode AFTER splitting, so a %2F inside a segment cannot
+                # forge a boundary.
+                params[segment[1:]] = urllib.parse.unquote(requested[index])
+                rank.append(PARAM)
+            else:
+                if requested[index] != segment:
+                    matched = False
+                    break
+                rank.append(LITERAL)
+        if matched and not absorbed and len(requested) != len(segments):
+            matched = False
+        if not matched:
+            continue
+        key = (tuple(rank), order)
+        if best is None or key < best[0]:
+            best = (key, pattern, params)
+
+    if best is None:
+        return None
+    return {"route": best[1], "params": best[2]}
+'''
+
+# Take the first pattern that matches. Correct for any route table written
+# most-specific-first, which is how they are usually written and why this
+# survives review -- and wrong the moment somebody appends a route.
+MUTATIONS["frontend_state_ux_accessibility-0502"] = (
+    "        key = (tuple(rank), order)",
+    "        key = (order,)",
+)
+
+
+REFERENCES["frontend_state_ux_accessibility-0503"] = r'''
+def select(rows, actions):
+    if len(set(rows)) != len(rows):
+        raise ValueError("rows contains a duplicate")
+    position = {row: index for index, row in enumerate(rows)}
+
+    selected = set()
+    anchor = None
+    # What the CURRENT anchor's shift-range last contributed. Replacing it,
+    # rather than unioning, is what lets a second shift-click shrink the
+    # range while leaving a ctrl-click's selection outside it alone.
+    contributed = set()
+
+    for action in actions:
+        row = action.get("row")
+        modifier = action.get("modifier")
+        if row not in position:
+            raise ValueError("no such row: " + repr(row))
+        if modifier not in (None, "ctrl", "shift"):
+            raise ValueError("unknown modifier: " + repr(modifier))
+
+        if modifier is None:
+            selected = {row}
+            anchor = row
+            contributed = {row}
+        elif modifier == "ctrl":
+            if row in selected:
+                selected.discard(row)
+            else:
+                selected.add(row)
+            anchor = row
+            contributed = set()
+        elif anchor is None:
+            selected = {row}
+            anchor = row
+            contributed = {row}
+        else:
+            low, high = sorted((position[anchor], position[row]))
+            extent = set(rows[low:high + 1])
+            selected = (selected - contributed) | extent
+            contributed = extent
+
+    return [row for row in rows if row in selected]
+'''
+
+# Union the new range instead of replacing what the anchor contributed. Every
+# growing drag agrees exactly; a drag back toward the anchor can then only
+# ever add rows, so the selection cannot shrink.
+MUTATIONS["frontend_state_ux_accessibility-0503"] = (
+    "            selected = (selected - contributed) | extent",
+    "            selected = selected | extent",
+)
+
+
+REFERENCES["frontend_state_ux_accessibility-0504"] = r'''
+import datetime
+
+MINUTE_MS = 60 * 1000
+HOUR_MS = 60 * MINUTE_MS
+DAY_MS = 24 * HOUR_MS
+EPOCH = datetime.date(1970, 1, 1)
+
+
+def _whole(value):
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def relative_time(then_ms, now_ms, offset_minutes):
+    if not (_whole(then_ms) and _whole(now_ms) and _whole(offset_minutes)):
+        raise ValueError("timestamps and offset must be integers")
+    if not -1440 <= offset_minutes <= 1440:
+        raise ValueError("offset_minutes out of range")
+
+    elapsed = now_ms - then_ms
+    if elapsed < MINUTE_MS:
+        # Includes the future: a clock skew must never read as the past.
+        return "just now"
+    if elapsed < HOUR_MS:
+        minutes = elapsed // MINUTE_MS
+        return "1 minute ago" if minutes == 1 else "%d minutes ago" % minutes
+
+    # Beyond an hour the answer is about CALENDAR days in the viewer's zone,
+    # not elapsed time. 23:00 yesterday is "yesterday" at 12:00 today even
+    # though only thirteen hours have passed.
+    offset_ms = offset_minutes * MINUTE_MS
+    local_now = (now_ms + offset_ms) // DAY_MS
+    local_then = (then_ms + offset_ms) // DAY_MS
+    days = local_now - local_then
+
+    if days == 0:
+        hours = elapsed // HOUR_MS
+        return "1 hour ago" if hours == 1 else "%d hours ago" % hours
+    if days == 1:
+        return "yesterday"
+    if days <= 6:
+        return "%d days ago" % days
+    return (EPOCH + datetime.timedelta(days=local_then)).strftime("%Y-%m-%d")
+'''
+
+# Bucket by elapsed time instead of by local calendar day. Every case whose
+# clocks happen to line up agrees, which is every case anyone runs by hand;
+# what breaks is the evening-to-midday span every feed actually shows.
+MUTATIONS["frontend_state_ux_accessibility-0504"] = (
+    "    local_now = (now_ms + offset_ms) // DAY_MS\n"
+    "    local_then = (then_ms + offset_ms) // DAY_MS\n"
+    "    days = local_now - local_then",
+    "    local_then = (then_ms + offset_ms) // DAY_MS\n"
+    "    days = elapsed // DAY_MS",
+)
+
+
+REFERENCES["frontend_state_ux_accessibility-0505"] = r'''
+import unicodedata
+
+ZWJ = "‍"
+REGIONAL_FIRST, REGIONAL_LAST = 0x1F1E6, 0x1F1FF
+VS_FIRST, VS_LAST = 0xFE00, 0xFE0F
+
+
+def _trailer(text, index):
+    """Absorb combining marks and variation selectors after a base."""
+    while index < len(text):
+        char = text[index]
+        if unicodedata.combining(char) or VS_FIRST <= ord(char) <= VS_LAST:
+            index += 1
+            continue
+        return index
+    return index
+
+
+def _atom(text, index):
+    """One base plus its trailers, with regional indicators paired up."""
+    char = text[index]
+    if char == "\r" and index + 1 < len(text) and text[index + 1] == "\n":
+        return index + 2
+    if REGIONAL_FIRST <= ord(char) <= REGIONAL_LAST:
+        index += 1
+        if (index < len(text)
+                and REGIONAL_FIRST <= ord(text[index]) <= REGIONAL_LAST):
+            index += 1
+        return _trailer(text, index)
+    return _trailer(text, index + 1)
+
+
+def clusters(text):
+    out = []
+    index = 0
+    while index < len(text):
+        start = index
+        index = _atom(text, index)
+        # A zero-width joiner binds what precedes it to what follows, however
+        # many times: a family emoji is one cluster, not three people.
+        while index < len(text) and text[index] == ZWJ:
+            index += 1
+            if index < len(text):
+                index = _atom(text, index)
+        out.append(text[start:index])
+    return out
+
+
+def truncate(text, limit, ellipsis="…"):
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+        raise ValueError("limit must be an integer of at least one")
+    if len(clusters(ellipsis)) != 1:
+        raise ValueError("the ellipsis must be exactly one cluster")
+    parts = clusters(text)
+    if len(parts) <= limit:
+        return text
+    return "".join(parts[:limit - 1]) + ellipsis
+'''
+
+# Count code points instead of clusters. Identical for the ASCII labels every
+# example uses, and it cuts a combining mark off its base, leaves half a flag,
+# or splits a family emoji into unrelated people.
+MUTATIONS["frontend_state_ux_accessibility-0505"] = (
+    "    parts = clusters(text)\n"
+    "    if len(parts) <= limit:\n"
+    "        return text\n"
+    '    return "".join(parts[:limit - 1]) + ellipsis',
+    "    if len(text) <= limit:\n"
+    "        return text\n"
+    "    return text[:limit - 1] + ellipsis",
+)
+
+
+REFERENCES["frontend_state_ux_accessibility-0506"] = r'''
+def _split_reference(body):
+    """Name and fallback, split at the FIRST top-level comma."""
+    depth = 0
+    for index, char in enumerate(body):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif char == "," and depth == 0:
+            return body[:index].strip(), body[index + 1:].strip()
+    return body.strip(), None
+
+
+def resolve_tokens(tokens):
+    def render(template, open_names):
+        out = []
+        index = 0
+        while index < len(template):
+            if template.startswith("var(", index):
+                depth = 0
+                cursor = index + 3
+                end = -1
+                while cursor < len(template):
+                    if template[cursor] == "(":
+                        depth += 1
+                    elif template[cursor] == ")":
+                        depth -= 1
+                        if depth == 0:
+                            end = cursor
+                            break
+                    cursor += 1
+                if end < 0:
+                    raise ValueError("unbalanced var() in " + repr(template))
+                name, fallback = _split_reference(template[index + 4:end])
+                out.append(reference(name, fallback, open_names, template))
+                index = end + 1
+            elif template[index] == ")":
+                raise ValueError("unbalanced ) in " + repr(template))
+            else:
+                out.append(template[index])
+                index += 1
+        return "".join(out)
+
+    def reference(name, fallback, open_names, template):
+        if not name.startswith("--"):
+            raise ValueError("a reference must name --something: " + repr(name))
+        key = name[2:]
+        # The fallback is rendered ONLY when it is needed. An unresolvable
+        # fallback beside a name that does resolve is not an error.
+        if key not in tokens:
+            if fallback is None:
+                raise KeyError(name)
+            return render(fallback, open_names)
+        if key in open_names:
+            if fallback is None:
+                raise ValueError("reference cycle through " + repr(key))
+            return render(fallback, open_names)
+        return render(tokens[key], open_names | {key})
+
+    return {key: render(template, {key}) for key, template in tokens.items()}
+'''
+
+# Evaluate the fallback whether or not it is needed. Every table whose
+# fallbacks are plain literals agrees exactly; a fallback that names another
+# missing token -- the usual way a fallback chain is written -- now raises on
+# a reference that resolved perfectly well.
+MUTATIONS["frontend_state_ux_accessibility-0506"] = (
+    "        if key not in tokens:\n"
+    "            if fallback is None:\n"
+    "                raise KeyError(name)\n"
+    "            return render(fallback, open_names)",
+    "        spare = None if fallback is None else render(fallback, open_names)\n"
+    "        if key not in tokens:\n"
+    "            if spare is None:\n"
+    "                raise KeyError(name)\n"
+    "            return spare",
+)

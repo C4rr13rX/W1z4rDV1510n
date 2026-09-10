@@ -1026,4 +1026,586 @@ for bad_selection, bad_target in (([5], 0), ([-1], 0), ([0], 6), ([0], -1)):
             f'move_selection({bad_selection}, {bad_target}) was accepted')
 ''',
     ),
+    task(
+        f"{FAMILY}-0501", FAMILY,
+        prompt=(
+            "Implement a Python function announce(region, updates) modelling "
+            "what an ARIA live region hands to a screen reader. region is a "
+            "dict with keys politeness ('polite' or 'assertive'), atomic "
+            "(bool) and relevant (a list drawn from 'additions', 'removals' "
+            "and 'text'). updates is a list of dicts, each with keys kind "
+            "(one of 'additions', 'removals', 'text'), node (a string id), "
+            "text (the region's full text after the update) and time_ms (an "
+            "integer, non-decreasing). Return the list of announcement "
+            "strings, in order. An update whose kind is not listed in "
+            "relevant produces no announcement. A polite region coalesces: "
+            "every relevant update within 200 ms of the FIRST update of the "
+            "current run belongs to that run and yields exactly one "
+            "announcement, emitted for the last update in the run; the next "
+            "relevant update after that window starts a new run. An "
+            "assertive region never coalesces and announces every relevant "
+            "update. When atomic is true an announcement is the update's "
+            "full text; when atomic is false it is only the changed part, "
+            "which is the update's text with the text of the LAST UPDATE "
+            "THAT PRODUCED AN ANNOUNCEMENT removed from its start when that "
+            "earlier text is a prefix of it, and otherwise the full text. "
+            "The first announcement of a "
+            "non-atomic region has no previous text and so is the full text. "
+            "An empty announcement string is dropped rather than emitted. "
+            "Raise ValueError if politeness is not one of the two values, if "
+            "relevant is empty, or if time_ms decreases."
+        ),
+        validator=LOAD_CANDIDATE + require("announce") + SHAPE_GUARDS + r'''
+# Every call: each result is iterated or compared, and a non-list return
+# raises in validator frames rather than scoring the candidate.
+_announce = announce
+def announce(region, updates):
+    return list(iterating(_announce(region, updates), 'announce(region, updates)'))
+
+
+def region(politeness='polite', atomic=True, relevant=('text',)):
+    return {'politeness': politeness, 'atomic': atomic,
+            'relevant': list(relevant)}
+
+
+def update(kind, node, text, time_ms):
+    return {'kind': kind, 'node': node, 'text': text, 'time_ms': time_ms}
+
+
+assert announce(region(), []) == []
+
+# A polite run coalesces to ONE announcement, and it is the LAST update's --
+# a screen reader that spoke the first would read a value already replaced.
+run = [update('text', 'n', 'loading', 0),
+       update('text', 'n', 'loading.', 80),
+       update('text', 'n', 'loaded 3 results', 190)]
+assert announce(region(), run) == ['loaded 3 results'], announce(region(), run)
+
+# The window is measured from the FIRST update of the run, not from the
+# previous update. Three updates 150 ms apart are 300 ms wide, so the third
+# opens a second run rather than extending the first forever.
+walking = [update('text', 'n', 'a', 0),
+           update('text', 'n', 'b', 150),
+           update('text', 'n', 'c', 300)]
+assert announce(region(), walking) == ['b', 'c'], announce(region(), walking)
+
+# Exactly 200 ms is inside the window; 201 is not.
+edge = [update('text', 'n', 'a', 0), update('text', 'n', 'b', 200)]
+assert announce(region(), edge) == ['b']
+past = [update('text', 'n', 'a', 0), update('text', 'n', 'b', 201)]
+assert announce(region(), past) == ['a', 'b']
+
+# Assertive interrupts and never coalesces.
+loud = region('assertive')
+assert announce(loud, run) == ['loading', 'loading.', 'loaded 3 results']
+
+# `relevant` filters BEFORE coalescing: an ignored update must not anchor a
+# run, or a stream of removals would silently swallow the additions after it.
+adds_only = region('polite', True, ('additions',))
+mixed = [update('removals', 'x', 'gone', 0),
+         update('additions', 'y', 'one', 10),
+         update('additions', 'z', 'one two', 500)]
+assert announce(adds_only, mixed) == ['one', 'one two'], \
+    announce(adds_only, mixed)
+
+# Non-atomic announces only what changed, against the last text ANNOUNCED
+# rather than the last text seen.
+partial = region('assertive', False, ('text',))
+grow = [update('text', 'n', 'one', 0),
+        update('text', 'n', 'one two', 10),
+        update('text', 'n', 'one two three', 20)]
+assert announce(partial, grow) == ['one', ' two', ' three'], \
+    announce(partial, grow)
+
+# A rewrite is not a prefix extension, so the whole text is announced.
+rewrite = [update('text', 'n', 'one two', 0),
+           update('text', 'n', 'other', 10)]
+assert announce(partial, rewrite) == ['one two', 'other']
+
+# Text that did not change produces an empty diff, which is dropped rather
+# than announced as silence.
+same = [update('text', 'n', 'ready', 0), update('text', 'n', 'ready', 10)]
+assert announce(partial, same) == ['ready']
+
+# Coalescing and diffing compose: the run's last text is diffed against what
+# was actually announced, not against the intermediate texts skipped over.
+polite_partial = region('polite', False, ('text',))
+combined = [update('text', 'n', 'a', 0),
+            update('text', 'n', 'ab', 50),
+            update('text', 'n', 'abc', 100),
+            update('text', 'n', 'abcd', 400)]
+assert announce(polite_partial, combined) == ['abc', 'd'], \
+    announce(polite_partial, combined)
+
+for bad in (region('urgent'), region('polite', True, ())):
+    try:
+        announce(bad, [update('text', 'n', 'x', 0)])
+    except ValueError:
+        continue
+    raise AssertionError(f'{bad!r} was accepted')
+
+try:
+    announce(region(), [update('text', 'n', 'a', 10),
+                        update('text', 'n', 'b', 9)])
+except ValueError:
+    pass
+else:
+    raise AssertionError('time going backwards was accepted')
+''',
+    ),
+    task(
+        f"{FAMILY}-0502", FAMILY,
+        prompt=(
+            "Implement a Python function match_route(routes, path) for a "
+            "client-side router. routes is a list of pattern strings; path "
+            "is the requested path. A pattern is a '/'-separated sequence of "
+            "segments: a literal segment matches itself exactly, a segment "
+            "written ':name' matches exactly one non-empty segment and "
+            "captures it under name, and a final segment written '*name' "
+            "matches the remaining zero or more segments and captures them "
+            "joined by '/' (the empty string when none remain). Return a "
+            "dict {'route': pattern, 'params': {...}} for the best match, or "
+            "None when nothing matches. Percent-decode each captured value "
+            "after splitting, so a %2F inside a segment stays part of that "
+            "segment rather than dividing it. A trailing slash is "
+            "insignificant except on the root path '/', and both '' and '/' "
+            "request the root. When several patterns match, the best is the "
+            "one that is more specific at the first segment where they "
+            "differ, with a literal beating ':name' and ':name' beating "
+            "'*name'; if they are still tied the one declared earlier wins. "
+            "Raise ValueError if a pattern places '*name' anywhere but last, "
+            "or if two patterns capture the same name twice."
+        ),
+        validator=LOAD_CANDIDATE + require("match_route") + SHAPE_GUARDS + r'''
+ROUTES = [
+    '/',
+    '/users',
+    '/users/new',
+    '/users/:id',
+    '/users/:id/posts/:post',
+    '/files/*rest',
+    '/:section',
+]
+
+
+def matched(path, routes=None):
+    result = match_route(list(ROUTES if routes is None else routes), path)
+    if result is None:
+        return None
+    assert isinstance(result, dict), f'{result!r} is not a dict'
+    assert set(result) == {'route', 'params'}, sorted(result)
+    return result['route'], result['params']
+
+
+assert matched('/') == ('/', {})
+assert matched('') == ('/', {}), "the empty path requests the root"
+assert matched('/users') == ('/users', {})
+
+# A literal beats a parameter at the segment where they differ, however the
+# patterns are ordered -- this is the defect a first-match router ships with.
+assert matched('/users/new') == ('/users/new', {})
+assert matched('/users/42') == ('/users/:id', {'id': '42'})
+reordered = ['/users/:id', '/users/new']
+assert matched('/users/new', reordered) == ('/users/new', {})
+
+# Specificity is decided at the FIRST differing segment, not by counting
+# literals overall: '/a/:b/c' and '/:a/b/c' both have two literals.
+first_wins = ['/a/:b/c', '/:a/b/c']
+assert matched('/a/b/c', first_wins) == ('/a/:b/c', {'b': 'b'})
+
+assert matched('/users/7/posts/9') == \
+    ('/users/:id/posts/:post', {'id': '7', 'post': '9'})
+
+# A wildcard captures the rest, including nothing at all.
+assert matched('/files/a/b/c.txt') == ('/files/*rest', {'rest': 'a/b/c.txt'})
+assert matched('/files') == ('/files/*rest', {'rest': ''})
+assert matched('/files/') == ('/files/*rest', {'rest': ''})
+
+# A parameter beats a wildcard at the differing segment.
+both = ['/files/*rest', '/files/:name']
+assert matched('/files/one', both) == ('/files/:name', {'name': 'one'})
+assert matched('/files/one/two', both) == ('/files/*rest',
+                                           {'rest': 'one/two'})
+
+# Decoding happens AFTER splitting, so an encoded slash cannot forge a
+# segment boundary -- the classic path-traversal-by-encoding bug.
+assert matched('/users/a%2Fb') == ('/users/:id', {'id': 'a/b'})
+assert matched('/users/a%20b') == ('/users/:id', {'id': 'a b'})
+assert matched('/files/x%2Fy/z') == ('/files/*rest', {'rest': 'x/y/z'})
+
+# A trailing slash is insignificant, and an empty middle segment is not a
+# match for ':name', which requires one NON-EMPTY segment.
+assert matched('/users/42/') == ('/users/:id', {'id': '42'})
+assert matched('/users//posts/9') is None
+
+assert matched('/anything') == ('/:section', {'section': 'anything'})
+assert matched('/users/1/posts/2/extra') is None
+
+try:
+    match_route(['/a/*rest/b'], '/a/x/b')
+except ValueError:
+    pass
+else:
+    raise AssertionError('a non-final wildcard was accepted')
+
+try:
+    match_route(['/:id/:id'], '/a/b')
+except ValueError:
+    pass
+else:
+    raise AssertionError('a duplicated capture name was accepted')
+''',
+    ),
+    task(
+        f"{FAMILY}-0503", FAMILY,
+        prompt=(
+            "Implement a Python function select(rows, actions) modelling a "
+            "list's selection under click, ctrl-click and shift-click. rows "
+            "is a list of row ids in display order. Each action is a dict "
+            "with keys row (an id) and modifier (one of None, 'ctrl' or "
+            "'shift'). Return the list of selected ids in display order "
+            "after every action. A plain click selects only that row and "
+            "makes it the anchor. A ctrl-click toggles that row's membership "
+            "and makes it the anchor whether it was added or removed. A "
+            "shift-click replaces the range previously contributed by the "
+            "anchor with the inclusive range between the anchor and the "
+            "clicked row, leaving the anchor where it is, so that a second "
+            "shift-click resizes the range rather than unioning with it; the "
+            "selection a ctrl-click built outside that range must survive. A "
+            "shift-click with no anchor yet behaves as a plain click. Raise "
+            "ValueError if rows contains a duplicate, if an action names a "
+            "row that is not in rows, or if a modifier is not one of the "
+            "three values."
+        ),
+        validator=LOAD_CANDIDATE + require("select") + SHAPE_GUARDS + r'''
+_select = select
+def select(rows, actions):
+    return list(iterating(_select(rows, actions), 'select(rows, actions)'))
+
+
+ROWS = ['a', 'b', 'c', 'd', 'e', 'f']
+
+
+def click(row, modifier=None):
+    return {'row': row, 'modifier': modifier}
+
+
+assert select(ROWS, []) == []
+assert select(ROWS, [click('c')]) == ['c']
+
+# A plain click replaces the whole selection.
+assert select(ROWS, [click('c'), click('e')]) == ['e']
+
+# Ctrl toggles, in display order rather than click order.
+assert select(ROWS, [click('e'), click('b', 'ctrl')]) == ['b', 'e']
+assert select(ROWS, [click('e'), click('b', 'ctrl'),
+                     click('b', 'ctrl')]) == ['e']
+
+# Shift extends from the anchor, in either direction, inclusive at both ends.
+assert select(ROWS, [click('b'), click('d', 'shift')]) == ['b', 'c', 'd']
+assert select(ROWS, [click('d'), click('b', 'shift')]) == ['b', 'c', 'd']
+assert select(ROWS, [click('c'), click('c', 'shift')]) == ['c']
+
+# A second shift-click RESIZES the range rather than unioning with it. A
+# router that unions cannot shrink a selection, which is the whole point of
+# dragging the shift-click back toward the anchor.
+assert select(ROWS, [click('b'), click('e', 'shift'),
+                     click('c', 'shift')]) == ['b', 'c']
+assert select(ROWS, [click('b'), click('c', 'shift'),
+                     click('e', 'shift')]) == ['b', 'c', 'd', 'e']
+
+# Resizing must not discard what a ctrl-click added outside the range.
+assert select(ROWS, [click('e'), click('a', 'ctrl'), click('c', 'shift'),
+                     click('b', 'shift')]) == ['a', 'b', 'e'],     select(ROWS, [click('e'), click('a', 'ctrl'), click('c', 'shift'),
+                  click('b', 'shift')])
+
+# Ctrl moves the anchor whether it added or removed, so the next shift
+# extends from the row last touched.
+assert select(ROWS, [click('a'), click('c', 'ctrl'),
+                     click('e', 'shift')]) == ['a', 'c', 'd', 'e']
+assert select(ROWS, [click('a'), click('b', 'ctrl'), click('b', 'ctrl'),
+                     click('d', 'shift')]) == ['a', 'b', 'c', 'd']
+
+# Shift with no anchor is a plain click.
+assert select(ROWS, [click('d', 'shift')]) == ['d']
+
+# A plain click after a range collapses it and re-anchors.
+assert select(ROWS, [click('b'), click('e', 'shift'), click('a'),
+                     click('c', 'shift')]) == ['a', 'b', 'c']
+
+for bad in (['a', 'a'],):
+    try:
+        select(bad, [])
+    except ValueError:
+        continue
+    raise AssertionError(f'{bad!r} was accepted')
+
+for bad_action in (click('z'), click('a', 'alt')):
+    try:
+        select(ROWS, [bad_action])
+    except ValueError:
+        continue
+    raise AssertionError(f'{bad_action!r} was accepted')
+''',
+    ),
+    task(
+        f"{FAMILY}-0504", FAMILY,
+        prompt=(
+            "Implement a Python function relative_time(then_ms, now_ms, "
+            "offset_minutes) rendering a timestamp the way a feed does. Both "
+            "times are Unix milliseconds; offset_minutes is the viewer's UTC "
+            "offset in minutes and may be negative. Return, for a difference "
+            "under one minute, 'just now'; under one hour, '<n> minutes ago' "
+            "with '1 minute ago' in the singular; otherwise decide by "
+            "CALENDAR DAY in the viewer's local time rather than by elapsed "
+            "hours. Same local day: '<n> hours ago', singular '1 hour ago'. "
+            "The local day before: 'yesterday'. Two to six local days "
+            "before: '<n> days ago'. Seven or more local days before: the "
+            "local date as 'YYYY-MM-DD'. A time in the future by any amount "
+            "returns 'just now'. Raise ValueError if either timestamp is not "
+            "an integer or if offset_minutes is outside -1440 to 1440."
+        ),
+        validator=LOAD_CANDIDATE + require("relative_time") + SHAPE_GUARDS + r'''
+relative_time = returning(relative_time, 'relative_time(then, now, offset)')
+
+MINUTE = 60 * 1000
+HOUR = 60 * MINUTE
+DAY = 24 * HOUR
+
+# A fixed instant: 2026-02-26T12:00:00Z.
+NOW = 1772107200000
+
+assert relative_time(NOW, NOW, 0) == 'just now'
+assert relative_time(NOW - 59 * 1000, NOW, 0) == 'just now'
+assert relative_time(NOW - MINUTE, NOW, 0) == '1 minute ago'
+assert relative_time(NOW - 2 * MINUTE, NOW, 0) == '2 minutes ago'
+assert relative_time(NOW - 59 * MINUTE, NOW, 0) == '59 minutes ago'
+assert relative_time(NOW - HOUR, NOW, 0) == '1 hour ago'
+assert relative_time(NOW - 11 * HOUR, NOW, 0) == '11 hours ago'
+
+# The future never reads as the past, however far ahead.
+assert relative_time(NOW + 1, NOW, 0) == 'just now'
+assert relative_time(NOW + 400 * DAY, NOW, 0) == 'just now'
+
+# THE CALENDAR RULE. At 12:00 UTC, 13 hours earlier is 23:00 the PREVIOUS
+# day -- 'yesterday', not '13 hours ago'. An implementation dividing elapsed
+# time by 24 hours gets this wrong and looks right in every hand-run example.
+assert relative_time(NOW - 13 * HOUR, NOW, 0) == 'yesterday'
+# And 20 hours before 12:00 is 16:00 the previous day: still yesterday, even
+# though it is closer to a full day.
+assert relative_time(NOW - 20 * HOUR, NOW, 0) == 'yesterday'
+# 30 hours back is 06:00 on the day before -- still 'yesterday', though it is
+# over a full elapsed day.
+assert relative_time(NOW - 30 * HOUR, NOW, 0) == 'yesterday'
+# 40 hours back is 20:00 two days before, so it is '2 days ago' even though
+# fewer than two elapsed days have passed. Elapsed-time bucketing gets both
+# of these backwards, in opposite directions.
+assert relative_time(NOW - 40 * HOUR, NOW, 0) == '2 days ago'
+
+# The same instants read differently to a viewer in another zone, because the
+# local midnight moves. At UTC+11 the local time is 23:00 on the 26th, so 13
+# hours earlier is 10:00 that same morning.
+assert relative_time(NOW - 13 * HOUR, NOW, 11 * 60) == '13 hours ago'
+# At UTC-11 the local time is 01:00 on the 26th; 13 hours earlier is 12:00 on
+# the 25th, the local day before.
+assert relative_time(NOW - 13 * HOUR, NOW, -11 * 60) == 'yesterday'
+
+assert relative_time(NOW - 3 * DAY, NOW, 0) == '3 days ago'
+assert relative_time(NOW - 6 * DAY, NOW, 0) == '6 days ago'
+
+# Seven local days back is a date, and it is the LOCAL date.
+assert relative_time(NOW - 7 * DAY, NOW, 0) == '2026-02-19'
+assert relative_time(NOW - 40 * DAY, NOW, 0) == '2026-01-17'
+assert relative_time(NOW - 10 * DAY, NOW, 0) == '2026-02-16'
+
+# A viewer far enough east sees the next local date for the same instant.
+old = NOW - 10 * DAY
+assert relative_time(old, NOW, 13 * 60) == '2026-02-17'
+assert relative_time(old, NOW, -13 * 60) == '2026-02-15'
+
+for bad in ((NOW + 0.5, NOW, 0), (NOW, 'x', 0), (NOW, NOW, 1441),
+            (NOW, NOW, -1441)):
+    try:
+        relative_time(*bad)
+    except ValueError:
+        continue
+    raise AssertionError(f'{bad!r} was accepted')
+''',
+    ),
+    task(
+        f"{FAMILY}-0505", FAMILY,
+        prompt=(
+            "Implement a Python function truncate(text, limit, ellipsis='…') "
+            "that shortens a label to at most limit USER-PERCEIVED "
+            "characters without splitting one. Treat the text as a sequence "
+            "of clusters formed by these rules, applied left to right: a "
+            "base character takes with it every following character whose "
+            "Unicode combining class is non-zero and every following "
+            "variation selector in U+FE00 to U+FE0F; a zero-width joiner "
+            "U+200D binds the cluster before it to the cluster after it into "
+            "one cluster; and regional indicator symbols U+1F1E6 to U+1F1FF "
+            "pair up two at a time, so a flag is one cluster and three "
+            "indicators are two. A carriage return followed immediately by a "
+            "line feed is one cluster. If the text has at most limit "
+            "clusters return it unchanged. Otherwise return the longest "
+            "prefix of whole clusters that leaves room for the ellipsis, "
+            "which itself counts as one cluster, followed by the ellipsis. "
+            "Raise ValueError if limit is not an integer of at least one, or "
+            "if the ellipsis is not exactly one cluster."
+        ),
+        validator=LOAD_CANDIDATE + require("truncate") + SHAPE_GUARDS + r'''
+truncate = returning(truncate, 'truncate(text, limit)')
+
+FLAG_GB = '\U0001F1EC\U0001F1E7'
+FLAG_JP = '\U0001F1EF\U0001F1F5'
+# Written as escapes on purpose. A literal e-acute typed into this source is
+# the PRECOMPOSED U+00E9, which carries no combining mark at all, so every
+# assertion below would pass without the candidate clustering anything.
+FAMILY_EMOJI = '👨‍👩‍👧'
+E_ACUTE = 'é'
+HEART_VS = '❤️'
+
+assert truncate('', 5) == ''
+assert truncate('abc', 5) == 'abc'
+assert truncate('abcde', 5) == 'abcde', 'exactly the limit is not truncated'
+assert truncate('abcdef', 5) == 'abcd…', truncate('abcdef', 5)
+assert truncate('abcdef', 1) == '…'
+
+# A combining mark travels with its base: slicing by code point would leave
+# a bare U+0301 that renders on whatever follows it.
+assert truncate(E_ACUTE * 4, 3) == E_ACUTE * 2 + '…', repr(truncate(E_ACUTE * 4, 3))
+assert truncate(E_ACUTE * 3, 3) == E_ACUTE * 3
+assert truncate('a' + E_ACUTE + 'b', 3) == 'a' + E_ACUTE + 'b'
+
+# A variation selector is part of the cluster it follows.
+assert truncate(HEART_VS + 'abc', 2) == HEART_VS + '…'
+assert truncate(HEART_VS * 2, 2) == HEART_VS * 2
+
+# ZWJ binds across the join: a family emoji is ONE cluster, and cutting it
+# leaves two unrelated people rather than a shortened label.
+assert truncate(FAMILY_EMOJI + 'xy', 2) == FAMILY_EMOJI + '…'
+assert truncate(FAMILY_EMOJI, 1) == FAMILY_EMOJI
+assert truncate(FAMILY_EMOJI + 'x', 1) == '…'
+
+# Regional indicators pair up. Three of them are a flag plus a lone letter,
+# not one-and-a-half flags.
+assert truncate(FLAG_GB + FLAG_JP, 2) == FLAG_GB + FLAG_JP
+assert truncate(FLAG_GB + FLAG_JP + 'z', 2) == FLAG_GB + '…'
+odd = FLAG_GB + '\U0001F1EB'
+assert truncate(odd, 2) == odd
+assert truncate(odd + 'q', 2) == FLAG_GB + '…'
+
+# CRLF is one cluster; a bare CR and a bare LF are one each.
+assert truncate('a\r\nb', 3) == 'a\r\nb'
+assert truncate('a\r\nbc', 3) == 'a\r\n…'
+assert truncate('a\rb\nc', 5) == 'a\rb\nc'
+
+# A custom ellipsis is measured as one cluster, whatever it is made of.
+assert truncate('abcdef', 4, E_ACUTE) == 'abc' + E_ACUTE
+assert truncate('abcdef', 3, FLAG_GB) == 'ab' + FLAG_GB
+
+for bad in ((('abc', 0)), (('abc', -1)), (('abc', 'x')), (('abc', 1.0))):
+    try:
+        truncate(*bad)
+    except ValueError:
+        continue
+    raise AssertionError(f'{bad!r} was accepted')
+
+for bad_ellipsis in ('..', '', 'ab'):
+    try:
+        truncate('abcdef', 3, bad_ellipsis)
+    except ValueError:
+        continue
+    raise AssertionError(f'ellipsis {bad_ellipsis!r} was accepted')
+''',
+    ),
+    task(
+        f"{FAMILY}-0506", FAMILY,
+        prompt=(
+            "Implement a Python function resolve_tokens(tokens) resolving a "
+            "design-token table the way CSS custom properties do. tokens "
+            "maps a token name to a template string. A template may contain "
+            "references written 'var(--name)' or 'var(--name, fallback)', "
+            "where the fallback is itself a template and may contain commas "
+            "and nested var() calls. Return a new dict mapping every token "
+            "name to its fully resolved string. A reference to a name that "
+            "is not in tokens resolves to its fallback, or raises KeyError "
+            "when it has none. A reference that takes part in a cycle "
+            "resolves to its fallback if it has one, and otherwise raises "
+            "ValueError naming a token on the cycle. A fallback is evaluated "
+            "only when it is needed, so an unresolvable fallback beside a "
+            "name that does resolve is not an error. Text outside var() is "
+            "copied through unchanged, including whitespace, and "
+            "'var(--name)' written with spaces as 'var( --name )' is the "
+            "same reference. Raise ValueError on a malformed reference: an "
+            "unbalanced parenthesis, or a name not beginning with '--'."
+        ),
+        validator=LOAD_CANDIDATE + require("resolve_tokens") + SHAPE_GUARDS + r'''
+resolve_tokens = returning(resolve_tokens, 'resolve_tokens(tokens)')
+
+assert resolve_tokens({}) == {}
+assert resolve_tokens({'a': 'red'}) == {'a': 'red'}
+
+# The input must not be mutated: a token table is usually a module constant.
+source = {'base': '4px', 'gap': 'var(--base)'}
+snapshot = dict(source)
+assert resolve_tokens(source) == {'base': '4px', 'gap': '4px'}
+assert source == snapshot, 'the token table was mutated'
+
+# Chains resolve transitively, in any declaration order.
+chain = {'c': 'var(--b)', 'b': 'var(--a)', 'a': 'x'}
+assert resolve_tokens(chain) == {'a': 'x', 'b': 'x', 'c': 'x'}
+
+# Text around and between references survives exactly.
+mixed = {'pad': '2px', 'box': '  var(--pad) 0 var(--pad)  '}
+assert resolve_tokens(mixed)['box'] == '  2px 0 2px  '
+assert resolve_tokens({'a': '1', 'b': 'var( --a )'})['b'] == '1'
+
+# A fallback is used only when the name is missing, and is not evaluated
+# otherwise -- so an unresolvable fallback beside a resolvable name is fine.
+assert resolve_tokens({'a': '9', 'b': 'var(--a, var(--nope))'})['b'] == '9'
+assert resolve_tokens({'b': 'var(--gone, 12px)'})['b'] == '12px'
+
+# A fallback is a template: commas and nesting inside it belong to it.
+nested = {'b': 'var(--gone, var(--also-gone, 1px solid red))'}
+assert resolve_tokens(nested)['b'] == '1px solid red'
+assert resolve_tokens({'b': 'var(--gone, a, b)'})['b'] == 'a, b', \
+    'only the FIRST comma separates the name from the fallback'
+
+# A cycle with a fallback takes the fallback rather than diverging.
+cyclic = {'a': 'var(--b, safe)', 'b': 'var(--a, other)'}
+resolved = resolve_tokens(cyclic)
+assert resolved['a'] in ('safe', 'other'), resolved
+assert resolved['b'] in ('safe', 'other'), resolved
+
+try:
+    resolve_tokens({'a': 'var(--b)', 'b': 'var(--a)'})
+except ValueError as error:
+    assert 'a' in str(error) or 'b' in str(error), (
+        f'the error does not name a token on the cycle: {error}')
+else:
+    raise AssertionError('a cycle with no fallback was accepted')
+
+try:
+    resolve_tokens({'a': 'var(--a)'})
+except ValueError:
+    pass
+else:
+    raise AssertionError('a self-reference with no fallback was accepted')
+
+try:
+    resolve_tokens({'a': 'var(--missing)'})
+except KeyError:
+    pass
+else:
+    raise AssertionError('an unknown name with no fallback was accepted')
+
+for bad in ('var(--a', 'var(--a))', 'var(a)', 'var(a, 1)'):
+    try:
+        resolve_tokens({'t': bad, 'a': '1'})
+    except ValueError:
+        continue
+    raise AssertionError(f'{bad!r} was accepted')
+''',
+    ),
 ]

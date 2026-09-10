@@ -667,6 +667,15 @@ REVIEWED_OVERLAPS = {
         "measured on default omission and typed decoding, not on the "
         "encoding rules themselves."
     ),
+    "citation:UNICODE": (
+        "validation-0005 sorts JSON object keys by code point and escapes "
+        "strings; frontend-0505 truncates a label without splitting a "
+        "user-perceived character. Both name Unicode and neither shares a "
+        "behaviour with the other: code-point ORDER is a total order over "
+        "scalars, while grapheme CLUSTERING is about which scalars must not "
+        "be separated. A candidate can get either one right while getting "
+        "the other wrong, which is the point of keeping both."
+    ),
     "citation:RFC6901": (
         "validation-0003 evaluates a pointer, validation-0011 emits one to "
         "name a schema violation, and requirements-0101 uses pointers as the "
