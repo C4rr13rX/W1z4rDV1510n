@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import scripts.aws.watch_programming_brain as watch
@@ -581,3 +582,162 @@ def test_a_stale_status_file_alone_is_not_a_stalled_curriculum() -> None:
     decision = classify_probe(missing, stall_seconds=1800)
     assert decision.kind == "fix_required"
     assert "no progress file" in decision.reason
+
+
+def remote_probe_body() -> str:
+    """Return the Python the watcher actually ships to the training host.
+
+    Built through the real call path rather than re-read from the file, so the
+    f-string interpolation and `{{`/`}}` escaping are exercised exactly as they
+    are in production.
+    """
+    sent: list[str] = []
+
+    class Result:
+        stdout = "running"
+
+    def fake_aws(*args, **kwargs):
+        return Result()
+
+    def fake_send(profile, instance_id, commands, timeout, comment=""):
+        sent.append(commands[0])
+        return {"StandardOutputContent": "{}"}
+
+    original_aws, original_send = watch.aws, watch.send_and_wait
+    watch.aws, watch.send_and_wait = fake_aws, fake_send
+    try:
+        watch.remote_probe("p", "i-0", "/srv/wizard/runtime/x")
+    finally:
+        watch.aws, watch.send_and_wait = original_aws, original_send
+
+    command = sent[0]
+    body = command.split("<<'PY'\n", 1)[1]
+    return body.rsplit("\nPY", 1)[0]
+
+
+def test_the_shipped_probe_body_is_valid_python() -> None:
+    """A syntax error in the probe would surface only against the live host.
+
+    The body is a heredoc inside an f-string, so nothing in the local import,
+    `py_compile`, or any test that greps the file can see a broken one. The
+    watcher would raise "probe returned no output" -- indistinguishable from a
+    dead host or an SSM fault -- and the only way to tell them apart is a
+    round trip to AWS. Compile it here instead.
+    """
+    body = remote_probe_body()
+    # `compile("")` succeeds. If the heredoc markers this extraction depends on
+    # are ever renamed, the assertion below is all that stops this test
+    # reporting a pass on an empty string forever.
+    assert len(body.splitlines()) > 200, "probe body did not extract"
+    assert body.rstrip().endswith("separators=(',', ':')))")
+    compile(body, "<remote-probe>", "exec")
+
+
+def test_the_heartbeat_is_the_freshest_writer_not_a_fixed_file() -> None:
+    """Two writers advance rows; whichever is live is the heartbeat.
+
+    The replay worker rewrites `deferred-replay-*.progress.json` every batch
+    and the forward worker rewrites `curriculum-supervisor.status.json` every
+    batch. `throughput` reads only the first, so during a forward block it
+    republishes the last replay pass. Measured 2026-09-09 on the fault that
+    woke this session: that file was 100.7 h old carrying durable_next_row
+    201344, printed beside a live status at row 16416 with no staleness
+    marker, while the forward block was advancing at 15.3 rows/s. The payload
+    admitted two readings -- "the run went backwards 185k rows" or "throughput
+    flatlined for four days" -- and neither was true.
+    """
+    body = remote_probe_body()
+    # The freshest of the two, chosen by age, rather than a hard-coded file.
+    assert "'source': source" in body
+    assert "min(ages, key=lambda item: item[0])" in body
+    assert "'replay_progress'" in body and "'status'" in body
+    # A superseded progress file must say so in the payload, not only in a
+    # comment no reader of the JSON evidence will ever see.
+    assert "throughput['is_live_heartbeat'] = False" in body
+    assert "throughput['superseded_by'] = source" in body
+    # A rate is the thing that separates a converging block from a live
+    # process that is not training, and the payload never carried one.
+    assert "'rows_per_second'" in body
+
+
+def test_a_new_probe_field_cannot_break_event_deduplication() -> None:
+    """`heartbeat` varies every poll; fingerprints must not follow it.
+
+    `event_fingerprint` hashes a fixed identity drawn from `status`, so adding
+    a live-varying field is safe -- but only for as long as that stays true.
+    If the fingerprint is ever widened to the whole probe, a rate that changes
+    each poll would mint a new event id every time, and the cooldown and
+    stability-poll machinery that stops the watcher spawning duplicate agents
+    would silently stop working.
+    """
+    base = probe("midphase_gate_failed")
+    moving = json.loads(json.dumps(base))
+    moving["heartbeat"] = {"source": "status", "rows_per_second": 15.3,
+                           "row": 21544, "age_seconds": 1.0}
+    still = json.loads(json.dumps(base))
+    still["heartbeat"] = {"source": "status", "rows_per_second": 0.0,
+                          "row": 9, "age_seconds": 2.0}
+    assert (watch.event_fingerprint("fix_required", moving)
+            == watch.event_fingerprint("fix_required", still))
+
+
+def test_the_drought_alarm_is_not_silenced_by_visible_progress() -> None:
+    """Motion is not progress, and this rule exists because of that.
+
+    Measured across two weeks: eight clean yield/recycle cycles, seven
+    intervals advanced and 18,568 accepted episodes, with zero admissions,
+    because the gate never executed. A drought alarm that a positive row rate
+    can switch off would have reported all of that as healthy.
+    """
+    moving = probe("midphase_gate_failed")
+    moving["admissions"] = {"hours_since_admission": 100.7, "gate_artifacts": 47}
+    moving["heartbeat"] = {"source": "status", "rows_per_second": 18.65,
+                           "row": 28384, "age_seconds": 1.4}
+    moving["status"]["block_target_row"] = 131072
+    decision = classify_probe(moving, stall_seconds=1800)
+    assert decision.kind == "fix_required"
+    assert "no interval admitted for 100.7h" in decision.reason
+
+
+def test_the_drought_alarm_carries_the_convergence_evidence() -> None:
+    """The alarm decides between "repair it" and "wait"; it should say which.
+
+    Measured 2026-09-09: a 100.7 h drought whose cause had already been
+    repaired, on a block 1.5 h from its gate. The payload carried no row rate
+    at all, so separating those two readings cost two SSM round trips -- and
+    at a 1800 s retry cooldown that diagnosis would have been repeated about
+    three more times before the gate ran.
+    """
+    converging = probe("midphase_gate_failed")
+    converging["admissions"] = {"hours_since_admission": 100.7,
+                                "gate_artifacts": 47}
+    converging["heartbeat"] = {"source": "status", "rows_per_second": 18.65,
+                               "row": 28384, "age_seconds": 1.4}
+    converging["status"]["block_target_row"] = 131072
+    reason = classify_probe(converging, stall_seconds=1800).reason
+    # 18.6, not 18.7: 18.65 is 18.6499... in binary, so `.1f` rounds down.
+    assert "18.6 rows/s at row 28384 of 131072" in reason
+    assert "reaches its gate in about 1.5h" in reason
+
+    # A block that is NOT advancing must not claim an ETA it cannot support.
+    stuck = probe("midphase_gate_failed")
+    stuck["admissions"] = {"hours_since_admission": 100.7, "gate_artifacts": 47}
+    stuck["heartbeat"] = {"source": "status", "rows_per_second": 0.0,
+                          "row": 28384, "age_seconds": 1.4}
+    stuck["status"]["block_target_row"] = 131072
+    assert "reaches its gate" not in classify_probe(stuck, stall_seconds=1800).reason
+
+    # Nor may one that has already passed its target: a negative remainder
+    # would print a negative ETA and read as "overdue by -0.2h".
+    past = probe("midphase_gate_failed")
+    past["admissions"] = {"hours_since_admission": 100.7, "gate_artifacts": 47}
+    past["heartbeat"] = {"source": "status", "rows_per_second": 18.65,
+                         "row": 140000, "age_seconds": 1.4}
+    past["status"]["block_target_row"] = 131072
+    assert "reaches its gate" not in classify_probe(past, stall_seconds=1800).reason
+
+    # And a probe from a watcher that predates the heartbeat field must not
+    # crash the classifier -- it simply carries no ETA.
+    legacy = probe("midphase_gate_failed")
+    legacy["admissions"] = {"hours_since_admission": 100.7, "gate_artifacts": 47}
+    assert classify_probe(legacy, stall_seconds=1800).kind == "fix_required"

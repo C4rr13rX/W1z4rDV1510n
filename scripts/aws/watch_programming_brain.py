@@ -270,10 +270,38 @@ def classify_probe(probe: dict, *, stall_seconds: float,
                 event_fingerprint("gate_never_ran", probe),
             )
         if since is not None and float(since) > admission_stall_hours:
+            # Deliberately still a fault, not downgraded by visible progress:
+            # the scar behind this rule is eight clean yield/recycle cycles and
+            # 18,568 accepted episodes across two weeks with zero admissions,
+            # so "rows are moving" is exactly the evidence that fooled a
+            # watcher once already. What a converging block does change is the
+            # ACTION, and that belongs in the alarm rather than in a probe the
+            # woken agent has to run itself. Measured 2026-09-09: the drought
+            # was 100.7 h and real, its cause (a registry SchemaError that
+            # exit-42 latched the service) had been repaired 40 min earlier,
+            # and the block was 1.5 h from its gate -- but the payload carried
+            # no rate, so establishing "wait" instead of "repair" cost two SSM
+            # round trips. The `retry_cooldown` is 1800 s, so that bill would
+            # have been paid roughly three more times before the gate ran.
+            beat = probe.get("heartbeat") or {}
+            rate = beat.get("rows_per_second")
+            row = beat.get("row")
+            target = status.get("block_target_row")
+            converging = ""
+            if rate and float(rate) > 0 and row is not None and target:
+                remaining = int(target) - int(row)
+                if remaining > 0:
+                    converging = (
+                        f"; the live heartbeat ({beat.get('source')}) is "
+                        f"advancing {float(rate):.1f} rows/s at row {row} of "
+                        f"{target}, so this block reaches its gate in about "
+                        f"{remaining / float(rate) / 3600.0:.1f}h -- confirm "
+                        f"convergence before repairing anything"
+                    )
             return Decision(
                 "fix_required",
                 f"no interval admitted for {float(since):.1f}h while the "
-                f"curriculum reports itself active",
+                f"curriculum reports itself active" + converging,
                 event_fingerprint("no_admission", probe),
             )
 
@@ -484,20 +512,85 @@ for path in pathlib.Path('/proc').glob('[0-9]*/comm'):
     except Exception:
         continue
 
+status_file = runtime / 'curriculum-supervisor.status.json'
+progress_file = max(runtime.glob('deferred-replay-*.progress.json'),
+                    key=lambda f: f.stat().st_mtime, default=None)
+
+
+def _file_age(path):
+    try:
+        return round(time.time() - path.stat().st_mtime, 1)
+    except Exception:
+        return None
+
+
+def _row_now(path):
+    try:
+        row = json.loads(path.read_text()).get('durable_next_row')
+        return int(row) if row is not None else None
+    except Exception:
+        return None
+
+
 throughput = {{}}
 try:
-    newest = max(runtime.glob('deferred-replay-*.progress.json'),
-                 key=lambda f: f.stat().st_mtime, default=None)
-    if newest is not None:
-        prog = json.loads(newest.read_text())
+    if progress_file is not None:
+        prog = json.loads(progress_file.read_text())
         throughput = {{
-            'progress_file': newest.name,
+            'progress_file': progress_file.name,
             'accepted_episodes': prog.get('accepted_episodes'),
             'durable_next_row': prog.get('durable_next_row'),
             'batch_seconds_ema': prog.get('batch_seconds_ema'),
             'current_batch_size': prog.get('current_batch_size'),
-            'age_seconds': round(time.time() - newest.stat().st_mtime, 1),
+            'age_seconds': _file_age(progress_file),
         }}
+except Exception:
+    pass
+
+# THE REPLAY PROGRESS FILE IS NOT THE ONLY HEARTBEAT, AND IS OFTEN NOT THE
+# LIVE ONE. Two different writers advance rows: the replay worker rewrites
+# deferred-replay-*.progress.json every batch, and the forward worker rewrites
+# curriculum-supervisor.status.json every batch. `throughput` above reads only
+# the first, so during a forward block it publishes whatever the last replay
+# pass left behind. Measured 2026-09-09: that file was 100.7 h old and carried
+# durable_next_row 201344 / accepted_episodes 5168, printed beside a live
+# status at row 16416. Nothing in the payload marked it stale, so the only
+# available readings of a forward block advancing at 15.3 rows/s were "the run
+# went backwards 185k rows" or "throughput has flatlined for four days".
+#
+# So take the freshest writer rather than a fixed one, and sample it twice:
+# the payload has never carried a RATE, and a rate is what separates a
+# converging block from a live process that is not training. Reporting only --
+# a zero rate is deliberately NOT a fault here, because settlement and the
+# admission gate both freeze the row for minutes by design, and alarming on
+# that is the false-positive class this file already carries two scars from.
+heartbeat = {{}}
+try:
+    ages = [(age, name, path) for age, name, path in (
+        (_file_age(status_file), 'status', status_file),
+        (_file_age(progress_file) if progress_file is not None else None,
+         'replay_progress', progress_file),
+    ) if age is not None]
+    if ages:
+        age, source, path = min(ages, key=lambda item: item[0])
+        first_row, first_at = _row_now(path), time.time()
+        time.sleep(6.0)
+        last_row, last_at = _row_now(path), time.time()
+        elapsed = max(1e-6, last_at - first_at)
+        heartbeat = {{
+            'source': source,
+            'file': path.name,
+            'age_seconds': age,
+            'row': last_row,
+            'sample_seconds': round(elapsed, 1),
+            'rows_per_second': (
+                round((last_row - first_row) / elapsed, 2)
+                if first_row is not None and last_row is not None else None),
+        }}
+        if throughput and source != 'replay_progress':
+            # Say it in the payload, not just in this comment.
+            throughput['is_live_heartbeat'] = False
+            throughput['superseded_by'] = source
 except Exception:
     pass
 curriculum = {{
@@ -539,6 +632,7 @@ print(json.dumps({{
         'brain_age_seconds': round(brain_age_s, 1),
     }},
     'throughput': throughput,
+    'heartbeat': heartbeat,
     'status_age_seconds': max(0.0, time.time() - updated) if updated else 1e99,
     'observed_unix': time.time(),
 }}, separators=(',', ':')))
