@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -1098,3 +1099,227 @@ def test_a_drought_alarm_says_so_when_no_writer_exposes_a_row() -> None:
     reason = classify_probe(seeing, stall_seconds=1800).reason
     assert "no writer currently exposes a row" not in reason
     assert "advancing 14.0 rows/s at row 48800" in reason
+
+
+def failure_summary_helpers() -> dict:
+    """Exec the probe's own failure-rendering helpers out of the shipped body.
+
+    Extracted from the real f-string rather than reimplemented, so the
+    `{{`/`}}` escaping in the suite regex is exercised the way production
+    renders it -- an unescaped brace there compiles fine and silently changes
+    the character class.
+    """
+    body = remote_probe_body()
+    # `failing_suites` resolves `re` from the probe's module scope, so the
+    # harness has to supply it -- and then assert the shipped body really
+    # imports it, or this test would pass against a probe that raises
+    # NameError on the host and reports no failure at all.
+    assert "import json, os, pathlib, re, sys, time" in body
+    segment = body[body.index("def summarize_failure(error):"):
+                   body.index("\ntry:\n", body.index("def failing_suites("))]
+    namespace: dict = {"re": re}
+    exec(compile(segment, "<failure-helpers>", "exec"), namespace)
+    return namespace
+
+
+def test_a_worker_exit_reports_its_reason_not_only_its_address() -> None:
+    """The tail the supervisor deliberately attached must reach the agent.
+
+    `replay_worker_failure` appends up to 4000 bytes of worker stderr after
+    the log path, so `last_failure` carries the cause rather than a filename
+    on a host nobody is reading. The probe then cut the field at 180
+    characters -- and the runtime path alone is 135, so 45 characters
+    survived, from the FRONT, which is the least informative end of a
+    traceback.
+
+    Measured 2026-09-10: the `quarantine_ready` wake-up published exactly
+    `deferred replay worker exited 1; stderr=<path>`. The named file held a
+    SchemaError for `category='systems_programming_go'` that had already been
+    repaired 3 h before the current supervisor started, so the answer was in
+    the payload's own source and still cost a round trip to the host.
+    """
+    helpers = failure_summary_helpers()
+    path = ("/srv/wizard/runtime/programming-integrated-20260713/"
+            "deferred-replay-8f4a439a7fc7a772.stderr.log")
+    error = (
+        f"deferred replay worker exited 1; stderr={path}\n"
+        + "Traceback (most recent call last):\n"
+        + '  File "/srv/wizard/project/tools/training_standard/schema.py", '
+          "line 161, in load_script\n    raise SchemaError(\n" * 6
+        + "tools.training_standard.schema.SchemaError: registry/"
+          "go_systems_001.toml[script]: category='systems_programming_go' "
+          "not in ['agent_planning', 'code_generation']"
+    )
+    summary = helpers["summarize_failure"](error)
+
+    # The cause, which lives on the LAST line of a traceback.
+    assert "SchemaError" in summary
+    assert "category='systems_programming_go'" in summary
+    # Prove the test fails without the fix: the old rule kept none of it.
+    assert "SchemaError" not in error[:180]
+    # The head still has to survive, because the worker/gate split keys on it.
+    assert summary.startswith("deferred replay worker exited 1")
+    assert "worker exited" in summary
+    # Say that something was dropped rather than implying the error ended.
+    assert "chars]" in summary
+
+
+def test_a_short_failure_is_passed_through_whole() -> None:
+    """Summarising must not mangle the errors that already fit."""
+    helpers = failure_summary_helpers()
+    error = "deferred replay worker exited -15; stderr=/srv/x.log\nSIGTERM"
+    assert helpers["summarize_failure"](error) == error
+    assert helpers["summarize_failure"]("") == ""
+
+
+def test_the_named_failure_says_which_suites_failed() -> None:
+    """An 11/12 gate must not arrive as a blob that names no suite.
+
+    CLAUDE.md records four days of admissions held by one suite whose identity
+    the ledger never carried. The gate report's repr does carry it; nothing
+    pulled it out, and the first 180 characters are spent on tick and
+    structure counts, so the names were always past the cut.
+    """
+    helpers = failure_summary_helpers()
+    error = (
+        "enterprise regression after go-systems: {'passed': False, "
+        "'tick_before': 1108042, 'tick_after': 1108042, 'tick_delta': 0, "
+        "'structure_unchanged': True, 'passed_suites': 11, "
+        "'total_suites': 12, 'results': ["
+        "{'name': 'python_enterprise', 'passed': True, 'timed_out': False}, "
+        "{'name': 'polyglot', 'passed': False, 'timed_out': False}]}"
+    )
+    assert helpers["failing_suites"](error) == ["polyglot"]
+    # A passing suite must never be reported as failing just because a later
+    # sibling failed -- the character class excluding braces is what stops the
+    # match walking out of one result dict and into the next.
+    assert "python_enterprise" not in helpers["failing_suites"](error)
+    # A failure that is not a suite verdict names no suites, and that must
+    # read as "not applicable" rather than "everything passed".
+    assert helpers["failing_suites"]("deferred replay worker exited 1") == []
+
+
+def test_a_replay_block_gets_its_convergence_annex_from_end_row() -> None:
+    """The annex must fire on the status a replay actually publishes.
+
+    `block_target_row` is written only by the forward stage, which hands it to
+    the driver as `--limit-rows`. Deferred replay publishes the identical
+    quantity under `end_row`. The annex read only the former, so it was live
+    exclusively during forward blocks -- where the drought branch is already
+    suppressed, because a forward stage does not admit -- and silent during
+    replay, the one stage that admits and the only one that reaches here.
+
+    Measured 2026-09-10 against the live host: `no interval admitted for
+    112.6h while the curriculum reports itself active`, and nothing else,
+    while the block sat at row 86,320 of 131,072 advancing 12.8 rows/s about
+    an hour from its gate. Every existing test hand-set `block_target_row`, so
+    the suite passed against a payload no replay ever emits.
+    """
+    # The exact status shape the supervisor publishes for a deferred replay:
+    # start/resume/end, and no `block_target_row` anywhere.
+    live = probe("deferred_replay_training")
+    live["admissions"] = {"hours_since_admission": 112.6, "gate_artifacts": 47}
+    live["status"].update({
+        "phase": "go-systems", "interval_id": "go-systems:0:131072",
+        "start_row": 0, "resume_row": 36384, "end_row": 131072,
+    })
+    live["status"].pop("block_target_row", None)
+    live["heartbeat"] = {"source": "replay_progress", "row": 86320,
+                         "rows_per_second": 12.8, "age_seconds": 0.5,
+                         "row_source_lag_seconds": 0.0, "sample_seconds": 2.0}
+
+    decision = classify_probe(live, stall_seconds=1800)
+    assert decision.kind == "fix_required"
+    assert "no interval admitted for 112.6h" in decision.reason
+    # The annex, which was the whole point of the drought branch carrying one.
+    assert "advancing 12.8 rows/s at row 86320 of 131072" in decision.reason
+    assert "confirm convergence before repairing anything" in decision.reason
+    # 44752 rows at 12.8 rows/s is ~0.97h. Pin the arithmetic, not just the
+    # presence of a sentence.
+    assert "reaches its gate in about 1.0h" in decision.reason
+
+
+def test_a_frozen_replay_block_is_still_named_without_block_target_row() -> None:
+    """The freeze arm needs the same fallback, or it reports nothing either.
+
+    A rate of 0 is normal -- settlement, the admission gate and the continuous
+    canary each freeze the row by design -- but that is only useful if the
+    payload SAYS so. Sharing `target` with the converging arm means fixing one
+    without the other would leave a frozen replay indistinguishable from a
+    payload that never measured.
+    """
+    frozen = probe("deferred_replay_training")
+    frozen["admissions"] = {"hours_since_admission": 112.6, "gate_artifacts": 47}
+    frozen["status"].update({"phase": "go-systems", "end_row": 131072})
+    frozen["status"].pop("block_target_row", None)
+    frozen["heartbeat"] = {"source": "replay_progress", "row": 131040,
+                           "rows_per_second": 0.0, "age_seconds": 0.5,
+                           "sample_seconds": 120.0, "accepted_per_second": 4.2,
+                           "row_source_lag_seconds": 0.0}
+
+    reason = classify_probe(frozen, stall_seconds=1800).reason
+    assert "sits at row 131040 of 131072" in reason
+    assert "did not move in 120s" in reason
+    # Still accepting episodes means the block is training through the freeze.
+    assert "still accepting 4.2 episodes/s" in reason
+    assert "freeze the row by design" in reason
+    # And it must not be mistaken for the no-writer case, which is a different
+    # fact: this payload measured a row, it just did not move.
+    assert "no writer currently exposes a row" not in reason
+
+
+def test_the_probe_resolves_the_block_target_without_the_status_file() -> None:
+    """`curriculum-supervisor.status.json` is not one schema.
+
+    Forward blocks publish `block_target_row`; a deferred replay publishes
+    `end_row`; and a `resource_node_recycled` record publishes neither --
+    only `trained_rows` and a `topology` dict. Measured 2026-09-10 on the
+    live host, mid-replay at row 90,616 of 131,072: the status file had just
+    been overwritten by a recycle record, so BOTH status keys were absent and
+    the drought alarm went out bare for the second time in one session.
+
+    So run the shipped resolver against a real directory rather than grepping
+    for a key name -- the interval is durable state and the interval id
+    encodes phase:start:end, neither of which a recycle can erase.
+    """
+    body = remote_probe_body()
+    segment = body[body.index("def _block_target(status):"):
+                   body.index("\nthroughput = ")]
+    return _exercise_block_target(segment)
+
+
+def _exercise_block_target(segment: str):
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        namespace: dict = {"json": json, "runtime": root}
+        exec(compile(segment, "<block-target>", "exec"), namespace)
+        resolve = namespace["_block_target"]
+
+        # 1. Forward stage: its own key wins.
+        assert resolve({"block_target_row": 131072}) == 131072
+        # 2. Replay training: end_row is the same quantity under another name.
+        assert resolve({"end_row": 131072, "resume_row": 36384}) == 131072
+
+        # 3. The recycle record that broke it: no target key at all, so the
+        #    resolver has to reach the durable interval file.
+        recycled = {"state": "resource_node_recycled", "phase": "go-systems",
+                    "trained_rows": 131072, "topology": {"tick": 4501934}}
+        assert resolve(recycled) is None, "no interval on disk yet"
+        (root / "deferred-replay-active.json").write_text(json.dumps({
+            "interval_id": "go-systems:0:131072", "phase": "go-systems",
+            "state": "training",
+            "interval": {"start_row": 0, "end_row": 131072,
+                         "interval_id": "go-systems:0:131072"},
+        }))
+        assert resolve(recycled) == 131072
+
+        # 4. Last resort: the interval id encodes the end row, so a truncated
+        #    or unreadable active file still yields a target.
+        (root / "deferred-replay-active.json").write_text("{ not json")
+        assert resolve({"interval_id": "go-systems:0:131072"}) == 131072
+        # 5. And an id that does not encode one must report absence rather
+        #    than a fabricated number.
+        assert resolve({"interval_id": "go-systems"}) is None
+        assert resolve({}) is None

@@ -354,7 +354,37 @@ def classify_probe(probe: dict, *, stall_seconds: float,
             # an unknown rate are different facts, and neither one is silence.
             rate = beat.get("rows_per_second")
             row = beat.get("row")
-            target = status.get("block_target_row")
+            # THE TARGET HAS TWO NAMES, AND ONLY ONE OF THEM IS EVER SET
+            # DURING REPLAY. `block_target_row` is published solely by the
+            # forward stage, which passes it to the driver as `--limit-rows`.
+            # A deferred replay publishes the same quantity as `end_row`.
+            #
+            # So the convergence annex below -- added precisely so a drought
+            # alarm would carry evidence instead of going out bare -- was
+            # live only during forward blocks, the stage where the drought
+            # branch is already suppressed because a forward stage does not
+            # admit. In replay, the one stage that DOES admit and the only
+            # one that reaches this branch, `target` was always None and all
+            # three arms fell through to silence.
+            #
+            # Measured 2026-09-10, a dry-run against the live host published
+            # exactly `no interval admitted for 112.6h while the curriculum
+            # reports itself active` -- nothing more -- while the replay was
+            # at row 86,320 of 131,072 advancing 12.8 rows/s with
+            # `durable_next_row == ram_next_row`, about an hour from its
+            # gate. At a 1800 s retry cooldown that bills an agent wake-up
+            # every half hour against a converging block.
+            #
+            # Every test covering this annex hand-set `block_target_row`, so
+            # the whole suite passed against a payload no replay ever emits.
+            #
+            # The heartbeat's copy is preferred because the probe resolves it
+            # from the durable interval files and the interval id, not from
+            # whichever lifecycle event wrote the status file last -- a
+            # `resource_node_recycled` record carries no target at all.
+            target = (beat.get("block_target_row")
+                      or status.get("block_target_row")
+                      or status.get("end_row"))
             sampled = beat.get("sample_seconds")
             converging = ""
             if rate and float(rate) > 0 and row is not None and target:
@@ -435,7 +465,7 @@ def remote_probe(profile: str, instance_id: str, runtime: str) -> dict:
 
     heartbeat_sample_seconds = HEARTBEAT_SAMPLE_SECONDS
     remote = f"""python3 - <<'PY'
-import json, os, pathlib, sys, time
+import json, os, pathlib, re, sys, time
 runtime = pathlib.Path({runtime!r})
 sys.path.insert(0, '/srv/wizard/project')
 from scripts.programming_curriculum_supervisor import (
@@ -537,8 +567,42 @@ kinds = {{}}
 admitted_unix = 0.0
 last_yield = {{}}
 recent_fail = ''
+recent_fail_suites = []
 worker_killed = 0
 gate_reached = 0
+
+def summarize_failure(error):
+    # KEEP THE END OF A TRACEBACK. Truncating head-first is exactly backwards
+    # for the two shapes this field actually carries.
+    #
+    # `replay_worker_failure` appends up to 4000 bytes of the worker's stderr
+    # after the log's path, precisely so the reason travels with its address
+    # (44e496b, "Carries the reason, not just its address"). But the runtime
+    # path alone is 135 characters, so a flat [:180] left 45 characters for
+    # that tail -- and a traceback's one informative line, the exception type
+    # and message, is its LAST. Measured 2026-09-10: this wake-up reported
+    # `deferred replay worker exited 1; stderr=<path>` and nothing more; the
+    # file held a SchemaError naming `category='systems_programming_go'`,
+    # already repaired 3 h before the current supervisor started. Recovering
+    # one line that was sitting in the payload's own source cost a full
+    # round-trip to the host.
+    #
+    # Same defect on the other shape: an `enterprise regression` blob spends
+    # its first 180 characters on tick and structure counts, so the failing
+    # suite names -- the only part that says WHICH capability regressed --
+    # were always past the cut. That is the reporting half of the lesson in
+    # CLAUDE.md that an 11/12 gate names no suite in the ledger.
+    error = str(error or '')
+    if len(error) <= 900:
+        return error
+    return error[:260] + '\\n...[' + str(len(error) - 860) + ' chars]...\\n' + error[-600:]
+
+def failing_suites(error):
+    # The per-suite verdict is embedded in the repr of the gate report. Pull
+    # it out rather than making every reader re-derive it from prose.
+    return sorted(set(re.findall(
+        r"'name':\\s*'([^']+)'[^{{}}]*?'passed':\\s*False", str(error or ''))))[:8]
+
 try:
     for line in health.read_text(errors='replace').splitlines()[-4000:]:
         try:
@@ -557,14 +621,19 @@ try:
                 'after_gb': round(float(ev.get('available_bytes_after') or 0) / 2**30, 2),
             }}
         elif kind == 'deferred_replay_failed':
-            recent_fail = str(ev.get('error') or '')[:180]
+            full_fail = str(ev.get('error') or '')
+            recent_fail = summarize_failure(full_fail)
+            recent_fail_suites = failing_suites(full_fail)
             # Which half of the transaction died? A worker killed by the
             # memory guard never reached the gate; anything else means the
             # gate ran and returned a verdict. Both arrive as the same
             # `deferred_replay_failed` kind, so the count alone cannot tell
             # a starved gate from a rejecting one -- and they need opposite
             # fixes (resize the work unit vs. repair the capability).
-            if 'worker exited' in recent_fail:
+            # Classify on the WHOLE error, never on the display summary --
+            # otherwise trimming the field for readability silently moves the
+            # worker/gate split, and the two need opposite fixes.
+            if 'worker exited' in full_fail:
                 worker_killed += 1
             else:
                 gate_reached += 1
@@ -655,6 +724,50 @@ def _accepted_now(path):
         return int(value) if value is not None else None
     except Exception:
         return None
+
+
+# WHERE THE BLOCK'S TARGET ROW ACTUALLY LIVES.
+#
+# `curriculum-supervisor.status.json` is not one schema, it is whatever the
+# last lifecycle event published. Forward blocks write `block_target_row`;
+# a deferred replay writes `start_row`/`resume_row`/`end_row`; and a
+# `resource_node_recycled` record -- measured on this host at 2026-09-10,
+# mid-replay -- writes `trained_rows` and a `topology` dict and NO target of
+# any kind. So a consumer that reads the target from that file gets an answer
+# that depends on which event happened to land last, which is why the
+# convergence annex went silent on a converging block.
+#
+# The interval being replayed is durable state, so read it from the files that
+# define it and fall back to the interval id, which encodes phase:start:end.
+def _block_target(status):
+    for key in ('block_target_row', 'end_row'):
+        value = status.get(key)
+        if value is not None:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                pass
+    candidates = [runtime / 'deferred-replay-active.json']
+    identifiers = [status.get('interval_id')]
+    for path in candidates:
+        try:
+            body = json.loads(path.read_text())
+        except Exception:
+            continue
+        for scope in (body.get('interval') or {{}}, body):
+            if not isinstance(scope, dict):
+                continue
+            if scope.get('end_row') is not None:
+                try:
+                    return int(scope['end_row'])
+                except (TypeError, ValueError):
+                    pass
+            identifiers.append(scope.get('interval_id'))
+    for identifier in identifiers:
+        parts = str(identifier or '').split(':')
+        if len(parts) >= 3 and parts[-1].isdigit():
+            return int(parts[-1])
+    return None
 
 
 throughput = {{}}
@@ -758,6 +871,7 @@ try:
             # measured zero: no writer on this host exposes durable_next_row.
             'no_row_writer': True,
             'freshest_writer': freshest[1],
+            'block_target_row': _block_target(status),
         }}
     if rowed:
         age, source, path = min(rowed, key=lambda item: item[0])
@@ -779,6 +893,10 @@ try:
             'file': path.name,
             'age_seconds': age,
             'row': last_row,
+            # Published beside the row it is measured against, so a consumer
+            # never has to guess which of the status file's several schemas
+            # happens to be live.
+            'block_target_row': _block_target(status),
             'sample_seconds': round(elapsed, 1),
             'rows_per_second': (
                 round((last_row - first_row) / elapsed, 2)
@@ -830,6 +948,10 @@ print(json.dumps({{
         'replay_failures_at_gate': gate_reached,
         'last_resource_yield': last_yield,
         'last_failure': recent_fail,
+        # Which suites the named failure actually names. Empty means the
+        # failure was not a suite verdict (a worker exit, say), not that
+        # every suite passed.
+        'last_failure_suites': recent_fail_suites,
     }},
     'memory': {{
         'available_gb': round(meminfo.get('MemAvailable', 0) / 2**20, 2),

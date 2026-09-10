@@ -107,6 +107,42 @@ Verify, do not assume:
   plus `no_row_writer: true` when nothing exposes one. Verified live: source
   `replay_progress`, row 51,464, 11.99 rows/s, `sample_seconds` 2.0.
 
+- **`curriculum-supervisor.status.json` is not ONE schema — it is whatever
+  lifecycle event wrote last.** A forward block publishes `block_target_row`;
+  a deferred replay publishes `start_row`/`resume_row`/`end_row`; a
+  `resource_node_recycled` record publishes neither, only `trained_rows` and
+  a `topology` dict. So any consumer reading a field from that file gets an
+  answer that depends on timing. This broke the SAME convergence annex twice
+  in one session on 2026-09-10: the fix above made the annex require a row,
+  but it still read the TARGET from `status['block_target_row']` — a key only
+  the forward stage writes, and a forward stage is exactly where the drought
+  branch is already suppressed. In replay, the one stage that admits and the
+  only one that reaches that branch, the target was always `None`, so all
+  three arms fell through and the alarm went out bare a second time: "no
+  interval admitted for 112.6h" against a block at row 86,320 of 131,072
+  advancing 12.8 rows/s, ~1 h from its gate, at a 1800 s retry cooldown. Every
+  test covering the annex hand-set `block_target_row`, so 47 tests passed
+  against a payload no replay ever emits. **Read a block's target from durable
+  interval state** — `deferred-replay-active.json`, or the `interval_id`,
+  which encodes `phase:start:end` and no recycle can erase — and publish it in
+  the heartbeat beside the row it is measured against. Verified live: `row
+  91,752 of 131,072, 16.0 rows/s, reaches its gate in about 0.7h`.
+
+- **A failure field truncated from the FRONT deletes the cause.**
+  `replay_worker_failure` appends up to 4000 bytes of worker stderr after the
+  log path so the reason travels with its address; the probe then cut
+  `last_failure` at 180 characters, and the runtime path alone is 135. A
+  traceback's one informative line is its LAST. Measured 2026-09-10: this
+  wake-up published `deferred replay worker exited 1; stderr=<path>` and
+  nothing else; the named file held a `SchemaError` for
+  `category='systems_programming_go'` already repaired 3 h before the current
+  supervisor started, so the answer was in the payload's own source and still
+  cost a round trip to the host. The field now keeps head AND tail and says
+  how much it dropped, and `last_failure_suites` extracts the failing suite
+  names — the reporting half of the next lesson. **Classify on the whole
+  error, never on the display summary**, or trimming for readability silently
+  moves the worker-vs-gate split.
+
 - **An 11/12 enterprise gate names no suite in the ledger.** The
   `enterprise_gate_confirmation` record carries only counts, so a drought
   looks causeless from `curriculum-health.jsonl` alone. The per-suite verdict
