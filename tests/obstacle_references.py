@@ -11899,3 +11899,281 @@ MUTATIONS["concurrency_async_distributed-0302"] = (
     "    ordered.sort(key=lambda lock: lock.name)",
     "    pass",
 )
+
+
+# --------------------------------------------------------------------------
+# architecture_multifile_integration-0401..0405
+#
+# Authored 2026-09-09 without reference solutions, which left ten tests
+# failing on a KeyError rather than on anything about the tasks. A task with
+# no reference is a task nobody has seen pass, and the course cannot tell that
+# apart from a brain that cannot solve it.
+# --------------------------------------------------------------------------
+
+REFERENCES["architecture_multifile_integration-0401"] = r'''
+import outbox_infra
+
+
+def place_order(db, broker, order_id, payload):
+    """Persist the order and its outbox row atomically, then try to publish.
+
+    The publish is deliberately OUTSIDE the transaction. Publishing inside it
+    would make a broker acceptance durable before the order is, so a rollback
+    would leave a message referring to an order that does not exist.
+    """
+    with db.transaction() as txn:
+        txn.put("order:%s" % order_id, payload)
+        txn.put("outbox:%s" % order_id,
+                {"order_id": order_id, "state": "pending"})
+
+    try:
+        broker.publish({"order_id": order_id, "payload": payload})
+    except outbox_infra.Rejected:
+        # The order is already durable and its outbox row is already pending,
+        # so the relay will retry it. There is nothing to undo.
+        return False
+
+    with db.transaction() as txn:
+        txn.put("outbox:%s" % order_id,
+                {"order_id": order_id, "state": "sent"})
+    return True
+
+
+def relay(db, broker):
+    pending = []
+    for key, value in db.rows().items():
+        if not key.startswith("outbox:"):
+            continue
+        if not isinstance(value, dict) or value.get("state") != "pending":
+            continue
+        pending.append(value["order_id"])
+
+    published = []
+    for order_id in sorted(pending):
+        payload = db.get("order:%s" % order_id)
+        try:
+            broker.publish({"order_id": order_id, "payload": payload})
+        except outbox_infra.Rejected:
+            # Leave it pending and keep going: one refused row must not
+            # strand every row behind it.
+            continue
+        with db.transaction() as txn:
+            txn.put("outbox:%s" % order_id,
+                    {"order_id": order_id, "state": "sent"})
+        published.append(order_id)
+    return published
+'''
+
+# Publish while the transaction is still open. Every visible outcome on the
+# happy path is unchanged -- the order is durable, the row is sent, the return
+# value is the same -- and only the fixture's in_transaction witness notices.
+MUTATIONS["architecture_multifile_integration-0401"] = (
+    "                {\"order_id\": order_id, \"state\": \"pending\"})\n"
+    "\n"
+    "    try:\n"
+    "        broker.publish({\"order_id\": order_id, \"payload\": payload})",
+    "                {\"order_id\": order_id, \"state\": \"pending\"})\n"
+    "        broker.publish({\"order_id\": order_id, \"payload\": payload})\n"
+    "\n"
+    "    try:\n"
+    "        pass",
+)
+
+
+REFERENCES["architecture_multifile_integration-0402"] = r'''
+import copy
+
+
+def upgrade(record):
+    """Bring a record to version 3 without ever mutating the argument.
+
+    The unknown-key rule is why this copies the whole record and edits the
+    copy rather than building a fresh dict from the fields it knows: a writer
+    newer than this service emits keys nobody here has heard of, and
+    reconstructing from a known list silently drops them.
+    """
+    if not isinstance(record, dict):
+        raise ValueError("a record must be a mapping")
+    if "id" not in record:
+        raise ValueError("a record must carry an id")
+
+    version = record.get("schema_version")
+    # bool is a subclass of int and is not a schema version.
+    if not isinstance(version, int) or isinstance(version, bool):
+        raise ValueError("schema_version must be an integer")
+
+    if version > 3:
+        # Newer than this service understands. Returning it unchanged is the
+        # only safe move: downgrading would discard fields we cannot see.
+        return copy.deepcopy(record)
+
+    upgraded = copy.deepcopy(record)
+
+    if version in (1, 2):
+        if "name" not in record:
+            raise ValueError("a version %d record must carry a name" % version)
+        upgraded["display_name"] = upgraded.pop("name")
+        upgraded.setdefault("email", "")
+        upgraded["tags"] = list(upgraded.get("tags", []))
+        upgraded["schema_version"] = 3
+    elif version == 3:
+        if "display_name" not in record:
+            raise ValueError("a version 3 record must carry a display_name")
+        upgraded["tags"] = list(upgraded.get("tags", []))
+    else:
+        raise ValueError("unknown schema_version %r" % (version,))
+
+    return upgraded
+'''
+
+# Rebuild from the fields this service knows instead of copying the record.
+# The upgrade stays correct for every recognised key; what disappears is the
+# forward compatibility the task is actually about.
+MUTATIONS["architecture_multifile_integration-0402"] = (
+    "    upgraded = copy.deepcopy(record)",
+    "    upgraded = {key: copy.deepcopy(value)\n"
+    "                for key, value in record.items()\n"
+    "                if key in ('schema_version', 'id', 'name',\n"
+    "                           'display_name', 'email', 'tags')}",
+)
+
+
+REFERENCES["architecture_multifile_integration-0403"] = r'''
+def iterate(store, page_size):
+    """Yield every row in key order, paging by POSITION rather than by count.
+
+    Offset paging is the defect this task exists to catch: a row inserted
+    behind the reader shifts every later offset by one, so the reader skips a
+    row it has never seen. Keying the next page on the last
+    (created_unix, row_id) actually visited makes an insertion behind the
+    cursor invisible and one ahead of it visible, which is the contract.
+    """
+    if (not isinstance(page_size, int) or isinstance(page_size, bool)
+            or page_size < 1):
+        raise ValueError("page_size must be a positive integer")
+
+    after = None
+    while True:
+        rows = store.page(after=after, limit=page_size)
+        if not rows:
+            return
+        for row in rows:
+            yield row
+        last = rows[-1]
+        after = (last["created_unix"], last["row_id"])
+'''
+
+# Page by how many rows have been seen rather than by where the reader is.
+# Identical output on a store nobody writes to, which is exactly why offset
+# paging survives review and then loses rows under concurrent inserts.
+MUTATIONS["architecture_multifile_integration-0403"] = (
+    "    after = None\n"
+    "    while True:\n"
+    "        rows = store.page(after=after, limit=page_size)\n"
+    "        if not rows:\n"
+    "            return\n"
+    "        for row in rows:\n"
+    "            yield row\n"
+    "        last = rows[-1]\n"
+    '        after = (last["created_unix"], last["row_id"])',
+    "    seen = 0\n"
+    "    while True:\n"
+    "        rows = store.page(after=None, limit=seen + page_size)[seen:]\n"
+    "        if not rows:\n"
+    "            return\n"
+    "        for row in rows:\n"
+    "            yield row\n"
+    "        seen += len(rows)",
+)
+
+
+REFERENCES["architecture_multifile_integration-0404"] = r'''
+import replication
+
+
+class Session:
+    """Read-your-writes over a replica that lags.
+
+    The session tracks the highest version IT caused, not the primary's
+    current version: another session's write must not force this one onto the
+    primary, which is the difference between a read-your-writes guarantee and
+    no replica offload at all.
+    """
+
+    def __init__(self, primary, replica):
+        self._primary = primary
+        self._replica = replica
+        self._version = 0
+
+    def write(self, key, value):
+        version = self._primary.write(key, value)
+        self._version = max(self._version, version)
+        return version
+
+    def read(self, key):
+        try:
+            return self._replica.read_at_least(key, self._version)
+        except replication.Stale:
+            # The replica cannot serve this session's own history yet.
+            return self._primary.read(key)
+'''
+
+# Go straight to the primary once this session has written anything. Every
+# read is still CORRECT -- the primary always serves the current value, so
+# read-your-writes holds -- and the only thing lost is the replica offload the
+# prompt asks for, which the fixture's read counters are what notice.
+#
+# Tracking the primary's version instead of the session's was tried here first
+# and does NOT discriminate: no case in the validator has a second writer, so
+# the two watermarks are equal throughout and the mutated reference passed.
+MUTATIONS["architecture_multifile_integration-0404"] = (
+    "        try:\n"
+    "            return self._replica.read_at_least(key, self._version)",
+    "        if self._version:\n"
+    "            return self._primary.read(key)\n"
+    "        try:\n"
+    "            return self._replica.read_at_least(key, self._version)",
+)
+
+
+REFERENCES["architecture_multifile_integration-0405"] = r'''
+import steps as step_module
+
+
+def run_saga(steps):
+    """Run in order; on failure compensate what ran, in reverse.
+
+    Two rules make this harder than it reads. A step that is not
+    compensatable must be SKIPPED without stopping the unwind -- returning
+    early there would strand every earlier step -- and a compensation that
+    itself raises must not prevent the remaining ones, so each is attempted
+    inside its own try.
+    """
+    ran = []
+    try:
+        for step in steps:
+            step.run()
+            ran.append(step)
+    except step_module.StepError:
+        for step in reversed(ran):
+            if not getattr(step, "compensatable", True):
+                continue
+            try:
+                step.compensate()
+            except step_module.StepError:
+                # Best effort: the next compensation still has to happen.
+                continue
+        raise
+    return [step.name for step in ran]
+
+
+'''
+
+# Unwind in the order the steps ran rather than in reverse. Every step is
+# still compensated exactly once and the error still propagates, so a saga of
+# independent steps agrees; only one whose steps depend on each other -- the
+# reason compensation is ordered at all -- comes apart.
+MUTATIONS["architecture_multifile_integration-0405"] = (
+    "        for step in reversed(ran):",
+    "        for step in ran:",
+)
