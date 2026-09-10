@@ -164,6 +164,25 @@ Verify, do not assume:
   worker only POSTs rows; every judgement runs in the supervisor after the
   training loop returns. Before blaming an interval's content, read the
   worker's stderr tail — `last_failure` now carries it inline.
+- **`check=True` beside `capture_output=True` deletes the evidence that
+  classifies a gate failure.** The supervisor decides quarantine-vs-retry by
+  scanning the failure text for markers like `timed out`. Measured 2026-09-10:
+  `midphase_gate` had 0 `_infrastructure_retry` and 0 `_infrastructure_paused`
+  against 45 `_failed`, beside 108/48 for `continuous_canary` and 146 for
+  `idle_settlement`. A zero next to healthy neighbours means the branch is
+  unreachable, not that the failure never happened. The cause: `debug_eval`
+  ran its child captured-and-checked, so the child's `socket.timeout: timed
+  out` went into a `CalledProcessError` nobody read, and the classifier saw
+  only `returned non-zero exit status 1` — a string with the answer deleted.
+  Two go-systems blocks (262,144 rows) were quarantined for a client timeout.
+  **Ask what a child is ABLE to say before reading its exit code:**
+  `programming_debug_benchmark.py` ends in an unconditional `return 0`, so its
+  non-zero exit is never a verdict; `programming_code_eval.py` returns 1 on a
+  real failure and prints its report, so its exit is a verdict only when that
+  report parses. And when a report is read from a fixed path, **unlink it
+  first** — the copy beside both quarantined candidates was a 769.7 h leftover
+  reading 6/6, so relaxing the check without deleting would have traded a false
+  quarantine for a false admission.
 - **Files written over SSM land `root:root`.** The supervisor runs as
   `ec2-user` and dies with `Permission denied` on anything it must write.
   `chown ec2-user:ec2-user` after any host-side write.

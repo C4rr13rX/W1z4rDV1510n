@@ -1393,3 +1393,107 @@ asserts no declared language accepts a plain English sentence as source.
 
 Note when reading past bash benchmark results: they were measured against a
 validator that could not fail, so their structural axis carries no information.
+
+## `check=True` deletes the evidence that says "infrastructure, not regression"
+
+The supervisor decides whether a failed gate quarantines a block by scanning
+the failure text for transient markers — `timed out`, `connectionreseterror`,
+`no such file or directory`. That classifier is correct and has always been
+wired into the midphase gate: `admit_midphase_candidate()` calls
+`admission_infrastructure_failure(exc)` before `record_deferred_failure()`.
+
+It had never once fired. Measured 2026-09-10:
+
+| Gate | `_infrastructure_retry` | `_infrastructure_paused` | `_failed` |
+|---|---:|---:|---:|
+| `continuous_canary` | 108 | 48 | 110 |
+| `idle_settlement` | 146 | — | — |
+| `completion_gate` | 3 | — | 6 |
+| `midphase_gate` | **0** | **0** | **45** |
+
+A zero beside three healthy neighbours is the signature of a branch that
+cannot be reached, not of a gate that never had a transient failure.
+
+The cause was one keyword. `programming_integrated_retention.debug_eval()` ran
+its child as `subprocess.run(..., capture_output=True, check=True)`. The child
+died on `socket.timeout: timed out`; `capture_output` put that traceback in a
+`CalledProcessError` and `check` raised it, and nothing ever read
+`exc.stderr`. What reached the classifier was the *parent's* traceback, whose
+last line is:
+
+```
+subprocess.CalledProcessError: Command '[...programming_debug_benchmark.py...]'
+returned non-zero exit status 1.
+```
+
+Reproduced on the host by running the child directly and keeping its stderr:
+the child's output contained the marker `timed out`; the parent's message
+contained no marker at all. The classifier was reading a string from which the
+answer had been deleted, so it returned "semantic" and quarantined the block.
+
+Cost: two go-systems blocks, rows 131072 and 262144, deferred 7.2 h and 3.0 h
+apart for a client timeout. 262,144 rows of forward yield are now being
+re-earned by quarantine replay at ~10 rows/s.
+
+### Ask what the child is *able* to say before reading its exit code
+
+The two evaluators behind this gate are not alike, and treating them alike is
+what made a crash indistinguishable from a verdict:
+
+- `programming_debug_benchmark.py` ends in `return 0`. Unconditionally. It
+  cannot express failure through its exit code, so a non-zero exit from it is
+  **by construction** infrastructure.
+- `programming_code_eval.py` ends in `return 0 if all(row["executes"] ...)
+  else 1`, and prints its report either way. Its exit *is* a verdict — but
+  only when that report parses. A crash prints no JSON.
+
+So the discriminator is not the exit code, it is whether a verdict was
+produced. `code_eval()` now returns the report whenever stdout parses (which
+also stops a genuine execution regression from killing the gate before it can
+be recorded), and raises `EvaluatorUnavailable` when it does not.
+
+### A stale artifact turns a false quarantine into a false admission
+
+`debug_eval()` reads its report from a *file*. Dropping `check=True` without
+more would have made it read whatever was already at that path.
+
+That is not hypothetical. The `integrated_debug.json` sitting beside both
+quarantined candidates was **769.7 h old** — the evidence collector copies
+with mtimes preserved, so it had faithfully archived a leftover from a month
+earlier, reading a perfect 6/6. The gate would have admitted a brain that
+nothing had measured.
+
+`debug_eval()` now unlinks the path before invoking the child and requires the
+file to exist afterwards. When an artifact is read from a fixed path, absence
+of a fresh write is indistinguishable from a pass unless you delete first.
+
+### The stricter of two patience levels is the one that defers blocks
+
+`programming_integrated_retention.request()` gives the brain 120 s.
+`programming_debug_benchmark.predict()` gave the same brain, in the same gate,
+30 s. Under replay load the benchmark abandoned a server the surrounding gate
+would have waited for — and because the gate read that crash as a regression,
+the tighter timeout was doing the quarantining. Now aligned at 120 s.
+
+### Verified, not assumed
+
+After deploying to `/srv/wizard/project` (two files, fresh inodes, uid 1000)
+the fixed path was executed on the host rather than inspected:
+
+- a simulated crash raised `EvaluatorUnavailable`, and the supervisor's own
+  `transient_gate_failure()` returned **True** on the resulting message —
+  the branch that had never fired now fires;
+- the stale report at the target path was gone afterwards;
+- the deployed benchmark run against the live brain returned **rc 0 in
+  227.8 s**, writing `exact 6/6, heldout_execution 6/6, structural_transfer
+  4/4, oov_honesty 3/3`.
+
+That last line is what makes the quarantine provably false: 227.8 s is more
+than seven consecutive 30 s timeouts, and the brain accused of an integrated
+retention regression answers every debug-repair group perfectly.
+
+No supervisor restart was needed — the gate spawns
+`programming_integrated_retention.py` as a fresh subprocess per invocation, so
+the next gate run reads the new file. Restarting would have discarded the
+in-flight replay interval, which `deferred-replay-active.json` reported as
+`state: training`.
