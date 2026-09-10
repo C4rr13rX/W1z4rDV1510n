@@ -98,17 +98,81 @@ def foundation_eval(endpoint: str, accepted: dict[str, set[str]]) -> dict:
     }
 
 
+class EvaluatorUnavailable(RuntimeError):
+    """A child evaluator crashed instead of returning a verdict.
+
+    This exception reaches the curriculum supervisor only as text, on this
+    process's traceback, so the message deliberately carries both the child's
+    own stderr and the `infrastructure_only_failure` marker that
+    `transient_gate_failure()` already scans for.
+    """
+
+    def __init__(self, command: list[str], returncode: int,
+                 stdout: str, stderr: str) -> None:
+        self.returncode = returncode
+        super().__init__(
+            f'{{"infrastructure_only_failure": true}} '
+            f"{Path(command[1]).name} exited {returncode} without a verdict\n"
+            f"child stdout: {stdout[-1500:]}\n"
+            f"child stderr: {stderr[-2500:]}"
+        )
+
+
+def run_evaluator(command: list[str]) -> subprocess.CompletedProcess:
+    """Run a child evaluator without discarding what classifies its failure.
+
+    `check=True` beside `capture_output=True` funnels the child's traceback
+    into a CalledProcessError whose str() is only "returned non-zero exit
+    status 1". The supervisor classifies a gate failure by scanning that text
+    for transient markers, so it had nothing to match and scored every crash
+    as neural regression.
+
+    Measured 2026-09-10: the child died on `socket.timeout: timed out` -- a
+    marker `transient_gate_failure()` already looks for -- yet 0 of 45
+    midphase gate failures had ever been classified as infrastructure, and two
+    go-systems blocks (rows 131072 and 262144) were quarantined for a client
+    timeout against a brain that was answering correctly.
+    """
+    return subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
+
+
 def code_eval(endpoint: str) -> dict:
-    run = subprocess.run([sys.executable, "scripts/programming_code_eval.py",
-                          "--endpoint", endpoint], cwd=ROOT, check=True,
-                         capture_output=True, text=True)
-    return json.loads(run.stdout.strip().splitlines()[-1])
+    """Return the execution verdict, or report that none was produced.
+
+    This evaluator can say no: it exits 1 when a case fails to execute, and
+    prints its report either way. A non-zero exit is therefore a verdict only
+    when that report parses -- a crash prints no JSON, and returning the gate
+    a fabricated verdict for it is exactly the misclassification above.
+    """
+    command = [sys.executable, "scripts/programming_code_eval.py",
+               "--endpoint", endpoint]
+    run = run_evaluator(command)
+    lines = [line for line in run.stdout.splitlines() if line.strip()]
+    try:
+        return json.loads(lines[-1])
+    except (IndexError, ValueError):
+        raise EvaluatorUnavailable(
+            command, run.returncode, run.stdout, run.stderr) from None
 
 
 def debug_eval(endpoint: str, output: Path) -> dict:
-    run = subprocess.run([sys.executable, "scripts/programming_debug_benchmark.py",
-                          "--endpoint", endpoint, "--output", str(output)],
-                         cwd=ROOT, check=True, capture_output=True, text=True)
+    """Return the debug-repair verdict, or report that none was produced.
+
+    `programming_debug_benchmark.py` returns 0 unconditionally, so a non-zero
+    exit from it is never a verdict. Its report also lands in a FILE, and the
+    evidence collector preserves mtimes: the copy beside both quarantined
+    go-systems candidates was a 769.7 h leftover from a run a month earlier.
+    Remove the path first, so a stale report can never be read as this run's
+    result and admit a brain nothing measured.
+    """
+    command = [sys.executable, "scripts/programming_debug_benchmark.py",
+               "--endpoint", endpoint, "--output", str(output)]
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.unlink(missing_ok=True)
+    run = run_evaluator(command)
+    if run.returncode != 0 or not output.exists():
+        raise EvaluatorUnavailable(
+            command, run.returncode, run.stdout, run.stderr)
     return json.loads(output.read_text(encoding="utf-8"))
 
 

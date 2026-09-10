@@ -24,7 +24,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from scripts.programming_integrated_retention import foundation_eval, mutation_enabled
+from scripts.programming_integrated_retention import (
+    EvaluatorUnavailable,
+    code_eval,
+    debug_eval,
+    foundation_eval,
+    mutation_enabled,
+)
 from scripts.independent_snapshot import publish_independent_copy
 from scripts.programming_brain_eval import (
     BrainClient as FoundationBrainClient,
@@ -736,6 +742,85 @@ class ProgrammingRuntimeContractTests(unittest.TestCase):
             '{"infrastructure_only_failure": true}', "",
         )
         self.assertTrue(transient_gate_failure(exact_fixture_failure))
+
+    def test_crashed_evaluator_reaches_the_supervisor_as_infrastructure(self) -> None:
+        """A child that dies mid-request must not read as neural regression.
+
+        Measured 2026-09-10: `programming_debug_benchmark.py` died on
+        `socket.timeout: timed out` against a loaded brain, `debug_eval` ran it
+        with check=True beside capture_output=True, and the traceback the
+        supervisor classifies on said only "returned non-zero exit status 1".
+        `transient_gate_failure()` had nothing to match, so 0 of 45 midphase
+        gate failures were ever called infrastructure and two go-systems blocks
+        were quarantined for a client timeout.
+        """
+        crash = subprocess.CompletedProcess(
+            [sys.executable, "scripts/programming_debug_benchmark.py"], 1, "",
+            "Traceback (most recent call last):\n"
+            "  File \"scripts/programming_debug_benchmark.py\", line 80\n"
+            "socket.timeout: timed out\n",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "integrated_debug.json"
+            # The stale report the evidence collector preserved beside both
+            # quarantined candidates was 769.7 h old. It must never be
+            # mistaken for this run's measurement.
+            report.write_text(json.dumps({"exact": {"passed": 6, "total": 6}}),
+                              encoding="utf-8")
+            with patch(
+                "scripts.programming_integrated_retention.run_evaluator",
+                return_value=crash,
+            ):
+                with self.assertRaises(EvaluatorUnavailable) as caught:
+                    debug_eval("http://127.0.0.1:18095", report)
+            self.assertFalse(report.exists())
+
+        # The supervisor only ever sees this as text on the child's traceback.
+        surfaced = GateCommandFailure(
+            ["python", "scripts/programming_integrated_retention.py"], 1, "",
+            f"Traceback (most recent call last):\n{caught.exception}",
+        )
+        self.assertTrue(transient_gate_failure(surfaced))
+        self.assertIn("timed out", str(caught.exception))
+
+        # The shape check=True produced, verbatim from the go-systems ledger.
+        # It is the same crash, and it classifies as a semantic regression --
+        # which is the whole defect, so pin it or the fix can silently revert.
+        swallowed = GateCommandFailure(
+            ["python", "scripts/programming_integrated_retention.py"], 1, "",
+            "Traceback (most recent call last):\n"
+            "  File \"scripts/programming_integrated_retention.py\", line 176, in main\n"
+            "    \"debug\": debug_eval(args.endpoint, ...),\n"
+            "subprocess.CalledProcessError: Command "
+            "'['/usr/bin/python3', 'scripts/programming_debug_benchmark.py']' "
+            "returned non-zero exit status 1.\n",
+        )
+        self.assertFalse(transient_gate_failure(swallowed))
+
+        # Narrowness: an evaluator that DID return a verdict keeps it, so a
+        # real execution regression still fails the gate semantically.
+        verdict = {"summary": {"trained": {"count": 5, "executes": 4}}}
+        semantic = subprocess.CompletedProcess(
+            [sys.executable, "scripts/programming_code_eval.py"], 1,
+            json.dumps(verdict) + "\n", "",
+        )
+        with patch(
+            "scripts.programming_integrated_retention.run_evaluator",
+            return_value=semantic,
+        ):
+            self.assertEqual(code_eval("http://127.0.0.1:18095"), verdict)
+
+        # But a code evaluator that crashed printed no verdict to keep.
+        with patch(
+            "scripts.programming_integrated_retention.run_evaluator",
+            return_value=subprocess.CompletedProcess(
+                [sys.executable, "scripts/programming_code_eval.py"], 1, "",
+                "ConnectionResetError: [Errno 104] Connection reset by peer\n"),
+        ):
+            with self.assertRaises(EvaluatorUnavailable) as reset:
+                code_eval("http://127.0.0.1:18095")
+        self.assertTrue(transient_gate_failure(GateCommandFailure(
+            ["python", "retention.py"], 1, "", str(reset.exception))))
 
     def test_tool_failure_detail_preserves_stdout_and_stderr(self) -> None:
         result = subprocess.CompletedProcess(

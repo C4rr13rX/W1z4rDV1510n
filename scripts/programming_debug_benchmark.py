@@ -15,6 +15,13 @@ CAUSAL_FIELDS = {1: "instruction", 2: "source_before", 3: "console_before",
                  5: "environment", 6: "failure_outcome", 10: "source_before",
                  12: "instruction"}
 
+#: Matches `programming_integrated_retention.request`, which gives the same
+#: brain 120 s. This benchmark used 30 s, so under replay load it gave up on a
+#: brain the surrounding gate would have waited for -- and because that gate
+#: reads a crash as a regression, the stricter of two patience levels for one
+#: server was the one that quarantined 131,072-row blocks.
+PREDICT_TIMEOUT_SECONDS = 120
+
 PARAPHRASES = [
     "Make square compute the product of its argument with itself.",
     "Correct is_negative to recognize numbers less than zero.",
@@ -77,7 +84,7 @@ def predict(endpoint: str, streams: dict[int, str]) -> str | None:
                            for pool, value in streams.items()], "target_pool": 4}
     request = urllib.request.Request(endpoint.rstrip("/") + "/brain/predict/multi",
         data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(request, timeout=30) as response:
+    with urllib.request.urlopen(request, timeout=PREDICT_TIMEOUT_SECONDS) as response:
         result = json.loads(response.read())
     answer = result.get("answer")
     return base64.urlsafe_b64decode(answer + "===").decode() if answer else None
@@ -89,7 +96,7 @@ def predict_composed(endpoint: str, source: str, streams: dict[int, str]) -> str
                            for pool, value in streams.items()]}
     request = urllib.request.Request(endpoint.rstrip("/") + "/brain/repair/predict",
         data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(request, timeout=30) as response:
+    with urllib.request.urlopen(request, timeout=PREDICT_TIMEOUT_SECONDS) as response:
         result = json.loads(response.read())
     answer = result.get("answer")
     return base64.urlsafe_b64decode(answer + "===").decode() if answer else None
