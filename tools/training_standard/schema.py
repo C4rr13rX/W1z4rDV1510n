@@ -44,7 +44,7 @@ CATEGORIES = {
 
 # Code languages the AST validator understands.  Anything else means
 # "skip structural check, fall back to keyword score only".
-SUPPORTED_LANGS = {"python", "rust", "javascript", "bash", "powershell"}
+SUPPORTED_LANGS = {"python", "rust", "javascript", "bash", "powershell", "go"}
 
 
 @dataclasses.dataclass(frozen=True)

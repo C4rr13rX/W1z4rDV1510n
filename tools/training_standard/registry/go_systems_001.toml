@@ -1,6 +1,12 @@
 [script]
 id          = "go_systems_001"
-category    = "systems_programming_go"
+# `code_generation`, like every other per-language corpus: code_gen_rust_001
+# and code_gen_python_001 both sit here, and CATEGORIES is a fixed coverage
+# contract the runner groups sparklines by, not a free-text label. The invented
+# `systems_programming_go` was not in it, so `load_registry()` raised
+# SchemaError for the WHOLE registry and every corpus driver invocation died at
+# startup -- see the header of tests/test_training_registry_schema.py.
+category    = "code_generation"
 phase       = 31
 description = """
 Go functions paired with their doc comments, from CodeSearchNet.

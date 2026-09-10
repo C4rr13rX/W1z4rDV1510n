@@ -91,9 +91,12 @@ out["examples"] = examples
 # What does the CURRENT brain say -- is the tick actually advancing right now?
 try:
     import urllib.request
+    # The replay brain listens on 18095; 8095 is the interactive host and is
+    # closed here, so the previous constant made this whole block report
+    # "Connection refused" no matter how healthy the brain was.
     def stat():
         with urllib.request.urlopen(
-                "http://127.0.0.1:8095/stats", timeout=20) as handle:
+                "http://127.0.0.1:18095/stats", timeout=20) as handle:
             return json.loads(handle.read().decode("utf-8"))
     first = stat()
     time.sleep(8)

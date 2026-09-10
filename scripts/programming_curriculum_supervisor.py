@@ -1317,6 +1317,59 @@ def run_json_command(command: list[str], timeout: float = 3600.0) -> dict:
     return json.loads(lines[-1])
 
 
+def replay_worker_stderr_tail(stderr_path: Path, mark: int,
+                              limit: int = 4000) -> str:
+    """Return what THIS worker pass wrote to the shared stderr log.
+
+    The log is opened append-mode once per interval and reused across passes,
+    so `mark` (its size captured immediately before the worker started) is what
+    separates this pass's diagnostic from every earlier one's.
+    """
+    try:
+        with stderr_path.open("r", encoding="utf-8", errors="replace") as handle:
+            handle.seek(max(0, int(mark)))
+            return handle.read()[-limit:].strip()
+    except OSError:
+        return ""
+
+
+def replay_worker_failure(returncode: int, stderr_tail: str,
+                          stderr_path: Path) -> AdmissionInfrastructureError:
+    """Build the error for a replay worker that exited without being asked to.
+
+    Always infrastructure, never a verdict about interval content. The replay
+    worker only POSTS rows: every judgement --
+    `interval_recall`, settlement, the completion gate -- runs in the
+    supervisor after the training loop returns. `drive_corpora_brain.main()`
+    itself returns only 0, or 2 for an unknown script; any other non-zero code
+    is an uncaught exception or a signal, i.e. the driver failing to run rather
+    than the brain failing to learn.
+
+    Measured 2026-09-09, the cost of not drawing this line: one registry file
+    shipped with `category='systems_programming_go'`, which is not in
+    `schema.CATEGORIES`, so `load_registry()` raised for the whole registry and
+    EVERY worker died at startup. Twelve intervals across four unrelated
+    corpora -- jupyter-scientific, metamathqa, webstack -- were each marked
+    `deferred_replay_failed` and rejected without a single row being trained or
+    a single gate being run, and the pass then reported
+    `deferred_replay_complete` with 26 rejections. A deploy typo had been
+    recorded as 12 semantic verdicts about corpus content.
+
+    Infrastructure failures stop the pass instead (see
+    test_infrastructure_failure_stops_the_whole_pass), which is also the right
+    bound on a genuinely corpus-triggered crash: it surfaces once rather than
+    burning the rest of the queue.
+
+    Carries the reason, not just its address: the ledger recorded only
+    "stderr=<path>", so `last_failure` named a file on a host nobody was
+    reading and the registry SchemaError stayed invisible for the whole pass.
+    """
+    return AdmissionInfrastructureError(
+        f"deferred replay worker exited {returncode}; stderr={stderr_path}"
+        + (f"\n{stderr_tail}" if stderr_tail else "")
+    )
+
+
 def transient_gate_failure(error: BaseException) -> bool:
     """Separate transport/resource failures from behavioral regressions."""
     if isinstance(error, (
@@ -3731,6 +3784,11 @@ def run_deferred_replays(args: argparse.Namespace, runtime: Path,
                 # check on rows the replay had never posted.
                 barren_yields = 0
                 while resume_row < interval_end:
+                    # Where this pass's diagnostic starts in the shared log.
+                    try:
+                        stderr_mark = stderr_path.stat().st_size
+                    except OSError:
+                        stderr_mark = 0
                     worker = run_deferred_replay_worker(
                         args, phase, runtime, event, status_path,
                         interval_id, stdout, stderr, resume_row=resume_row,
@@ -3739,9 +3797,12 @@ def run_deferred_replays(args: argparse.Namespace, runtime: Path,
                     )
                     yielded = bool(getattr(worker, "resource_yield", False))
                     if worker.returncode != 0 and not yielded:
-                        raise RuntimeError(
-                            f"deferred replay worker exited "
-                            f"{worker.returncode}; stderr={stderr_path}"
+                        raise replay_worker_failure(
+                            worker.returncode,
+                            replay_worker_stderr_tail(
+                                stderr_path, stderr_mark
+                            ),
+                            stderr_path,
                         )
                     trained_row = replay_pass_durable_row(
                         replay_progress, resume_row, interval_end

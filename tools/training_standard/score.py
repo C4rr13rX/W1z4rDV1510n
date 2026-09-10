@@ -26,6 +26,19 @@ from .schema import Benchmark
 
 _FENCED_RE = re.compile(r"```(?:[a-zA-Z0-9_+\-]*)\n(.*?)```", re.DOTALL)
 
+# What makes a string read as shell rather than as a sentence about shell.
+# `for`/`if`/`while` are absent on purpose: they are ordinary English words
+# ("...one for the word ERROR"), so only their closing halves count.
+_BASH_SIGNAL_RE = re.compile(
+    r"[|$`]"                        # pipe, expansion, command substitution
+    r"|[<>]"                        # redirection
+    r"|(?:^|\s)-{1,2}[A-Za-z]"      # a flag argument
+    r"|(?:^|\s)\w+="                # assignment
+    r"|^#!"                         # shebang
+    r"|\b(?:do|then|done|fi|esac|elif)\b",
+    re.MULTILINE,
+)
+
 
 @dataclasses.dataclass
 class BenchmarkResult:
@@ -78,10 +91,39 @@ def _validate_lang(code: str, lang: str) -> tuple[bool, str]:
         if code.count("{") != code.count("}"):
             return False, "js check: unbalanced braces"
         return True, ""
+    if lang == "go":
+        # `go` has to have a real arm, not just a seat in SUPPORTED_LANGS:
+        # the fallthrough at the bottom of this function returns ok for any
+        # language it doesn't know, so a bare listing would have handed every
+        # Go benchmark the full 0.5 structural weight for any text at all.
+        if not any(k in code for k in ("func ", "func(", "package ", "type ", "var ")):
+            return False, "go check: no func/package/type/var keyword"
+        if code.count("{") != code.count("}"):
+            return False, "go check: unbalanced braces"
+        return True, ""
     if lang == "bash":
-        if "$(" in code and not code.count("$(") == code.count(")"):
-            # tolerant — bash $() can nest with quoting; this is a soft check
-            pass
+        # This arm used to be unable to fail: a `pass`-bodied nesting check
+        # followed by an unconditional `return True, ""`, so every bash
+        # benchmark collected the full 0.5 structural weight for any text at
+        # all, prose included.  Kept heuristic like rust/js above -- no shell
+        # parser is bundled and `evaluate` is documented pure -- but it now
+        # discriminates.  See test_every_declared_language_has_a_validator_arm.
+        if not _BASH_SIGNAL_RE.search(code):
+            # Deliberately keyed on shell *signals* -- operators, flags,
+            # variables, block keywords -- and not on "a line that starts with
+            # a word", which every English sentence also satisfies.  The cost
+            # is that a bare `echo hello` reads as prose; no registry benchmark
+            # asks for one, and a false accept here is the more expensive error.
+            return False, "bash check: no shell operator, flag or keyword found"
+        # Truncation is the failure this exists to catch, and an unterminated
+        # block is what truncation looks like in shell.
+        for opener, closer in (("do", "done"), ("then", "fi"), ("case", "esac")):
+            opens = len(re.findall(rf"\b{opener}\b", code))
+            closes = len(re.findall(rf"\b{closer}\b", code))
+            if opens != closes:
+                return False, f"bash check: {opens} {opener} vs {closes} {closer}"
+        if code.count('"') % 2:
+            return False, "bash check: unbalanced double quotes"
         return True, ""
     if lang == "powershell":
         if not any(k in code.lower() for k in ("get-", "set-", "$", "function", "param")):

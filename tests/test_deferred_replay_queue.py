@@ -12,6 +12,8 @@ The fix skips a behaviourally-rejected interval for the rest of the pass
 infrastructure failures. These tests pin that distinction, which is the
 part that is easy to get subtly wrong.
 """
+import pathlib
+
 import pytest
 
 from scripts import programming_curriculum_supervisor as sup
@@ -65,6 +67,53 @@ def test_infrastructure_failure_stops_the_whole_pass():
     assert result["attempted"] == ["a", "boom"]
     assert "c" not in result["attempted"]
     assert result["rc"] == 1
+
+
+def test_dead_worker_is_infrastructure_not_a_semantic_verdict():
+    """A worker that exits on its own is never a verdict about corpus content.
+
+    2026-09-09: `go_systems_001.toml` deployed with a category outside
+    `schema.CATEGORIES`, so `load_registry()` raised for the WHOLE registry and
+    every worker died at startup, before posting a row.  The old code raised a
+    bare RuntimeError, which the drain loop reads as a behavioural rejection,
+    so twelve intervals across four unrelated corpora -- jupyter-scientific,
+    metamathqa, webstack -- were rejected without a row trained or a gate run.
+    The pass then reported `deferred_replay_complete` with 26 rejections and
+    exited 42, which `RestartPreventExitStatus=42` latched into a stopped
+    service: a deploy typo took training down for four days.
+
+    The replay worker only POSTs rows; every judgement runs in the supervisor
+    after the training loop returns.  So a non-zero exit is the driver failing
+    to run, never the brain failing to learn.
+    """
+    err = sup.replay_worker_failure(1, "", pathlib.Path("/tmp/x.stderr.log"))
+    assert isinstance(err, sup.AdmissionInfrastructureError)
+    # The load-bearing half: `AdmissionInfrastructureError` deliberately does
+    # not inherit RuntimeError, so it cannot be swallowed by a handler meant
+    # for behavioural rejections.  The old code raised a bare RuntimeError,
+    # which is precisely what that handler caught.
+    assert not isinstance(err, RuntimeError)
+
+
+def test_worker_failure_carries_the_reason_not_just_its_address(tmp_path):
+    """The ledger recorded only `stderr=<path>`, so `last_failure` named a file
+    on a host nobody was reading and the SchemaError stayed invisible for the
+    whole pass.  The diagnostic has to travel with the error."""
+    log = tmp_path / "deferred-replay-abc.stderr.log"
+    log.write_text("stale text from an earlier pass\n", encoding="utf-8")
+    mark = log.stat().st_size
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write("SchemaError: category='systems_programming_go' not in [...]\n")
+
+    tail = sup.replay_worker_stderr_tail(log, mark)
+    assert "SchemaError" in tail
+    # The shared log is append-mode across passes, so `mark` is what separates
+    # this pass's diagnostic from every earlier one's.
+    assert "stale text" not in tail
+
+    err = sup.replay_worker_failure(1, tail, log)
+    assert "SchemaError" in str(err)
+    assert str(log) in str(err)
 
 
 def test_explicit_single_interval_keeps_strict_semantics():
