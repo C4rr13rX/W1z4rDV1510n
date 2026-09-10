@@ -77,15 +77,31 @@ Verify, do not assume:
   than inferring which route ran.
 - **A live curriculum trains underneath any measurement.** Sample repeatedly;
   one probe is not verification.
-- **The heartbeat is whichever writer is freshest, not a fixed file.** The
-  replay worker writes `deferred-replay-*.progress.json`; the FORWARD worker
-  writes `curriculum-supervisor.status.json`. During a forward block the
-  newest progress file is a leftover — measured 2026-09-09 at 100.7 h old,
-  reporting `durable_next_row` 201344 beside a live status at row 16,416 while
-  the block advanced at 15.3 rows/s. Read `heartbeat.rows_per_second` and
-  check `throughput.is_live_heartbeat` before believing a throughput number.
-  A rate of 0 is normal: settlement, the admission gate and the continuous
-  canary all freeze the row by design.
+- **The heartbeat is whichever writer is freshest, and there are THREE.** The
+  replay worker writes `deferred-replay-*.progress.json`; the forward driver
+  writes its own `<phase>.progress.json` (its `--progress-path`); the
+  supervisor writes `curriculum-supervisor.status.json` only BETWEEN batches,
+  so it freezes for minutes during a canary, a settlement or a gate. Both
+  fixed choices have now produced a false reading. Measured 2026-09-09: the
+  replay file was 100.7 h old reporting `durable_next_row` 201344 beside a
+  live status at row 16,416 advancing at 15.3 rows/s. Measured 2026-09-10 mid
+  `continuous_canary`: the status file was 718 s stale at row 49,152 while
+  `go-systems.progress.json` was 7.6 s old climbing 50192 → 50224, and the
+  watchdog published `rows_per_second: 0.0` and woke an agent to diagnose a
+  stall on a healthy block. Read `heartbeat.source` and confirm it names the
+  file matching the CURRENT phase before believing any rate. A rate of 0 is
+  normal: settlement, the admission gate and the continuous canary all freeze
+  the row by design.
+
+- **An 11/12 enterprise gate names no suite in the ledger.** The
+  `enterprise_gate_confirmation` record carries only counts, so a drought
+  looks causeless from `curriculum-health.jsonl` alone. The per-suite verdict
+  is in `<phase>.enterprise-gate.json` next to it, under `results[].name`.
+  Measured 2026-09-09: 127 gate runs, exactly one pass ever, `polyglot`
+  failing every time on a single row — `javascript_go_order_workers`
+  canonical composing `ledger.go` where the prompt asked for a deduplicator,
+  so `go_deduplication` died on `stat dedup.go: no such file`. One row of one
+  suite held every admission for over four days.
 - **Onboarding a corpus requires a registry `.toml`.** Without it the driver
   exits 2 on `unknown script` and the supervisor retry-loops, stopping ALL
   training. `scripts/onboard_corpus.py` writes it; deploy it with the corpus.

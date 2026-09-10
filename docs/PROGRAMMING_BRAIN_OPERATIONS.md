@@ -523,6 +523,33 @@ the build under test contains the code under repair.** Until that is checked,
 a failing suite and an unshipped fix are the same observation, and the cheaper
 explanation is almost always the second one.
 
+### Outcome, measured 2026-09-10
+
+The brain relaunched at 21:46:44 UTC onto the rebuilt image, 28 minutes after
+the 21:18:51 relink, via an ordinary memory recycle — no supervisor restart,
+no interval rolled back, exactly the cheap remedy above. Both inodes now read
+`1616920738` with no `(deleted)` marker, so the running process is the fixed
+build.
+
+The suite was then re-run against that live brain, and the row that had held
+the gate for four days now composes correctly:
+
+```
+javascript_go_order_workers/canonical
+  files:  ["dedup.go", "order_service.js"]     (was ["ledger.go", ...])
+  go_deduplication: executes=true              (was: stat dedup.go: no such file)
+summary: projects 6/6, components 12/12, oov 2/2, exit 0
+```
+
+Two cautions this run added. The inode match proves the process is executing
+the file on disk; it does **not** prove that file was built from the fix, and
+a `grep -c -a` of the binary for a guessed marker string returned 0 — a
+vacuous probe that would have read identically had the fix been present. Only
+the behavioural re-run settles it. And a single 6/6 is weaker evidence than
+the failure it replaces, which was reproducible across twelve consecutive gate
+runs over 57.6 h; the gate itself runs the suite twice and rejects on either,
+so treat one green sample as necessary and not sufficient.
+
 ## The named failure is not the failure population
 
 The watchdog reports `last_failure`. It is one row. Repairing it and declaring
