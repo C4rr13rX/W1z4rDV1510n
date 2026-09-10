@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -705,6 +706,45 @@ def test_the_forward_driver_progress_file_is_a_heartbeat_candidate(tmp_path) -> 
 
     # And it must actually be offered to the freshest-writer rule.
     assert "'forward_progress', forward_file" in body
+
+
+def test_the_agent_stream_is_decoded_as_utf8_not_the_windows_locale(tmp_path) -> None:
+    """An alarm that cannot decode its own agent's output wakes nobody.
+
+    `text=True` without `encoding` uses the locale codec. On this Windows host
+    that is cp1252, which has no mapping for 0x9d -- the third byte of U+201D,
+    an ordinary curly quote. Measured across 2026-09-05..09: 27 alarms died
+    with `AGENT INVOKE FAILED 'charmap' codec can't decode byte 0x9d`, each
+    after the agent had already started streaming, so the child was orphaned
+    and the fault went unworked. It surfaces as returncode 127, the same code
+    used for "no launcher on PATH".
+
+    The child here emits a curly quote deliberately: that single character is
+    the whole defect, and a test using only ASCII passes on the broken code.
+    """
+    stdout_path = tmp_path / "out.jsonl"
+    stderr_path = tmp_path / "err.log"
+    activity_path = tmp_path / "activity.log"
+
+    child = (
+        "import sys;"
+        "sys.stdin.read();"
+        "sys.stdout.buffer.write("
+        "'{\"type\":\"system\",\"subtype\":\"thinking_tokens\"}\\n'"
+        ".encode('utf-8'));"
+        "sys.stdout.buffer.write('\\u201cbudget\\u201d\\n'.encode('utf-8'));"
+        "sys.stdout.buffer.flush()"
+    )
+    returncode = watch._run_claude(
+        [sys.executable, "-c", child],
+        Decision("fix_required", "reason", "fp"),
+        probe("midphase_gate_failed"),
+        stdout_path, stderr_path, activity_path,
+    )
+
+    assert returncode == 0
+    # The bytes must survive the round trip, not merely fail to raise.
+    assert "”" in stdout_path.read_text(encoding="utf-8")
 
 
 def test_a_new_probe_field_cannot_break_event_deduplication() -> None:

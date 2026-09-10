@@ -846,9 +846,25 @@ def _run_claude(command: list[str], decision: Decision, probe: dict,
                 activity_path: Path) -> int:
     with stdout_path.open("a", encoding="utf-8") as stdout, \
             stderr_path.open("a", encoding="utf-8") as stderr:
+        # `text=True` WITHOUT `encoding` decodes with the Windows locale codec.
+        # Claude's stream-json is UTF-8, and cp1252 has no mapping for 0x9d or
+        # 0x90 -- the middle bytes of a curly quote (U+201D is E2 80 9D) and of
+        # many em-dashes. Measured across 2026-09-05..09: 27 alarms logged
+        # `AGENT INVOKE FAILED 'charmap' codec can't decode byte 0x9d`, each
+        # one an alarm that fired and produced no agent. The failure lands mid
+        # stream, after the agent is already running and emitting
+        # thinking_tokens, so the child is orphaned rather than never started,
+        # and the broad handler upstream records it as returncode 127 -- the
+        # same code used for "no launcher on PATH", which reads as an install
+        # problem rather than a decoding one.
+        #
+        # This also covers stdin: the prompt carries the probe JSON verbatim,
+        # so an em-dash in a failure reason would otherwise raise
+        # UnicodeEncodeError on the way out.
         process = subprocess.Popen(
             command, cwd=ROOT, text=True, stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=stderr,
+            encoding="utf-8", errors="replace",
         )
         assert process.stdin is not None and process.stdout is not None
         process.stdin.write(agent_prompt(decision, probe))
