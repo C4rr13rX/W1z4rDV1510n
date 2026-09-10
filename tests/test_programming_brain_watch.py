@@ -1323,3 +1323,114 @@ def _exercise_block_target(segment: str):
         #    than a fabricated number.
         assert resolve({"interval_id": "go-systems"}) is None
         assert resolve({}) is None
+
+
+def test_a_drought_alarm_says_when_its_named_failure_is_history() -> None:
+    """`last_failure` is read from a ledger that outlives every writer.
+
+    `curriculum-health.jsonl` is append-only, so the newest `deferred_replay_
+    failed` record in it can name a cause repaired several supervisor
+    generations ago. Quoting that text into a `fix_required` reason without
+    its age invites the woken agent to debug a fixed bug -- and CLAUDE.md's
+    standing instruction to "timestamp last_failure against process start
+    before re-debugging it" was addressed to a reader the payload handed
+    nothing to act on.
+
+    Measured 2026-09-10 on the `quarantine_ready` wake-up: `last_failure` was
+    a worker exit 19.6 h old, quoted beside a supervisor 0.14 h old, whose
+    registry SchemaError had been redeployed 16.6 h before. Two SSM round
+    trips went to establishing that the ledger text was history.
+    """
+    # NOT `service_stage: replay`. The quarantine_ready arm matches a
+    # replay stage in a deferred_replay_* state and returns before the
+    # drought branch is ever reached -- the if/else chain CLAUDE.md warns
+    # about, where an earlier arm that matches ends it.
+    live = probe("deferred_replay_training")
+    live["admissions"] = {
+        "hours_since_admission": 111.6,
+        "gate_artifacts": 49,
+        "last_failure": (
+            "deferred replay worker exited 1; stderr=/srv/wizard/runtime/"
+            "programming-integrated-20260713/deferred-replay-8f4a439a.stderr.log"
+        ),
+        "last_failure_age_hours": 19.62,
+        "last_failure_predates_supervisor": True,
+        "supervisor_age_hours": 0.14,
+    }
+    live["status"].update({
+        "phase": "jupyter-scientific-full",
+        "interval_id": "jupyter-scientific-full:201344:262144",
+        "start_row": 201344, "resume_row": 201376, "end_row": 262144,
+    })
+    live["heartbeat"] = {"source": "replay_progress", "row": 202088,
+                         "rows_per_second": 7.99, "age_seconds": 0.5,
+                         "row_source_lag_seconds": 0.0, "sample_seconds": 2.0}
+
+    decision = classify_probe(live, stall_seconds=1800)
+    assert decision.kind == "fix_required"
+    # The convergence annex still fires; this one is additive, not a swap.
+    assert "advancing 8.0 rows/s at row 202088 of 262144" in decision.reason
+    # The staleness annex itself, with both ages, because the comparison is
+    # the point -- "19.6h old" alone does not say it is unreachable.
+    assert "19.6h old and predates this supervisor" in decision.reason
+    assert "0.1h old" in decision.reason
+    assert "confirm it is still reachable before re-debugging it" in decision.reason
+
+
+def test_a_failure_from_the_running_supervisor_is_not_called_history() -> None:
+    """The suppression has to stay narrow or it hides live faults.
+
+    A failure produced BY the process now running is exactly the one worth
+    debugging, and an annex that called it history would send the next agent
+    away from the only reachable cause on the host. So the annex keys on the
+    probe's own comparison rather than on the age alone -- a 19 h-old failure
+    under a 40 h-old supervisor is still live.
+    """
+    live = probe("deferred_replay_training")
+    live["admissions"] = {
+        "hours_since_admission": 111.6,
+        "gate_artifacts": 49,
+        "last_failure": "deferred replay worker exited 1; stderr=/srv/x.log",
+        "last_failure_age_hours": 19.62,
+        "last_failure_predates_supervisor": False,
+        "supervisor_age_hours": 40.0,
+    }
+    live["status"].update({
+        "interval_id": "go-systems:0:131072", "end_row": 131072,
+    })
+    live["heartbeat"] = {"source": "replay_progress", "row": 86320,
+                         "rows_per_second": 12.8, "age_seconds": 0.5,
+                         "row_source_lag_seconds": 0.0, "sample_seconds": 2.0}
+
+    decision = classify_probe(live, stall_seconds=1800)
+    assert decision.kind == "fix_required"
+    assert "predates this supervisor" not in decision.reason
+    # And a payload from an older watcher, carrying no verdict at all, must
+    # not be read as "live" either -- absence is not False.
+    live["admissions"]["last_failure_predates_supervisor"] = None
+    assert "predates this supervisor" not in classify_probe(
+        live, stall_seconds=1800).reason
+
+
+def test_the_probe_publishes_the_staleness_fields_it_is_classified_on() -> None:
+    """A classifier keyed on a field nothing writes is a vacuous check.
+
+    This repository has already paid for that once: a watchdog globbed
+    `*interval_recall*`, which nothing creates, and reported 0 forever. The
+    annex above reads `last_failure_predates_supervisor` out of the payload,
+    so the shipped probe body has to actually emit it -- and has to capture
+    the supervisor start time it is compared against.
+    """
+    body = remote_probe_body()
+    for key in ("'last_failure_unix'", "'last_failure_age_hours'",
+                "'last_failure_predates_supervisor'",
+                "'supervisor_started_unix'", "'supervisor_age_hours'"):
+        assert key in body, f"the shipped probe never publishes {key}"
+    # The comparison needs a supervisor start time, and it has to come from
+    # the process table rather than from the status file -- the status file
+    # is written by whichever lifecycle event ran last, not at startup.
+    assert "supervisor_started_unix = max(" in body
+    assert "path.parent.stat().st_mtime" in body
+    # And the failure's own timestamp has to be captured where the failure is
+    # read, not inferred later from file mtimes.
+    assert "recent_fail_unix = when" in body

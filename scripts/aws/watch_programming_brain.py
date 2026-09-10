@@ -431,6 +431,28 @@ def classify_probe(probe: dict, *, stall_seconds: float,
                     f"payload carries no convergence evidence -- read the "
                     f"replay progress file directly before repairing anything"
                 )
+            # AND SAY WHETHER THE NAMED FAILURE IS STILL REACHABLE.
+            # `last_failure` comes from an append-only ledger that outlives
+            # every process that wrote to it, so the newest entry can name a
+            # cause repaired generations ago. CLAUDE.md has said "timestamp
+            # last_failure against process start before re-debugging it"
+            # since 2026-09-10 -- but that instruction was addressed to a
+            # reader the payload gave nothing to act on, so obeying it cost a
+            # round trip to the host every time. Measured 2026-09-10 on the
+            # `quarantine_ready` payload: a worker exit 19.6 h old, quoted
+            # against a supervisor 0.14 h old, whose registry SchemaError had
+            # been redeployed 16.6 h earlier. Two probes went to prove the
+            # ledger text was history.
+            stale = admissions.get("last_failure_predates_supervisor")
+            if stale and admissions.get("last_failure"):
+                converging += (
+                    f"; the named last_failure is "
+                    f"{float(admissions.get('last_failure_age_hours') or 0):.1f}h "
+                    f"old and predates this supervisor "
+                    f"({float(admissions.get('supervisor_age_hours') or 0):.1f}h "
+                    f"old), so it describes a previous generation -- confirm it "
+                    f"is still reachable before re-debugging it"
+                )
             return Decision(
                 "fix_required",
                 f"no interval admitted for {float(since):.1f}h while the "
@@ -476,6 +498,11 @@ try:
 except Exception as exc:
     status = {{'state': 'missing', 'error': str(exc)}}
 supervisors = wrappers = workers = 0
+# When the CURRENT supervisor generation started. `last_failure` is read from
+# an append-only ledger that outlives every process which wrote to it, so the
+# age of the newest failure says nothing on its own about whether that failure
+# is still reachable. Capturing this here is what lets the payload answer it.
+supervisor_started_unix = 0.0
 for path in pathlib.Path('/proc').glob('[0-9]*/cmdline'):
     try:
         command = path.read_bytes().replace(b'\\0', b' ').decode(errors='replace')
@@ -486,6 +513,14 @@ for path in pathlib.Path('/proc').glob('[0-9]*/cmdline'):
             and 'programming_curriculum_supervisor.py' in command
             and {runtime!r} in command):
         supervisors += 1
+        try:
+            # /proc/<pid> is created when the process is, so its mtime is the
+            # start time. Take the NEWEST across generations: a stale entry
+            # would understate the age and re-arm the trap this closes.
+            supervisor_started_unix = max(
+                supervisor_started_unix, path.parent.stat().st_mtime)
+        except OSError:
+            pass
     if process_name == 'bash' and 'run_programming_curriculum_service.sh' in command:
         wrappers += 1
     if (process_name.startswith('python')
@@ -568,6 +603,7 @@ admitted_unix = 0.0
 last_yield = {{}}
 recent_fail = ''
 recent_fail_suites = []
+recent_fail_unix = 0.0
 worker_killed = 0
 gate_reached = 0
 
@@ -624,6 +660,7 @@ try:
             full_fail = str(ev.get('error') or '')
             recent_fail = summarize_failure(full_fail)
             recent_fail_suites = failing_suites(full_fail)
+            recent_fail_unix = when
             # Which half of the transaction died? A worker killed by the
             # memory guard never reached the gate; anything else means the
             # gate ran and returned a verdict. Both arrive as the same
@@ -952,6 +989,34 @@ print(json.dumps({{
         # failure was not a suite verdict (a worker exit, say), not that
         # every suite passed.
         'last_failure_suites': recent_fail_suites,
+        # WHEN, not just what. `curriculum-health.jsonl` is append-only and
+        # outlives every supervisor generation, so the newest failure in it
+        # can be arbitrarily old and already repaired. CLAUDE.md has said
+        # "timestamp last_failure against process start before re-debugging
+        # it" since 2026-09-10, but the payload carried no timestamp, so the
+        # only way to act on that instruction was a round trip to the host --
+        # and this wake-up spent two of them re-deriving it. Measured
+        # 2026-09-10 on THIS payload: `last_failure` was a worker exit 19.6 h
+        # old, named against a supervisor 0.14 h old, whose cause (a registry
+        # SchemaError) had been redeployed 16.6 h earlier. Publishing the age
+        # beside the text is what makes "is this still reachable?" answerable
+        # without leaving the payload.
+        'last_failure_unix': recent_fail_unix or None,
+        'last_failure_age_hours': (
+            round((time.time() - recent_fail_unix) / 3600.0, 2)
+            if recent_fail_unix else None),
+        # True means no process now running could have produced it. That is
+        # not proof the cause is fixed -- an unreached code path also never
+        # fails -- but it does mean the ledger text is evidence about a
+        # PREVIOUS generation, and re-debugging it starts from the wrong end.
+        'last_failure_predates_supervisor': (
+            bool(recent_fail_unix and supervisor_started_unix
+                 and recent_fail_unix < supervisor_started_unix)
+            if (recent_fail_unix and supervisor_started_unix) else None),
+        'supervisor_started_unix': supervisor_started_unix or None,
+        'supervisor_age_hours': (
+            round((time.time() - supervisor_started_unix) / 3600.0, 2)
+            if supervisor_started_unix else None),
     }},
     'memory': {{
         'available_gb': round(meminfo.get('MemAvailable', 0) / 2**20, 2),
