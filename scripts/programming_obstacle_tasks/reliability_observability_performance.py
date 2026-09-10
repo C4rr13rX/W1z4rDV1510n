@@ -1411,3 +1411,466 @@ for bad_items, bad_age in ((0, 1.0), (-1, 1.0), ("3", 1.0), (3, 0), (3, -1)):
         )
 '''),
 ]
+
+
+# --------------------------------------------------------------------------
+# Id block 0101 and up.
+#
+# Numbered away from the 0001-0016 block above rather than continuing it, so a
+# concurrent session appending 0017 to this family cannot collide with these.
+# `tests/obstacle_references.py` turns a duplicate id into an ImportError, but
+# only after both blocks are written; a disjoint block avoids the rework.
+#
+# Each of the three measures a decision a *fixed* rule gets wrong, which is the
+# reliability defect that survives review: a fixed timeout cannot tell a
+# slow-but-healthy dependency from a dead one, a fixed sampling rate throws
+# away the errors it exists to capture, and a fixed threshold flaps. The
+# validators therefore compare the candidate against ITSELF under two input
+# regimes -- metronomic against jittery, error against slow, steady against
+# oscillating -- because any single-regime check admits the fixed rule.
+# --------------------------------------------------------------------------
+
+TASKS.extend([
+    task(
+        f"{FAMILY}-0101", FAMILY,
+        prompt=(
+            "Implement a Python class PhiAccrualDetector(window_size, "
+            "min_stddev_seconds) that decides whether a service is up from "
+            "the statistics of its own heartbeat arrivals rather than from a "
+            "fixed timeout. heartbeat(timestamp) records an arrival at that "
+            "float unix time; arrivals are non-decreasing and a timestamp "
+            "earlier than the previous one must raise ValueError. Retain at "
+            "most window_size of the most recent inter-arrival intervals, "
+            "discarding the oldest first, and provide intervals() returning "
+            "the retained intervals oldest first. phi(now) returns a float "
+            "suspicion level: let m be the mean and s the population standard "
+            "deviation of the retained intervals, with s raised to "
+            "min_stddev_seconds if it is smaller, and let elapsed be "
+            "now - last_arrival. Return 0.0 if elapsed <= 0. Otherwise return "
+            "-log10(P), where P is the probability that an interval exceeds "
+            "elapsed under a normal distribution with mean m and standard "
+            "deviation s, that is P = 1 - 0.5 * (1 + erf((elapsed - m) / "
+            "(s * sqrt(2)))), clamped up to 1e-300 so phi stays finite. Raise "
+            "ValueError from phi if fewer than two intervals are retained, "
+            "and from the constructor if window_size is not an integer "
+            "greater than 1 or min_stddev_seconds is not a positive number."
+        ),
+        timeout_seconds=60.0,
+        validator=LOAD_CANDIDATE + require("PhiAccrualDetector")
+        + SHAPE_GUARDS + r'''
+import math
+
+# --- the memory ceiling holds under load ------------------------------------
+# A detector that simply retains every interval answers every accuracy
+# question below perfectly and is still wrong: its footprint grows without
+# bound for the lifetime of the process it is watching.
+detector = built(PhiAccrualDetector(64, 0.05), "PhiAccrualDetector(64, 0.05)")
+having(detector, "heartbeat", "phi", "intervals", what="the detector")
+for index in range(200000):
+    detector.heartbeat(1000.0 + index * 1.0)
+retained = iterating(detector.intervals(), "intervals()")
+assert len(retained) == 64, (
+    f"retained {len(retained)} intervals after 200000 heartbeats; "
+    "window_size was 64"
+)
+
+# --- and the window holds the RECENT intervals, not the first ones ----------
+recent = PhiAccrualDetector(3, 0.05)
+for stamp in (0.0, 5.0, 15.0, 16.0, 17.0):
+    recent.heartbeat(stamp)
+kept = [round(value, 6) for value in recent.intervals()]
+assert kept == [10.0, 1.0, 1.0], (
+    f"expected the three most recent intervals [10.0, 1.0, 1.0], got {kept}"
+)
+
+# --- phi is undefined before there is a distribution to speak of ------------
+cold = PhiAccrualDetector(8, 0.05)
+for count in range(2):
+    try:
+        cold.phi(100.0)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(
+            f"phi must raise ValueError with {count} intervals retained"
+        )
+    cold.heartbeat(float(count))
+
+# --- a fresh heartbeat is not suspicious ------------------------------------
+fresh = PhiAccrualDetector(16, 0.05)
+for index in range(8):
+    fresh.heartbeat(1000.0 + index)
+assert fresh.phi(1007.0) == 0.0, "phi must be 0.0 when elapsed is zero"
+assert fresh.phi(1006.0) == 0.0, "phi must be 0.0 when elapsed is negative"
+
+# --- suspicion rises monotonically with silence -----------------------------
+previous = -1.0
+for silence in (0.5, 1.0, 1.5, 2.0, 3.0, 5.0):
+    current = fresh.phi(1007.0 + silence)
+    assert isinstance(current, float), f"phi returned {type(current).__name__}"
+    assert current >= previous, (
+        f"phi fell from {previous} to {current} as silence grew to {silence}s"
+    )
+    previous = current
+
+# --- THE CONTRACT: suspicion adapts to the stream's own variance ------------
+# Both streams below have a mean interval of 1.0s and are then silent for the
+# same 2.0s. A fixed timeout, or any implementation that ignores the spread,
+# must score them identically. A phi-accrual detector must not: two seconds of
+# silence is damning from a metronome and unremarkable from a jittery link.
+metronome = PhiAccrualDetector(32, 0.05)
+stamp = 1000.0
+for _ in range(32):
+    stamp += 1.0
+    metronome.heartbeat(stamp)
+
+jittery = PhiAccrualDetector(32, 0.05)
+wobble = [0.4, 1.6, 0.5, 1.5, 0.6, 1.4, 0.7, 1.3]
+moment = 1000.0
+for index in range(32):
+    moment += wobble[index % len(wobble)]
+    jittery.heartbeat(moment)
+
+steady_phi = metronome.phi(stamp + 2.0)
+noisy_phi = jittery.phi(moment + 2.0)
+assert steady_phi > noisy_phi * 5.0, (
+    f"after the same 2.0s of silence the metronomic stream scored "
+    f"{steady_phi:.3f} and the jittery stream {noisy_phi:.3f}; a detector "
+    "that adapts to observed variance must find the metronome far more "
+    "suspicious, so this is a fixed-threshold answer"
+)
+assert noisy_phi < 10.0, (
+    f"the jittery stream scored {noisy_phi:.3f} after a silence well inside "
+    "its own spread; that is a false positive"
+)
+
+# --- the standard-deviation floor keeps a perfect metronome finite ----------
+# Without it the variance is exactly zero and the normal CDF divides by it.
+exact = PhiAccrualDetector(8, 0.25)
+for index in range(9):
+    exact.heartbeat(float(index))
+value = exact.phi(8.0 + 0.25)
+assert math.isfinite(value), f"phi returned {value!r} on a zero-variance stream"
+
+# --- clamped, so a long silence saturates instead of overflowing ------------
+huge = exact.phi(8.0 + 10000.0)
+assert math.isfinite(huge), f"phi returned {huge!r} after a very long silence"
+assert huge <= 300.0 + 1e-6, (
+    f"phi saturates at -log10(1e-300) = 300, got {huge}"
+)
+
+# --- arrivals are ordered ---------------------------------------------------
+ordered = PhiAccrualDetector(4, 0.05)
+ordered.heartbeat(10.0)
+ordered.heartbeat(11.0)
+try:
+    ordered.heartbeat(10.5)
+except ValueError:
+    pass
+else:
+    raise AssertionError(
+        "a heartbeat earlier than the last must raise ValueError"
+    )
+
+# --- constructor validation -------------------------------------------------
+for bad_window, bad_floor in (
+    (1, 0.05), (0, 0.05), (-4, 0.05), (True, 0.05), ("8", 0.05), (8.0, 0.05),
+    (8, 0), (8, -1.0), (8, "0.05"), (8, True),
+):
+    try:
+        PhiAccrualDetector(bad_window, bad_floor)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(
+            f"PhiAccrualDetector({bad_window!r}, {bad_floor!r}) must raise "
+            "ValueError"
+        )
+'''),
+    task(
+        f"{FAMILY}-0102", FAMILY,
+        prompt=(
+            "Implement a Python class TailSampler(capacity) that keeps a "
+            "bounded, deterministic sample of finished traces. "
+            "offer(trace_id, is_error, duration_ms) records one finished "
+            "trace, where trace_id is a str, is_error a bool, and duration_ms "
+            "a non-negative int or float; anything else raises ValueError. "
+            "The sampler retains at most capacity traces and must never drop "
+            "an error trace in favour of a non-error one. Rank a retained "
+            "trace by is_error first, so every error outranks every "
+            "non-error, then by larger duration_ms, then by earlier arrival. "
+            "When the sampler is full, a newly offered trace that outranks "
+            "the weakest retained trace evicts it, and one that does not is "
+            "discarded. Offering a trace_id that is already retained updates "
+            "its duration and error flag in place and keeps its original "
+            "arrival position. Provide sampled() returning the retained trace "
+            "ids as a list ordered from highest rank to lowest. Raise "
+            "ValueError from the constructor if capacity is not a positive "
+            "integer."
+        ),
+        timeout_seconds=60.0,
+        validator=LOAD_CANDIDATE + require("TailSampler")
+        + SHAPE_GUARDS + r'''
+# --- the capacity ceiling holds ---------------------------------------------
+sampler = built(TailSampler(50), "TailSampler(50)")
+having(sampler, "offer", "sampled", what="the sampler")
+for index in range(100000):
+    sampler.offer(f"t{index}", False, float(index % 997))
+kept = iterating(sampler.sampled(), "sampled()")
+assert len(kept) == 50, (
+    f"retained {len(kept)} traces after 100000 offers; capacity was 50"
+)
+assert len(set(kept)) == len(kept), f"sampled() repeated a trace id: {kept}"
+
+# --- THE CONTRACT: a rare error survives a flood of faster successes --------
+# This is the whole reason tail sampling exists. A head sampler, a reservoir
+# sampler, and a keep-the-slowest heap all pass a bounded-memory check and all
+# lose the error, which is the one trace anybody will go looking for.
+flood = TailSampler(10)
+flood.offer("boom", True, 3.0)
+for index in range(10000):
+    flood.offer(f"ok{index}", False, 500.0 + index)
+survivors = flood.sampled()
+assert "boom" in survivors, (
+    "the single error trace was evicted by non-error traces; an error must "
+    f"outrank every non-error regardless of duration. kept: {survivors}"
+)
+assert survivors[0] == "boom", (
+    f"the error trace must rank first, got {survivors[0]!r}"
+)
+
+# --- errors are kept in preference, and ranked among themselves -------------
+mixed = TailSampler(3)
+mixed.offer("slow", False, 9000.0)
+mixed.offer("e-small", True, 1.0)
+mixed.offer("e-big", True, 2.0)
+mixed.offer("e-mid", True, 1.5)
+assert mixed.sampled() == ["e-big", "e-mid", "e-small"], (
+    f"errors must fill the sampler, ordered by duration: {mixed.sampled()}"
+)
+
+# --- when everything is an error, the slowest win ---------------------------
+slowest = TailSampler(3)
+for index, duration in enumerate([5.0, 100.0, 1.0, 50.0, 2.0, 75.0]):
+    slowest.offer(f"e{index}", True, duration)
+assert slowest.sampled() == ["e1", "e5", "e3"], (
+    f"expected the three slowest errors, got {slowest.sampled()}"
+)
+
+# --- a tie is broken by arrival, deterministically --------------------------
+ties = TailSampler(2)
+ties.offer("first", False, 10.0)
+ties.offer("second", False, 10.0)
+ties.offer("third", False, 10.0)
+assert ties.sampled() == ["first", "second"], (
+    f"equal-ranked traces keep the earlier arrivals, got {ties.sampled()}"
+)
+
+# --- a weaker trace is discarded, not admitted ------------------------------
+full = TailSampler(2)
+full.offer("a", False, 100.0)
+full.offer("b", False, 90.0)
+full.offer("weak", False, 1.0)
+assert full.sampled() == ["a", "b"], (
+    f"a trace weaker than the weakest retained must be discarded: "
+    f"{full.sampled()}"
+)
+
+# --- re-offering an id updates it in place ----------------------------------
+update = TailSampler(2)
+update.offer("x", False, 5.0)
+update.offer("y", False, 50.0)
+update.offer("x", True, 6.0)
+assert sorted(update.sampled()) == ["x", "y"], (
+    f"re-offering a retained id must not add a second entry: {update.sampled()}"
+)
+assert update.sampled()[0] == "x", (
+    f"x was promoted to an error and must now rank first: {update.sampled()}"
+)
+
+# --- the update keeps the original arrival position -------------------------
+position = TailSampler(2)
+position.offer("early", False, 10.0)
+position.offer("late", False, 5.0)
+position.offer("late", False, 10.0)
+assert position.sampled() == ["early", "late"], (
+    "an updated trace keeps its original arrival for tie-breaking, so "
+    f"'early' still ranks first; got {position.sampled()}"
+)
+
+# --- argument validation ----------------------------------------------------
+guard = TailSampler(4)
+for bad in (
+    (123, False, 1.0), (None, False, 1.0), ("t", "no", 1.0), ("t", 1, 1.0),
+    ("t", False, -1.0), ("t", False, "5"), ("t", False, None),
+    ("t", False, True),
+):
+    try:
+        guard.offer(*bad)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"offer{bad!r} must raise ValueError")
+
+for bad_capacity in (0, -1, True, "5", 2.0, None):
+    try:
+        TailSampler(bad_capacity)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(
+            f"TailSampler({bad_capacity!r}) must raise ValueError"
+        )
+'''),
+    task(
+        f"{FAMILY}-0103", FAMILY,
+        prompt=(
+            "Implement a Python class FlapSuppressor(trigger_threshold, "
+            "clear_threshold, dwell_seconds) that turns a noisy metric into a "
+            "stable alert state using hysteresis and a dwell time. "
+            "observe(value, timestamp) records one sample at that float unix "
+            "time and returns the alert state after it, either 'ok' or "
+            "'alerting'; timestamps are non-decreasing and an earlier one "
+            "raises ValueError. The state starts 'ok'. It becomes 'alerting' "
+            "only once value has been greater than or equal to "
+            "trigger_threshold on every sample of an unbroken run spanning at "
+            "least dwell_seconds, measured from that run's first sample. It "
+            "returns to 'ok' only once value has been less than or equal to "
+            "clear_threshold on every sample of an unbroken run spanning at "
+            "least dwell_seconds, measured the same way. A value strictly "
+            "between the two thresholds belongs to neither run and breaks "
+            "whichever run is in progress; a broken run starts over and the "
+            "current state is kept. Completing a transition also clears the "
+            "run in progress. Provide state() returning the current state "
+            "without recording a sample. Raise ValueError from the "
+            "constructor if either threshold is not a real number, if "
+            "trigger_threshold is not strictly greater than clear_threshold, "
+            "or if dwell_seconds is not a positive number."
+        ),
+        timeout_seconds=60.0,
+        validator=LOAD_CANDIDATE + require("FlapSuppressor")
+        + SHAPE_GUARDS + r'''
+# --- a spike is not an incident ---------------------------------------------
+alerter = built(FlapSuppressor(90.0, 70.0, 30.0), "FlapSuppressor(90, 70, 30)")
+having(alerter, "observe", "state", what="the suppressor")
+assert alerter.state() == "ok", (
+    f"initial state must be 'ok', got {alerter.state()!r}"
+)
+assert alerter.observe(99.0, 1000.0) == "ok", (
+    "one sample above the trigger cannot alert before the dwell elapses"
+)
+assert alerter.observe(99.0, 1020.0) == "ok", (
+    "20s of a 30s dwell is not enough to alert"
+)
+assert alerter.observe(10.0, 1025.0) == "ok", "still ok"
+
+# --- the run restarts after the break, so the old elapsed time is gone ------
+assert alerter.observe(99.0, 1030.0) == "ok", (
+    "the qualifying run was broken at 1025.0 and restarts at 1030.0"
+)
+assert alerter.observe(99.0, 1055.0) == "ok", (
+    "only 25s into the restarted run; alerting here means the break was "
+    "not honoured"
+)
+assert alerter.observe(99.0, 1060.0) == "alerting", (
+    "30s of unbroken breach must alert"
+)
+assert alerter.state() == "alerting", "state() must agree with observe()"
+
+# --- THE CONTRACT: the mid-band does not clear the alert --------------------
+# A single-threshold implementation treats anything below 90 as recovery and
+# resolves here. That is precisely the flap two thresholds exist to stop: the
+# metric is sitting between them, which is neither breach nor recovery.
+for offset in range(0, 400, 10):
+    state = alerter.observe(80.0, 1060.0 + offset)
+    assert state == "alerting", (
+        f"a value of 80.0 sits between clear=70.0 and trigger=90.0, so it "
+        f"must hold the current state; the alert cleared after {offset}s"
+    )
+
+# --- and oscillating across one threshold still does not clear it -----------
+moment = 1500.0
+for index in range(200):
+    moment += 5.0
+    state = alerter.observe(95.0 if index % 2 else 75.0, moment)
+    assert state == "alerting", (
+        "a metric flapping between 75.0 and 95.0 never sustains a clear run, "
+        f"so the alert must hold; it cleared at sample {index}"
+    )
+
+# --- a sustained recovery does clear it -------------------------------------
+assert alerter.observe(50.0, moment + 10.0) == "alerting", (
+    "recovery has not yet lasted the dwell"
+)
+assert alerter.observe(50.0, moment + 39.0) == "alerting", (
+    "29s of a 30s dwell must not clear the alert"
+)
+assert alerter.observe(50.0, moment + 40.0) == "ok", (
+    "30s of unbroken recovery must clear the alert"
+)
+
+# --- a broken recovery run restarts too -------------------------------------
+second = FlapSuppressor(10.0, 5.0, 4.0)
+second.observe(20.0, 0.0)
+second.observe(20.0, 4.0)
+assert second.state() == "alerting", "the alert should be raised by 4.0s"
+second.observe(1.0, 5.0)
+second.observe(7.0, 6.0)          # mid-band: breaks the recovery run
+second.observe(1.0, 7.0)          # a fresh run starts here
+assert second.observe(1.0, 10.0) == "alerting", (
+    "the recovery run restarted at 7.0, so 10.0 is only 3s into a 4s dwell"
+)
+assert second.observe(1.0, 11.0) == "ok", "4s of unbroken recovery clears it"
+
+# --- the boundaries are inclusive -------------------------------------------
+edges = FlapSuppressor(10.0, 5.0, 2.0)
+edges.observe(10.0, 0.0)
+assert edges.observe(10.0, 2.0) == "alerting", (
+    "a value exactly at trigger_threshold counts as a breach"
+)
+edges.observe(5.0, 3.0)
+assert edges.observe(5.0, 5.0) == "ok", (
+    "a value exactly at clear_threshold counts as recovery"
+)
+
+# --- completing a transition clears the run in progress ---------------------
+# Otherwise the run that just alerted keeps accumulating, and the sample after
+# it re-fires a transition that has already happened.
+settled = FlapSuppressor(10.0, 5.0, 2.0)
+settled.observe(20.0, 0.0)
+assert settled.observe(20.0, 2.0) == "alerting", "alerts at the dwell"
+assert settled.observe(1.0, 3.0) == "alerting", (
+    "the recovery run begins at 3.0 and has not yet lasted 2s"
+)
+assert settled.observe(1.0, 4.9) == "alerting", "still inside the dwell"
+assert settled.observe(1.0, 5.0) == "ok", "clears at 2s of recovery"
+
+# --- timestamps are ordered -------------------------------------------------
+ordered = FlapSuppressor(10.0, 5.0, 2.0)
+ordered.observe(1.0, 100.0)
+try:
+    ordered.observe(1.0, 99.0)
+except ValueError:
+    pass
+else:
+    raise AssertionError(
+        "a timestamp earlier than the last must raise ValueError"
+    )
+
+# --- constructor validation -------------------------------------------------
+for trigger, clear, dwell in (
+    (5.0, 10.0, 1.0), (5.0, 5.0, 1.0), ("9", 5.0, 1.0), (9.0, "5", 1.0),
+    (True, 5.0, 1.0), (9.0, True, 1.0), (9.0, 5.0, 0), (9.0, 5.0, -1.0),
+    (9.0, 5.0, "1"), (9.0, 5.0, True), (None, 5.0, 1.0),
+):
+    try:
+        FlapSuppressor(trigger, clear, dwell)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(
+            f"FlapSuppressor({trigger!r}, {clear!r}, {dwell!r}) must raise "
+            "ValueError"
+        )
+'''),
+])

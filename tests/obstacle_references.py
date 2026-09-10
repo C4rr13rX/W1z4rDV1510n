@@ -13280,3 +13280,189 @@ MUTATIONS["validation_parsing_serialization-0020"] = (
     "        return False\n"
     "    return len(value) == length",
 )
+
+
+# --------------------------------------------------------------------------
+# reliability_observability_performance, id block 0101 and up.
+#
+# Appended at the end of the file rather than inserted, so a session extending
+# this file from the front and one extending it from the back never touch the
+# same lines. Item assignment on both tables is what the duplicate scan in
+# `test_no_task_is_defined_twice_in_the_reference_tables` reads.
+# --------------------------------------------------------------------------
+
+REFERENCES["reliability_observability_performance-0101"] = r'''
+import math
+from collections import deque
+
+
+class PhiAccrualDetector:
+    def __init__(self, window_size, min_stddev_seconds):
+        if (
+            isinstance(window_size, bool)
+            or not isinstance(window_size, int)
+            or window_size <= 1
+        ):
+            raise ValueError("window_size must be an integer greater than 1")
+        if (
+            isinstance(min_stddev_seconds, bool)
+            or not isinstance(min_stddev_seconds, (int, float))
+            or min_stddev_seconds <= 0
+        ):
+            raise ValueError("min_stddev_seconds must be a positive number")
+        self._intervals = deque(maxlen=window_size)
+        self._floor = float(min_stddev_seconds)
+        self._last = None
+
+    def heartbeat(self, timestamp):
+        stamp = float(timestamp)
+        if self._last is not None:
+            if stamp < self._last:
+                raise ValueError("heartbeat timestamps must be non-decreasing")
+            self._intervals.append(stamp - self._last)
+        self._last = stamp
+
+    def intervals(self):
+        return list(self._intervals)
+
+    def phi(self, now):
+        if len(self._intervals) < 2:
+            raise ValueError("phi needs at least two retained intervals")
+        elapsed = float(now) - self._last
+        if elapsed <= 0:
+            return 0.0
+        count = len(self._intervals)
+        mean = sum(self._intervals) / count
+        variance = sum((value - mean) ** 2 for value in self._intervals) / count
+        stddev = max(math.sqrt(variance), self._floor)
+        cdf = 0.5 * (1.0 + math.erf((elapsed - mean) / (stddev * math.sqrt(2.0))))
+        survival = max(1.0 - cdf, 1e-300)
+        return -math.log10(survival)
+'''
+
+REFERENCES["reliability_observability_performance-0102"] = r'''
+class TailSampler:
+    def __init__(self, capacity):
+        if (
+            isinstance(capacity, bool)
+            or not isinstance(capacity, int)
+            or capacity <= 0
+        ):
+            raise ValueError("capacity must be a positive integer")
+        self._capacity = capacity
+        self._retained = {}
+        self._arrivals = 0
+
+    @staticmethod
+    def _rank(entry):
+        # Errors first, then longer durations, then earlier arrivals. The
+        # negated arrival makes "earlier is better" a plain tuple comparison.
+        is_error, duration, arrival = entry
+        return (1 if is_error else 0, duration, -arrival)
+
+    def offer(self, trace_id, is_error, duration_ms):
+        if not isinstance(trace_id, str):
+            raise ValueError("trace_id must be a str")
+        if not isinstance(is_error, bool):
+            raise ValueError("is_error must be a bool")
+        if (
+            isinstance(duration_ms, bool)
+            or not isinstance(duration_ms, (int, float))
+            or duration_ms < 0
+        ):
+            raise ValueError("duration_ms must be a non-negative number")
+        if trace_id in self._retained:
+            _, _, arrival = self._retained[trace_id]
+            self._retained[trace_id] = (is_error, float(duration_ms), arrival)
+            return
+        self._arrivals += 1
+        candidate = (is_error, float(duration_ms), self._arrivals)
+        if len(self._retained) < self._capacity:
+            self._retained[trace_id] = candidate
+            return
+        weakest = min(self._retained,
+                      key=lambda key: self._rank(self._retained[key]))
+        if self._rank(candidate) > self._rank(self._retained[weakest]):
+            del self._retained[weakest]
+            self._retained[trace_id] = candidate
+
+    def sampled(self):
+        return sorted(self._retained,
+                      key=lambda key: self._rank(self._retained[key]),
+                      reverse=True)
+'''
+
+REFERENCES["reliability_observability_performance-0103"] = r'''
+class FlapSuppressor:
+    def __init__(self, trigger_threshold, clear_threshold, dwell_seconds):
+        for name, value in (("trigger_threshold", trigger_threshold),
+                            ("clear_threshold", clear_threshold)):
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"{name} must be a real number")
+        if not trigger_threshold > clear_threshold:
+            raise ValueError(
+                "trigger_threshold must be strictly greater than clear_threshold"
+            )
+        if (
+            isinstance(dwell_seconds, bool)
+            or not isinstance(dwell_seconds, (int, float))
+            or dwell_seconds <= 0
+        ):
+            raise ValueError("dwell_seconds must be a positive number")
+        self._trigger = float(trigger_threshold)
+        self._clear = float(clear_threshold)
+        self._dwell = float(dwell_seconds)
+        self._state = "ok"
+        self._run_kind = None
+        self._run_start = None
+        self._last_stamp = None
+
+    def state(self):
+        return self._state
+
+    def observe(self, value, timestamp):
+        stamp = float(timestamp)
+        if self._last_stamp is not None and stamp < self._last_stamp:
+            raise ValueError("timestamps must be non-decreasing")
+        self._last_stamp = stamp
+
+        # The mid-band belongs to neither run, which is what stops the flap.
+        if value >= self._trigger:
+            kind = "high"
+        elif value <= self._clear:
+            kind = "low"
+        else:
+            kind = None
+
+        if kind != self._run_kind:
+            self._run_kind = kind
+            self._run_start = stamp if kind is not None else None
+
+        if kind == "high" and self._state == "ok":
+            if stamp - self._run_start >= self._dwell:
+                self._state = "alerting"
+                self._run_kind = None
+                self._run_start = None
+        elif kind == "low" and self._state == "alerting":
+            if stamp - self._run_start >= self._dwell:
+                self._state = "ok"
+                self._run_kind = None
+                self._run_start = None
+        return self._state
+'''
+
+# Each mutation removes exactly the property its validator was written to
+# measure, so a validator that merely accepts anything parseable fails the
+# second half of the pair.
+MUTATIONS["reliability_observability_performance-0101"] = (
+    "        self._intervals = deque(maxlen=window_size)",
+    "        self._intervals = deque()",
+)
+MUTATIONS["reliability_observability_performance-0102"] = (
+    "        return (1 if is_error else 0, duration, -arrival)",
+    "        return (duration, 1 if is_error else 0, -arrival)",
+)
+MUTATIONS["reliability_observability_performance-0103"] = (
+    "        elif value <= self._clear:\n            kind = \"low\"\n        else:\n            kind = None",
+    "        else:\n            kind = \"low\"",
+)
