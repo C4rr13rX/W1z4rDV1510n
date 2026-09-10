@@ -11811,3 +11811,91 @@ MUTATIONS["databases_migrations_transactions-0305"] = (
     '    connection.execute("BEGIN IMMEDIATE")\n'
     '    connection.execute("PRAGMA foreign_keys = ON")',
 )
+
+
+REFERENCES["concurrency_async_distributed-0301"] = r'''
+import collections
+
+
+class SlidingWindowLimiter:
+    def __init__(self, limit, window_seconds, clock):
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("limit must be a positive integer")
+        if isinstance(window_seconds, bool) or not isinstance(
+                window_seconds, (int, float)) or window_seconds <= 0:
+            raise ValueError("window_seconds must be positive")
+        self.limit = limit
+        self.window_seconds = float(window_seconds)
+        self.clock = clock
+        self._admitted = collections.deque()
+
+    def _expire(self, now):
+        cutoff = now - self.window_seconds
+        while self._admitted and self._admitted[0] <= cutoff:
+            self._admitted.popleft()
+
+    def allow(self):
+        now = self.clock()
+        self._expire(now)
+        if len(self._admitted) >= self.limit:
+            return False
+        self._admitted.append(now)
+        return True
+
+    def retry_after(self):
+        now = self.clock()
+        self._expire(now)
+        if len(self._admitted) < self.limit:
+            return 0.0
+        return (self._admitted[0] + self.window_seconds) - now
+'''
+
+
+REFERENCES["concurrency_async_distributed-0302"] = r'''
+def acquire_all(locks):
+    ordered = list(locks)
+    seen = set()
+    for lock in ordered:
+        name = getattr(lock, "name", None)
+        if not isinstance(name, str):
+            raise ValueError("every lock needs a str name, got %r" % (name,))
+        if name in seen:
+            raise ValueError("duplicate lock name %r" % (name,))
+        seen.add(name)
+
+    ordered.sort(key=lambda lock: lock.name)
+    taken = []
+    try:
+        for lock in ordered:
+            lock.acquire()
+            taken.append(lock)
+    except BaseException:
+        for lock in reversed(taken):
+            lock.release()
+        raise
+    return [lock.name for lock in taken]
+'''
+
+
+# Count admissions per calendar bucket instead of per continuous window.
+# Every case inside a single bucket agrees, and so does an admission that has
+# genuinely aged out; only a burst that straddles a multiple of the window
+# diverges, refilling the budget early and admitting 2x the limit.
+MUTATIONS["concurrency_async_distributed-0301"] = (
+    "        cutoff = now - self.window_seconds\n"
+    "        while self._admitted and self._admitted[0] <= cutoff:\n"
+    "            self._admitted.popleft()",
+    "        bucket = now // self.window_seconds\n"
+    "        while (self._admitted\n"
+    "               and self._admitted[0] // self.window_seconds < bucket):\n"
+    "            self._admitted.popleft()",
+)
+
+# Acquire in the order the caller happened to pass. Each call on its own
+# still acquires everything and unwinds correctly on failure; what is lost is
+# that two callers agree, which is the only thing standing between them and a
+# lock-order inversion.
+MUTATIONS["concurrency_async_distributed-0302"] = (
+    "    ordered.sort(key=lambda lock: lock.name)",
+    "    pass",
+)

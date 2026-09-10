@@ -1189,4 +1189,225 @@ for bad in (0, -3):
         raise AssertionError(f"CyclicBarrier({bad}) was accepted")
 ''',
     ),
+
+    # Ids from 0301, matching the block this session used in
+    # databases_migrations_transactions, so a concurrent author working from
+    # 0001.. or 0101.. cannot silently shadow them.
+    task(
+        f"{FAMILY}-0301", FAMILY,
+        prompt=(
+            "Implement a Python class SlidingWindowLimiter(limit, "
+            "window_seconds, clock) enforcing at most `limit` admissions in "
+            "any window of `window_seconds`. `clock` is a zero-argument "
+            "callable returning a monotonic float in seconds; call it rather "
+            "than reading time yourself. allow() returns True and records an "
+            "admission when the number already recorded within the last "
+            "window_seconds is below limit, and returns False without "
+            "recording otherwise. An admission recorded at time t no longer "
+            "counts once the clock reaches t + window_seconds exactly. The "
+            "window is continuous, not a calendar bucket: the limit must "
+            "hold across every instant, so admissions must not become "
+            "available again merely because the clock crossed a multiple of "
+            "window_seconds. retry_after() returns 0.0 when allow() would "
+            "currently succeed, and otherwise the seconds until the oldest "
+            "counted admission expires. Raise ValueError when limit is not a "
+            "positive integer or window_seconds is not positive."
+        ),
+        validator=LOAD_CANDIDATE + require("SlidingWindowLimiter") + r'''
+now = [0.0]
+
+
+def clock():
+    return now[0]
+
+
+limiter = SlidingWindowLimiter(3, 10.0, clock)
+
+# The budget is spent, then refused.
+assert [limiter.allow() for _ in range(4)] == [True, True, True, False]
+assert limiter.retry_after() == 10.0
+
+# Still refused most of the way through the window.
+now[0] = 9.5
+assert limiter.allow() is False
+assert abs(limiter.retry_after() - 0.5) < 1e-9
+
+# At exactly t + window the oldest admission stops counting.
+now[0] = 10.0
+assert limiter.retry_after() == 0.0
+assert limiter.allow() is True
+
+# THE BOUNDARY BURST. Three admissions at t=8, then the clock crosses 10 --
+# a multiple of the window. A limiter that buckets by calendar interval
+# starts a fresh count there and admits three more, putting six admissions
+# inside a 2.5 second span while every other case above still agrees.
+now[0] = 0.0
+edge = SlidingWindowLimiter(3, 10.0, clock)
+now[0] = 8.0
+assert [edge.allow() for _ in range(3)] == [True, True, True]
+now[0] = 10.5
+assert edge.allow() is False, (
+    "crossing a multiple of the window is not a reason to refill the budget"
+)
+assert abs(edge.retry_after() - 7.5) < 1e-9, edge.retry_after()
+
+# And once the t=8 admissions really do age out, it opens again.
+now[0] = 18.0
+assert edge.allow() is True
+
+# A limit of one is the degenerate case that must still work.
+now[0] = 0.0
+single = SlidingWindowLimiter(1, 5.0, clock)
+assert single.allow() is True
+assert single.allow() is False
+now[0] = 5.0
+assert single.allow() is True
+
+# Refused calls record nothing, so the window does not creep forward.
+now[0] = 0.0
+creep = SlidingWindowLimiter(1, 4.0, clock)
+assert creep.allow() is True
+for tick in (1.0, 2.0, 3.0):
+    now[0] = tick
+    assert creep.allow() is False
+now[0] = 4.0
+assert creep.allow() is True, (
+    "a refused call must not extend the window by recording itself"
+)
+
+for bad_limit in (0, -1, 1.5, True, "2"):
+    try:
+        SlidingWindowLimiter(bad_limit, 10.0, clock)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("limit %r must raise ValueError" % (bad_limit,))
+
+for bad_window in (0, -3):
+    try:
+        SlidingWindowLimiter(3, bad_window, clock)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("window %r must raise ValueError" % (bad_window,))
+'''),
+
+    task(
+        f"{FAMILY}-0302", FAMILY,
+        prompt=(
+            "Implement a Python function acquire_all(locks) that takes a "
+            "list of lock objects and acquires every one of them. Each lock "
+            "has a `name` attribute of type str and acquire() and release() "
+            "methods taking no arguments. Callers reach these locks by "
+            "different routes and pass them in whatever order they happen to "
+            "hold them, so acquiring them in the order given lets two "
+            "callers take them in opposite orders and wait on each other "
+            "forever. Impose a total order instead: acquire in ascending "
+            "`name` order, so that the sequence depends only on which locks "
+            "are involved and not on the order the caller listed them. "
+            "Return the list of names in the order acquired. If an acquire() "
+            "raises, release the locks already acquired in the reverse of "
+            "the order they were taken and let the exception propagate. "
+            "Raise ValueError when two locks share a name, or when any name "
+            "is not a str, before acquiring anything."
+        ),
+        validator=LOAD_CANDIDATE + require("acquire_all") + r'''
+class Lock:
+    """Records into a shared log instead of blocking.
+
+    Deadlock cannot be demonstrated deterministically by running threads and
+    hoping they interleave, and a validator that depended on that would fail
+    on a loaded host. The property that actually prevents the deadlock is
+    observable without any concurrency at all: the acquisition sequence must
+    be a function of the SET of locks, not of the caller's argument order.
+    """
+
+    def __init__(self, name, log, fails=False):
+        self.name = name
+        self.log = log
+        self.fails = fails
+        self.held = False
+
+    def acquire(self):
+        if self.fails:
+            raise RuntimeError("cannot acquire %s" % self.name)
+        assert not self.held, "%s acquired twice" % self.name
+        self.held = True
+        self.log.append(("acquire", self.name))
+
+    def release(self):
+        assert self.held, "%s released without being held" % self.name
+        self.held = False
+        self.log.append(("release", self.name))
+
+
+def acquisitions(log):
+    return [name for kind, name in log if kind == "acquire"]
+
+
+# Two callers, opposite argument orders, one acquisition sequence.
+first, second = [], []
+a1, b1, c1 = Lock("alpha", first), Lock("beta", first), Lock("gamma", first)
+a2, b2, c2 = Lock("alpha", second), Lock("beta", second), Lock("gamma", second)
+
+assert acquire_all([c1, a1, b1]) == ["alpha", "beta", "gamma"]
+assert acquire_all([b2, c2, a2]) == ["alpha", "beta", "gamma"]
+assert acquisitions(first) == acquisitions(second), (
+    "the order two callers acquire in depends on how they listed the locks, "
+    "which is exactly the inversion that deadlocks"
+)
+assert all(lock.held for lock in (a1, b1, c1, a2, b2, c2))
+
+# Names order as strings, not by any incidental numeric reading.
+log = []
+ordered = acquire_all([Lock("item10", log), Lock("item9", log), Lock("item1", log)])
+assert ordered == ["item1", "item10", "item9"], ordered
+
+# A failure partway through unwinds what it took, newest first, and nothing
+# stays held.
+log = []
+good_a = Lock("aaa", log)
+good_b = Lock("bbb", log)
+broken = Lock("ccc", log, fails=True)
+try:
+    acquire_all([broken, good_b, good_a])
+except RuntimeError:
+    pass
+else:
+    raise AssertionError("a failing acquire must propagate")
+assert log == [
+    ("acquire", "aaa"), ("acquire", "bbb"),
+    ("release", "bbb"), ("release", "aaa"),
+], log
+assert not good_a.held and not good_b.held
+
+# A lock that fails first leaves nothing to unwind.
+log = []
+assert_first = Lock("aaa", log, fails=True)
+try:
+    acquire_all([assert_first, Lock("bbb", log)])
+except RuntimeError:
+    pass
+else:
+    raise AssertionError("a failing acquire must propagate")
+assert log == [], log
+
+# Duplicate and non-str names are refused before anything is acquired.
+log = []
+for bad in ([Lock("dup", log), Lock("dup", log)],
+            [Lock("ok", log), Lock(7, log)]):
+    try:
+        acquire_all(bad)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("invalid names must raise ValueError")
+    assert log == [], "nothing may be acquired before the names are checked"
+
+# Empty and single-lock inputs are ordinary.
+assert acquire_all([]) == []
+log = []
+assert acquire_all([Lock("only", log)]) == ["only"]
+assert acquisitions(log) == ["only"]
+'''),
 ]
