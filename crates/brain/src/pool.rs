@@ -4832,4 +4832,98 @@ mod resident_slot_tests {
         assert!(empty.resident_window(0, 64).is_empty());
         assert_eq!(empty.resident_len(), 0);
     }
+
+    /// The production failure behind [45e24952], reproduced rather than
+    /// inferred.  :8090 wrote a 179-byte `brain.bin.tmp` every
+    /// autocheckpoint interval for 25h and nothing else, because its
+    /// neurons are paged out to the wbrain store -- `/brain/stats` on
+    /// 2026-09-11 reported 665,101 neurons of which 525,547 were evicted --
+    /// and the legacy bincode snapshot refuses a non-resident body rather
+    /// than writing a brain that is missing 79% of itself.
+    ///
+    /// The 179 bytes are the fabric header plus pool 0's config; the very
+    /// next field is `neurons`, and that is where it dies.  This asserts on
+    /// the ERROR, which is the thing the item asked to be named, and on the
+    /// fact that the refusal is specific: a fully resident pool of the same
+    /// shape serialises.
+    #[test]
+    fn a_paged_out_neuron_body_refuses_the_legacy_snapshot_instead_of_shrinking_it() {
+        // Production's shape: every body asleep in the wbrain store.
+        let asleep = NeuronSlots::sleeping(665_101, 664_938);
+        assert_eq!(asleep.resident_count(), 0);
+        assert_eq!(asleep.len(), 665_101);
+
+        let err = bincode::serialize(&asleep)
+            .expect_err("a snapshot missing every neuron body must NOT be reported as success");
+        let message = err.to_string();
+        assert!(
+            message.contains("every neuron body to be resident"),
+            "the refusal must name why it refused, so the operator does not have to \
+             infer it from a file size; got: {message}"
+        );
+
+        // Partial residency fails too -- the silent-shrink case is the
+        // dangerous one, because it would write a plausible smaller file.
+        let mut partial = NeuronSlots::sleeping(3, 0);
+        assert!(partial.wake(
+            1,
+            Neuron::new_atom(1, "awake".into(), NeuronKind::Excitatory, 0),
+        ));
+        assert_ne!(partial.resident_count(), partial.len());
+        assert!(
+            bincode::serialize(&partial).is_err(),
+            "2 of 3 bodies resident must refuse, not write a 1-neuron pool"
+        );
+
+        // The guard is specific, not a blanket refusal: the same pool with
+        // every body in RAM round-trips.  Without this the test would pass
+        // against a serializer that simply never works.
+        let resident = NeuronSlots::from_dense(vec![
+            Neuron::new_atom(0, "a".into(), NeuronKind::Excitatory, 0),
+            Neuron::new_atom(1, "b".into(), NeuronKind::Excitatory, 0),
+            Neuron::new_atom(2, "c".into(), NeuronKind::Excitatory, 0),
+        ]);
+        assert_eq!(resident.resident_count(), resident.len());
+        let bytes = bincode::serialize(&resident)
+            .expect("a fully resident pool must still checkpoint down the legacy path");
+        assert!(bytes.len() > 8, "a real pool writes more than a length prefix");
+    }
+
+    /// The whole production signature in one assertion: the refusal above,
+    /// travelling through the checkpoint writer, must leave NO torn temp
+    /// file behind.  Before 858ca7d this combination is exactly what put a
+    /// 179-byte `brain.bin.tmp` on disk and left it there -- and a torn tmp
+    /// is not inert, it aborted the node with a 4.5-exabyte allocation on
+    /// 2026-09-05.
+    #[test]
+    fn a_checkpoint_of_paged_out_neurons_leaves_no_torn_temp_file() {
+        let dir = std::env::temp_dir().join("w1z4rd_paged_checkpoint_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let final_path = dir.join("brain.bin");
+        let tmp_path = final_path.with_extension("bin.tmp");
+        let _ = std::fs::remove_file(&final_path);
+        let _ = std::fs::remove_file(&tmp_path);
+        std::fs::write(&final_path, b"previous good snapshot").expect("seed final");
+
+        let asleep = NeuronSlots::sleeping(665_101, 664_938);
+        let result = crate::persistence::save_serializable(&asleep, &final_path);
+
+        let err = result.expect_err("a refused checkpoint must not be reported as success");
+        assert!(
+            err.to_string().contains("every neuron body to be resident"),
+            "the io error must carry the ORIGINAL cause, not a cleanup error: {err}"
+        );
+        assert!(
+            !tmp_path.exists(),
+            "a failed checkpoint must not leave a torn temp file: {} survived",
+            tmp_path.display()
+        );
+        assert_eq!(
+            std::fs::read(&final_path).expect("final still readable"),
+            b"previous good snapshot",
+            "a failed checkpoint must never displace the previous good snapshot"
+        );
+
+        let _ = std::fs::remove_file(&final_path);
+    }
 }
