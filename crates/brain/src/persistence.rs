@@ -353,4 +353,62 @@ mod truncated_snapshot_tests {
 
         let _ = fs::remove_file(&path);
     }
+
+    /// A checkpoint that dies part-way must be reported as a FAILURE and must
+    /// leave no torn temp file behind.
+    ///
+    /// Named for the production failure it prevents. On 2026-09-11 the node's
+    /// auto-checkpoint thread was alive and exactly on its configured 600 s
+    /// cadence -- brain-data/brain.bin.tmp's mtime moved 01:45:16 -> 01:55:28
+    /// while it was watched -- and every attempt died 179 bytes in. BufWriter
+    /// flushes on Drop and swallows the error, so each failure deposited those
+    /// 179 bytes and walked away, and brain.bin had not been checkpointed
+    /// since 2026-08-19. A torn tmp is not inert: load_snapshot reads a
+    /// garbage length prefix out of it, which is what aborted the node with a
+    /// 4.5-exabyte allocation on 2026-09-05.
+    #[test]
+    fn a_checkpoint_that_dies_mid_write_is_not_reported_as_success() {
+        use serde::ser::{Error as _, SerializeStruct};
+
+        /// Serialises two real fields, then fails -- the shape of a value
+        /// whose neurons are no longer reachable from the in-RAM view.
+        struct DiesPartWay;
+        impl Serialize for DiesPartWay {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                let mut st = s.serialize_struct("DiesPartWay", 3)?;
+                st.serialize_field("format_version", &3u32)?;
+                st.serialize_field("binding_pool_id", &0u64)?;
+                Err(S::Error::custom("neuron unreachable from the borrowed view"))
+            }
+        }
+
+        let dir = std::env::temp_dir().join("w1z4rd_torn_checkpoint_test");
+        let _ = fs::create_dir_all(&dir);
+        let final_path = dir.join("brain.bin");
+        let tmp_path = final_path.with_extension("bin.tmp");
+        let _ = fs::remove_file(&final_path);
+        let _ = fs::remove_file(&tmp_path);
+
+        // A previous good snapshot, so we can prove it is never displaced.
+        fs::write(&final_path, b"previous good snapshot").expect("seed final");
+
+        let result = save_serializable(&DiesPartWay, &final_path);
+
+        assert!(
+            result.is_err(),
+            "a checkpoint that died mid-write must NOT be reported as success"
+        );
+        assert!(
+            !tmp_path.exists(),
+            "a failed checkpoint must not leave a torn temp file: {} survived",
+            tmp_path.display()
+        );
+        assert_eq!(
+            fs::read(&final_path).expect("final still readable"),
+            b"previous good snapshot",
+            "a failed checkpoint must never displace the previous good snapshot"
+        );
+
+        let _ = fs::remove_file(&final_path);
+    }
 }
