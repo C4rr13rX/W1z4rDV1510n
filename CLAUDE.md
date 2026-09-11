@@ -353,6 +353,65 @@ Verify, do not assume:
   interval out of `known`, which makes its base unprunable forever. A pruner that
   reclaims nothing looks identical to one with nothing to reclaim.
 
+  **Re-measured 2026-09-10 against the CORRECT ledger, and the reclaim is
+  exhausted, not merely blocked.** The first census read
+  `deferred-intervals.jsonl`; the real path is
+  `curriculum-deferred-intervals.jsonl`, so every digest fell into "unknown,
+  deliberately preserved" and the answer was another vacuous zero — check the
+  filename against `deferred_intervals_path()` before believing a population
+  count. Against the real ledger (523 lines, 459 deferred / 64 resolved): 113
+  directories on disk, 89 ledger-known, 26 protected, **2 prunable**, 85
+  unknown-preserved, and an upper bound of **0.01 GB** returnable against
+  **399.56 GB pinned by cross-links**. There is no reclaim left on this volume.
+
+- **Waiting on DISK is not a yield — nothing ever frees it.** `--min-free-disk-gb
+  150` converted a 115× ENOSPC crash loop into a cooperative yield, and the yield
+  landed in `while (memory low) or (disk low): publish("resource_waiting");
+  sleep`. Memory leaves that loop on its own — `recycle_settled_runtime_node`
+  hands the allocator's arena back, measured 2.99 GB → 14.66 GB. Disk does not:
+  the store is append-only, `prune_resolved_deferred_bases` is called at 3686,
+  4065 and 4321 and at **none** of the three disk-wait sites, and once the worker
+  stops the volume stops falling and never rises. So it was an unbounded wait for
+  an impossible event, and a SILENT one — the unit stays `active`, the row parks
+  on a durable boundary, and every heartbeat rule here says a frozen row during
+  settlement is normal by design. Strictly harder to see than the crash loop it
+  replaced. Fixed: reclaim before waiting, three attempts, then publish
+  `disk_exhausted_unrecoverable` and keep waiting so a resized volume still
+  recovers unattended.
+
+  **Both alarm floors sat BELOW the floor the supervisor halts at.**
+  `DISK_ALARM_FLOOR_GB` is 48 and `admission_watchdog`'s trigger is 20, against a
+  150 GB stop — so a supervisor parked on its own floor sits at ~149 GB free and
+  BOTH emitters call it healthy. Verified by deleting the fix: the classifier
+  returns `Decision(kind='healthy', reason='automation owns
+  disk_exhausted_unrecoverable')`. **An alarm threshold below the guard it is
+  watching can never fire.** The classifier also keys on `resource_waiting` +
+  the floor carried in the payload, because a hung host cannot redeploy itself
+  and the running generation always predates the fix.
+
+- **The interval is larger than the disk window, which is a LIVELOCK, not a
+  stall.** Durable progress survives a memory yield within one supervisor
+  generation (measured 222,104 → 222,520 → 223,240 → 223,456) but a supervisor
+  RESTART rolls a `state: training` marker back to its interval start. Measured
+  2026-09-10: interval `jupyter-scientific-full:201344:262144` is 60,800 rows at
+  ~1.1 rows/s ≈ **15.4 h of training**, against a disk window of ~45 GB of
+  headroom at **128–160 GB/h ≈ 0.4 h**, on a volume whose burn is ~100 % neuron
+  eviction (`evicted_neurons` 5,098,116 of `total_neurons` 5,098,439 — the brain
+  evicts essentially everything it owns because 363 GB of bodies cannot be
+  resident on 15.26 GB). 453 `deferred_replay_resource_yield` and 324
+  `deferred_replay_failed` against 22 admissions is that livelock's signature.
+  **Compare the interval's ETA against the disk window before treating a yield
+  as recoverable**; no reclaim, floor or retry setting fixes an interval that
+  cannot fit.
+
+- **`wbrain_compact` has no `--estimate`, and `--inspect` cannot measure this
+  store.** The deployed binary's usage is `--inspect` / `--in-place` /
+  `<src> <dst>`. `--inspect` on the 850 GB brain returned in **0.0 s** with
+  `pools_with_offset_vec 0` and `live_in_offset_vecs 0` — it reads metadata only
+  and cannot report live bytes for slot-table pools. So compaction cannot be
+  estimated on this brain, let alone automated from an estimate. Do not quote a
+  live/garbage split for it without a measurement that actually walked the bodies.
+
 - **The SSM transport rewrote its own payload.** `ssm.py` read scripts with
   `read_text()`, whose universal-newline handling turns CRLF into LF. A
   51,846-byte patch arrived as 51,750 — exactly its 96 CRLF pairs — so

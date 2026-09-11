@@ -1714,3 +1714,41 @@ def test_a_supervisor_stopped_on_its_own_disk_floor_is_not_healthy() -> None:
                  "wrapper_enospc": False},
     }
     assert classify_probe(training, stall_seconds=1800).kind != "fix_required"
+
+
+def test_the_halt_is_visible_on_a_supervisor_that_predates_the_fix() -> None:
+    """A hung host cannot redeploy itself, so the alarm must not require it.
+
+    The running generation always predates the repair, and it publishes
+    `resource_waiting` rather than `disk_exhausted_unrecoverable`. Keying the
+    fault only on the new state would leave exactly the hosts that are already
+    stuck reporting healthy. The supervisor's own floor travels in the status
+    payload, so no assumption about the deployed build is needed.
+    """
+    old_build = {
+        **probe("resource_waiting"),
+        "admissions": {"gate_artifacts": 6, "hours_since_admission": 0.2,
+                       "event_counts": {}},
+        "status": {
+            "state": "resource_waiting",
+            "phase": "jupyter-scientific-full",
+            "minimum_free_disk_gb": 150,
+            "durable_next_row": 223240,
+        },
+        "disk": {"free_gb": 149.4, "total_gb": 1023.5, "used_percent": 85.0,
+                 "free_inodes": 107322485, "inodes_used_percent": 0.0,
+                 "wrapper_enospc": False},
+    }
+    decision = classify_probe(old_build, stall_seconds=1800)
+    assert decision.kind == "fix_required", decision
+    assert "resource_waiting" in decision.reason
+    assert "cannot end on its own" in decision.reason
+
+    # `resource_waiting` on MEMORY pressure is a real yield that does end --
+    # the recycle hands the arena back. Alarming on it would fire on the guard
+    # doing its job, so the disk floor must actually be breached.
+    memory_yield = {
+        **old_build,
+        "disk": {**old_build["disk"], "free_gb": 600.0},
+    }
+    assert classify_probe(memory_yield, stall_seconds=1800).kind != "fix_required"

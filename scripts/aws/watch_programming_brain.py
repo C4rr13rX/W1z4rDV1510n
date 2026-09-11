@@ -209,6 +209,24 @@ def disk_exhaustion_fault(probe: dict, *,
     # number it was never measured against.
     status = probe.get("status") or {}
     state = str(status.get("state") or "")
+
+    # `resource_waiting` is the SAME halt published by a supervisor that
+    # predates the fix, and the running generation is always the one that
+    # predates it. Keying only on the new state would leave every already-hung
+    # host invisible until it was redeployed -- and redeploying is exactly what
+    # a hung host cannot do for itself. The floor travels in the payload, so
+    # this needs no assumption about which build is running.
+    supervisor_floor_gb = status.get("minimum_free_disk_gb")
+    if state == "resource_waiting" and supervisor_floor_gb is not None:
+        free_gb = disk.get("free_gb")
+        if free_gb is not None and float(free_gb) < float(supervisor_floor_gb):
+            return (
+                f"the curriculum supervisor is parked in `resource_waiting` at "
+                f"{float(free_gb):.2f} GB free against its own "
+                f"{float(supervisor_floor_gb):.1f} GB disk floor -- nothing on "
+                "this host frees disk, so that wait cannot end on its own"
+            )
+
     if state == "disk_exhausted_unrecoverable":
         reclaimed = status.get("disk_reclaimed_bytes")
         attempts = status.get("disk_reclaim_attempts")
