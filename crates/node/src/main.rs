@@ -278,8 +278,20 @@ enum Command {
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    // Fall back to `info` when RUST_LOG is unset.  from_default_env() alone
+    // yields a filter with NO directives, which enables nothing — so a node
+    // launched without RUST_LOG emits not one line, however badly it is
+    // failing.  Measured on production 2026-09-11: PID 16108 started
+    // 2026-09-09 18:03 and its stderr log had not grown since 09-09 08:48,
+    // 31.8 hours of total silence, while its auto-checkpoint thread failed
+    // every 600 s.  w1z4rd_supervisor.py copies os.environ and sets only the
+    // three W1Z4RD_* vars, so RUST_LOG is never present in production.
+    // The failure was unobservable BY CONSTRUCTION, not by accident.
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
+        .with_env_filter(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .with_target(true)
         .with_level(true)
         .init();

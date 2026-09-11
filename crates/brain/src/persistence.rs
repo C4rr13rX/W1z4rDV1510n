@@ -203,19 +203,33 @@ where
     let final_path = path.as_ref();
     let tmp_path = final_path.with_extension("bin.tmp");
 
-    {
-        let file = fs::File::create(&tmp_path)?;
-        let mut w = BufWriter::with_capacity(256 * 1024, file);
-        bincode::serialize_into(&mut w, value)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        w.flush()?;
-        w.get_ref().sync_all()?;
-    }
+    // A failure anywhere below must not leave the torn temp file on disk.
+    // BufWriter flushes on Drop and ignores the error, so a serialisation
+    // that dies part-way still deposits whatever had been buffered — that
+    // is exactly how brain-data/brain.bin.tmp came to sit at 179 bytes for
+    // weeks, and a torn tmp is not inert: load_snapshot reads a garbage
+    // length prefix out of it. Clean it up, and report the ORIGINAL error
+    // rather than any cleanup error.
+    let write = (|| -> io::Result<()> {
+        {
+            let file = fs::File::create(&tmp_path)?;
+            let mut w = BufWriter::with_capacity(256 * 1024, file);
+            bincode::serialize_into(&mut w, value)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            w.flush()?;
+            w.get_ref().sync_all()?;
+        }
 
-    // Atomic-replace.  Windows rename is atomic-replace for files on the
-    // same volume since NTFS journals the operation.
-    fs::rename(&tmp_path, final_path)?;
-    Ok(())
+        // Atomic-replace.  Windows rename is atomic-replace for files on the
+        // same volume since NTFS journals the operation.
+        fs::rename(&tmp_path, final_path)?;
+        Ok(())
+    })();
+
+    if write.is_err() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+    write
 }
 
 pub fn load_snapshot<P: AsRef<Path>>(path: P) -> io::Result<BrainSnapshot> {
