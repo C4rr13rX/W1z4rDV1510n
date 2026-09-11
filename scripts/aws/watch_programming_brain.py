@@ -200,6 +200,27 @@ def disk_exhaustion_fault(probe: dict, *,
     if disk.get("error"):
         return ""
 
+    # The supervisor stops at ITS floor, not at ours, and ours is lower --
+    # `DISK_ALARM_FLOOR_GB` is 48 GB and `--min-free-disk-gb` is 150. A
+    # supervisor parked in `disk_exhausted_unrecoverable` therefore sits at
+    # ~149 GB free: three times this alarm floor, so every threshold below
+    # reports a healthy volume while training is stopped dead on disk. Read the
+    # state the supervisor published rather than re-deriving its verdict from a
+    # number it was never measured against.
+    status = probe.get("status") or {}
+    state = str(status.get("state") or "")
+    if state == "disk_exhausted_unrecoverable":
+        reclaimed = status.get("disk_reclaimed_bytes")
+        attempts = status.get("disk_reclaim_attempts")
+        return (
+            "the curriculum supervisor stopped on its own disk floor and could "
+            f"not reclaim past it ({disk.get('free_gb')} GB free against a "
+            f"{status.get('minimum_free_disk_gb')} GB floor; {attempts} reclaim "
+            f"attempts returned {reclaimed} bytes) -- training is halted at "
+            f"durable row {status.get('durable_next_row')} and no reclaim on "
+            "this host can restart it"
+        )
+
     free_gb = disk.get("free_gb")
     if free_gb is not None and float(free_gb) < disk_floor_gb:
         return (

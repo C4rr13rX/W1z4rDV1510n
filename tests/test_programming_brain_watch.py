@@ -1649,3 +1649,68 @@ def test_the_disk_floor_leaves_time_to_act_at_the_measured_burn_rate() -> None:
     # And it must sit well clear of the supervisor's own yield floor, or the
     # alarm fires on the guard doing its job rather than on the guard failing.
     assert watch.DISK_ALARM_FLOOR_GB > 8.0 * 2
+
+
+def test_a_supervisor_stopped_on_its_own_disk_floor_is_not_healthy() -> None:
+    """The alarm floors sit BELOW the floor the supervisor halts at.
+
+    `--min-free-disk-gb` is 150, `watch.DISK_ALARM_FLOOR_GB` is 48 and
+    `admission_watchdog`'s trigger is 20. A supervisor that gave up on its own
+    disk floor therefore parks at ~149 GB free -- three times one alarm floor
+    and seven times the other -- so both emitters read a healthy volume beside
+    training that is stopped dead. Measured 2026-09-10: burn 159.91 GB/h with
+    69.68 GB above the floor gave 0.44 h of runway against a 10.02 h ETA to the
+    interval's gate, so this state was about one half-hour away and nothing
+    would have reported it.
+    """
+    parked = {
+        **probe("disk_exhausted_unrecoverable"),
+        "admissions": {"gate_artifacts": 6, "hours_since_admission": 0.2,
+                       "event_counts": {}},
+        "status": {
+            "state": "disk_exhausted_unrecoverable",
+            "phase": "jupyter-scientific-full",
+            "minimum_free_disk_gb": 150,
+            "durable_next_row": 222520,
+            "disk_reclaim_attempts": 3,
+            "disk_reclaimed_bytes": 0,
+        },
+        # Far above BOTH alarm floors: this is the whole point.
+        "disk": {"free_gb": 149.2, "total_gb": 1023.5, "used_percent": 85.0,
+                 "free_inodes": 107322485, "inodes_used_percent": 0.0,
+                 "wrapper_enospc": False},
+    }
+    decision = classify_probe(parked, stall_seconds=1800)
+    assert decision.kind == "fix_required", decision
+    assert "150" in decision.reason
+    assert "222520" in decision.reason
+    # It must not be mistaken for the routine quarantine handoff: that arm
+    # matches any `deferred_replay_*` state during replay and would have
+    # swallowed this one under its old name.
+    assert decision.kind != "quarantine_ready"
+
+    # The same evidence must reach the OTHER emitter, or the host is
+    # simultaneously healthy and faulted -- the two-emitter drift that has now
+    # happened three times in this file's history.
+    from scripts.aws.admission_watchdog import faults
+
+    found = faults({
+        "unit": "active", "brain_up": True, "failed_since_deploy": 0,
+        "last_admission_age": 600, "tick_delta": 0, "deferred": 3,
+        "disk_free_gb": 149, "mem_free_gb": 9, "progress_age": 30,
+        "status_age": 30, "state": "disk_exhausted_unrecoverable",
+        "min_free_disk_gb": 150, "supervisor_busy": True,
+    }, baseline_deferred=3)
+    assert any(f.startswith("disk_exhausted_unrecoverable:") for f in found), found
+
+    # A volume above the floor with the supervisor training normally must stay
+    # healthy, or this trades a blind spot for a false alarm.
+    training = {
+        **probe("deferred_replay_training"),
+        "admissions": {"gate_artifacts": 6, "hours_since_admission": 0.2,
+                       "event_counts": {}},
+        "disk": {"free_gb": 211.7, "total_gb": 1023.5, "used_percent": 79.0,
+                 "free_inodes": 107322485, "inodes_used_percent": 0.0,
+                 "wrapper_enospc": False},
+    }
+    assert classify_probe(training, stall_seconds=1800).kind != "fix_required"

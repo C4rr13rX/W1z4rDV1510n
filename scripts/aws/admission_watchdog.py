@@ -15,7 +15,11 @@ happen, because each has actually happened:
   brain_down       /health stopped answering
   queue_growing    deferred count rising: the canary is quarantining faster
                    than the replay admits (measured: 43 -> 49 in under an hour)
-  disk_low         /srv/wizard below the supervisor's own floor
+  disk_low         /srv/wizard below this watchdog's 20 GB trigger
+  disk_exhausted_unrecoverable
+                   the supervisor stopped on its OWN 150 GB floor and could not
+                   reclaim past it -- invisible to `disk_low`, which sits far
+                   below the floor the supervisor actually halts at
   memory_low       free RAM below the floor, which pauses training silently
   status_stale     the supervisor has not written its status in over an hour
                    while claiming to be running
@@ -86,6 +90,9 @@ try:
     out["state"] = status.get("state")
     out["phase"] = status.get("phase")
     out["status_error"] = str(status.get("error") or "")[:200]
+    # Carried so the disk fault can quote the floor the supervisor actually
+    # stopped at rather than this watchdog's own, much lower, trigger.
+    out["min_free_disk_gb"] = status.get("minimum_free_disk_gb")
     out["status_age"] = round(time.time() - os.path.getmtime(status_path))
 except Exception as error:
     out["state"] = f"unreadable: {error}"
@@ -527,6 +534,20 @@ def faults(now: dict, baseline_deferred: int) -> list[str]:
         found.append(
             f"queue_growing: deferred {baseline_deferred} -> "
             f"{now['deferred']} -- quarantining faster than admitting")
+
+    # This threshold cannot see the state the supervisor actually stops in.
+    # `--min-free-disk-gb` is 150, so a supervisor that gave up on its own disk
+    # floor parks at ~149 GB free -- seven times this 20 GB trigger, and above
+    # `watch_programming_brain.DISK_ALARM_FLOOR_GB` (48) as well. Both emitters
+    # would report a healthy volume beside halted training. Read the published
+    # state first; the threshold below still catches a volume that is genuinely
+    # emptying underneath a supervisor that has not noticed yet.
+    if str(now.get("state") or "") == "disk_exhausted_unrecoverable":
+        found.append(
+            "disk_exhausted_unrecoverable: the supervisor stopped on its own "
+            f"{now.get('min_free_disk_gb', 150)}GB disk floor with "
+            f"{now.get('disk_free_gb')}GB free and could not reclaim past it "
+            "-- no reclaim on this host restarts training")
 
     if 0 <= now.get("disk_free_gb", -1) < 20:
         found.append(f"disk_low: {now['disk_free_gb']}GB free on /srv/wizard")

@@ -59,6 +59,25 @@ RESOURCE_SETTLEMENT_FAILED_EXIT = 89
 #: than spinning on billed compute.
 MAX_BARREN_REPLAY_YIELDS = 3
 
+#: How many times the disk-pressure yield may try to reclaim the volume before
+#: it declares the floor unrecoverable and says so in a state a watchdog can
+#: alarm on.
+#:
+#: Memory pressure and disk pressure are not symmetric, and treating them as
+#: though they were is what made this a deadlock. Memory comes back on its own:
+#: `recycle_settled_runtime_node` hands the allocator's arena back (measured
+#: 2.99 GB -> 14.66 GB) and other processes exit. Disk does not. The `.wbrain`
+#: neuron store is append-only, its compaction pass is not on this path, and
+#: once the worker is stopped the volume stops falling and nothing ever raises
+#: it -- so a `while free < floor: sleep()` is not a cooperative yield, it is an
+#: unbounded wait for an event that cannot occur.
+#:
+#: Three attempts rather than one because `prune_resolved_deferred_bases` is
+#: per-directory and a single blocked inode must not be read as "nothing can be
+#: reclaimed". Three failures in a row, measured by `df` and not by summing file
+#: sizes, means there is genuinely nothing left to return.
+MAX_DISK_RECLAIM_ATTEMPTS = 3
+
 
 class GateCommandFailure(RuntimeError):
     """A gate subprocess failed after it was launched successfully."""
@@ -1792,6 +1811,48 @@ def prune_resolved_deferred_bases(runtime: Path) -> list[Path]:
             ],
         })
     return removed
+
+
+def reclaim_disk_for_floor(runtime: Path, min_free_disk_gb: float) -> dict:
+    """Try to return the volume above its floor, and MEASURE what came back.
+
+    The reclaim is reported as a `df` delta and never as a sum of the file
+    sizes removed, because on this XFS reflink volume those two numbers are not
+    even the same order of magnitude. Measured 2026-09-10: nine deferred
+    directories holding ~560 GB of apparent `st_blocks` returned **0.00 GB**,
+    because the causal bases are `os.link` hardlinks to the last-good guard and
+    reflink clones of the live brain. Re-measured today: a single 53.55 GB
+    inode wears **85 names** and another wears 17, so deleting eighty-four of
+    those directories reclaims exactly nothing while looking like 4.5 TB of
+    cleanup. A reclaim that is summed rather than measured reports a success it
+    did not achieve, and the caller then waits forever on the strength of it.
+
+    Errors are captured rather than raised: the disk-pressure path has no other
+    diagnostic, and a partial reclaim that reports nothing is indistinguishable
+    from a complete one -- which is exactly how one root-owned directory
+    stopped all reclaim on this volume for five weeks.
+    """
+    floor_bytes = int(min_free_disk_gb * 1024 * 1024 * 1024)
+    free_before = int(shutil.disk_usage(runtime).free)
+    removed: list[Path] = []
+    error: str | None = None
+    try:
+        removed = prune_resolved_deferred_bases(runtime)
+    except (OSError, RuntimeError) as exc:
+        error = f"{type(exc).__name__}: {exc}"
+    free_after = int(shutil.disk_usage(runtime).free)
+    report = {
+        "removed_count": len(removed),
+        "removed": [path.name for path in removed[:20]],
+        "free_bytes_before": free_before,
+        "free_bytes_after": free_after,
+        "reclaimed_bytes": free_after - free_before,
+        "floor_bytes": floor_bytes,
+        "cleared_floor": free_after >= floor_bytes,
+    }
+    if error is not None:
+        report["error"] = error
+    return report
 
 
 def unresolved_deferred_intervals(runtime: Path, phase: str | None = None) -> list[dict]:
@@ -4783,30 +4844,86 @@ def main() -> int:
                             "updated_unix": time.time(),
                         })
                         return 1
-                while (
-                    (
-                        floor_bytes > 0
-                        and int(psutil.virtual_memory().available) < floor_bytes
+                # Memory pressure and disk pressure leave this loop by
+                # different routes, and the original code gave them one. The
+                # recycle above returns the allocator's pages, so a memory wait
+                # ends; the `.wbrain` neuron store is append-only, so once the
+                # worker is stopped the volume stops falling and NOTHING raises
+                # it. Waiting on disk was therefore an unbounded wait for an
+                # event that cannot occur -- and a silent one, because the unit
+                # stays `active`, the row is parked on a durable boundary, and
+                # every heartbeat rule we wrote says a frozen row during
+                # settlement is normal by design. That is strictly harder to see
+                # than the 115x ENOSPC crash loop the 150 GB floor replaced.
+                disk_reclaims: list[dict] = []
+                disk_exhausted = False
+                wait_started = time.time()
+                while True:
+                    available_now = int(psutil.virtual_memory().available)
+                    disk_free_now = int(shutil.disk_usage(runtime).free)
+                    memory_low = (
+                        floor_bytes > 0 and available_now < floor_bytes
                     )
-                    or (
+                    disk_low = (
                         disk_floor_bytes > 0
-                        and int(shutil.disk_usage(runtime).free)
-                        < disk_floor_bytes
+                        and disk_free_now < disk_floor_bytes
                     )
-                ):
+                    if not (memory_low or disk_low):
+                        break
+                    if disk_low and not disk_exhausted:
+                        if len(disk_reclaims) < MAX_DISK_RECLAIM_ATTEMPTS:
+                            reclaim = reclaim_disk_for_floor(
+                                runtime, args.min_free_disk_gb
+                            )
+                            disk_reclaims.append(reclaim)
+                            append_health_event(runtime, {
+                                "kind": "disk_floor_reclaim",
+                                "passed": bool(reclaim["cleared_floor"]),
+                                "phase": phase.name,
+                                "ram_next_row": ram_after,
+                                "durable_next_row": durable_after,
+                                **reclaim,
+                            })
+                            continue
+                        # Nothing left to return. Say so in a named state
+                        # instead of spinning: the wait continues (a resized
+                        # volume still recovers on its own) but it is now
+                        # legible to both watchdog emitters rather than
+                        # indistinguishable from a healthy settlement.
+                        disk_exhausted = True
+                        append_health_event(runtime, {
+                            "kind": "disk_exhausted_unrecoverable",
+                            "passed": False,
+                            "phase": phase.name,
+                            "ram_next_row": ram_after,
+                            "durable_next_row": durable_after,
+                            "disk_free_bytes": disk_free_now,
+                            "minimum_free_disk_gb": args.min_free_disk_gb,
+                            "reclaim_attempts": disk_reclaims,
+                            "updated_unix": time.time(),
+                        })
                     publish(status_path, {
-                        "state": "resource_waiting",
+                        "state": (
+                            "disk_exhausted_unrecoverable" if disk_exhausted
+                            else "resource_waiting"
+                        ),
                         "phase": phase.name,
                         "ram_next_row": ram_after,
                         "durable_next_row": durable_after,
-                        "available_bytes": int(
-                            psutil.virtual_memory().available
-                        ),
-                        "disk_free_bytes": int(
-                            shutil.disk_usage(runtime).free
-                        ),
+                        "available_bytes": available_now,
+                        "disk_free_bytes": disk_free_now,
                         "minimum_free_memory_gb": args.min_free_memory_gb,
                         "minimum_free_disk_gb": args.min_free_disk_gb,
+                        "pressure": {
+                            "memory": memory_low,
+                            "disk": disk_low,
+                        },
+                        "waiting_seconds": round(time.time() - wait_started, 1),
+                        "disk_reclaim_attempts": len(disk_reclaims),
+                        "disk_reclaimed_bytes": sum(
+                            attempt["reclaimed_bytes"]
+                            for attempt in disk_reclaims
+                        ),
                         "updated_unix": time.time(),
                     })
                     time.sleep(max(1.0, args.poll_seconds))
