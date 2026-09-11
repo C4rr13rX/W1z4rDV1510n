@@ -1974,6 +1974,88 @@ def unresolved_deferred_intervals(runtime: Path, phase: str | None = None) -> li
     ))
 
 
+#: Health-ledger kind recording that a generation died mid-replay without ever
+#: producing an admission verdict. See `replay_stall_counts`.
+REPLAY_STALL_KIND = "deferred_replay_interrupted_before_gate"
+
+
+def record_replay_stall(runtime: Path, interval_id: str, phase: str,
+                        reason: str = "") -> None:
+    """Remember, ACROSS RESTARTS, that this interval never reached its gate.
+
+    `rejected_this_pass` already stops one interval monopolising a single
+    pass, but it is a set in memory, so it protects nothing against the
+    failure mode that actually occurs here: an interval whose generation is
+    KILLED. A gate rejection returns into the loop, joins that set and lets
+    the queue advance; a resource halt exits the process, so the interval is
+    never marked, and `unresolved_deferred_intervals` sorts by
+    `(phase, start_row)` -- a total order identical on every restart. The next
+    generation therefore selects exactly the same `pending[0]` and dies the
+    same way.
+
+    Measured 2026-09-11 on `jupyter-scientific-full:201344:262144`: 361
+    resource yields and 14 gate failures over 437 h, every one of those 14
+    at-gate and the newest 86 h old, against a 60,800-row span needing ~5.9 h
+    of training inside a disk window of ~1.26 h at the measured 237.65 GB/h.
+    It cannot reach a verdict, so it can never earn a place in
+    `rejected_this_pass`, so it is re-selected forever while 131 unresolved
+    intervals -- many of them 14,336-18,432 rows, small enough to fit --
+    never get a turn. `go-systems:0:131072` and `go-systems:131072:262144`
+    admitted 16.6 h and 13.8 h ago with 1 and 4 yields, so the queue behind it
+    is healthy and converting.
+    """
+    append_health_event(runtime, {
+        "kind": REPLAY_STALL_KIND,
+        "interval_id": interval_id,
+        "phase": phase,
+        "reason": reason,
+        "updated_unix": time.time(),
+    })
+
+
+def replay_stall_counts(runtime: Path) -> dict[str, int]:
+    """How many generations each interval has consumed without a verdict."""
+    # An admitted interval leaves `unresolved_deferred_intervals` altogether,
+    # so its count is never consulted again and needs no clearing here.
+    counts: dict[str, int] = {}
+    try:
+        with (runtime / "curriculum-health.jsonl").open(
+                encoding="utf-8") as stream:
+            for line in stream:
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if event.get("kind") != REPLAY_STALL_KIND:
+                    continue
+                interval_id = event.get("interval_id")
+                if isinstance(interval_id, str) and interval_id:
+                    counts[interval_id] = counts.get(interval_id, 0) + 1
+    except (FileNotFoundError, OSError):
+        return counts
+    return counts
+
+
+def order_replay_candidates(pending: list[dict],
+                            stalls: dict[str, int]) -> list[dict]:
+    """Put intervals that have never consumed a generation first.
+
+    Deliberately a REORDERING and not a filter. Every obligation stays in the
+    ledger and stays eligible, so nothing is admitted, discarded or retired by
+    this -- the accept/quarantine invariant is untouched and an interval that
+    only ever stalls is still retried once the queue ahead of it drains. What
+    changes is that a span too large for the host's resource window stops
+    consuming every generation before anything else is tried.
+
+    The sort is stable and its tiebreak is the existing `(phase, start_row)`
+    order, so a host with no stalls recorded selects exactly what it does now.
+    """
+    return sorted(
+        pending,
+        key=lambda event: stalls.get(str(event.get("interval_id") or ""), 0),
+    )
+
+
 def next_suspect_start(runtime: Path, phase: str, candidate_row: int,
                        floor: int, canary_after_unix: float = 0.0) -> int:
     """Return the first newly trained row after subtracting quarantines.
@@ -3837,6 +3919,15 @@ def recover_interrupted_deferred_replay(
         marker_path.unlink(missing_ok=True)
         prune_resolved_deferred_bases(runtime)
         return
+    # This branch runs at STARTUP for a transaction the previous generation
+    # never finished -- a resource halt, a reboot, a kill. That is exactly the
+    # "consumed a generation without reaching a verdict" fact that
+    # `rejected_this_pass` cannot carry, because that set died with the
+    # process. Record it before the rollback so the next selection can see it.
+    record_replay_stall(
+        runtime, interval_id, phase.name,
+        f"generation ended in state {marker.get('state')!r} before a verdict",
+    )
     restore_rejected_deferred_replay(
         args, runtime, phase, event,
         "interrupted deferred replay rolled back before retry",
@@ -3890,6 +3981,15 @@ def run_deferred_replays(args: argparse.Namespace, runtime: Path,
                 event for event in pending
                 if str(event.get("interval_id")) not in rejected_this_pass
             ]
+            # `rejected_this_pass` handles intervals that reached a verdict and
+            # lost. This handles the ones that never reach a verdict at all:
+            # they kill the generation, so they are re-selected by the
+            # restart-identical `(phase, start_row)` order and no other
+            # interval is ever tried. Reordering only -- every obligation
+            # stays in the ledger and stays eligible.
+            pending = order_replay_candidates(
+                pending, replay_stall_counts(runtime)
+            )
         if not pending:
             publish(status_path, {
                 "state": "deferred_replay_complete",

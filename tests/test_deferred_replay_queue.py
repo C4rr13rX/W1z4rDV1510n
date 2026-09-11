@@ -165,3 +165,139 @@ def test_tick_style_payloads_are_tolerated(raw, expected_dict):
 
     decoded = json.loads(raw)
     assert isinstance(decoded, dict) is expected_dict
+
+
+# ---------------------------------------------------------------------------
+# A verdict-less interval consumes every generation (2026-09-11).
+#
+# The tests above pin the WITHIN-pass fix: an interval that reaches its gate
+# and loses joins `rejected_this_pass` and the queue moves on. The failure
+# below is the one that survives that fix, because it never reaches a gate at
+# all -- it kills the generation, so the set it would have joined dies with
+# the process and `unresolved_deferred_intervals`' `(phase, start_row)` order
+# hands the restart exactly the same `pending[0]`.
+# ---------------------------------------------------------------------------
+
+def _interval(interval_id, phase, start, end):
+    return {"interval_id": interval_id, "phase": phase,
+            "start_row": start, "end_row": end, "status": "deferred"}
+
+
+def test_a_stall_is_remembered_across_restarts(tmp_path):
+    """The in-memory set cannot carry this fact; the ledger must."""
+    runtime = tmp_path
+    assert sup.replay_stall_counts(runtime) == {}
+
+    sup.record_replay_stall(runtime, "jupyter:201344:262144",
+                            "jupyter", "disk halt")
+    sup.record_replay_stall(runtime, "jupyter:201344:262144",
+                            "jupyter", "disk halt")
+    sup.record_replay_stall(runtime, "other:0:1024", "other", "reboot")
+
+    # Read back by a DIFFERENT call, standing in for the next generation.
+    counts = sup.replay_stall_counts(runtime)
+    assert counts == {"jupyter:201344:262144": 2, "other:0:1024": 1}
+
+    ledger = (runtime / "curriculum-health.jsonl").read_text(encoding="utf-8")
+    assert sup.REPLAY_STALL_KIND in ledger
+    # Append-only: recording must not rewrite or drop earlier history.
+    assert ledger.count(sup.REPLAY_STALL_KIND) == 3
+
+
+def test_the_queue_tries_something_else_after_a_generation_is_consumed():
+    """The measured host: one 60,800-row span re-selected forever.
+
+    `jupyter-scientific-full:201344:262144` took 361 resource yields and 14
+    gate failures over 437 h -- every one of those 14 at-gate, the newest 86 h
+    old, so its recorded cause (`polyglot` 11/12) predates the Go corpus that
+    closed it and the freshest gate artifact passes 12/12. What blocks it now
+    is arithmetic: ~5.9 h of training against a ~1.26 h disk window at the
+    measured 237.65 GB/h. It cannot produce a verdict, so it can never be
+    skipped, while smaller intervals behind it never get a turn.
+    """
+    pending = [
+        _interval("jupyter-scientific-full:201344:262144",
+                  "jupyter-scientific-full", 201344, 262144),
+        _interval("jupyter-scientific-full:262144:393216",
+                  "jupyter-scientific-full", 262144, 393216),
+        _interval("zz-small:0:14336", "zz-small", 0, 14336),
+    ]
+    # Generation 1 picks pending[0] and is killed by the disk floor.
+    assert sup.order_replay_candidates(pending, {})[0]["interval_id"] == \
+        "jupyter-scientific-full:201344:262144"
+
+    # Every restart repeats that with no memory of it.
+    stalls = {}
+    for _ in range(5):
+        chosen = sup.order_replay_candidates(pending, stalls)[0]
+        assert chosen["interval_id"] == "jupyter-scientific-full:201344:262144"
+
+    # With the stall recorded, the next generation tries something else.
+    stalls = {"jupyter-scientific-full:201344:262144": 1}
+    assert sup.order_replay_candidates(pending, stalls)[0]["interval_id"] == \
+        "jupyter-scientific-full:262144:393216"
+
+    # And the obligation is only DEPRIORITISED, never dropped: it is still in
+    # the queue, so it is retried once the rest have had their turn.
+    ordered = sup.order_replay_candidates(pending, stalls)
+    assert len(ordered) == len(pending)
+    assert {event["interval_id"] for event in ordered} == \
+        {event["interval_id"] for event in pending}
+
+
+def test_a_host_with_no_stalls_selects_exactly_what_it_does_now():
+    """The reorder must be inert until something actually stalls."""
+    pending = [
+        _interval("a:0:1024", "a", 0, 1024),
+        _interval("b:0:1024", "b", 0, 1024),
+        _interval("b:1024:2048", "b", 1024, 2048),
+    ]
+    assert sup.order_replay_candidates(pending, {}) == pending
+    # Stable: equal stall counts preserve the (phase, start_row) tiebreak the
+    # ledger fold already applied.
+    equal = {event["interval_id"]: 3 for event in pending}
+    assert sup.order_replay_candidates(pending, equal) == pending
+
+
+def test_the_stall_record_is_written_before_the_rollback_discards_it():
+    """Ordering matters: the rollback clears the interval's resume state.
+
+    `restore_rejected_deferred_replay` deliberately unlinks the resume record
+    and the progress file so the retry replays from the first row. If the
+    stall were recorded after that call, a crash between the two would lose
+    the only evidence that this interval consumed a generation.
+    """
+    source = (sup.ROOT / "scripts"
+              / "programming_curriculum_supervisor.py").read_text(
+        encoding="utf-8")
+    recover = source.split("def recover_interrupted_deferred_replay")[1]
+    recover = recover.split("\ndef ")[0]
+    assert "record_replay_stall" in recover
+    assert recover.index("record_replay_stall") < \
+        recover.index("restore_rejected_deferred_replay(")
+
+
+def test_the_reorder_is_actually_wired_into_the_selection_loop():
+    """A helper nothing calls is the inert-fix trap this repo keeps hitting.
+
+    `order_replay_candidates` only matters if `run_deferred_replays` applies
+    it to the queue it actually selects from, AFTER the `rejected_this_pass`
+    filter and BEFORE `pending[0]` is taken.
+    """
+    source = (sup.ROOT / "scripts"
+              / "programming_curriculum_supervisor.py").read_text(
+        encoding="utf-8")
+    body = source.split("def run_deferred_replays")[1].split("\ndef ")[0]
+    assert "order_replay_candidates(" in body, \
+        "run_deferred_replays never reorders its queue"
+    assert "replay_stall_counts(" in body
+    # Anchor on the STATEMENTS, not on prose: this function's comments discuss
+    # `pending[0]` and `rejected_this_pass` several lines before either is
+    # executed, and a naive substring search scores the comment.
+    selection = body.index("event = pending[0]")
+    reorder = body.index("order_replay_candidates(")
+    skip_filter = body.index("not in rejected_this_pass")
+    assert reorder < selection, \
+        "the reorder must happen before the interval is chosen"
+    assert skip_filter < reorder, \
+        "the reorder must apply to the already-filtered queue"

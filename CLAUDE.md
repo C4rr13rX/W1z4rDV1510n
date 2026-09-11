@@ -428,6 +428,29 @@ Verify, do not assume:
   produced "39,971,683 bytes per body": the quotient silently attributes every
   other writer on the volume to eviction. Read the record headers.
 
+  **"Which records are biggest" is not "which records are being written", and
+  the 85.9 % above answers the first.** That figure comes from walking the
+  container's TAIL, which is an all-time picture. Re-measured 2026-09-11 by
+  walking only the region appended DURING a live 240 s window — the bytes the
+  burn actually wrote — the distribution is much flatter: 12.855 GB appended
+  (192.8 GB/h, against 237.65 GB/h by `df`, so the container is most but not
+  all of the volume's drain), and within the 4.269 GB the walk could parse
+  before a concurrent append truncated it, **407 distinct neurons, mean body
+  10.5 MB, and the twelve largest only 22.6 % of the bytes**. They are ~82 MB
+  each and uniform to within 1.4 % (83.11, 82.94, 82.93, 82.69, 82.42 …), low
+  ids in pools 1 and 5, so atoms — but there are dozens of them, not a dozen.
+  Pinning the hot set is therefore NOT a fix on this host: ~12.8 GB of atom
+  bodies per sleep cycle against 15.26 GB of RAM and a 3 GB floor.
+
+  **And nothing was written twice: `max_rewrites_of_one_neuron` was 1 across
+  the whole window.** That is the structural reason `clean_skips` reads 0 — not
+  that the digests miss, but that a whole-brain sleep touches each neuron once
+  per cycle, so there is never a second write to compare against. A suppression
+  keyed on repeats cannot fire in a workload with no repeats. The burn is one
+  full ~82 MB body per hot atom per memory yield, every ~2.4 minutes, to record
+  a few KB of new terminals — so the remaining lever is delta-encoded terminal
+  appends, and neither pinning nor compaction touches it.
+
 - **A counter of zero from a path that has not had the opportunity to run is
   not a refutation — including when it is your own fix.** The first reading
   after deploying the clean-skip suppression was `clean_skips: 0` beside an
