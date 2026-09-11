@@ -2038,22 +2038,40 @@ def replay_stall_counts(runtime: Path) -> dict[str, int]:
 
 def order_replay_candidates(pending: list[dict],
                             stalls: dict[str, int]) -> list[dict]:
-    """Put intervals that have never consumed a generation first.
+    """Fewest stalls first, then smallest span first.
 
     Deliberately a REORDERING and not a filter. Every obligation stays in the
     ledger and stays eligible, so nothing is admitted, discarded or retired by
     this -- the accept/quarantine invariant is untouched and an interval that
     only ever stalls is still retried once the queue ahead of it drains. What
     changes is that a span too large for the host's resource window stops
-    consuming every generation before anything else is tried.
+    consuming every generation before anything else is tried. Spans are
+    disjoint and each is gated independently, so their order carries no
+    semantics; `rejected_this_pass` already replays them out of order.
 
-    The sort is stable and its tiebreak is the existing `(phase, start_row)`
-    order, so a host with no stalls recorded selects exactly what it does now.
+    The second key matters as much as the first. Verified live 2026-09-11: the
+    stall record moved selection off `jupyter-scientific-full:201344:262144`
+    (60,800 rows) and straight onto `:262144:393216`, which is 131,072 rows --
+    ETA 9.28 h at the measured 3.89 rows/s against a 1.52 h window at 294.87
+    GB/h. Ordering on stalls alone therefore discovers "too large" one full
+    rollback at a time, paying ~1.5 h and a regrow per discovery. Smallest
+    first drains the intervals that DO fit -- there are unresolved spans of
+    14,336-18,432 rows, ~1.0-1.3 h at that rate -- so each generation converts
+    instead of teaching the queue one more thing it cannot do.
+
+    The sort is stable and both keys are 0/constant on a host that has never
+    stalled and whose spans are equal, so the existing `(phase, start_row)`
+    order is preserved exactly where neither key discriminates.
     """
-    return sorted(
-        pending,
-        key=lambda event: stalls.get(str(event.get("interval_id") or ""), 0),
-    )
+    def key(event: dict) -> tuple[int, int]:
+        interval_id = str(event.get("interval_id") or "")
+        try:
+            span = int(event["end_row"]) - int(event["start_row"])
+        except (KeyError, TypeError, ValueError):
+            span = 0
+        return (stalls.get(interval_id, 0), max(0, span))
+
+    return sorted(pending, key=key)
 
 
 def next_suspect_start(runtime: Path, phase: str, candidate_row: int,

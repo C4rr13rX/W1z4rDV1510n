@@ -220,17 +220,18 @@ def test_the_queue_tries_something_else_after_a_generation_is_consumed():
                   "jupyter-scientific-full", 201344, 262144),
         _interval("jupyter-scientific-full:262144:393216",
                   "jupyter-scientific-full", 262144, 393216),
-        _interval("zz-small:0:14336", "zz-small", 0, 14336),
+        _interval("jupyter-scientific-full:393216:524288",
+                  "jupyter-scientific-full", 393216, 524288),
     ]
-    # Generation 1 picks pending[0] and is killed by the disk floor.
-    assert sup.order_replay_candidates(pending, {})[0]["interval_id"] == \
-        "jupyter-scientific-full:201344:262144"
-
-    # Every restart repeats that with no memory of it.
-    stalls = {}
+    # The livelock is the DETERMINISM, not which span happens to be first:
+    # `unresolved_deferred_intervals` yields a total order and a killed
+    # generation leaves no trace, so every restart re-derives the identical
+    # queue and re-selects the identical head.
+    first = sup.order_replay_candidates(pending, {})[0]["interval_id"]
+    assert first == "jupyter-scientific-full:201344:262144"
     for _ in range(5):
-        chosen = sup.order_replay_candidates(pending, stalls)[0]
-        assert chosen["interval_id"] == "jupyter-scientific-full:201344:262144"
+        assert sup.order_replay_candidates(pending, {})[0]["interval_id"] == \
+            first
 
     # With the stall recorded, the next generation tries something else.
     stalls = {"jupyter-scientific-full:201344:262144": 1}
@@ -253,8 +254,8 @@ def test_a_host_with_no_stalls_selects_exactly_what_it_does_now():
         _interval("b:1024:2048", "b", 1024, 2048),
     ]
     assert sup.order_replay_candidates(pending, {}) == pending
-    # Stable: equal stall counts preserve the (phase, start_row) tiebreak the
-    # ledger fold already applied.
+    # Stable: equal stall counts AND equal spans preserve the
+    # (phase, start_row) tiebreak the ledger fold already applied.
     equal = {event["interval_id"]: 3 for event in pending}
     assert sup.order_replay_candidates(pending, equal) == pending
 
@@ -301,3 +302,41 @@ def test_the_reorder_is_actually_wired_into_the_selection_loop():
         "the reorder must happen before the interval is chosen"
     assert skip_filter < reorder, \
         "the reorder must apply to the already-filtered queue"
+
+
+def test_the_queue_drains_what_fits_the_window_first():
+    """Smallest span first, so a generation converts instead of stalling.
+
+    A stall costs a full rollback and regrow (~1.5 h on the measured host), so
+    discovering "too large" one interval at a time is the expensive way to
+    learn it. Spans are disjoint and independently gated, so ordering them by
+    size carries no semantics -- only throughput.
+    """
+    pending = [
+        _interval("p:0:131072", "p", 0, 131072),
+        _interval("p:131072:262144", "p", 131072, 262144),
+        _interval("p:262144:276480", "p", 262144, 276480),   # 14,336 -- fits
+        _interval("p:276480:294912", "p", 276480, 294912),   # 18,432 -- fits
+    ]
+    ordered = sup.order_replay_candidates(pending, {})
+    assert [event["interval_id"] for event in ordered] == [
+        "p:262144:276480", "p:276480:294912", "p:0:131072", "p:131072:262144",
+    ]
+    # A stall still outranks size: an interval that consumed a generation goes
+    # behind everything that has not, however small it is.
+    stalled = sup.order_replay_candidates(pending, {"p:262144:276480": 1})
+    assert stalled[0]["interval_id"] == "p:276480:294912"
+    assert stalled[-1]["interval_id"] == "p:262144:276480"
+    # Nothing is ever dropped.
+    assert len(stalled) == len(pending)
+
+
+def test_a_malformed_span_does_not_crash_the_selection():
+    """A ledger row missing its bounds must not take the queue down."""
+    pending = [
+        {"interval_id": "broken", "phase": "p", "status": "deferred"},
+        _interval("p:0:1024", "p", 0, 1024),
+    ]
+    ordered = sup.order_replay_candidates(pending, {})
+    assert len(ordered) == 2
+    assert {event["interval_id"] for event in ordered} == {"broken", "p:0:1024"}

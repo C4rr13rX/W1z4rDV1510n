@@ -585,6 +585,56 @@ Verify, do not assume:
   `ec2-user` and dies with `Permission denied` on anything it must write.
   `chown ec2-user:ec2-user` after any host-side write.
 
+- **A lifecycle NOTICE placed above the fault arms outranks all of them once
+  its state becomes permanent.** `classify_probe`'s `quarantine_ready` arm
+  matched `service_stage == "replay"` with any `deferred_replay_*` state and
+  returned unconditionally. That was a one-shot handoff signal until
+  `forward_remaining_rows` reached 0 — after which `service_stage` is `replay`
+  for all 2.78 M remaining rows and the state is always some
+  `deferred_replay_*`, so the classifier could emit exactly one verdict for the
+  rest of the curriculum. Measured 2026-09-11 against the live payload: a
+  volume at 96.39 GB under the supervisor's own 150 GB floor — the exact case
+  `disk_floor_unenforced` had been added for hours earlier — plus near-ENOSPC,
+  99 % inode exhaustion, a logged wrapper ENOSPC, control stale 9000 s beside a
+  dead heartbeat, a 400 h drought and a gate that had never produced an
+  artifact ALL classified `quarantine_ready`. And because `required_polls` is 1
+  for that kind, it re-woke a billed agent every 1800 s against a replay that
+  was merely training. **Every one of those faults has a passing test**, because
+  the `probe()` helper never sets `service_stage` — 67 tests green against a
+  payload the host can no longer emit, the same shape as the `block_target_row`
+  annex. When a stage becomes the steady state, re-read every arm that ranks
+  above it, and build at least one test on the payload the host ACTUALLY emits.
+
+- **An interval that never reaches a verdict is re-selected by every restart.**
+  `rejected_this_pass` is a set in memory, so it only protects against
+  intervals that LOSE a gate: those return into the loop, join the set, and the
+  queue advances. An interval that is killed instead — a disk halt, a reboot —
+  is never marked, and `unresolved_deferred_intervals` sorts by
+  `(phase, start_row)`, a total order identical on every restart, so the next
+  generation selects the same `pending[0]` and dies the same way. Measured
+  2026-09-11 on `jupyter-scientific-full:201344:262144`: 361 resource yields
+  and 14 gate failures over 437 h, with 131 unresolved intervals behind it
+  never getting a turn. Fixed by recording the stall in the health ledger from
+  the startup recovery path and sorting the queue on it — a REORDER, not a
+  filter, so every obligation stays eligible.
+
+  **Its recorded cause was 86 h stale and already repaired.** All 14 failures
+  are at-gate `enterprise regression ... passed_suites: 11`, and the newest
+  names `polyglot` — the drought this file records as CLOSED by the Go corpus.
+  The freshest gate artifact (`go-systems`, 13.8 h old) passes **12/12**. So
+  the interval is not failing a capability; it cannot reach the gate at all.
+  Date a gate verdict against the corpus that repaired it, not just against
+  process start.
+
+  **And the work unit is NOT sized in rows.** `go-systems:0:131072` and
+  `go-systems:131072:262144` — more than twice the span — admitted 16.6 h and
+  13.8 h ago with 1 and 4 resource yields. The difference is cost per row: go
+  rows run ~12.6 rows/s end-to-end, jupyter-scientific ~0.84–2.4 rows/s, so
+  60,800 jupyter rows need ~5.9 h against a disk window of ~1.26 h (300 GB of
+  headroom at the measured 237.65 GB/h). **Compare an interval's ETA at ITS
+  phase's measured rate against the disk window**; resizing on row count alone
+  would have been another inert fix.
+
 ## Important Notes
 - Always commit and push after any code changes
 - Kill old processes before deploying new binary (port conflicts cause silent API thread death)
