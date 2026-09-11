@@ -204,12 +204,26 @@ impl BrainContainer {
     pub fn append_neuron(&mut self, pool: PoolId, neuron: &Neuron) -> io::Result<u64> {
         let body = bincode::serialize(neuron)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        self.append_neuron_body(pool, neuron.id, &body)
+    }
+
+    /// Append an already-serialized body. Callers that must inspect the bytes
+    /// before deciding to write them -- `WbrainNeuronStore::append_record`
+    /// compares them against what is already durable -- would otherwise pay
+    /// bincode twice per eviction, and this path runs on every page-out of a
+    /// brain that evicts everything it owns.
+    pub fn append_neuron_body(
+        &mut self,
+        pool: PoolId,
+        id: NeuronId,
+        body: &[u8],
+    ) -> io::Result<u64> {
         let offset = self.file.seek(SeekFrom::End(0))?;
         self.file.write_all(NEURON_RECORD)?;
         self.file.write_all(&pool.to_le_bytes())?;
-        self.file.write_all(&neuron.id.to_le_bytes())?;
+        self.file.write_all(&id.to_le_bytes())?;
         self.file.write_all(&(body.len() as u64).to_le_bytes())?;
-        self.file.write_all(&body)?;
+        self.file.write_all(body)?;
         Ok(offset)
     }
 

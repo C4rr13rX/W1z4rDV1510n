@@ -32,6 +32,22 @@ pub(crate) const LABEL_INDEX_HEADER_BYTES: u64 = 24;
 pub(crate) const LABEL_INDEX_RECORD_HEADER_BYTES: u64 = 24;
 const LABEL_INDEX_MAX_BUCKETS: u64 = 4 * 1024 * 1024;
 
+/// FNV-1a over a serialized neuron body.
+///
+/// Used only to decide whether an append would be redundant, and a collision
+/// therefore costs a skipped write of an identical-length body rather than a
+/// wrong answer -- but the length is folded in first so a collision needs two
+/// bodies of the same size as well as the same hash. Deliberately not a
+/// cryptographic digest: this runs on every page-out.
+fn body_digest(body: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in (body.len() as u64).to_le_bytes().iter().chain(body.iter()) {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
 #[derive(Clone, Copy, Default)]
 struct NeuronSlotRecord {
     offset: u64,
@@ -240,8 +256,24 @@ pub struct WbrainNeuronStore {
     pool_metadata: RwLock<Vec<u8>>,
     working_set: RwLock<AHashMap<NeuronId, Neuron>>,
     index_concept_labels: AtomicBool,
+    /// Indexed by neuron id: `(durable offset, digest of the body stored
+    /// there)` for bodies this process has written. Lets `append_record` prove
+    /// a re-append would be byte-for-byte redundant and skip it.
+    ///
+    /// A flat vector rather than a map because the ids are dense and this host
+    /// is memory-bound: `AHashMap` costs ~163 MB at 5.1 M neurons against
+    /// 82 MB here, and memory pressure is precisely what drives the eviction
+    /// churn being suppressed. Offset 0 is the container header and so is never
+    /// a valid body offset -- `NeuronSlotRecord::is_present` already relies on
+    /// that -- which makes it the "nothing recorded" sentinel. See
+    /// `clean_skips`.
+    durable_bodies: RwLock<Vec<(u64, u64)>>,
     page_ins: AtomicU64,
     page_outs: AtomicU64,
+    /// Evictions that wrote nothing because the durable body was already
+    /// identical. This is the counter that says whether the append-only store
+    /// is recording learning or recycling the same bytes.
+    clean_skips: AtomicU64,
     read_errors: AtomicU64,
     write_errors: AtomicU64,
 }
@@ -263,8 +295,10 @@ impl WbrainNeuronStore {
             pool_metadata: RwLock::new(Vec::new()),
             working_set: RwLock::new(AHashMap::new()),
             index_concept_labels: AtomicBool::new(false),
+            durable_bodies: RwLock::new(Vec::new()),
             page_ins: AtomicU64::new(0),
             page_outs: AtomicU64::new(0),
+            clean_skips: AtomicU64::new(0),
             read_errors: AtomicU64::new(0),
             write_errors: AtomicU64::new(0),
         }
@@ -310,8 +344,10 @@ impl WbrainNeuronStore {
             pool_metadata: RwLock::new(manifest.pool_metadata),
             working_set: RwLock::new(AHashMap::new()),
             index_concept_labels: AtomicBool::new(false),
+            durable_bodies: RwLock::new(Vec::new()),
             page_ins: AtomicU64::new(0),
             page_outs: AtomicU64::new(0),
+            clean_skips: AtomicU64::new(0),
             read_errors: AtomicU64::new(0),
             write_errors: AtomicU64::new(0),
         }
@@ -837,6 +873,16 @@ impl WbrainNeuronStore {
         self.page_outs.load(Ordering::Relaxed)
     }
 
+    /// Page-outs that wrote no body because the durable copy was identical.
+    ///
+    /// Report this beside `page_outs`: their ratio is the only direct readout
+    /// of how much of the store's growth is learning and how much is eviction
+    /// churn, and every previous attempt to attribute that growth had to be
+    /// done by differencing `df` against a stopwatch on the host.
+    pub fn clean_skips(&self) -> u64 {
+        self.clean_skips.load(Ordering::Relaxed)
+    }
+
     /// Persist the current neuron body and remove only that neuron from RAM.
     pub fn sleep_neuron(&self, id: NeuronId) -> std::io::Result<bool> {
         let neuron = match self.working_set.write().remove(&id) {
@@ -895,14 +941,60 @@ impl WbrainNeuronStore {
             ));
         }
         self.ensure_slot_capacity(neuron.id as u64 + 1)?;
-        let was_present = self
-            .read_slot(neuron.id)
-            .is_some_and(NeuronSlotRecord::is_present);
+        let slot = self.read_slot(neuron.id);
+        let was_present = slot.is_some_and(NeuronSlotRecord::is_present);
+
+        // AN EVICTION THAT CHANGED NOTHING MUST NOT COST A BODY.
+        //
+        // `cold.rs` has said since the first cut that "every eviction appends";
+        // what it did not say is that most evictions append a body identical to
+        // the one already durable. A brain whose bodies total 363 GB cannot be
+        // resident on a 15.26 GB host, so it evicts essentially everything it
+        // owns -- measured `evicted_neurons` 5,105,285 of `total_neurons`
+        // 5,105,285, `resident_terminals` 0 -- and pages the same neurons back
+        // in to read them. Each of those read-only round trips re-appended ~71
+        // KB that no compaction ever returned.
+        //
+        // Measured 2026-09-11: 108.66 GB/h of growth, and stopping the training
+        // worker took it to -0.0 GB/h, so this path is the writer. At 2.78 M
+        // deferred rows and 1.652 rows/s that is ~51 TB of appends owed on a
+        // 1 TB volume -- the curriculum could not finish on any volume anyone
+        // would buy.
+        //
+        // Skipping is safe by construction rather than by argument: the body is
+        // serialized first and compared against the digest of what is already
+        // at the offset THIS slot points to. Identical bytes at the same offset
+        // means the store's state after the skip is the state it would have had
+        // after the write. A digest recorded against a different offset is not
+        // trusted, so a rollback, a compaction or a reopen simply falls through
+        // to the append.
+        let body = bincode::serialize(neuron)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        let digest = body_digest(&body);
+        if was_present {
+            let durable_offset = slot.map(|record| record.offset).unwrap_or(0);
+            if let Some(&(offset, known)) =
+                self.durable_bodies.read().get(neuron.id as usize)
+            {
+                if offset != 0 && offset == durable_offset && known == digest {
+                    self.clean_skips.fetch_add(1, Ordering::Relaxed);
+                    return Ok(());
+                }
+            }
+        }
+
         let offset = self
             .file
             .container
             .lock()
-            .append_neuron(self.pool_id, neuron)?;
+            .append_neuron_body(self.pool_id, neuron.id, &body)?;
+        {
+            let mut durable = self.durable_bodies.write();
+            if durable.len() <= neuron.id as usize {
+                durable.resize(neuron.id as usize + 1, (0, 0));
+            }
+            durable[neuron.id as usize] = (offset, digest);
+        }
         let record = NeuronSlotRecord::from_neuron(offset, neuron);
         if !was_present && neuron.id as u64 == logical_before {
             self.queue_slot_write(neuron.id, record)?;
@@ -1057,6 +1149,97 @@ mod tests {
         assert_eq!(pool.page_ins(), 1);
         assert_eq!(pool.label_to_id("atom:2"), Some(2));
         assert_eq!(pool.resident_count(), 1);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn unchanged_eviction_writes_no_body_and_a_changed_one_still_does() {
+        // The append-only store grew 108.66 GB/h against a brain whose live
+        // bodies total ~363 GB, because a brain that cannot be resident pages
+        // neurons in to READ them and re-appends an identical body on the way
+        // out. Two properties matter and they pull in opposite directions: a
+        // redundant append must cost nothing, and a real mutation must never be
+        // silently dropped. Assert both against the file's own length.
+        let path = tmpfile("clean-skip");
+        let file = WbrainFile::open(&path).unwrap();
+        let pool = file.pool(3);
+
+        let mut neuron =
+            Neuron::new_atom(0, "atom:0".into(), NeuronKind::Excitatory, 1);
+        pool.persist_sleeping(&neuron).unwrap();
+        file.flush().unwrap();
+        let after_first = std::fs::metadata(&path).unwrap().len();
+        assert_eq!(pool.clean_skips(), 0, "the first write is never redundant");
+
+        // Page in, change nothing, evict again -- the shape of a read-only
+        // round trip, which is the overwhelming majority of this brain's
+        // evictions.
+        let read_back = pool.get(0).unwrap();
+        assert_eq!(read_back.label, "atom:0");
+        pool.persist_sleeping(&read_back).unwrap();
+        file.flush().unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            after_first,
+            "an eviction that changed nothing must append nothing",
+        );
+        assert_eq!(pool.clean_skips(), 1);
+
+        // A real mutation must still reach disk, and must be what comes back.
+        neuron.terminals.push(Terminal::new(NeuronRef::new(3, 0), 0.5, 2));
+        pool.persist_sleeping(&neuron).unwrap();
+        file.flush().unwrap();
+        assert!(
+            std::fs::metadata(&path).unwrap().len() > after_first,
+            "a changed body must still be appended",
+        );
+        assert_eq!(pool.clean_skips(), 1, "a changed body is not a clean skip");
+        assert_eq!(pool.get(0).unwrap().terminals.len(), 1);
+
+        // And the suppression must not latch: once the durable copy is the
+        // mutated one, re-evicting THAT unchanged is redundant in its turn.
+        let mutated = pool.get(0).unwrap();
+        let after_mutation = std::fs::metadata(&path).unwrap().len();
+        pool.persist_sleeping(&mutated).unwrap();
+        file.flush().unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), after_mutation);
+        assert_eq!(pool.clean_skips(), 2);
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn reopened_store_re_appends_because_no_digest_survives_the_process() {
+        // The digest map is in-memory and deliberately not persisted: a
+        // rollback, a compaction or a crash can move a body out from under a
+        // recorded offset, and trusting a stale digest would drop a write. A
+        // fresh process must therefore fall through to the append.
+        let path = tmpfile("clean-skip-reopen");
+        {
+            let file = WbrainFile::open(&path).unwrap();
+            let pool = file.pool(3);
+            pool.persist_sleeping(&Neuron::new_atom(
+                0,
+                "atom:0".into(),
+                NeuronKind::Excitatory,
+                1,
+            ))
+            .unwrap();
+            file.commit_manifest().unwrap();
+            file.flush().unwrap();
+        }
+
+        let reopened = WbrainFile::open(&path).unwrap();
+        let pool = reopened.pool(3);
+        let before = std::fs::metadata(&path).unwrap().len();
+        let neuron = pool.get(0).unwrap();
+        pool.persist_sleeping(&neuron).unwrap();
+        reopened.flush().unwrap();
+        assert!(
+            std::fs::metadata(&path).unwrap().len() > before,
+            "a reopened store has no digest to trust and must append",
+        );
+        assert_eq!(pool.clean_skips(), 0);
         std::fs::remove_file(path).ok();
     }
 

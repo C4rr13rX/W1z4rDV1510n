@@ -549,6 +549,25 @@ def faults(now: dict, baseline_deferred: int) -> list[str]:
             f"{now.get('disk_free_gb')}GB free and could not reclaim past it "
             "-- no reclaim on this host restarts training")
 
+    # Training BELOW the supervisor's own floor means the guard is not being
+    # enforced on the stage that is running, which is a different fault from a
+    # volume that is merely low. Measured 2026-09-11: `--min-free-disk-gb 150`
+    # sat on the running supervisor's argv while deferred replay trained at
+    # 96.39 GB free and 108.66 GB/h, because the floor is checked by the
+    # forward corpus-phase loop and forward harvesting had already finished.
+    # The 20 GB trigger below would have fired with roughly ten minutes of
+    # headroom left; this fires with an hour.
+    floor_gb = now.get("min_free_disk_gb")
+    free_gb = now.get("disk_free_gb", -1)
+    if (floor_gb and 0 <= free_gb < float(floor_gb)
+            and str(now.get("state") or "") not in {
+                "resource_waiting", "disk_exhausted_unrecoverable"}):
+        found.append(
+            f"disk_floor_unenforced: {free_gb}GB free is below the "
+            f"{floor_gb}GB floor the supervisor was started with, but it is in "
+            f"state '{now.get('state')}' rather than parked -- the guard is "
+            "not on the stage that is running")
+
     if 0 <= now.get("disk_free_gb", -1) < 20:
         found.append(f"disk_low: {now['disk_free_gb']}GB free on /srv/wizard")
 

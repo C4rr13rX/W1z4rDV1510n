@@ -230,14 +230,49 @@ def disk_exhaustion_fault(probe: dict, *,
     if state == "disk_exhausted_unrecoverable":
         reclaimed = status.get("disk_reclaimed_bytes")
         attempts = status.get("disk_reclaim_attempts")
+        # Forward publishes `durable_next_row`; deferred replay publishes
+        # `resume_row`. Reading one key would render "row None" for whichever
+        # stage did not write it, which is the multi-schema trap this file has
+        # already been bitten by twice.
+        halted_row = status.get("durable_next_row")
+        if halted_row is None:
+            halted_row = status.get("resume_row")
         return (
             "the curriculum supervisor stopped on its own disk floor and could "
             f"not reclaim past it ({disk.get('free_gb')} GB free against a "
             f"{status.get('minimum_free_disk_gb')} GB floor; {attempts} reclaim "
             f"attempts returned {reclaimed} bytes) -- training is halted at "
-            f"durable row {status.get('durable_next_row')} and no reclaim on "
+            f"durable row {halted_row} and no reclaim on "
             "this host can restart it"
         )
+
+    # A supervisor that is STILL TRAINING below its own floor is not a healthy
+    # host with a low threshold -- it is a host whose guard is not being
+    # enforced on the path that is running, and the guard is the only thing
+    # standing between this volume and the ENOSPC crash loop.
+    #
+    # The previous fix here keyed on `resource_waiting`, which covers a
+    # supervisor PARKED on its floor and misses one that never reaches it.
+    # Measured 2026-09-11: `--min-free-disk-gb 150` was on the running
+    # supervisor's own argv while deferred replay trained at 96.39 GB free and
+    # 108.66 GB/h, because `disk_floor_breached` is enforced by the forward
+    # corpus-phase loop and `forward_remaining_rows` was 0. Both emitters
+    # called that healthy, and it was ~40 minutes from ENOSPC. An alarm floor
+    # below the guard it watches can never fire -- and neither can a guard
+    # attached to a stage that has finished.
+    if supervisor_floor_gb is not None and state not in {
+        "resource_waiting", "disk_exhausted_unrecoverable",
+    }:
+        free_gb = disk.get("free_gb")
+        if free_gb is not None and float(free_gb) < float(supervisor_floor_gb):
+            return (
+                f"/srv/wizard has {float(free_gb):.2f} GB free, below the "
+                f"{float(supervisor_floor_gb):.1f} GB floor the supervisor "
+                f"itself was started with, yet it is in state '{state}' rather "
+                "than parked -- the disk guard is not being enforced on the "
+                "stage that is running, so nothing will stop this volume "
+                "before ENOSPC"
+            )
 
     free_gb = disk.get("free_gb")
     if free_gb is not None and float(free_gb) < disk_floor_gb:
@@ -348,6 +383,24 @@ def classify_probe(probe: dict, *, stall_seconds: float,
         since = admissions.get("hours_since_admission")
         counts = admissions.get("event_counts") or {}
         yields = int(counts.get("deferred_replay_resource_yield") or 0)
+
+        # THE VOLUME IS CHECKED BEFORE THE DROUGHT, BECAUSE IT EXPLAINS IT.
+        # A full or unguarded volume stops training, and stopped training is
+        # what produces a drought -- so an arm ordered after the drought can
+        # only ever fire on a host the drought arm has already claimed.
+        # `disk_exhaustion_fault` sat below the `return` at the end of the
+        # drought branch, which is the same earlier-arm-swallows-the-cause
+        # shape as the `intent_diagnostics.answer_branch` chain and the
+        # dominant-bucket arm that matched "stderr" and absorbed every cause.
+        # Measured 2026-09-11: 96.39 GB free against the supervisor's own
+        # 150 GB floor classified as `no_admission: 11.1h`, sending a woken
+        # agent to look for a semantic repair on a host that was 40 minutes
+        # from ENOSPC.
+        disk_fault = disk_exhaustion_fault(probe, disk_floor_gb=disk_floor_gb)
+        if disk_fault:
+            return Decision(
+                "fix_required", disk_fault, event_fingerprint("disk_low", probe),
+            )
 
         before_gate = int(admissions.get("replay_failures_before_gate") or 0)
         at_gate = int(admissions.get("replay_failures_at_gate") or 0)

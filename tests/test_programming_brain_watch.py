@@ -1752,3 +1752,104 @@ def test_the_halt_is_visible_on_a_supervisor_that_predates_the_fix() -> None:
         "disk": {**old_build["disk"], "free_gb": 600.0},
     }
     assert classify_probe(memory_yield, stall_seconds=1800).kind != "fix_required"
+
+
+def test_training_below_the_supervisors_own_floor_is_a_fault() -> None:
+    """The exact payload that both emitters called healthy on 2026-09-11.
+
+    The previous fix here keyed on `resource_waiting`, which covers a
+    supervisor PARKED on its floor and misses one that never reaches it.
+    `--min-free-disk-gb 150` sat on the running supervisor's own argv while
+    deferred replay trained at 96.39 GB free and 108.66 GB/h, because
+    `disk_floor_breached` is enforced by the forward corpus-phase loop and
+    `forward_remaining_rows` was 0. That is not a low volume under a working
+    guard; it is a guard attached to a stage that has finished, and the host
+    was ~40 minutes from ENOSPC with no alarm anywhere.
+    """
+    unguarded = {
+        **probe("deferred_replay_training"),
+        "admissions": {"gate_artifacts": 11, "hours_since_admission": 11.1,
+                       "event_counts": {}},
+        "status": {
+            "state": "deferred_replay_training",
+            "phase": "jupyter-scientific-full",
+            "interval_id": "jupyter-scientific-full:201344:262144",
+            "minimum_free_disk_gb": 150,
+            "resume_row": 227056,
+        },
+        # Above BOTH alarm floors (48 and 20) and below the supervisor's own.
+        "disk": {"free_gb": 96.39, "total_gb": 1098.97, "used_percent": 91.2,
+                 "free_inodes": 107322484, "inodes_used_percent": 0.0,
+                 "wrapper_enospc": False},
+    }
+    decision = classify_probe(unguarded, stall_seconds=1800)
+    assert decision.kind == "fix_required", decision
+    assert "96.39" in decision.reason and "150" in decision.reason
+
+    # Same evidence, other emitter. Changing one and not the other is how this
+    # host was simultaneously healthy and faulted three times already.
+    from scripts.aws.admission_watchdog import faults
+
+    found = faults({
+        "unit": "active", "brain_up": True, "failed_since_deploy": 0,
+        "last_admission_age": 39960, "tick_delta": 12, "deferred": 3,
+        "disk_free_gb": 96.39, "mem_free_gb": 9, "progress_age": 2,
+        "status_age": 32, "state": "deferred_replay_training",
+        "min_free_disk_gb": 150, "supervisor_busy": True,
+    }, baseline_deferred=3)
+    assert any(f.startswith("disk_floor_unenforced:") for f in found), found
+
+    # The suppression must stay narrow: a supervisor legitimately PARKED on its
+    # floor already has its own named fault and must not also be reported as an
+    # unenforced guard, and a healthy volume must stay healthy.
+    parked = faults({
+        "unit": "active", "brain_up": True, "failed_since_deploy": 0,
+        "last_admission_age": 600, "tick_delta": 0, "deferred": 3,
+        "disk_free_gb": 149, "mem_free_gb": 9, "progress_age": 30,
+        "status_age": 30, "state": "disk_exhausted_unrecoverable",
+        "min_free_disk_gb": 150, "supervisor_busy": True,
+    }, baseline_deferred=3)
+    assert not any(f.startswith("disk_floor_unenforced:") for f in parked)
+
+    # Hoisting the disk arm above the drought must not let it claim hosts whose
+    # volume is fine. The same payload with headroom still reaches the drought
+    # arm on its own merits -- 11.1 h with no admission is a real finding -- but
+    # it must no longer be reported as a disk fault.
+    healthy = {
+        **unguarded,
+        "status": {**unguarded["status"], "minimum_free_disk_gb": 150},
+        "disk": {**unguarded["disk"], "free_gb": 402.0},
+    }
+    healthy_decision = classify_probe(healthy, stall_seconds=1800)
+    assert not healthy_decision.fingerprint.startswith("disk_low:")
+    assert "150" not in healthy_decision.reason
+
+
+def test_the_halt_row_is_read_from_either_stages_schema() -> None:
+    """Forward publishes `durable_next_row`; replay publishes `resume_row`.
+
+    `curriculum-supervisor.status.json` is whatever lifecycle event wrote last,
+    and reading one key has already produced a vacuous "row None" twice in this
+    file's history. Deferred replay is the stage that halts on disk, so the
+    replay spelling is the one that must not be dropped.
+    """
+    parked = {
+        **probe("disk_exhausted_unrecoverable"),
+        "admissions": {"gate_artifacts": 6, "hours_since_admission": 0.2,
+                       "event_counts": {}},
+        "status": {
+            "state": "disk_exhausted_unrecoverable",
+            "phase": "jupyter-scientific-full",
+            "minimum_free_disk_gb": 150,
+            "resume_row": 229264,
+            "disk_reclaim_attempts": 3,
+            "disk_reclaimed_bytes": 0,
+        },
+        "disk": {"free_gb": 149.2, "total_gb": 1023.5, "used_percent": 85.0,
+                 "free_inodes": 107322485, "inodes_used_percent": 0.0,
+                 "wrapper_enospc": False},
+    }
+    decision = classify_probe(parked, stall_seconds=1800)
+    assert decision.kind == "fix_required", decision
+    assert "229264" in decision.reason, decision.reason
+    assert "None" not in decision.reason

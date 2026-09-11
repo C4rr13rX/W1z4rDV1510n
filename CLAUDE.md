@@ -389,6 +389,56 @@ Verify, do not assume:
   the floor carried in the payload, because a hung host cannot redeploy itself
   and the running generation always predates the fix.
 
+- **The disk guard was on the stage that had FINISHED.** `--min-free-disk-gb`
+  is enforced by `disk_floor_breached`, which is called only from the forward
+  corpus-phase loop. Once `forward_remaining_rows` reaches 0 that loop is done
+  and deferred replay does every remaining row — and `run_deferred_replay_worker`
+  polled `replay_memory_floor_breached` and nothing else. Measured 2026-09-11:
+  the running supervisor carried `--min-free-disk-gb 150` on its own argv while
+  replay trained at 96.39 GB free and 108.66 GB/h, ~40 minutes from the ENOSPC
+  crash loop that floor exists to prevent. **Both watchdog emitters called it
+  healthy**, because the previous fix keyed on `resource_waiting` — a supervisor
+  PARKED on its floor — and this one never reached it. An alarm floor below the
+  guard it watches can never fire; neither can a guard attached to a stage that
+  has ended. Training below the supervisor's own floor is now its own fault in
+  both emitters (`disk_floor_unenforced`), and the disk arm is checked BEFORE
+  the drought arm, because a full volume causes droughts: at 96.39 GB this
+  classified as `no_admission: 11.1h` and would have sent an agent hunting a
+  semantic repair. A disk yield must also HALT (`DISK_EXHAUSTED_EXIT` 90,
+  `RestartPreventExitStatus=42 90`) rather than respawn — a memory yield ends
+  because the recycle returns the arena, but nothing returns disk, so a
+  respawning disk yield is a faster path to ENOSPC than no guard at all.
+
+- **The burn was re-appending bodies that had not changed.** `persist_sleeping`
+  → `append_record` → `append_neuron` wrote a full body on every page-out
+  unconditionally. A brain whose live bodies total ~363 GB cannot be resident on
+  a 15.26 GB host, so it evicts everything it owns (`evicted_neurons` 5,105,285
+  of `total_neurons` 5,105,285, `resident_terminals` 0) and pages neurons back
+  in to READ them; each read-only round trip re-appended ~71 KB that no
+  compaction returns. Stopping the worker took the volume from 108.66 GB/h to
+  **-0.0 GB/h**, so the attribution needs no argument. `append_record` now
+  serializes first, compares an FNV-1a digest against what is already at the
+  offset the slot points to, and skips the write when they match — safe by
+  construction rather than by reasoning about dirty flags, since identical bytes
+  at the same offset leave the store in the state the write would have produced.
+  The digest map is in-memory and deliberately not persisted, so a rollback,
+  compaction or reopen falls through to the append. Report `clean_skips` beside
+  `page_outs`: their ratio is the only direct readout of how much growth is
+  learning rather than churn. **Size the curriculum against the burn before
+  believing it can finish**: 2.78 M deferred rows at 1.652 rows/s is 468 h,
+  which at the old rate is ~51 TB of appends on a 1 TB volume.
+
+- **The designed rollback reclaims the volume; deleting files by hand does
+  not.** `deferred-replay-active.json` carrying `state: training` makes
+  `recover_interrupted_deferred_replay` call `restore_rejected_deferred_replay`,
+  which reflink-clones `brain.last-good.wbrain` over `brain.wbrain` and
+  `os.replace`s it — unlinking the old inode and returning everything unique to
+  it. Measured 2026-09-11 by extent subtraction (`filefrag -v`, never file
+  size): `brain.wbrain` 982.43 GB with **587.83 GB unique**, against
+  `brain.last-good.wbrain` 394.59 GB with **0.0 GB unique** — deleting the guard
+  would free nothing, and restarting the supervisor frees 587.83 GB as designed.
+  It costs exactly the unadmitted interval the invariant discards anyway.
+
 - **The interval is larger than the disk window, which is a LIVELOCK, not a
   stall.** Durable progress survives a memory yield within one supervisor
   generation (measured 222,104 → 222,520 → 223,240 → 223,456) but a supervisor

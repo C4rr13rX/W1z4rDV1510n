@@ -165,3 +165,76 @@ def test_the_disk_wait_is_bounded_rather_than_unbounded() -> None:
     # publish a state a watchdog can key on.
     assert "disk_exhausted_unrecoverable" in source
     assert source.count("reclaim_disk_for_floor") >= 2
+
+
+def test_the_replay_path_has_its_own_disk_floor() -> None:
+    """The guard must be on the stage that RUNS, not the stage that finished.
+
+    `--min-free-disk-gb` was only ever enforced by `disk_floor_breached`, which
+    is called from the forward corpus-phase loop. Once `forward_remaining_rows`
+    reaches 0 that loop is done and deferred replay does all remaining
+    training -- with nothing checking the volume.
+
+    Measured 2026-09-11: the running supervisor carried `--min-free-disk-gb
+    150` on its own argv while deferred replay trained at 96.39 GB free and
+    108.66 GB/h, roughly 40 minutes from the ENOSPC crash loop that floor
+    exists to prevent. Both watchdog emitters called the host healthy. Stopping
+    the worker took the burn to -0.0 GB/h, so there was never any doubt about
+    which path was writing.
+    """
+    source = (
+        Path(__file__).parents[1]
+        / "scripts/programming_curriculum_supervisor.py"
+    ).read_text(encoding="utf-8")
+    worker = source.split("def run_deferred_replay_worker", 1)[1].split(
+        "\ndef ", 1
+    )[0]
+    assert "replay_disk_floor_breached" in worker, (
+        "the deferred-replay worker must check the volume, not only memory"
+    )
+    assert "replay_memory_floor_breached" in worker
+
+
+def test_replay_disk_floor_reads_the_volume_not_memory(tmp_path: Path) -> None:
+    from scripts.programming_curriculum_supervisor import (
+        replay_disk_floor_breached,
+    )
+
+    # A floor of 0 disables the guard, exactly as the memory floor does.
+    assert replay_disk_floor_breached(0.0, tmp_path, free_bytes=1) is False
+    one_gb = 1024 ** 3
+    assert replay_disk_floor_breached(150.0, tmp_path, free_bytes=96 * one_gb)
+    assert not replay_disk_floor_breached(
+        150.0, tmp_path, free_bytes=151 * one_gb
+    )
+
+
+def test_an_exhausted_disk_stops_the_pass_instead_of_respawning() -> None:
+    """A disk yield that loops is worse than no guard at all.
+
+    Memory and disk leave a yield by different routes: the node recycle hands
+    the allocator's arena back (measured 2.98 GB -> 14.65 GB), so respawning
+    after a memory yield is correct. Nothing returns disk on an append-only
+    store, so respawning after a disk yield burns the remaining headroom and
+    stops again -- turning a guard into a faster path to ENOSPC.
+    """
+    source = (
+        Path(__file__).parents[1]
+        / "scripts/programming_curriculum_supervisor.py"
+    ).read_text(encoding="utf-8")
+    assert "DISK_EXHAUSTED_EXIT = 90" in source
+    replays = source.split("def run_deferred_replays", 1)[1]
+    assert "disk_exhausted" in replays
+    assert "return DISK_EXHAUSTED_EXIT" in replays
+    # Whatever the pass banked must be recorded before the halt, or the next
+    # generation replays the span from its start.
+    halt = replays.split("disk_exhausted", 1)[1][:1200]
+    assert "record_deferred_replay_resume" in halt
+
+    unit = (
+        Path(__file__).parents[1]
+        / "scripts/aws/wizard-curriculum-supervisor.service"
+    ).read_text(encoding="utf-8")
+    assert "RestartPreventExitStatus=42 90" in unit, (
+        "systemd must not restart into the same wall"
+    )

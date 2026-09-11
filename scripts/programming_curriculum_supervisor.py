@@ -48,6 +48,12 @@ MIN_COPY_RESERVE_BYTES = 64 * 1024 * 1024
 MAX_COPY_RESERVE_BYTES = 4 * 1024 * 1024 * 1024
 RESOURCE_SETTLED_EXIT = 88
 RESOURCE_SETTLEMENT_FAILED_EXIT = 89
+#: Deferred replay stopped at a durable boundary because the volume is below
+#: `--min-free-disk-gb` and three reclaim attempts returned nothing. Distinct
+#: from a settlement so the wrapper does not restart into the same wall: the
+#: append-only store means a respawn burns the remaining headroom and stops
+#: again, and nothing but a larger volume or a compaction changes that.
+DISK_EXHAUSTED_EXIT = 90
 
 #: How many consecutive resource yields may end a replay pass without the
 #: pass having made any durable progress, before that counts as a failure.
@@ -437,6 +443,35 @@ def replay_memory_floor_breached(min_free_memory_gb: float,
     return available_bytes < int(min_free_memory_gb * 1024 * 1024 * 1024)
 
 
+def replay_disk_floor_breached(min_free_disk_gb: float, runtime: Path,
+                               free_bytes: int | None = None) -> bool:
+    """Volume floor for the DEFERRED REPLAY worker.
+
+    `disk_floor_breached` is the forward corpus-phase loop's guard, and it is
+    the ONLY place `--min-free-disk-gb` was ever enforced. Once
+    `forward_remaining_rows` reaches 0 that loop has finished, so the guard
+    watches a stage that no longer runs while deferred replay -- the stage that
+    actually trains from here on -- fills the volume with nothing checking it.
+
+    Measured 2026-09-11: the running supervisor carried `--min-free-disk-gb
+    150` and was training at 44.13 GB free, burning 108.66 GB/h, roughly 20
+    minutes from the ENOSPC crash loop that the 150 GB floor exists to prevent.
+    Stopping the worker took the burn to -0.0 GB/h, so the attribution is not
+    in doubt: this path is the writer.
+
+    Deliberately simpler than `disk_floor_breached`, which also requires
+    `durable_row == ram_row`. The replay worker publishes its durable row to a
+    progress file the caller already checkpoints once per poll, and the yield
+    stops the worker at that published boundary, so the durability condition is
+    established by the yield itself rather than tested here.
+    """
+    if min_free_disk_gb <= 0:
+        return False
+    if free_bytes is None:
+        free_bytes = int(shutil.disk_usage(runtime).free)
+    return free_bytes < int(min_free_disk_gb * 1024 * 1024 * 1024)
+
+
 def run_deferred_replay_worker(args: argparse.Namespace, phase: Phase,
                                runtime: Path, event: dict, status_path: Path,
                                interval_id: str, stdout, stderr,
@@ -470,6 +505,7 @@ def run_deferred_replay_worker(args: argparse.Namespace, phase: Phase,
     """
     poll_seconds = max(1.0, float(getattr(args, "poll_seconds", 2.0)))
     floor_gb = max(0.0, float(getattr(args, "min_free_memory_gb", 0.0)))
+    disk_floor_gb = max(0.0, float(getattr(args, "min_free_disk_gb", 0.0)))
     build = build_command or deferred_replay_command
     worker = subprocess.Popen(
         build(args, phase, runtime, event, resume_row),
@@ -499,19 +535,25 @@ def run_deferred_replay_worker(args: argparse.Namespace, phase: Phase,
                 runtime, digest, event, guard_identity,
                 replay_progress, recorded_row,
             )
-        if replay_memory_floor_breached(floor_gb):
+        memory_low = replay_memory_floor_breached(floor_gb)
+        disk_low = replay_disk_floor_breached(disk_floor_gb, runtime)
+        if memory_low or disk_low:
             streak += 1
         else:
             streak = 0
         if streak >= 3:
             available_before = int(psutil.virtual_memory().available)
+            disk_free_before = int(shutil.disk_usage(runtime).free)
             stop_worker_process(worker)
             publish(status_path, {
                 "state": "deferred_replay_resource_yield",
                 "phase": phase.name,
                 "interval_id": interval_id,
                 "available_bytes_before": available_before,
+                "disk_free_bytes_before": disk_free_before,
                 "minimum_free_memory_gb": floor_gb,
+                "minimum_free_disk_gb": disk_floor_gb,
+                "pressure": {"memory": memory_low, "disk": disk_low},
                 "updated_unix": time.time(),
             })
             recycled: dict = {}
@@ -528,6 +570,32 @@ def run_deferred_replay_worker(args: argparse.Namespace, phase: Phase,
                 # interval stays unmarked and a later pass retries it.
                 error = str(exc)
             available_after = int(psutil.virtual_memory().available)
+            # Memory and disk leave this yield by different routes, and giving
+            # them one route is the defect that made the forward path wait
+            # forever. The recycle above hands the allocator's arena back, so a
+            # memory yield ends on its own and the caller may respawn straight
+            # away. The `.wbrain` store is append-only, so once the worker
+            # stops the volume stops FALLING and nothing raises it -- respawning
+            # into an unreclaimed floor would spin yield/respawn until ENOSPC,
+            # which is strictly worse than the unguarded burn it replaced.
+            disk_reclaims: list[dict] = []
+            disk_exhausted = False
+            if disk_low:
+                while len(disk_reclaims) < MAX_DISK_RECLAIM_ATTEMPTS:
+                    reclaim = reclaim_disk_for_floor(runtime, disk_floor_gb)
+                    disk_reclaims.append(reclaim)
+                    append_health_event(runtime, {
+                        "kind": "disk_floor_reclaim",
+                        "passed": bool(reclaim["cleared_floor"]),
+                        "phase": phase.name,
+                        "interval_id": interval_id,
+                        **reclaim,
+                    })
+                    if reclaim["cleared_floor"]:
+                        break
+                else:
+                    disk_exhausted = True
+            disk_free_after = int(shutil.disk_usage(runtime).free)
             append_health_event(runtime, {
                 "kind": "deferred_replay_resource_yield",
                 "passed": not error,
@@ -535,10 +603,33 @@ def run_deferred_replay_worker(args: argparse.Namespace, phase: Phase,
                 "interval_id": interval_id,
                 "available_bytes_before": available_before,
                 "available_bytes_after": available_after,
+                "disk_free_bytes_before": disk_free_before,
+                "disk_free_bytes_after": disk_free_after,
                 "minimum_free_memory_gb": floor_gb,
+                "minimum_free_disk_gb": disk_floor_gb,
+                "pressure": {"memory": memory_low, "disk": disk_low},
+                "disk_reclaim_attempts": disk_reclaims,
                 "recycled": recycled,
                 "error": error,
             })
+            if disk_exhausted:
+                # Name it. A halt that looks like a settled interval is the
+                # failure mode this whole guard exists to avoid: the unit stays
+                # `active`, the row parks on a durable boundary, and every
+                # heartbeat rule we wrote says a frozen row during settlement is
+                # normal by design.
+                append_health_event(runtime, {
+                    "kind": "disk_exhausted_unrecoverable",
+                    "passed": False,
+                    "phase": phase.name,
+                    "interval_id": interval_id,
+                    "resume_row": recorded_row,
+                    "disk_free_bytes": disk_free_after,
+                    "minimum_free_disk_gb": disk_floor_gb,
+                    "reclaim_attempts": disk_reclaims,
+                    "updated_unix": time.time(),
+                })
+                worker.disk_exhausted = True
             # A yield is a deliberate pause at an already WAL-durable
             # boundary, not a crash. Flagging it lets the caller resume the
             # interval from that boundary instead of rolling the whole span
@@ -3892,6 +3983,35 @@ def run_deferred_replays(args: argparse.Namespace, runtime: Path,
                         replay_progress=replay_progress,
                     )
                     yielded = bool(getattr(worker, "resource_yield", False))
+                    if getattr(worker, "disk_exhausted", False):
+                        # Bank whatever this pass made durable, then stop. The
+                        # interval stays unmarked -- neither admitted nor
+                        # failed -- so a supervisor started after the volume
+                        # grows resumes it from this row rather than replaying
+                        # the span from its start.
+                        banked = replay_pass_durable_row(
+                            replay_progress, resume_row, interval_end
+                        )
+                        if banked > resume_row:
+                            resume_row = banked
+                            record_deferred_replay_resume(
+                                runtime, digest, event, guard_identity,
+                                resume_row,
+                            )
+                        publish(status_path, {
+                            "state": "disk_exhausted_unrecoverable",
+                            "phase": phase.name,
+                            "interval_id": interval_id,
+                            "start_row": int(event["start_row"]),
+                            "resume_row": resume_row,
+                            "end_row": interval_end,
+                            "minimum_free_disk_gb": args.min_free_disk_gb,
+                            "disk_free_bytes": int(
+                                shutil.disk_usage(runtime).free
+                            ),
+                            "updated_unix": time.time(),
+                        })
+                        return DISK_EXHAUSTED_EXIT
                     if worker.returncode != 0 and not yielded:
                         raise replay_worker_failure(
                             worker.returncode,
