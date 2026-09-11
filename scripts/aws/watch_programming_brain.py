@@ -318,11 +318,46 @@ def classify_probe(probe: dict, *, stall_seconds: float,
     status_age = float(probe.get("status_age_seconds") or 0.0)
     service_stage = str(probe.get("service_stage") or "")
 
-    if state == "deferred_intervals_pending" or (
+    # A HANDOFF IS ONLY A HANDOFF WHILE NOBODY IS DRIVING IT.
+    #
+    # This arm was written when forward harvesting ending was a one-shot
+    # event worth waking an agent for. `forward_remaining_rows` is now 0
+    # permanently, so `service_stage` is `replay` for every remaining row of
+    # the curriculum -- 2.78 M of them -- and `status.state` during replay is
+    # always some `deferred_replay_*`. The condition therefore matched every
+    # future probe, and because it sat ABOVE every fault arm and returned
+    # unconditionally, it made all of them unreachable for the rest of the
+    # run.
+    #
+    # Measured 2026-09-11 against the live payload: the volume at 96.39 GB
+    # under the supervisor's own 150 GB floor (the exact case
+    # `disk_floor_unenforced` was added for that same day), a volume at
+    # 12 GB, 99 % inode exhaustion, a logged wrapper ENOSPC, control stale
+    # for 9000 s beside a dead heartbeat, a 400 h drought, and a gate that
+    # has never produced an artifact ALL classified `quarantine_ready`. Each
+    # one reaches `fix_required` the moment `service_stage` is anything but
+    # `replay` -- which is precisely the shape the tests build, because the
+    # `probe()` helper never sets that key. The whole suite passed against a
+    # payload the host can no longer emit, exactly as the `block_target_row`
+    # annex did.
+    #
+    # The cost ran both ways: every genuine fault was invisible, and this
+    # notice re-fired as a billed agent wake-up every `retry_cooldown`
+    # (1800 s) because `required_polls` is 1 for this kind -- against a
+    # replay that was simply training.
+    #
+    # So the arm keeps its original job and loses the part that was never
+    # true: intervals queued or mid-replay with NO supervisor and NO wrapper
+    # is a real handoff that nothing will pick up on its own. The same state
+    # under a live owner is just the running stage, and it is classified by
+    # the same staleness, volume, gate and drought arms as any other -- a
+    # frozen or starving replay must still alarm below.
+    quarantine_stage = state == "deferred_intervals_pending" or (
         service_stage == "replay"
         and state.startswith("deferred_replay_")
         and state not in COMPLETE_STATES
-    ):
+    )
+    if quarantine_stage and supervisor_count == 0 and wrapper_count == 0:
         identity = {
             "host_state": host_state,
             "runtime": probe.get("runtime"),
@@ -330,7 +365,8 @@ def classify_probe(probe: dict, *, stall_seconds: float,
         }
         return Decision(
             "quarantine_ready",
-            "forward harvesting is complete and quarantine replay is ready or active",
+            "forward harvesting is complete and quarantine replay is ready "
+            "to start, but no supervisor or wrapper owns it",
             event_fingerprint("quarantine_ready", identity),
         )
 

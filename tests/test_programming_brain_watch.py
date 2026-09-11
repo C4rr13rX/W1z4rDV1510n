@@ -58,16 +58,94 @@ def test_completed_automation_wakes_the_agent_for_the_next_stage() -> None:
     assert decision.fingerprint
 
 
-def test_quarantine_handoff_wakes_the_agent_even_while_replay_is_live() -> None:
-    ready = probe("deferred_intervals_pending")
+def test_quarantine_handoff_wakes_the_agent_when_nothing_owns_it() -> None:
+    """The handoff is real only while no supervisor and no wrapper drive it.
+
+    `ready` and `active` must still dedupe to ONE event, which is what the
+    shared fingerprint buys: an agent woken for the handoff must not be woken
+    again the moment the same intervals start replaying.
+    """
+    ready = probe("deferred_intervals_pending", supervisors=0, wrappers=0)
     ready["runtime"] = "/runtime"
-    replay = probe("deferred_replay_training")
+    replay = probe("deferred_replay_training", supervisors=0, wrappers=0)
     replay.update({"runtime": "/runtime", "service_stage": "replay"})
     first = classify_probe(ready, stall_seconds=1800)
     second = classify_probe(replay, stall_seconds=1800)
     assert first.kind == "quarantine_ready"
     assert second.kind == "quarantine_ready"
     assert first.fingerprint == second.fingerprint
+
+
+def test_the_quarantine_arm_cannot_swallow_a_fault_during_replay() -> None:
+    """`service_stage: replay` is now PERMANENT, so this arm outranked everything.
+
+    `forward_remaining_rows` reached 0, which fixes `service_stage` at
+    `replay` and `status.state` at some `deferred_replay_*` for all 2.78 M
+    remaining rows. The handoff arm matched that, sat above every fault check
+    and returned unconditionally -- so for the rest of the curriculum the
+    classifier could emit exactly one verdict.
+
+    Measured 2026-09-11 against the live payload: a volume at 96.39 GB under
+    the supervisor's own 150 GB floor -- the exact case `disk_floor_unenforced`
+    was added for hours earlier -- classified `quarantine_ready`, as did
+    near-ENOSPC, inode exhaustion, a logged wrapper ENOSPC, dead control and a
+    gate that had never produced an artifact. Every one of them passes its own
+    dedicated test, because `probe()` never sets `service_stage`: the suite was
+    green against a payload the host can no longer produce.
+
+    Each case below is asserted on the SAME owned-replay payload the host
+    actually emits, so the suppression cannot come back by widening.
+    """
+    def live(**overrides) -> dict:
+        payload = {
+            **probe("deferred_replay_resource_yield"),
+            "runtime": "/runtime",
+            "service_stage": "replay",
+            "curriculum": {"forward_remaining_rows": 0},
+            "admissions": {"gate_artifacts": 11, "hours_since_admission": 0.2,
+                           "event_counts": {"deferred_replay_resource_yield": 535},
+                           "replay_failures_before_gate": 65,
+                           "replay_failures_at_gate": 259},
+            "throughput": {"age_seconds": 5.4, "durable_next_row": 210896},
+            "heartbeat": {"row": 210904, "rows_per_second": 0.11,
+                          "source": "replay_progress",
+                          "block_target_row": 262144, "sample_seconds": 70.1},
+            "disk": {"free_gb": 509.33, "total_gb": 1098.97,
+                     "used_percent": 53.7, "free_inodes": 107322484,
+                     "inodes_used_percent": 0.0, "wrapper_enospc": False},
+        }
+        payload["status"]["minimum_free_disk_gb"] = 150.0
+        for key, value in overrides.items():
+            if isinstance(value, dict) and isinstance(payload.get(key), dict):
+                payload[key] = {**payload[key], **value}
+            else:
+                payload[key] = value
+        return payload
+
+    # A healthy owned replay is the running stage, not a handoff, and must not
+    # re-wake a billed agent every `retry_cooldown` for days.
+    assert classify_probe(live(), stall_seconds=1800).kind == "healthy"
+
+    faulted = {
+        "volume under the supervisor's own floor":
+            live(disk={"free_gb": 96.39, "used_percent": 91.2}),
+        "near-ENOSPC volume":
+            live(disk={"free_gb": 12.0, "used_percent": 98.9}),
+        "inode exhaustion":
+            live(disk={"inodes_used_percent": 99.4, "free_inodes": 12}),
+        "wrapper logged ENOSPC":
+            live(disk={"wrapper_enospc": True}),
+        "dead control and dead heartbeat":
+            live(status_age_seconds=9000.0, throughput={"age_seconds": 9000.0}),
+        "gate has never produced an artifact":
+            live(admissions={"gate_artifacts": 0}),
+        "admission drought":
+            live(admissions={"hours_since_admission": 400.0}),
+    }
+    for name, payload in faulted.items():
+        decision = classify_probe(payload, stall_seconds=1800)
+        assert decision.kind == "fix_required", f"{name}: {decision}"
+        assert decision.kind != "quarantine_ready", name
 
 
 def test_stopped_control_or_host_requires_repair() -> None:
