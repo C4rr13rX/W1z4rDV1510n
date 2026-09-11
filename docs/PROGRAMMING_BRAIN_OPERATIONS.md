@@ -1734,3 +1734,112 @@ What the measurement does settle is the alarm floor. `DISK_ALARM_FLOOR_GB` is
 it leaves room to act without chattering. The supervisor's own 8 GB yield guard
 is under four minutes at burst, and `admission_watchdog`'s 20 GB is under ten --
 neither is a warning, both are epitaphs.
+
+## The guard was on the stage that had already finished
+
+`--min-free-disk-gb` is enforced by `disk_floor_breached`, which is called from
+the forward corpus-phase loop. `run_deferred_replay_worker` polled
+`replay_memory_floor_breached` and nothing else. Once `forward_remaining_rows`
+reaches 0 the forward loop is done and deferred replay performs every remaining
+row, so from that moment the volume had no guard at all.
+
+Measured 2026-09-11 on the `quarantine_ready` wake-up:
+
+| Reading | Value |
+|---|---|
+| `--min-free-disk-gb` on the running supervisor's argv | 150 |
+| `disk.free_gb` in the payload | 96.39 |
+| free space 19 minutes later | 44.13 GB |
+| burn | 108.66 GB/h |
+| estimated time to ENOSPC | ~20 minutes |
+| `classify_probe` verdict | healthy (then `no_admission: 11.1h`) |
+| `admission_watchdog.faults` verdict | healthy |
+
+Both emitters reported a healthy host. The previous fix keyed on
+`resource_waiting`, which describes a supervisor PARKED on its floor; this one
+never reached its floor because nothing checked it. **An alarm floor below the
+guard it watches can never fire, and neither can a guard attached to a stage
+that has ended.**
+
+Three changes, and the third is the one that is easy to get backwards:
+
+1. `replay_disk_floor_breached` on the deferred-replay path.
+2. `disk_floor_unenforced` in both emitters — training below the supervisor's
+   own floor is a distinct fault from a merely low volume, and it fires with an
+   hour of headroom instead of ten minutes.
+3. A disk yield **halts** (`DISK_EXHAUSTED_EXIT` = 90,
+   `RestartPreventExitStatus=42 90`). Memory leaves a yield on its own because
+   `recycle_settled_runtime_node` hands the allocator's arena back; nothing
+   returns disk on an append-only store, so a respawning disk yield burns the
+   remaining headroom and stops again. A looping disk guard is strictly worse
+   than no disk guard.
+
+The disk arm is also checked BEFORE the drought arm. At 96.39 GB free this
+classified as `no_admission: 11.1h`, which would have sent a woken agent hunting
+a semantic repair on a host 40 minutes from ENOSPC. A full volume causes
+droughts, so an arm ordered after the drought can only fire on hosts the drought
+arm has already claimed.
+
+## Restarting the supervisor is how the volume is reclaimed
+
+`deferred-replay-active.json` carrying `state: training` with no owner makes
+`recover_interrupted_deferred_replay` call `restore_rejected_deferred_replay`,
+which reflink-clones `brain.last-good.wbrain` over `brain.wbrain` and
+`os.replace`s it. That unlinks the old inode and returns everything unique to
+it.
+
+Predicted from `filefrag -v` extent subtraction, never from file size:
+
+| File | Apparent | Unique physical |
+|---|---|---|
+| `brain.wbrain` | 982.43 GB | **587.83 GB** |
+| `brain.last-good.wbrain` | 394.59 GB | **0.00 GB** |
+
+Deleting the guard by hand would have freed nothing. Restarting the service
+freed **575.51 GB** (22.84 GB → 610.69 GB), and cost exactly the unadmitted
+interval the invariant discards anyway — the row went back to 201,344.
+
+## The burn is a dozen hot atoms, not five million average neurons
+
+`df` divided by `page_outs` gave "39,971,683 bytes per body", which is three
+orders of magnitude above the 71 KB mean and is not a body size at all: that
+quotient attributes every other writer on the volume to eviction.
+
+Walking the container's own record headers instead — `W1ZNEUR1` + `pool:u32` +
+`id:u32` + `len:u64` + body:
+
+| Statistic | Value |
+|---|---|
+| mean body | 8.7 MB |
+| median body | 1.47 MB |
+| max body | 86.2 MB |
+| top 12 records' share of bytes | **85.9 %** |
+
+The largest are pool 5 ids 28, 43, 25 and 35 at 82.2, 81.1, 77.1 and 18.3 MB.
+Low ids in a byte-passthrough pool are single-byte **atoms**: the most frequent
+bytes in the corpus accumulate millions of terminals. `evict_neuron` sleeps
+atoms whenever a `.wbrain` store is attached — the never-evict-atoms rule
+survives only on the legacy cold tier — so the whole-brain `/brain/sleep` that
+`settle_brain_for_admission` runs on every memory yield rewrites all of them,
+and they page straight back in because they are the hottest neurons in the
+fabric.
+
+**Read the record headers before theorising about body size**, and be careful
+with averages over a population whose tail is doing all the work.
+
+## A zero from a path that never ran is not a refutation
+
+The first reading after deploying the clean-skip suppression was
+`clean_skips: 0` beside an unchanged 95.79 GB/h. That reads exactly like an
+inert fix, and this repository has shipped inert fixes before.
+
+It was not evidence either way. The node had restarted 90 seconds earlier and
+recorded **235 page-outs against 5,079,603 neurons**, so essentially nothing had
+been evicted twice and the suppression had no case to decide. The digest map is
+per-process by design — a rollback, a compaction or a reopen must fall through
+to the append — so a fresh node always writes first.
+
+The same rule already appears in `CLAUDE.md` for the stderr-tail path that had
+"not failed since". It applies to your own work too: **check whether a code path
+has had the OPPORTUNITY to run before concluding it is broken.** Measure after
+several sleep cycles.

@@ -409,6 +409,34 @@ Verify, do not assume:
   because the recycle returns the arena, but nothing returns disk, so a
   respawning disk yield is a faster path to ENOSPC than no guard at all.
 
+- **The burn is a handful of HOT ATOMS, and the "71 KB mean body" hid them.**
+  363 GB across 5.09 M neurons really is ~71 KB on average, and that average is
+  useless here because the neurons being evicted are nothing like the average
+  one. Measured 2026-09-11 by walking the container's own records
+  (`W1ZNEUR1` + pool:u32 + id:u32 + len:u64 + body): mean body **8.7 MB**,
+  median **1.47 MB**, max **86.2 MB**, and the **top 12 records are 85.9 % of
+  the bytes**. They are pool 5, neuron ids 25, 28, 35, 43 — low ids, so single-
+  byte ATOMS, at 82.2, 81.1, 77.1 and 18.3 MB. The hottest bytes in the corpus
+  accumulate millions of terminals, and `evict_neuron` sleeps atoms whenever a
+  `.wbrain` store is attached (the never-evict-atoms rule holds only for the
+  legacy cold tier). So the whole-brain `/brain/sleep` that
+  `settle_brain_for_admission` runs on every memory yield — every two or three
+  minutes — rewrites those atoms in full, and they page straight back in
+  because they are the hottest neurons in the fabric.
+
+  **Do not derive a body size from `df` divided by `page_outs`.** That is what
+  produced "39,971,683 bytes per body": the quotient silently attributes every
+  other writer on the volume to eviction. Read the record headers.
+
+- **A counter of zero from a path that has not had the opportunity to run is
+  not a refutation — including when it is your own fix.** The first reading
+  after deploying the clean-skip suppression was `clean_skips: 0` beside an
+  unchanged 95.79 GB/h, which reads exactly like an inert fix. But the node had
+  restarted 90 s earlier and recorded **235 page-outs against 5.08 M neurons**,
+  so almost nothing had been evicted twice and the skip had no case to decide.
+  The digest map is per-process by design, so a fresh node always appends
+  first. Measure after several sleep cycles, not after the first.
+
 - **The burn was re-appending bodies that had not changed.** `persist_sleeping`
   → `append_record` → `append_neuron` wrote a full body on every page-out
   unconditionally. A brain whose live bodies total ~363 GB cannot be resident on
