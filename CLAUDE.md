@@ -318,6 +318,53 @@ Verify, do not assume:
   was queued, and date it before re-debugging it. Same rule as
   `last_failure`: a ledger entry is not evidence about the running process.
 
+- **The `.wbrain` is NOT mostly garbage, and compaction cannot free this
+  volume.** The compactor that `cold.rs` promised since Stage 17.4 now exists
+  (`store/compaction.rs`, `wbrain_compact` binary, `--inspect` / `--estimate` /
+  `--in-place`). Running it here would make things WORSE, and the measurements
+  say why. Measured 2026-09-10: `brain.wbrain` 576.67 GB holds **363.34 GB of
+  live bodies** — 5,086,800 neurons at a mean body of **71 KB** — so only
+  ~213 GB is reclaimable garbage. Meanwhile `brain.last-good.wbrain` is a
+  **reflink clone**: `fiemap` returns identical physical blocks for both files
+  at 6 of 7 sampled offsets from 4 GB to 412 GB. The tree reports **7,417 GB
+  apparent across 5,131 files against 596 GB actually used**. A compacted copy
+  writes 363 GB of fresh, unshareable blocks and then reclaims only the
+  ~153 GB the original did not share — ending near 292 GB free against 502 GB
+  before. **Predict a reclaim from block sharing, never from file size**, and
+  run `wbrain_compact --estimate` before assuming a container is mostly
+  garbage.
+
+- **The burn is full-body rewrites forced by memory pressure.** A 363 GB brain
+  on a 15.26 GB host must evict continuously, and every sleep appends the
+  WHOLE 71 KB body — there is no delta encoding — which both breaks reflink
+  sharing and is never reclaimed. That is the 112–257 GB/h. No compaction
+  schedule outruns it; the fixes are more RAM (fewer evictions), delta-encoded
+  terminal updates, or a larger volume. All three are user decisions.
+  `--min-free-disk-gb` is now 150, sized from that burn: it buys a clean
+  cooperative yield instead of the 115× ENOSPC crash-loop, and buys no
+  headroom at all.
+
+- **`prune_resolved_deferred_bases` cannot see a RETIRED interval.** It removes
+  `known - active`, where `known` is every `interval_id` in the ledger. Measured
+  2026-09-10: 113 deferred directories and 110 base files against 89 ledger-known
+  intervals (26 deferred, 63 resolved) — so ~87 directories are "unknown" and
+  deliberately preserved, and the pruner returned **0 directories / 0.00 GB**.
+  With 70 `unrestorable_quarantine_retired` events, retirement appears to drop an
+  interval out of `known`, which makes its base unprunable forever. A pruner that
+  reclaims nothing looks identical to one with nothing to reclaim.
+
+- **The SSM transport rewrote its own payload.** `ssm.py` read scripts with
+  `read_text()`, whose universal-newline handling turns CRLF into LF. A
+  51,846-byte patch arrived as 51,750 — exactly its 96 CRLF pairs — so
+  `git apply` rejected `pool.rs` and `wbrain_store.rs` (the two files stored
+  with CRLF) while the four stored with LF applied cleanly. That is
+  indistinguishable from host source drift, and the md5s disproved drift: all
+  six matched the base commit. It reads bytes now. Also: `send_and_wait` passed
+  the payload as a command-line argument (Windows caps that at 32 KB — the
+  error is `[WinError 206]`, which names the argument, not the caller) and
+  raised only stderr on failure, so "patch: command not found" was lost and the
+  host has no `patch` binary — use `git apply`, which needs no repository.
+
 - **Onboarding a corpus requires a registry `.toml`.** Without it the driver
   exits 2 on `unknown script` and the supervisor retry-loops, stopping ALL
   training. `scripts/onboard_corpus.py` writes it; deploy it with the corpus.

@@ -172,7 +172,23 @@ common=(
   # before interval_recall and the behavioural gate could run: zero
   # admissions since 2026-08-22 despite eight clean yield/recycle cycles.
   --replay-rows-per-pass 49152
-  --min-free-disk-gb 8
+  # Sized from the MEASURED burn, not from a round number. The `.wbrain` store
+  # appends a full neuron body on every sleep -- mean body 71 KB across
+  # 5,086,800 live neurons -- and consumes 112-257 GB/h while a replay runs.
+  # An 8 GB floor is 112 seconds of warning at the high end, and the guard
+  # needs three consecutive breaches AT A DURABLE BOUNDARY to act, so it lost
+  # that race: the volume filled, the wrapper died writing its 6-byte node.pid,
+  # and systemd restarted it 115 times, which reads as a finished stage rather
+  # than as a full disk. 150 GB is 35-80 minutes at the measured rates, which
+  # is many commit periods and leaves room for a clean cooperative yield.
+  #
+  # This buys a SAFE STOP, not headroom. Compaction cannot create headroom
+  # here: the guard and every causal base are reflink clones of the live
+  # container (verified by fiemap -- identical physical blocks at 6 of 7 sampled
+  # offsets), so a compacted copy writes 363 GB of unshareable blocks to reclaim
+  # 153 GB of unshared ones. The tree reports 7,417 GB apparent against 596 GB
+  # used; only `df` measures anything here.
+  --min-free-disk-gb 150
   --max-restarts 10
 )
 
