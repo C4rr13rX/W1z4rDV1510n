@@ -82,9 +82,23 @@ out["burn_gb_per_hour"] = round(
     (free_a - free_b) / 2**30 / (elapsed / 3600.0), 2
 )
 
+# THESE COUNTERS RESET WITH THE NODE, WHICH RECYCLES EVERY 2-3 MINUTES.
+# The first run of this probe published `page_outs_delta: -1008` against a
+# total of 129 -- the same counter-reset trap already documented for
+# `durable_next_row` and `accepted_episodes`, reproduced here in the
+# instrumentation added to diagnose it. A decrease is a restart, not a
+# negative rate, and a window that straddles one measures nothing.
 page_outs = int(second.get("page_outs", 0)) - int(first.get("page_outs", 0))
 skips = int(second.get("clean_skips", 0)) - int(first.get("clean_skips", 0))
 ticks = int(second.get("tick", 0)) - int(first.get("tick", 0))
+out["counter_reset"] = page_outs < 0 or skips < 0
+if out["counter_reset"]:
+    out["note"] = (
+        "the node recycled inside this window, so the deltas below describe "
+        "only the new process; totals are still valid"
+    )
+    page_outs = int(second.get("page_outs", 0))
+    skips = int(second.get("clean_skips", 0))
 out["page_outs_delta"] = page_outs
 out["clean_skips_delta"] = skips
 out["tick_delta"] = ticks

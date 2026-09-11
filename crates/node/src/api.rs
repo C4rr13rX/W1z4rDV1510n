@@ -900,16 +900,41 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
                             }
                         }
                         let t0 = std::time::Instant::now();
-                        let brain = ckpt_state.brain.blocking_lock();
+                        let mut brain = ckpt_state.brain.blocking_lock();
                         let lock_wait = t0.elapsed();
                         let t1 = std::time::Instant::now();
-                        match brain.checkpoint(&path) {
+                        // Branch on the storage backend exactly as the manual
+                        // /brain/checkpoint handler does.  This thread used to
+                        // call checkpoint() unconditionally, which serialises a
+                        // borrowed view of the in-RAM fabric — and when the
+                        // neurons live in the wbrain store that view cannot be
+                        // written.  Observed on production 2026-09-11: the
+                        // thread was alive and on cadence (brain.bin.tmp mtime
+                        // moved 01:45:16 -> 01:55:28, the configured 600 s) and
+                        // every single attempt died 179 bytes in, leaving a
+                        // torn temp file and no checkpoint since 2026-08-19.
+                        let uses_wbrain = brain.uses_wbrain_storage();
+                        let result = if uses_wbrain {
+                            brain.serialize_all_neurons_for_idle().map(|_| ())
+                        } else {
+                            brain.checkpoint(&path)
+                        };
+                        let written = if uses_wbrain {
+                            ckpt_dir.join("brain.wbrain")
+                        } else {
+                            path.clone()
+                        };
+                        match result {
                             Ok(()) => tracing::info!(
-                                "brain auto-checkpoint saved to {} (tick {}, lock-wait {:.1}s, save {:.1}s)",
-                                path.display(), brain.fabric().current_tick(),
+                                "brain auto-checkpoint saved to {} (storage {}, tick {}, lock-wait {:.1}s, save {:.1}s)",
+                                written.display(),
+                                if uses_wbrain { "wbrain" } else { "bin" },
+                                brain.fabric().current_tick(),
                                 lock_wait.as_secs_f32(), t1.elapsed().as_secs_f32()),
                             Err(e) => tracing::warn!(
-                                "brain auto-checkpoint failed: {}", e),
+                                "brain auto-checkpoint failed ({} storage, {}): {}",
+                                if uses_wbrain { "wbrain" } else { "bin" },
+                                written.display(), e),
                         }
                     }
                 })

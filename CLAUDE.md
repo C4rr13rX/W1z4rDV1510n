@@ -437,6 +437,27 @@ Verify, do not assume:
   The digest map is per-process by design, so a fresh node always appends
   first. Measure after several sleep cycles, not after the first.
 
+  **Re-measured, and the suppression is genuinely inert here — for a reason
+  that names the real fix.** Second reading: `page_outs` 129, `clean_skips` 0,
+  burn 95.9 GB/h. Two facts explain it. `evicted_neurons` is already
+  5,080,629 of 5,081,059, so a whole-brain `/brain/sleep` re-sleeps almost
+  nothing — `evict_neuron` returns early on an already-evicted id — and only
+  ~130 neurons are paged in and back out per node lifetime. Those ~130 are the
+  hot atoms, so repeats DO occur within one process, and they still never
+  match. **The hot atoms are exactly the neurons training mutates every tick**,
+  so their bodies differ on every eviction by construction. Suppressing
+  redundant writes cannot help a workload whose writes are not redundant. The
+  remaining levers are delta-encoded terminal updates (append the new terminals
+  rather than an 82 MB body), capping atom fan-out, or enough RAM to keep those
+  atoms resident — the first is real work, the last two are user decisions.
+
+  **And the counters reset with the node, which recycles every 2–3 minutes.**
+  `page_outs_delta` published **-1008** against a total of 129: the same
+  counter-reset trap already documented for `durable_next_row` and
+  `accepted_episodes`, now reproduced in instrumentation added to diagnose it.
+  Any per-process counter on this host must be read as a reset on a decrease,
+  never as a rate.
+
 - **The burn was re-appending bodies that had not changed.** `persist_sleeping`
   → `append_record` → `append_neuron` wrote a full body on every page-out
   unconditionally. A brain whose live bodies total ~363 GB cannot be resident on

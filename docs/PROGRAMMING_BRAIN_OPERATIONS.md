@@ -1843,3 +1843,43 @@ The same rule already appears in `CLAUDE.md` for the stderr-tail path that had
 "not failed since". It applies to your own work too: **check whether a code path
 has had the OPPORTUNITY to run before concluding it is broken.** Measure after
 several sleep cycles.
+
+### Re-measured: the suppression is inert here, and that names the real fix
+
+The second reading, after several yield cycles:
+
+| Reading | Value |
+|---|---|
+| `page_outs` (total, this node) | 129 |
+| `clean_skips` (total) | **0** |
+| burn | 95.9 GB/h |
+| `evicted_neurons` / `total_neurons` | 5,080,629 / 5,081,059 |
+| bytes per tick | 11.4 MB |
+
+Two facts explain the zero, and neither is "it hasn't run yet". Almost every
+neuron is already evicted, so a whole-brain `/brain/sleep` re-sleeps nearly
+nothing — `evict_neuron` returns early on an already-evicted id — and only ~130
+neurons are paged in and back out per node lifetime. Those ~130 are the hot
+atoms, so the same neuron *is* re-evicted within one process, and the digest
+still never matches.
+
+**The hot atoms are exactly the neurons training mutates every tick.** Their
+bodies differ on every eviction by construction. Suppressing redundant writes
+cannot help a workload whose writes are not redundant.
+
+The clean-skip path stays: it is correct, it costs one hash per page-out, and
+it protects any workload that pages neurons in to *read* them. But it is not
+the fix for this burn. The remaining levers are:
+
+1. **Delta-encoded terminal updates** — append the terminals that changed
+   rather than an 82 MB body. Real work in the store and in `Neuron`
+   serialization, and the only one of the three that is an engineering fix.
+2. **Cap atom fan-out** — an architecture decision, not an optimisation.
+3. **More RAM**, so the hot atoms stay resident and are never rewritten.
+
+Also: these counters reset with the node, which recycles every two or three
+minutes. The first run of the probe published `page_outs_delta: -1008` against
+a total of 129 — the counter-reset trap already documented for
+`durable_next_row` and `accepted_episodes`, reproduced in the instrumentation
+added to diagnose it. On this host, treat any per-process counter's decrease as
+a restart and never as a rate.
