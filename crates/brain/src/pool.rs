@@ -1783,6 +1783,20 @@ impl Pool {
         self.wbrain_store.is_some()
     }
 
+    /// `(page_outs, clean_skips)` for this pool's `.wbrain` store.
+    ///
+    /// Exposed so the growth of an append-only store can be attributed from
+    /// the brain's own `/brain/stats` rather than by differencing `df` on the
+    /// host against a stopwatch, which is how every previous attribution on
+    /// this volume had to be done. Zero for pools on the legacy cold tier,
+    /// which has no such counters.
+    pub fn store_page_out_counters(&self) -> (u64, u64) {
+        match &self.wbrain_store {
+            Some(store) => (store.page_outs(), store.clean_skips()),
+            None => (0, 0),
+        }
+    }
+
     /// Stage 18.12 step 4b — diagnostic: true when this pool has a
     /// `TieredStore` attached (i.e. is running in distributed mode).
     pub fn has_tiered_store(&self) -> bool {

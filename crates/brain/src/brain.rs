@@ -543,6 +543,14 @@ pub struct BrainStats {
     pub resident_terminals: usize,
     /// Neurons whose full members/terminals currently live in the cold tier.
     pub evicted_neurons: usize,
+    /// Bodies written to the `.wbrain` store by eviction.
+    pub page_outs: u64,
+    /// Evictions that wrote NOTHING because the durable body was already
+    /// byte-identical. Report beside `page_outs`: the ratio is the only direct
+    /// readout of how much of this append-only store's growth is learning and
+    /// how much is eviction churn. Every previous attribution had to be done by
+    /// differencing `df` against a stopwatch on the host.
+    pub clean_skips: u64,
     pub binding_pool_id: PoolId,
     pub fingerprints_window: usize,
     /// Bindings that crossed `tentative_emergence_threshold` but not
@@ -9267,6 +9275,8 @@ impl Brain {
             total_terminals: 0,
             resident_terminals: 0,
             evicted_neurons: 0,
+            page_outs: 0,
+            clean_skips: 0,
             binding_pool_id: self.binding_pool_id,
             fingerprints_window: self.moment_history.len(),
             tentative_bindings: self.tentative_binding_count_total,
@@ -9288,6 +9298,9 @@ impl Brain {
                 stats.total_terminals += pool.total_terminals();
                 stats.resident_terminals += pool.resident_terminal_count();
                 stats.evicted_neurons += pool.evicted_count();
+                let (page_outs, clean_skips) = pool.store_page_out_counters();
+                stats.page_outs += page_outs;
+                stats.clean_skips += clean_skips;
                 if pid == self.binding_pool_id {
                     stats.total_binding += cc;
                 }

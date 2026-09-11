@@ -657,6 +657,13 @@ async fn h_stats(State(s): State<BrainApiState>) -> Json<serde_json::Value> {
         "total_terminals":    st.total_terminals,
         "resident_terminals": st.resident_terminals,
         "evicted_neurons":    st.evicted_neurons,
+        // Attribution for the append-only store's growth. `page_outs` counts
+        // bodies actually written; `clean_skips` counts evictions that wrote
+        // nothing because the durable body was already identical. Their ratio
+        // says whether the volume is filling with learning or with churn --
+        // a question that previously cost an SSM round trip and a stopwatch.
+        "page_outs":       st.page_outs,
+        "clean_skips":     st.clean_skips,
         "binding_pool_id": b.binding_pool_id(),
         "binding_posting_overlay": binding_posting_overlay,
         "binding_posting_generations": binding_posting_generations,
