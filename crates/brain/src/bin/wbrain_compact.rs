@@ -90,6 +90,44 @@ fn main() -> ExitCode {
         return usage();
     }
 
+    if args[0] == "--estimate" {
+        if args.len() != 2 && args.len() != 3 {
+            return usage();
+        }
+        let stride: u64 = if args.len() == 3 {
+            match args[2].parse() {
+                Ok(value) => value,
+                Err(_) => return usage(),
+            }
+        } else {
+            1000
+        };
+        return match compaction::estimate(Path::new(&args[1]), stride) {
+            Ok(report) => {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "live_neurons": report.live_neurons,
+                        "sampled_neurons": report.sampled_neurons,
+                        "sampled_body_bytes": report.sampled_body_bytes,
+                        "estimated_live_bytes": report.estimated_live_bytes,
+                        "estimated_live_gb":
+                            (report.estimated_live_bytes as f64 / 1e9 * 100.0).round() / 100.0,
+                        "source_bytes": report.source_bytes,
+                        "source_gb": (report.source_bytes as f64 / 1e9 * 100.0).round() / 100.0,
+                        "stride": stride,
+                        "note": "sampled estimate, not a bound; leave margin",
+                    })
+                );
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("estimate failed: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
     if args[0] == "--inspect" {
         if args.len() != 2 {
             return usage();

@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import subprocess
+import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -278,25 +279,40 @@ def send_and_wait(
     comment: str,
 ) -> dict:
     parameters = json.dumps({"commands": commands, "executionTimeout": [str(timeout)]})
-    command_id = aws(
-        profile,
-        "ssm",
-        "send-command",
-        "--instance-ids",
-        instance_id,
-        "--document-name",
-        "AWS-RunShellScript",
-        "--comment",
-        comment,
-        "--parameters",
-        parameters,
-        "--timeout-seconds",
-        str(min(timeout, 172800)),
-        "--query",
-        "Command.CommandId",
-        "--output",
-        "text",
-    ).stdout.strip()
+    # Pass the payload through a file rather than on the command line. Windows
+    # caps a command line at 32 KB, so a 52 KB patch failed here with
+    # "[WinError 206] The filename or extension is too long" -- an error that
+    # names the argument length and not the caller, and so reads like a bad
+    # path. `file://` is handled by the AWS CLI itself and imposes no limit
+    # small enough to matter. Forward slashes: the CLI treats a Windows
+    # backslash inside a file:// URI as an escape.
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".json", encoding="utf-8", delete=False
+    ) as handle:
+        handle.write(parameters)
+        parameters_path = Path(handle.name)
+    try:
+        command_id = aws(
+            profile,
+            "ssm",
+            "send-command",
+            "--instance-ids",
+            instance_id,
+            "--document-name",
+            "AWS-RunShellScript",
+            "--comment",
+            comment,
+            "--parameters",
+            f"file://{parameters_path.as_posix()}",
+            "--timeout-seconds",
+            str(min(timeout, 172800)),
+            "--query",
+            "Command.CommandId",
+            "--output",
+            "text",
+        ).stdout.strip()
+    finally:
+        parameters_path.unlink(missing_ok=True)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         result = aws(
@@ -325,9 +341,16 @@ def send_and_wait(
         if status == "Success":
             return invocation
         if status in {"Cancelled", "Failed", "TimedOut", "Undeliverable", "Terminated"}:
+            # Carry stdout too. A remote script reports WHY it stopped on
+            # stdout and only "exit status 1" on stderr, so raising stderr
+            # alone deletes the cause and costs a second round trip to
+            # rediscover it -- the same failure class as truncating a stored
+            # error from the front.
+            stderr = (invocation.get("StandardErrorContent") or "").strip()
+            stdout = (invocation.get("StandardOutputContent") or "").strip()
             raise RuntimeError(
-                f"bootstrap {command_id} ended {status}: "
-                f"{invocation.get('StandardErrorContent', '')}"
+                f"bootstrap {command_id} ended {status}: {stderr}"
+                + (f"\n--- remote stdout (tail) ---\n{stdout[-4000:]}" if stdout else "")
             )
         time.sleep(10)
     raise TimeoutError(f"bootstrap {command_id} exceeded {timeout} seconds")

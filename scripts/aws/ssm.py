@@ -41,7 +41,15 @@ def run(script: pathlib.Path, timeout: int) -> int:
     invocation = send_and_wait(
         os.environ.get("WIZARD_AWS_PROFILE", DEFAULT_PROFILE),
         os.environ.get("WIZARD_INSTANCE_ID", DEFAULT_INSTANCE),
-        [script.read_text(encoding="utf-8")],
+        # Decode WITHOUT newline translation. `read_text()` opens in text mode,
+        # where Python's universal newlines silently rewrite every CRLF to LF.
+        # That is invisible for a probe whose output is JSON, and fatal for a
+        # probe that CARRIES data: a 51,846-byte patch arrived as 51,750 bytes
+        # -- exactly the 96 CRLF pairs it contained -- and `git apply` then
+        # rejected the two source files that happen to be stored with CRLF
+        # while the four stored with LF applied cleanly. The transport must
+        # deliver the payload it was given, byte for byte.
+        [script.read_bytes().decode("utf-8")],
         timeout,
         comment="Wizard admission watchdog probe",
     )

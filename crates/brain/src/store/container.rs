@@ -498,6 +498,14 @@ impl BrainContainer {
             .map(|(new_offset, _len)| new_offset)
     }
 
+    /// Body length recorded in a record header, without reading the body.
+    pub(crate) fn record_body_len(&mut self, offset: u64) -> io::Result<u64> {
+        self.file.seek(SeekFrom::Start(offset))?;
+        let mut header = [0_u8; Self::RECORD_HEADER_BYTES as usize];
+        self.file.read_exact(&mut header)?;
+        Ok(u64::from_le_bytes(header[16..24].try_into().unwrap()))
+    }
+
     /// Pool and kind fields of an auxiliary record header.
     pub(crate) fn auxiliary_header(
         &mut self,

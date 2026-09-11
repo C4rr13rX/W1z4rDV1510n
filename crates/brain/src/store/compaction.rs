@@ -198,6 +198,56 @@ pub fn verify(path: &Path, expected: &CompactionReport) -> io::Result<u64> {
     Ok(checked)
 }
 
+/// What a compaction pass would produce, without producing it.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LiveEstimate {
+    pub live_neurons: u64,
+    pub sampled_neurons: u64,
+    pub sampled_body_bytes: u64,
+    pub estimated_live_bytes: u64,
+    pub source_bytes: u64,
+}
+
+/// Estimate the compacted size by sampling live record headers.
+///
+/// Reading all 5M headers would be ~5M random seeks across a 576 GB file —
+/// IOPS-bound at roughly half an hour on network storage, which is too slow to
+/// answer "will the output fit?" before committing to a pass. Sampling one slot
+/// in `stride` answers it in seconds.
+///
+/// This is deliberately an ESTIMATE and is reported as one: body sizes are not
+/// uniform, so the caller must leave margin rather than treat the number as a
+/// bound. It exists to catch the case where compaction cannot possibly fit, not
+/// to prove that it will.
+pub fn estimate(path: &Path, stride: u64) -> io::Result<LiveEstimate> {
+    let stride = stride.max(1);
+    let mut container = BrainContainer::open(path)?;
+    let manifest = container.manifest().cloned().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidData, "container has no manifest")
+    })?;
+    let mut report = LiveEstimate {
+        source_bytes: container.byte_len()?,
+        ..Default::default()
+    };
+    for pool in &manifest.pools {
+        let offsets = live_offsets(&mut container, pool)?;
+        report.live_neurons += offsets.len() as u64;
+        for (index, (_id, offset)) in offsets.iter().enumerate() {
+            if index as u64 % stride != 0 {
+                continue;
+            }
+            report.sampled_body_bytes += container.record_body_len(*offset)?;
+            report.sampled_neurons += 1;
+        }
+    }
+    if report.sampled_neurons > 0 {
+        let mean = report.sampled_body_bytes as f64 / report.sampled_neurons as f64;
+        let per_record = mean + BrainContainer::RECORD_HEADER_BYTES as f64;
+        report.estimated_live_bytes = (per_record * report.live_neurons as f64) as u64;
+    }
+    Ok(report)
+}
+
 /// Live `(neuron id, offset)` pairs for one pool, from whichever addressing
 /// form its manifest uses.
 fn live_offsets(
