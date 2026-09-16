@@ -78,6 +78,14 @@ fn inspect(path: &Path) -> std::io::Result<()> {
     println!("pools_with_slot_table {slot_tables}");
     println!("pools_with_offset_vec {offset_vectors}");
     println!("live_in_offset_vecs  {live}");
+    // Count the slot-table pools too. Reporting only the offset-vector form
+    // printed `live_in_offset_vecs 0` for a brain with 5.1 M live neurons in 13
+    // slot-table pools, which reads as an empty container and was taken to mean
+    // this brain could not be measured at all.
+    match compaction::live_neuron_count(path) {
+        Ok(total) => println!("live_neurons_all_pools {total}"),
+        Err(error) => println!("live_neurons_all_pools unavailable: {error}"),
+    }
     println!("label_index_records  {label_indexes}");
     println!("pool_metadata_bytes  {metadata_bytes}");
     println!("brain_metadata_bytes {}", manifest.brain_metadata.len());
@@ -116,7 +124,20 @@ fn main() -> ExitCode {
                         "source_bytes": report.source_bytes,
                         "source_gb": (report.source_bytes as f64 / 1e9 * 100.0).round() / 100.0,
                         "stride": stride,
-                        "note": "sampled estimate, not a bound; leave margin",
+                        "sampled_max_body_bytes": report.sampled_max_body_bytes,
+                        // Carry the heavy-tail warning in the payload. The same
+                        // file at strides 5000/500/50/5 estimated
+                        // 848.9/119.53/49.38/44.50 GB, and the first of those
+                        // is larger than the container it describes.
+                        "exceeds_container": report.exceeds_container,
+                        "note": if report.exceeds_container {
+                            "UNRELIABLE: estimate exceeds the container; the \
+                             sample mean is dominated by outlier bodies. \
+                             Re-run with a much smaller stride."
+                        } else {
+                            "sampled estimate, not a bound; leave margin. \
+                             Re-run at a smaller stride and confirm it settles."
+                        },
                     })
                 );
                 ExitCode::SUCCESS

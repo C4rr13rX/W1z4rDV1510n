@@ -206,6 +206,22 @@ pub struct LiveEstimate {
     pub sampled_body_bytes: u64,
     pub estimated_live_bytes: u64,
     pub source_bytes: u64,
+    /// Largest body in the sample, and the share of the sampled bytes it alone
+    /// contributed. These are the heavy-tail warning the bare estimate lacked.
+    ///
+    /// Measured 2026-09-16 on a 472.45 GB container: strides 5000 / 500 / 50 /
+    /// 5 returned 848.9 / 119.53 / 49.38 / 44.50 GB for the SAME file at the
+    /// same moment. The loosest draw exceeds the size of the file it is
+    /// measuring, which is a self-evident absurdity -- and the estimate carried
+    /// nothing that said so, which is how 363.34 GB became the settled figure
+    /// behind "compaction is net-negative" for five days. A dozen ~86 MB hub
+    /// atoms against a ~1.5 KB median is all it takes.
+    pub sampled_max_body_bytes: u64,
+    /// `estimated_live_bytes` exceeding `source_bytes` is impossible: a live
+    /// set cannot be larger than the container holding it. Reported rather than
+    /// clamped, because silently capping it would hide the instability instead
+    /// of naming it.
+    pub exceeds_container: bool,
 }
 
 /// Estimate the compacted size by sampling live record headers.
@@ -236,7 +252,9 @@ pub fn estimate(path: &Path, stride: u64) -> io::Result<LiveEstimate> {
             if index as u64 % stride != 0 {
                 continue;
             }
-            report.sampled_body_bytes += container.record_body_len(*offset)?;
+            let body = container.record_body_len(*offset)?;
+            report.sampled_body_bytes += body;
+            report.sampled_max_body_bytes = report.sampled_max_body_bytes.max(body);
             report.sampled_neurons += 1;
         }
     }
@@ -245,7 +263,29 @@ pub fn estimate(path: &Path, stride: u64) -> io::Result<LiveEstimate> {
         let per_record = mean + BrainContainer::RECORD_HEADER_BYTES as f64;
         report.estimated_live_bytes = (per_record * report.live_neurons as f64) as u64;
     }
+    report.exceeds_container = report.estimated_live_bytes > report.source_bytes;
     Ok(report)
+}
+
+/// Live neuron count across every pool, whichever addressing form each uses.
+///
+/// `--inspect` counted only `neuron_offsets`, so on a brain whose pools all use
+/// slot tables it printed `live_in_offset_vecs 0` and returned in 0.0 s. That
+/// reads exactly like "this container holds nothing live", and it was taken as
+/// evidence that compaction could not be measured here at all -- while the
+/// actual compaction path, `live_offsets`, has always handled slot tables. The
+/// blindness was in the REPORT, never in the capability, and it left a wrong
+/// live-set figure unchallenged for five days.
+pub fn live_neuron_count(path: &Path) -> io::Result<u64> {
+    let mut container = BrainContainer::open(path)?;
+    let manifest = container.manifest().cloned().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidData, "container has no manifest")
+    })?;
+    let mut live = 0_u64;
+    for pool in &manifest.pools {
+        live += live_offsets(&mut container, pool)?.len() as u64;
+    }
+    Ok(live)
 }
 
 /// Live `(neuron id, offset)` pairs for one pool, from whichever addressing
@@ -545,6 +585,113 @@ mod tests {
             .map(|t| Terminal::new(NeuronRef::new(0, t as u32), 0.25, 1))
             .collect();
         neuron
+    }
+
+    /// A heavy tail must announce itself, because the bare mean does not.
+    ///
+    /// `estimate` extrapolates mean_sampled_body x live_neurons, and on the
+    /// live 472.45 GB container that returned 848.9 / 119.53 / 49.38 / 44.50 GB
+    /// at strides 5000 / 500 / 50 / 5 -- the same file, the same moment. The
+    /// first of those is larger than the container it describes, and nothing in
+    /// the payload said so, which is how 363.34 GB became the settled live-set
+    /// figure behind "compaction is net-negative". Here one 20,000-terminal
+    /// neuron sits beside small ones; a stride that samples only the big one
+    /// must extrapolate past the container and set `exceeds_container`.
+    #[test]
+    fn a_sample_dominated_by_one_huge_body_reports_that_it_is_unreliable() {
+        let dir = tmpdir("heavytail");
+        let source = dir.join("brain.wbrain");
+
+        let mut offsets = Vec::new();
+        {
+            let mut container = BrainContainer::open(&source).unwrap();
+            // Index 0 is the hub; the rest are ordinary. Sampling stride N
+            // takes index 0 first, so a large stride sees only the outlier --
+            // exactly the shape that produced an impossible estimate.
+            offsets.push(Some(
+                container.append_neuron(1, &concept(0, "c:hub", 20_000)).unwrap(),
+            ));
+            for id in 1..64_u32 {
+                offsets.push(Some(
+                    container
+                        .append_neuron(1, &concept(id, "c:small", 1))
+                        .unwrap(),
+                ));
+            }
+            container
+                .commit_manifest(BrainContainerManifest {
+                    generation: 1,
+                    tick: 1,
+                    brain_metadata: Vec::new(),
+                    pools: vec![PoolContainerManifest {
+                        pool_id: 1,
+                        neuron_count: offsets.len() as u32,
+                        neuron_capacity: offsets.len() as u32,
+                        neuron_slot_table: None,
+                        label_indexes: Vec::new(),
+                        neuron_offsets: offsets.clone(),
+                        labels: Vec::new(),
+                        pool_metadata: Vec::new(),
+                    }],
+                })
+                .unwrap();
+        }
+
+        let coarse = estimate(&source, 64).unwrap();
+        assert_eq!(coarse.sampled_neurons, 1, "stride 64 samples only the hub");
+        assert!(
+            coarse.exceeds_container,
+            "an estimate of {} bytes against a {} byte container must be \
+             flagged, not reported as a measurement",
+            coarse.estimated_live_bytes, coarse.source_bytes
+        );
+        assert!(coarse.sampled_max_body_bytes > 0);
+
+        // Tightening the sample must settle it -- the property an operator
+        // needs in order to know which draw to believe.
+        let tight = estimate(&source, 1).unwrap();
+        assert_eq!(tight.sampled_neurons, tight.live_neurons);
+        assert!(
+            !tight.exceeds_container,
+            "a full sample cannot exceed the container: {} vs {}",
+            tight.estimated_live_bytes, tight.source_bytes
+        );
+        assert!(
+            tight.estimated_live_bytes < coarse.estimated_live_bytes / 4,
+            "the coarse draw should be wildly high: {} vs {}",
+            coarse.estimated_live_bytes, tight.estimated_live_bytes
+        );
+    }
+
+    /// `--inspect` must not report a slot-table brain as holding nothing live.
+    #[test]
+    fn live_neuron_count_sees_slot_table_pools() {
+        let dir = tmpdir("livecount");
+        let source = dir.join("brain.wbrain");
+        {
+            let mut container = BrainContainer::open(&source).unwrap();
+            let offset = container
+                .append_neuron(1, &concept(0, "c:only", 4))
+                .unwrap();
+            container
+                .commit_manifest(BrainContainerManifest {
+                    generation: 1,
+                    tick: 1,
+                    brain_metadata: Vec::new(),
+                    pools: vec![PoolContainerManifest {
+                        pool_id: 1,
+                        neuron_count: 1,
+                        neuron_capacity: 1,
+                        neuron_slot_table: None,
+                        label_indexes: Vec::new(),
+                        neuron_offsets: vec![Some(offset)],
+                        labels: Vec::new(),
+                        pool_metadata: Vec::new(),
+                    }],
+                })
+                .unwrap();
+        }
+        assert_eq!(live_neuron_count(&source).unwrap(), 1);
     }
 
     /// The property the whole pass exists for: superseded bodies are dropped

@@ -22,6 +22,7 @@ import urllib.error
 import urllib.request
 import hashlib
 from urllib.parse import urlparse
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -83,6 +84,26 @@ MAX_BARREN_REPLAY_YIELDS = 3
 #: reclaimed". Three failures in a row, measured by `df` and not by summing file
 #: sizes, means there is genuinely nothing left to return.
 MAX_DISK_RECLAIM_ATTEMPTS = 3
+
+#: Where `wbrain_compact` may live, most-specific first. The compactor reclaims
+#: superseded neuron bodies from the append-only `.wbrain` container -- the one
+#: reclaim on this volume that is neither exhausted nor destructive.
+COMPACTOR_CANDIDATES = (
+    Path("bin/wbrain_compact"),
+    Path("target/release/wbrain_compact"),
+    Path("bin/wbrain_compact.exe"),
+    Path("target/release/wbrain_compact.exe"),
+)
+
+#: Topology fields that must be identical across a compaction. These are the
+#: same fields `recycle_settled_runtime_node` compares across a node restart,
+#: deliberately: a compaction is a storage-representation change and must be
+#: invisible to the fabric, so it is held to the standard already trusted for
+#: proving a reopened checkpoint is the same brain.
+COMPACTION_IDENTITY_FIELDS = (
+    "tick", "pool_count", "total_neurons", "total_concepts",
+    "total_binding", "total_terminals",
+)
 
 
 class GateCommandFailure(RuntimeError):
@@ -582,7 +603,10 @@ def run_deferred_replay_worker(args: argparse.Namespace, phase: Phase,
             disk_exhausted = False
             if disk_low:
                 while len(disk_reclaims) < MAX_DISK_RECLAIM_ATTEMPTS:
-                    reclaim = reclaim_disk_for_floor(runtime, disk_floor_gb)
+                    reclaim = reclaim_disk_for_floor(
+                        runtime, disk_floor_gb,
+                        lambda: compact_brain_containers(args, runtime),
+                    )
                     disk_reclaims.append(reclaim)
                     append_health_event(runtime, {
                         "kind": "disk_floor_reclaim",
@@ -1904,7 +1928,166 @@ def prune_resolved_deferred_bases(runtime: Path) -> list[Path]:
     return removed
 
 
-def reclaim_disk_for_floor(runtime: Path, min_free_disk_gb: float) -> dict:
+def locate_compactor(project: Path) -> Path | None:
+    """First existing `wbrain_compact` under `project`, or None."""
+    for relative in COMPACTOR_CANDIDATES:
+        candidate = project / relative
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def brain_container_paths(runtime: Path) -> list[Path]:
+    """Every `.wbrain` container whose garbage a compaction would return.
+
+    BOTH the live brain and its last-good guard, and the pair is not optional.
+    They are reflink clones of one another -- measured 2026-09-16, immediately
+    after a rollback: 472.45 GB allocated each, 472.45 GB SHARED, and
+    `brain_unique` and `guard_unique` both 0.00 GB. Compacting one alone
+    therefore returns nothing at all, because every extent it stops referencing
+    is still pinned by the other name. This is the same block-sharing trap that
+    made a 560 GB delete return 0.00 GB.
+    """
+    brain_dir = runtime / "brain"
+    names = ("brain.wbrain", "brain.last-good.wbrain")
+    return [brain_dir / name for name in names if (brain_dir / name).is_file()]
+
+
+def compact_brain_containers(args, runtime: Path) -> dict:
+    """Return superseded neuron bodies to the volume, and MEASURE the reclaim.
+
+    THIS IS THE RECLAIM THE HALT SAID DID NOT EXIST. `replay_window_census`
+    reasons that "only a rollback returns bytes -- which discards the interval",
+    and concludes the volume's remaining training capacity is fixed however the
+    queue is cut up. That was true while `prune_resolved_deferred_bases` was the
+    only reclaim, and it is exhausted here (0.00 GB on three consecutive
+    attempts, 2 prunable directories against 399.56 GB pinned by cross-links).
+
+    A compaction is categorically different from a rollback: it rewrites the
+    container's storage representation and preserves every live neuron, so the
+    bytes it returns are available TO THE INTERVAL THAT IS RUNNING rather than
+    costing that interval. That distinction is the whole reason the census was
+    right to refuse to add a rollback's bytes to the window and is wrong to
+    refuse a compaction's.
+
+    Measured on the live container 2026-09-16, 472.45 GB holding 5,102,174
+    neurons: `wbrain_compact --estimate` returns 848.9 / 119.53 / 49.38 /
+    44.50 GB at strides 5000 / 500 / 50 / 5. The estimator is
+    mean_sampled_body x live_neurons, which is unbiased only for a light tail,
+    and this tail is a dozen ~86 MB hub atoms against a ~1.5 KB median -- so its
+    loosest draw exceeds the size of the file it is measuring, which is proof on
+    its face that a single draw cannot be trusted. At 20 % sampling it settles
+    near 44.5 GB, and an independent header walk over the container's own
+    records agrees (mean live body 10,322 B x 5.10 M neurons = 52.7 GB). The
+    operating record's 363.34 GB -- the sole basis for "compaction is
+    net-negative" -- is one unstable draw from that estimator, high by ~8x.
+
+    Safety. The brain must not be running: the container has no locking protocol
+    and a live server appends to a file being copied. The original is kept until
+    the recompacted brain has been reopened and has proved the same topology,
+    and is restored if it has not, so an interruption or a mismatch leaves a
+    complete brain under one name or the other.
+    """
+    project = Path(__file__).resolve().parents[1]
+    compactor = locate_compactor(project)
+    containers = brain_container_paths(runtime)
+    report: dict = {
+        "compactor": str(compactor) if compactor else None,
+        "containers": [path.name for path in containers],
+        "free_bytes_before": int(shutil.disk_usage(runtime).free),
+    }
+    if compactor is None or not containers:
+        report["skipped"] = (
+            "no wbrain_compact binary" if compactor is None
+            else "no .wbrain container"
+        )
+        report["reclaimed_bytes"] = 0
+        report["free_bytes_after"] = report["free_bytes_before"]
+        return report
+
+    before = endpoint_json(args.endpoint, "/brain/stats", timeout=120.0)
+    stop_runtime_node(runtime, args.endpoint)
+    retired: list[tuple[Path, Path]] = []
+    compacted: list[dict] = []
+    failure: str | None = None
+    try:
+        for path in containers:
+            keep = path.with_suffix(path.suffix + ".precompact")
+            size_before = path.stat().st_size
+            result = subprocess.run(
+                [str(compactor), "--in-place", str(path),
+                 "--keep-retired", str(keep)],
+                capture_output=True, text=True, timeout=21600,
+            )
+            if result.returncode != 0 or not path.is_file():
+                # Capture the child's own words. `check=True` beside
+                # `capture_output=True` raises a CalledProcessError carrying
+                # only an exit status, and this repository has already
+                # quarantined two blocks of 131,072 rows because the one
+                # informative line was deleted that way.
+                failure = (
+                    f"wbrain_compact failed on {path.name} "
+                    f"({result.returncode}): "
+                    f"{(result.stdout or '')[-1500:]} "
+                    f"{(result.stderr or '')[-1500:]}"
+                ).strip()
+                break
+            if keep.is_file():
+                retired.append((path, keep))
+            compacted.append({
+                "container": path.name,
+                "bytes_before": size_before,
+                "bytes_after": path.stat().st_size,
+            })
+    finally:
+        start_runtime_node(runtime, args.node_bin, args.endpoint)
+
+    after = endpoint_json(args.endpoint, "/brain/stats", timeout=300.0)
+    mismatches = {
+        field: {"before": before.get(field), "after": after.get(field)}
+        for field in COMPACTION_IDENTITY_FIELDS
+        if before.get(field) != after.get(field)
+    }
+    report["topology_before"] = {f: before.get(f)
+                                 for f in COMPACTION_IDENTITY_FIELDS}
+    report["topology_after"] = {f: after.get(f)
+                                for f in COMPACTION_IDENTITY_FIELDS}
+    report["compacted"] = compacted
+    if failure is not None or mismatches:
+        # Put the pre-compaction containers back. Reclaiming disk is never
+        # worth a brain that no longer proves it is the same brain.
+        stop_runtime_node(runtime, args.endpoint)
+        for path, keep in retired:
+            try:
+                os.replace(keep, path)
+            except OSError as exc:
+                report.setdefault("restore_errors", []).append(
+                    f"{path.name}: {type(exc).__name__}: {exc}"
+                )
+        start_runtime_node(runtime, args.node_bin, args.endpoint)
+        report["error"] = failure or f"topology changed: {mismatches}"
+        report["mismatches"] = mismatches
+        report["reclaimed_bytes"] = 0
+        report["free_bytes_after"] = int(shutil.disk_usage(runtime).free)
+        return report
+
+    for _path, keep in retired:
+        try:
+            keep.unlink()
+        except OSError as exc:
+            report.setdefault("retire_errors", []).append(
+                f"{keep.name}: {type(exc).__name__}: {exc}"
+            )
+    free_after = int(shutil.disk_usage(runtime).free)
+    report["free_bytes_after"] = free_after
+    # A `df` delta, never a sum of the sizes removed: on this XFS reflink volume
+    # those two numbers are not the same order of magnitude.
+    report["reclaimed_bytes"] = free_after - report["free_bytes_before"]
+    return report
+
+
+def reclaim_disk_for_floor(runtime: Path, min_free_disk_gb: float,
+                           compactor: Callable[[], dict] | None = None) -> dict:
     """Try to return the volume above its floor, and MEASURE what came back.
 
     The reclaim is reported as a `df` delta and never as a sum of the file
@@ -1922,6 +2105,12 @@ def reclaim_disk_for_floor(runtime: Path, min_free_disk_gb: float) -> dict:
     diagnostic, and a partial reclaim that reports nothing is indistinguishable
     from a complete one -- which is exactly how one root-owned directory
     stopped all reclaim on this volume for five weeks.
+
+    Pruning runs first and compaction only if it did not clear the floor, in
+    that order for a reason: pruning is cheap and removes whole directories,
+    while a compaction stops the brain and rewrites the container. On this host
+    pruning is exhausted -- 2 prunable directories against 399.56 GB pinned by
+    cross-links -- so in practice the compactor is what returns the volume.
     """
     floor_bytes = int(min_free_disk_gb * 1024 * 1024 * 1024)
     free_before = int(shutil.disk_usage(runtime).free)
@@ -1941,6 +2130,17 @@ def reclaim_disk_for_floor(runtime: Path, min_free_disk_gb: float) -> dict:
         "floor_bytes": floor_bytes,
         "cleared_floor": free_after >= floor_bytes,
     }
+    if compactor is not None and not report["cleared_floor"]:
+        try:
+            compaction = compactor()
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            compaction = {"error": f"{type(exc).__name__}: {exc}",
+                          "reclaimed_bytes": 0}
+        report["compaction"] = compaction
+        free_after = int(shutil.disk_usage(runtime).free)
+        report["free_bytes_after"] = free_after
+        report["reclaimed_bytes"] = free_after - free_before
+        report["cleared_floor"] = free_after >= floor_bytes
     if error is not None:
         report["error"] = error
     return report
@@ -4717,6 +4917,40 @@ def run_deferred_replays(args: argparse.Namespace, runtime: Path,
                 runtime, pending, args.min_free_disk_gb
             )
             if replay_queue_is_hopeless(census):
+                # COMPACT BEFORE REFUSING, FOR THE SAME REASON EXIT 90 NOW
+                # ROLLS BACK BEFORE REFUSING.
+                #
+                # `RestartPreventExitStatus=42 90 91` makes this exit terminal,
+                # so whatever is not attempted here is a repair the halt has
+                # just deleted -- exactly how a supervisor once sat `failed` for
+                # 107.7 h holding the 414 GB rollback that would have cleared
+                # its own floor. The window this census measures is
+                # `free - floor`, and on this volume the overwhelming majority
+                # of "used" is not data at all: 472.45 GB of container against a
+                # live set measured at ~44.5 GB, because the `.wbrain` store is
+                # append-only and every eviction since the first cut left its
+                # previous body behind. Refusing the queue while ~90 % of the
+                # volume is superseded bodies prices a constraint that has not
+                # been relieved yet.
+                #
+                # Re-census afterwards rather than assuming the reclaim worked:
+                # a compaction that returns nothing must still halt, and a
+                # reclaim reported rather than measured is how this path has
+                # been wrong before.
+                reclaim = reclaim_disk_for_floor(
+                    runtime, args.min_free_disk_gb,
+                    lambda: compact_brain_containers(args, runtime),
+                )
+                append_health_event(runtime, {
+                    "kind": "pre_halt_compaction_reclaim",
+                    "passed": bool(reclaim.get("reclaimed_bytes", 0) > 0),
+                    "pending": len(pending),
+                    **reclaim,
+                })
+                census = replay_window_census(
+                    runtime, pending, args.min_free_disk_gb
+                )
+            if replay_queue_is_hopeless(census):
                 append_health_event(runtime, {
                     "kind": NO_FITTING_INTERVAL_KIND,
                     "passed": False,
@@ -5976,7 +6210,8 @@ def main() -> int:
                     if disk_low and not disk_exhausted:
                         if len(disk_reclaims) < MAX_DISK_RECLAIM_ATTEMPTS:
                             reclaim = reclaim_disk_for_floor(
-                                runtime, args.min_free_disk_gb
+                                runtime, args.min_free_disk_gb,
+                                lambda: compact_brain_containers(args, runtime),
                             )
                             disk_reclaims.append(reclaim)
                             append_health_event(runtime, {
