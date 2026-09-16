@@ -9,7 +9,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use crate::neuron::{Neuron, NeuronId, NeuronRef, PoolId};
+use crate::neuron::{Neuron, NeuronId, NeuronRef, PoolId, Terminal};
 
 const HEADER_BYTES: u64 = 4096;
 const MAGIC: &[u8; 8] = b"W1ZBRAIN";
@@ -18,6 +18,28 @@ const SLOT_BYTES: u64 = 64;
 const SLOT_A: u64 = 16;
 const SLOT_B: u64 = SLOT_A + SLOT_BYTES;
 const NEURON_RECORD: &[u8; 8] = b"W1ZNEUR1";
+/// A neuron body expressed as terminals APPENDED to an earlier record.
+///
+/// `append_record` writes a whole body on every eviction, and on this host the
+/// hot neurons are single-byte atoms carrying ~4.14 M terminals each: one
+/// eviction appends ~82 MB to record a few KB of new connections. Measured
+/// burn 167.96 GB/h over 120 samples, and stopping the training worker took
+/// the volume to -0.0 GB/h, so this path is the writer.
+///
+/// The record is `marker | pool | id | base_offset | len | payload`, where the
+/// payload holds only the terminals added since `base_offset`'s body. A reader
+/// follows `base_offset` to the base and applies the chain in order.
+///
+/// This helps the 41.5 % of the burn that is append-shaped and NOTHING of the
+/// 58.5 % that is perturbed -- a hub atom fires every tick, so every terminal
+/// it owns has its `last_fired_tick` rewritten, measured 20,000 of 20,000.
+/// See `docs/WBRAIN_DELTA_TERMINALS.md`.
+const NEURON_DELTA_RECORD: &[u8; 8] = b"W1ZNDLT1";
+
+/// Deltas a read will follow before the writer is required to re-base with a
+/// full body. A chain is a read amplification, so it is bounded rather than
+/// trusted to stay short.
+pub(crate) const MAX_DELTA_CHAIN: usize = 32;
 const MANIFEST_RECORD: &[u8; 8] = b"W1ZMANI1";
 const AUXILIARY_RECORD: &[u8; 8] = b"W1ZAUX01";
 
@@ -227,38 +249,135 @@ impl BrainContainer {
         Ok(offset)
     }
 
-    pub fn read_neuron_at(&mut self, offset: u64) -> io::Result<(PoolId, Neuron)> {
+    /// Append terminals to an earlier body instead of rewriting it.
+    ///
+    /// `base_offset` must be the record this neuron's slot currently points
+    /// at. The caller proves the rest -- that nothing outside the terminal
+    /// tail changed, and that the tail only grew -- before choosing this over
+    /// a full body; see `WbrainNeuronStore::append_record`.
+    pub fn append_neuron_delta(
+        &mut self,
+        pool: PoolId,
+        id: NeuronId,
+        base_offset: u64,
+        payload: &[u8],
+    ) -> io::Result<u64> {
+        let offset = self.file.seek(SeekFrom::End(0))?;
+        self.file.write_all(NEURON_DELTA_RECORD)?;
+        self.file.write_all(&pool.to_le_bytes())?;
+        self.file.write_all(&id.to_le_bytes())?;
+        self.file.write_all(&base_offset.to_le_bytes())?;
+        self.file.write_all(&(payload.len() as u64).to_le_bytes())?;
+        self.file.write_all(payload)?;
+        Ok(offset)
+    }
+
+    /// Read one record header without deciding what kind it is.
+    ///
+    /// Returns `(is_delta, pool, id, base_offset, body_len)`; `base_offset` is
+    /// 0 for a full body.
+    fn read_record_header(
+        &mut self,
+        offset: u64,
+    ) -> io::Result<(bool, PoolId, NeuronId, u64, u64)> {
         self.file.seek(SeekFrom::Start(offset))?;
-        let mut marker = [0u8; 8];
-        let mut pool_raw = [0u8; 4];
-        let mut id_raw = [0u8; 4];
-        let mut len_raw = [0u8; 8];
+        let mut marker = [0_u8; 8];
+        let mut pool_raw = [0_u8; 4];
+        let mut id_raw = [0_u8; 4];
         self.file.read_exact(&mut marker)?;
         self.file.read_exact(&mut pool_raw)?;
         self.file.read_exact(&mut id_raw)?;
-        self.file.read_exact(&mut len_raw)?;
-        if &marker != NEURON_RECORD {
+        let is_delta = &marker == NEURON_DELTA_RECORD;
+        if !is_delta && &marker != NEURON_RECORD {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "neuron marker mismatch",
             ));
         }
-        let pool = u32::from_le_bytes(pool_raw);
-        let expected_id = u32::from_le_bytes(id_raw);
-        let len = usize::try_from(u64::from_le_bytes(len_raw))
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "neuron too large"))?;
-        let mut body = vec![0u8; len];
-        self.file.read_exact(&mut body)?;
-        let mut neuron: Neuron = bincode::deserialize(&body)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        if neuron.id != expected_id {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "neuron id mismatch",
-            ));
+        let base_offset = if is_delta {
+            let mut raw = [0_u8; 8];
+            self.file.read_exact(&mut raw)?;
+            u64::from_le_bytes(raw)
+        } else {
+            0
+        };
+        let mut len_raw = [0_u8; 8];
+        self.file.read_exact(&mut len_raw)?;
+        Ok((
+            is_delta,
+            PoolId::from_le_bytes(pool_raw),
+            NeuronId::from_le_bytes(id_raw),
+            base_offset,
+            u64::from_le_bytes(len_raw),
+        ))
+    }
+
+    pub fn read_neuron_at(&mut self, offset: u64) -> io::Result<(PoolId, Neuron)> {
+        // Walk any delta chain back to its full body FIRST, collecting the
+        // appended-terminal payloads newest-first, then apply them oldest-first
+        // on top of the base. A full body simply has an empty chain, so the
+        // common path costs one extra header parse and nothing else.
+        let mut chain: Vec<Vec<u8>> = Vec::new();
+        let mut cursor = offset;
+        let mut expected_pool: Option<PoolId> = None;
+        let mut expected_id: Option<NeuronId> = None;
+        loop {
+            let (is_delta, pool, id, base_offset, len) =
+                self.read_record_header(cursor)?;
+            if let Some(previous) = expected_id {
+                if previous != id || expected_pool != Some(pool) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "delta chain crosses neurons",
+                    ));
+                }
+            }
+            expected_pool = Some(pool);
+            expected_id = Some(id);
+            let len = usize::try_from(len).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "neuron too large")
+            })?;
+            let mut payload = vec![0_u8; len];
+            self.file.read_exact(&mut payload)?;
+            if !is_delta {
+                let pool = expected_pool.unwrap_or(pool);
+                let mut neuron: Neuron = bincode::deserialize(&payload)
+                    .map_err(|error| {
+                        io::Error::new(io::ErrorKind::InvalidData, error)
+                    })?;
+                if Some(neuron.id) != expected_id {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "neuron id mismatch",
+                    ));
+                }
+                for raw in chain.iter().rev() {
+                    let appended: Vec<Terminal> = bincode::deserialize(raw)
+                        .map_err(|error| {
+                            io::Error::new(io::ErrorKind::InvalidData, error)
+                        })?;
+                    neuron.terminals.extend(appended);
+                }
+                neuron.rebuild_terminal_idx();
+                return Ok((pool, neuron));
+            }
+            if chain.len() >= MAX_DELTA_CHAIN {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "delta chain exceeds its bound",
+                ));
+            }
+            chain.push(payload);
+            if base_offset == 0 || base_offset >= cursor {
+                // A base must lie EARLIER in an append-only file. Anything else
+                // is corruption or a cycle, and following it would hang a read.
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "delta base offset does not precede its delta",
+                ));
+            }
+            cursor = base_offset;
         }
-        neuron.rebuild_terminal_idx();
-        Ok((pool, neuron))
     }
 
     /// Read the bincode prefix through `members` and deliberately leave the
@@ -508,8 +627,27 @@ impl BrainContainer {
         destination: &mut BrainContainer,
         buffer: &mut [u8],
     ) -> io::Result<u64> {
-        self.copy_record_into(offset, NEURON_RECORD, destination, buffer)
-            .map(|(new_offset, _len)| new_offset)
+        // A DELTA MUST BE FOLDED, NEVER COPIED.
+        //
+        // The fast path is a raw byte copy, which is correct for a full body
+        // and wrong for a delta: the copy would carry a `base_offset` pointing
+        // into the SOURCE container, and the compacted file has no record
+        // there. Reading it back would either fail the marker check or follow
+        // an offset that means something else entirely.
+        //
+        // Folding here is also what keeps the format from leaking: a compacted
+        // container holds only full bodies, so a guard clone of it can never
+        // contain a chain, and an older binary can still read it.
+        let (is_delta, ..) = self.read_record_header(offset)?;
+        if !is_delta {
+            return self
+                .copy_record_into(offset, NEURON_RECORD, destination, buffer)
+                .map(|(new_offset, _len)| new_offset);
+        }
+        let (pool, neuron) = self.read_neuron_at(offset)?;
+        let body = bincode::serialize(&neuron)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        destination.append_neuron_body(pool, neuron.id, &body)
     }
 
     /// Body length recorded in a record header, without reading the body.

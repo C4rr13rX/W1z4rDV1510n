@@ -12,7 +12,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use crate::neuron::{Neuron, NeuronId, PoolId};
+use crate::neuron::{Neuron, NeuronId, PoolId, Terminal};
 use crate::store::NeuronStore;
 use crate::store::container::{
     AuxiliaryRecordRef, BrainContainer, BrainContainerManifest, PoolContainerManifest,
@@ -268,12 +268,30 @@ pub struct WbrainNeuronStore {
     /// that -- which makes it the "nothing recorded" sentinel. See
     /// `clean_skips`.
     durable_bodies: RwLock<Vec<(u64, u64)>>,
+    /// Indexed by neuron id: `(terminal count, delta chain depth)` for the
+    /// record this neuron's slot points at. `append_record` needs the count to
+    /// know which terminals are NEW, and the depth to re-base before a read
+    /// would have to follow more than `MAX_DELTA_CHAIN` links.
+    ///
+    /// Same flat-vector reasoning as `durable_bodies`: 8 bytes per neuron
+    /// against the ~163 MB an `AHashMap` would cost at 5.1 M ids, on a host
+    /// whose memory pressure is the thing being fixed.
+    durable_terminals: RwLock<Vec<(u32, u32)>>,
     page_ins: AtomicU64,
     page_outs: AtomicU64,
     /// Evictions that wrote nothing because the durable body was already
     /// identical. This is the counter that says whether the append-only store
     /// is recording learning or recycling the same bytes.
     clean_skips: AtomicU64,
+    /// Evictions that appended only the NEW terminals instead of the whole
+    /// body, and the bytes that saved. Their ratio against `page_outs` is the
+    /// only direct readout of whether the delta path is reaching the burn --
+    /// and a zero is not a refutation until the path has had the opportunity
+    /// to run, because the maps are per-process and this host recycles the
+    /// node every two to three minutes.
+    delta_appends: AtomicU64,
+    delta_bytes_saved: AtomicU64,
+    delta_rebases: AtomicU64,
     read_errors: AtomicU64,
     write_errors: AtomicU64,
 }
@@ -296,9 +314,13 @@ impl WbrainNeuronStore {
             working_set: RwLock::new(AHashMap::new()),
             index_concept_labels: AtomicBool::new(false),
             durable_bodies: RwLock::new(Vec::new()),
+            durable_terminals: RwLock::new(Vec::new()),
             page_ins: AtomicU64::new(0),
             page_outs: AtomicU64::new(0),
             clean_skips: AtomicU64::new(0),
+            delta_rebases: AtomicU64::new(0),
+            delta_bytes_saved: AtomicU64::new(0),
+            delta_appends: AtomicU64::new(0),
             read_errors: AtomicU64::new(0),
             write_errors: AtomicU64::new(0),
         }
@@ -345,9 +367,13 @@ impl WbrainNeuronStore {
             working_set: RwLock::new(AHashMap::new()),
             index_concept_labels: AtomicBool::new(false),
             durable_bodies: RwLock::new(Vec::new()),
+            durable_terminals: RwLock::new(Vec::new()),
             page_ins: AtomicU64::new(0),
             page_outs: AtomicU64::new(0),
             clean_skips: AtomicU64::new(0),
+            delta_rebases: AtomicU64::new(0),
+            delta_bytes_saved: AtomicU64::new(0),
+            delta_appends: AtomicU64::new(0),
             read_errors: AtomicU64::new(0),
             write_errors: AtomicU64::new(0),
         }
@@ -883,6 +909,21 @@ impl WbrainNeuronStore {
         self.clean_skips.load(Ordering::Relaxed)
     }
 
+    /// Evictions that appended only new terminals instead of a whole body.
+    pub fn delta_appends(&self) -> u64 {
+        self.delta_appends.load(Ordering::Relaxed)
+    }
+
+    /// Bytes NOT written because a delta replaced a full body.
+    pub fn delta_bytes_saved(&self) -> u64 {
+        self.delta_bytes_saved.load(Ordering::Relaxed)
+    }
+
+    /// Full bodies written because a chain reached `MAX_DELTA_CHAIN`.
+    pub fn delta_rebases(&self) -> u64 {
+        self.delta_rebases.load(Ordering::Relaxed)
+    }
+
     /// Persist the current neuron body and remove only that neuron from RAM.
     pub fn sleep_neuron(&self, id: NeuronId) -> std::io::Result<bool> {
         let neuron = match self.working_set.write().remove(&id) {
@@ -927,6 +968,59 @@ impl WbrainNeuronStore {
     /// neuron in its own live slot. There must be exactly one resident body.
     pub fn release_cached(&self, id: NeuronId) {
         self.working_set.write().remove(&id);
+    }
+
+    /// Record what is now durable for `id`, for both the clean-skip digest and
+    /// the delta path's base.
+    fn record_durable(&self, id: NeuronId, offset: u64, digest: u64,
+                      terminals: u32, depth: u32) {
+        {
+            let mut durable = self.durable_bodies.write();
+            if durable.len() <= id as usize {
+                durable.resize(id as usize + 1, (0, 0));
+            }
+            durable[id as usize] = (offset, digest);
+        }
+        let mut counts = self.durable_terminals.write();
+        if counts.len() <= id as usize {
+            counts.resize(id as usize + 1, (0, 0));
+        }
+        counts[id as usize] = (terminals, depth);
+    }
+
+    /// The terminals appended since the base, or `None` when a delta would not
+    /// be equivalent to rewriting the body.
+    ///
+    /// Equivalence is PROVEN, not argued: the candidate is re-serialized with
+    /// its terminal vector truncated to the base's length, and that must be
+    /// byte-identical to the base body. That single comparison covers every
+    /// way the rest of the neuron could have changed -- label, members, kind,
+    /// ticks, a reweighted or reordered retained terminal -- without this code
+    /// having to enumerate them, so a future field cannot silently escape it.
+    fn terminal_append_payload(
+        &self,
+        neuron: &Neuron,
+        base_terminals: usize,
+        body: &[u8],
+    ) -> Option<Vec<u8>> {
+        let mut prefix = neuron.clone();
+        prefix.terminals.truncate(base_terminals);
+        let prefix_bytes = bincode::serialize(&prefix).ok()?;
+        // The base body is not re-read from disk: the digest that matched
+        // above proves what is there, and re-reading an 82 MB body to save
+        // writing one would defeat the purpose. Instead the candidate's own
+        // prefix is compared against the digest recorded for the base.
+        let base_digest = self
+            .durable_bodies
+            .read()
+            .get(neuron.id as usize)
+            .map(|&(_, digest)| digest)?;
+        if body_digest(&prefix_bytes) != base_digest {
+            return None;
+        }
+        let appended: Vec<Terminal> =
+            neuron.terminals[base_terminals..].to_vec();
+        bincode::serialize(&appended).ok()
     }
 
     fn append_record(&self, neuron: &Neuron) -> std::io::Result<()> {
@@ -983,18 +1077,99 @@ impl WbrainNeuronStore {
             }
         }
 
+        // APPEND ONLY THE NEW TERMINALS WHEN THAT IS PROVABLY EQUIVALENT.
+        //
+        // A hot atom carries ~4.14 M terminals, so its body is ~82 MB and an
+        // eviction that learned a few KB of connections still rewrites all of
+        // it. A delta is taken only when every one of these holds, each
+        // CHECKED rather than assumed:
+        //
+        //   * the base is still the record this slot points at -- a rollback,
+        //     compaction or reopen moves it, and the delta is then refused;
+        //   * the terminal vector only GREW, and its retained prefix is
+        //     byte-identical, so nothing was reordered, reweighted or pruned
+        //     (`terminal_idx` makes reorder possible in principle);
+        //   * everything outside the terminal tail is unchanged;
+        //   * the chain is shorter than `MAX_DELTA_CHAIN`, so a read never
+        //     degrades without bound.
+        //
+        // Anything else falls through to the full body below. This reaches the
+        // 41.5 % of the burn that is append-shaped and none of the 58.5 % that
+        // is perturbed -- see docs/WBRAIN_DELTA_TERMINALS.md.
+        if was_present {
+            let durable_offset = slot.map(|record| record.offset).unwrap_or(0);
+            let known = self
+                .durable_terminals
+                .read()
+                .get(neuron.id as usize)
+                .copied();
+            let base_matches = self
+                .durable_bodies
+                .read()
+                .get(neuron.id as usize)
+                .is_some_and(|&(offset, _)| {
+                    offset != 0 && offset == durable_offset
+                });
+            if let Some((base_terminals, depth)) = known {
+                let base_terminals = base_terminals as usize;
+                if base_matches
+                    && (depth as usize) < crate::store::container::MAX_DELTA_CHAIN
+                    && neuron.terminals.len() > base_terminals
+                {
+                    if let Some(payload) =
+                        self.terminal_append_payload(neuron, base_terminals, &body)
+                    {
+                        if payload.len() + 32 < body.len() {
+                            let offset = self
+                                .file
+                                .container
+                                .lock()
+                                .append_neuron_delta(
+                                    self.pool_id,
+                                    neuron.id,
+                                    durable_offset,
+                                    &payload,
+                                )?;
+                            self.record_durable(
+                                neuron.id,
+                                offset,
+                                digest,
+                                neuron.terminals.len() as u32,
+                                depth + 1,
+                            );
+                            let record =
+                                NeuronSlotRecord::from_neuron(offset, neuron);
+                            self.flush_paged_slots()?;
+                            self.write_slot(neuron.id, record)?;
+                            self.delta_appends.fetch_add(1, Ordering::Relaxed);
+                            self.delta_bytes_saved.fetch_add(
+                                (body.len() - payload.len()) as u64,
+                                Ordering::Relaxed,
+                            );
+                            return Ok(());
+                        }
+                    }
+                } else if base_matches
+                    && (depth as usize)
+                        >= crate::store::container::MAX_DELTA_CHAIN
+                {
+                    self.delta_rebases.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+
         let offset = self
             .file
             .container
             .lock()
             .append_neuron_body(self.pool_id, neuron.id, &body)?;
-        {
-            let mut durable = self.durable_bodies.write();
-            if durable.len() <= neuron.id as usize {
-                durable.resize(neuron.id as usize + 1, (0, 0));
-            }
-            durable[neuron.id as usize] = (offset, digest);
-        }
+        self.record_durable(
+            neuron.id,
+            offset,
+            digest,
+            neuron.terminals.len() as u32,
+            0,
+        );
         let record = NeuronSlotRecord::from_neuron(offset, neuron);
         if !was_present && neuron.id as u64 == logical_before {
             self.queue_slot_write(neuron.id, record)?;
@@ -1150,6 +1325,153 @@ mod tests {
         assert_eq!(pool.label_to_id("atom:2"), Some(2));
         assert_eq!(pool.resident_count(), 1);
         std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn appended_terminals_cost_a_delta_and_still_read_back_whole() {
+        // A hot atom carries ~4.14 M terminals, so its body is ~82 MB and an
+        // eviction that learned a few KB still rewrote all of it -- measured
+        // 167.96 GB/h, essentially all of it this path. Growing the terminal
+        // vector must append only what is new, and the neuron that comes back
+        // must be indistinguishable from one written whole.
+        let path = tmpfile("delta-append");
+        let file = WbrainFile::open(&path).unwrap();
+        let pool = file.pool(3);
+
+        let mut neuron =
+            Neuron::new_atom(0, "atom:0".into(), NeuronKind::Excitatory, 1);
+        for i in 0..64 {
+            neuron.terminals.push(Terminal::new(NeuronRef::new(3, i), 0.5, 2));
+        }
+        pool.persist_sleeping(&neuron).unwrap();
+        file.flush().unwrap();
+        let after_base = std::fs::metadata(&path).unwrap().len();
+        assert_eq!(pool.delta_appends(), 0, "a base body is never a delta");
+
+        // Learn two more connections and evict. Only those may be written.
+        neuron.terminals.push(Terminal::new(NeuronRef::new(3, 64), 0.5, 3));
+        neuron.terminals.push(Terminal::new(NeuronRef::new(3, 65), 0.5, 3));
+        pool.persist_sleeping(&neuron).unwrap();
+        file.flush().unwrap();
+        let after_delta = std::fs::metadata(&path).unwrap().len();
+
+        assert_eq!(pool.delta_appends(), 1, "the growth should be a delta");
+        assert!(pool.delta_bytes_saved() > 0);
+        let grew_by = after_delta - after_base;
+        assert!(
+            grew_by < (after_base / 2),
+            "a delta must be far smaller than the body it replaces: grew {grew_by} \
+             against a base of {after_base}",
+        );
+
+        // The read must fold the chain back into the whole neuron.
+        let read_back = pool.get(0).unwrap();
+        assert_eq!(read_back.terminals.len(), 66);
+        assert_eq!(read_back.terminals[65].target, NeuronRef::new(3, 65));
+        assert_eq!(read_back.label, "atom:0");
+        // And the rebuilt index must cover the folded-in terminals, or an
+        // O(1) lookup would miss exactly the connections just learned.
+        assert_eq!(
+            read_back.terminal_idx.get(&NeuronRef::new(3, 65)).copied(),
+            Some(65),
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_delta_is_refused_when_anything_but_the_tail_changed() {
+        // Equivalence is PROVEN by re-serializing the candidate truncated to
+        // the base's terminal count and comparing it against the base digest.
+        // That one comparison has to cover every other way a neuron can
+        // differ, so assert the cases a hand-written field check would miss.
+        let path = tmpfile("delta-refuse");
+        let file = WbrainFile::open(&path).unwrap();
+        let pool = file.pool(3);
+
+        let mut neuron =
+            Neuron::new_atom(0, "atom:0".into(), NeuronKind::Excitatory, 1);
+        for i in 0..32 {
+            neuron.terminals.push(Terminal::new(NeuronRef::new(3, i), 0.5, 2));
+        }
+        pool.persist_sleeping(&neuron).unwrap();
+        file.flush().unwrap();
+
+        // A RETAINED terminal changed as well as the tail growing. This is the
+        // measured shape of the perturbed half of the burn -- a hub atom fires
+        // every tick, so every terminal's last_fired_tick moves -- and it must
+        // fall through to a full body rather than silently losing the update.
+        let mut perturbed = neuron.clone();
+        perturbed.terminals[0].last_fired_tick = 99;
+        perturbed
+            .terminals
+            .push(Terminal::new(NeuronRef::new(3, 32), 0.5, 3));
+        pool.persist_sleeping(&perturbed).unwrap();
+        file.flush().unwrap();
+        assert_eq!(
+            pool.delta_appends(),
+            0,
+            "a changed retained terminal must not be encoded as an append",
+        );
+        let read_back = pool.get(0).unwrap();
+        assert_eq!(read_back.terminals.len(), 33);
+        assert_eq!(read_back.terminals[0].last_fired_tick, 99);
+
+        // A SHRINKING vector is not an append either.
+        let mut pruned = read_back.clone();
+        pruned.terminals.truncate(4);
+        pruned.rebuild_terminal_idx();
+        pool.persist_sleeping(&pruned).unwrap();
+        file.flush().unwrap();
+        assert_eq!(pool.delta_appends(), 0, "a prune is never an append");
+        assert_eq!(pool.get(0).unwrap().terminals.len(), 4);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_delta_chain_is_bounded_and_survives_reopen() {
+        // A chain is read amplification, so it must be bounded rather than
+        // trusted to stay short -- and the durability of the whole scheme
+        // rests on a reopened container reading the same neuron.
+        let path = tmpfile("delta-chain");
+        let file = WbrainFile::open(&path).unwrap();
+        let pool = file.pool(3);
+
+        let mut neuron =
+            Neuron::new_atom(0, "atom:0".into(), NeuronKind::Excitatory, 1);
+        neuron.terminals.push(Terminal::new(NeuronRef::new(3, 0), 0.5, 2));
+        pool.persist_sleeping(&neuron).unwrap();
+
+        // Well past MAX_DELTA_CHAIN, so the writer must re-base at least once.
+        for i in 1..(crate::store::container::MAX_DELTA_CHAIN as u32 + 8) {
+            neuron
+                .terminals
+                .push(Terminal::new(NeuronRef::new(3, i), 0.5, 2));
+            pool.persist_sleeping(&neuron).unwrap();
+        }
+        file.flush().unwrap();
+
+        let expected = neuron.terminals.len();
+        assert_eq!(pool.get(0).unwrap().terminals.len(), expected);
+        assert!(pool.delta_appends() > 0, "growth should have used deltas");
+
+        // Reopen from disk: the chain must resolve without the in-memory maps.
+        // The manifest carries the slot table, so a reopen is only meaningful
+        // once it is committed -- without this the pool has no offsets at all
+        // and the read fails for a reason that has nothing to do with deltas.
+        file.commit_manifest().unwrap();
+        file.flush().unwrap();
+        drop(pool);
+        drop(file);
+        let reopened = WbrainFile::open(&path).unwrap();
+        let pool = reopened.pool(3);
+        let read_back = pool.get(0).unwrap();
+        assert_eq!(read_back.terminals.len(), expected);
+        assert_eq!(read_back.terminals[expected - 1].target,
+                   NeuronRef::new(3, expected as u32 - 1));
+
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
