@@ -265,3 +265,38 @@ def test_a_compaction_too_small_to_buy_training_is_not_renewable() -> None:
     )
 
     assert MIN_RENEWABLE_CYCLE_HOURS >= 1.0
+
+
+def test_the_capacity_halt_compacts_even_above_its_floor() -> None:
+    """The halt is a CAPACITY refusal, not a floor breach.
+
+    `reclaim_disk_for_floor` calls its compactor only when pruning failed to
+    clear the FLOOR. That is right on the disk-pressure path and exactly wrong
+    on this one: the capacity halt fires while the volume is comfortably above
+    its floor and still cannot buy any interval enough training hours.
+
+    Measured 2026-09-16: 493.27 GB free against a 150 GB floor, so
+    `cleared_floor` was True, the compactor was never invoked, and
+    `pre_halt_compaction_reclaim` logged `removed: []`, `reclaimed_bytes: 0`
+    -- beside a finished 440 GB -> 105.78 GB compaction sitting on the same
+    disk. The halt refused a queue whose binding constraint it had just
+    declined to relieve.
+    """
+    source = (Path(__file__).resolve().parents[1]
+              / "scripts" / "programming_curriculum_supervisor.py"
+              ).read_text(encoding="utf-8")
+
+    start = source.index("kind\": NO_FITTING_INTERVAL_KIND")
+    window = source[max(0, start - 4000):start]
+
+    # The halt must call the compactor DIRECTLY, not hand it to the helper
+    # whose floor check would skip it.
+    assert "compact_brain_containers(args, runtime)" in window
+    assert "lambda: compact_brain_containers(args, runtime)" not in window, (
+        "the capacity halt must not route its compaction through "
+        "reclaim_disk_for_floor, whose floor check skips it above the floor"
+    )
+    # Pruning may still run first; its result must not gate the compaction.
+    assert "prune = reclaim_disk_for_floor(runtime, args.min_free_disk_gb)" in window
+    # And the reclaim it reports stays a df delta, never a summed claim.
+    assert "free_after_compaction - free_before_compaction" in window

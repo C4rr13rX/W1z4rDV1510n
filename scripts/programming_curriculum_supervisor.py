@@ -5027,10 +5027,43 @@ def run_deferred_replays(args: argparse.Namespace, runtime: Path,
                 # a compaction that returns nothing must still halt, and a
                 # reclaim reported rather than measured is how this path has
                 # been wrong before.
-                reclaim = reclaim_disk_for_floor(
-                    runtime, args.min_free_disk_gb,
-                    lambda: compact_brain_containers(args, runtime),
-                )
+                # Compact DIRECTLY, not through `reclaim_disk_for_floor`.
+                #
+                # That helper calls its compactor only when pruning failed to
+                # clear the FLOOR -- correct on the disk-pressure path, and
+                # exactly wrong here. This halt is a CAPACITY refusal: it fires
+                # while the volume is comfortably above its floor and still
+                # cannot buy an interval enough training hours. Measured
+                # 2026-09-16: 493.27 GB free against a 150 GB floor, so
+                # `cleared_floor` was True, the compactor was never invoked,
+                # and `pre_halt_compaction_reclaim` logged `removed: []`,
+                # `reclaimed_bytes: 0` beside a finished 440 GB -> 105.78 GB
+                # dry run sitting on the same disk. The halt then refused a
+                # queue whose binding constraint it had just declined to
+                # relieve.
+                #
+                # Pruning still runs first because it is cheap, but its result
+                # no longer gates the compaction.
+                prune = reclaim_disk_for_floor(runtime, args.min_free_disk_gb)
+                free_before_compaction = int(shutil.disk_usage(runtime).free)
+                try:
+                    compaction = compact_brain_containers(args, runtime)
+                except (OSError, RuntimeError,
+                        subprocess.SubprocessError) as exc:
+                    compaction = {"error": f"{type(exc).__name__}: {exc}",
+                                  "reclaimed_bytes": 0}
+                free_after_compaction = int(shutil.disk_usage(runtime).free)
+                reclaim = {
+                    **prune,
+                    "compaction": compaction,
+                    "free_bytes_before": free_before_compaction,
+                    "free_bytes_after": free_after_compaction,
+                    # Measured by `df`, never summed from file sizes: on this
+                    # reflink volume those differ by orders of magnitude.
+                    "reclaimed_bytes":
+                        free_after_compaction - free_before_compaction,
+                    "prune_reclaimed_bytes": prune.get("reclaimed_bytes", 0),
+                }
                 append_health_event(runtime, {
                     "kind": "pre_halt_compaction_reclaim",
                     "passed": bool(reclaim.get("reclaimed_bytes", 0) > 0),
