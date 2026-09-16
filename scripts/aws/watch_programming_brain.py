@@ -33,6 +33,22 @@ DEFAULT_INSTANCE = "i-0d7a6deeb0ead2dfc"
 DEFAULT_RUNTIME = "/srv/wizard/runtime/programming-integrated-20260713"
 COMPLETE_STATES = {"all_complete", "deferred_replay_complete"}
 
+#: The supervisor refused to spend a rollback on a queue where nothing fits
+#: (exit 91) and the unit honours that exit, so no supervisor and no wrapper
+#: remain. Without this, the bottom arm reports "no curriculum supervisor or
+#: wrapper owns terminal state ..." -- true, useless, and re-fired as a billed
+#: agent wake-up every `--retry-cooldown` forever, because `cooldown_elapsed`
+#: re-triggers an unchanged fingerprint on a timer. Nothing an agent can do
+#: resolves it: the remedies are more RAM, a larger volume, or delta-encoded
+#: terminal updates, and all three are user decisions.
+NO_FITTING_INTERVAL_STATE = "no_interval_fits_disk_window"
+
+#: Kinds that are reported ONCE per distinct situation and never re-fired on a
+#: timer. A halt awaiting a purchase decision does not become more actionable
+#: by being re-diagnosed every 30 minutes; its fingerprint carries the capacity
+#: arithmetic, so a materially changed situation still wakes an agent.
+FIRE_ONCE_KINDS = {"awaiting_user_decision"}
+
 #: How long the heartbeat probe will wait for the row to move before calling
 #: the rate zero. The row advances once per COMMITTED BATCH, not continuously,
 #: so this is really "the longest commit period we are willing to mistake for a
@@ -681,6 +697,64 @@ def classify_probe(probe: dict, *, stall_seconds: float,
             f"{disk_fault}; nothing owns terminal state {state} because the "
             f"wrapper cannot write its runtime identity files",
             event_fingerprint("disk_low", probe),
+        )
+    # A DELIBERATE TERMINAL HALT IS NOT A FAULT TO RE-DIAGNOSE ON A TIMER.
+    #
+    # Deliberately placed BELOW the disk arm above, not above it. The lesson
+    # this file already paid for is that a lifecycle notice ranked over the
+    # fault arms outranks all of them once its state becomes permanent, and
+    # this state IS permanent until a human acts -- so every fault that can
+    # still be true while halted must be classified first.
+    if state == NO_FITTING_INTERVAL_STATE:
+        capacity = status.get("capacity") or {}
+        needed = capacity.get("hours_needed_at_measured_rates")
+        available = capacity.get("hours_available")
+        rows = capacity.get("pending_rows")
+        priced = capacity.get("intervals_priced")
+        total = capacity.get("intervals_total")
+        detail = ""
+        if rows and available:
+            detail = (
+                f": {int(rows):,} rows still owed against {float(available):.2f} h "
+                "of training the volume can pay for before its floor"
+            )
+            if needed:
+                detail += (
+                    f", and {float(needed):,.0f} h needed at each interval's own "
+                    "measured rate"
+                )
+            if priced is not None and total:
+                detail += f" ({priced}/{total} intervals priced)"
+        return Decision(
+            "awaiting_user_decision",
+            "the curriculum supervisor refused to spend a rollback because no "
+            "unresolved interval can reach its gate inside the volume's window"
+            + detail
+            + " -- the volume is NOT full, so this is not a resize; the "
+            "remedies are more RAM (a ~363 GB brain on a 15.26 GB host evicts "
+            "continuously, which causes both the disk burn and the 260x "
+            "per-row cost spread), a larger volume (buys time only), or "
+            "delta-encoded terminal updates in the .wbrain store. All three "
+            "are user decisions, so this is reported once and not re-fired",
+            # Fingerprint on the ARITHMETIC, so this re-wakes when the
+            # situation materially changes (volume grown, burn fallen, queue
+            # drained) and never merely because time passed.
+            #
+            # Built here rather than via `event_fingerprint`, which hashes a
+            # fixed identity set -- `state`, `phase`, `interval_id`, `error`,
+            # `block_target_row` -- and would ignore every field that
+            # distinguishes one refusal from another. A fire-once kind whose
+            # fingerprint cannot change is a permanently silent alarm, which is
+            # strictly worse than the repeating one it replaces.
+            "awaiting_user_decision:" + hashlib.sha256(json.dumps({
+                "runtime": probe.get("runtime"),
+                "state": state,
+                "pending": status.get("pending"),
+                # Bucketed to whole hours: the window drifts by hundredths
+                # between polls and a raw float would re-fire on noise.
+                "window_hours": (round(float(available))
+                                 if available else None),
+            }, sort_keys=True).encode("utf-8")).hexdigest()[:20],
         )
     return Decision(
         "fix_required",
@@ -1570,6 +1644,15 @@ def cooldown_elapsed(state: dict, decision: Decision, *, now: float,
                      retry_cooldown: float) -> bool:
     if state.get("last_invoked_fingerprint") != decision.fingerprint:
         return True
+    # SOME HALTS DO NOT BECOME MORE ACTIONABLE BY BEING RE-REPORTED.
+    # An unchanged fingerprint otherwise re-triggers on a timer, which is how
+    # a `quarantine_ready` notice came to bill an agent every 1800 s for days
+    # against a replay that was merely training. A halt waiting on a purchase
+    # decision has the same shape and none of the urgency: its fingerprint
+    # carries the capacity arithmetic, so a materially changed situation still
+    # re-fires immediately via the branch above.
+    if decision.kind in FIRE_ONCE_KINDS:
+        return False
     return now - float(state.get("last_invoked_unix") or 0.0) >= retry_cooldown
 
 

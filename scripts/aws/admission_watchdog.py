@@ -477,6 +477,25 @@ def faults(now: dict, baseline_deferred: int) -> list[str]:
     """Every reason this run is not converting compute into progress."""
     found = []
 
+    # A REFUSAL TO SPEND IS NOT A FAULT, AND IT IS NOT A DOWN SUPERVISOR.
+    #
+    # The supervisor measured every unresolved interval against the volume's
+    # own window, found that none can reach its gate inside it, and returned
+    # exit 91 rather than burning a rollback per interval to rediscover that.
+    # `RestartPreventExitStatus` makes 91 terminal, so the unit is `failed`
+    # with no supervisor -- which every arm below reads as catastrophic:
+    # `supervisor_down`, `brain_down` and `no_admission` would all fire, each
+    # exiting 2 and re-invoking an agent that can do nothing about it.
+    #
+    # This is the two-emitter rule this file has already been bitten by twice
+    # (`forward` stage, `disk_low`): `watch_programming_brain.classify_probe`
+    # grew an `awaiting_user_decision` arm for exactly this state, so this one
+    # must know it too or the same host is simultaneously halted-by-design and
+    # critically faulted. Returning early is deliberate -- while nothing is
+    # training, no other arm here describes a condition that can change.
+    if str(now.get("state") or "") == "no_interval_fits_disk_window":
+        return []
+
     if now.get("unit") != "active":
         found.append(f"supervisor_down: unit is {now.get('unit')!r}")
 

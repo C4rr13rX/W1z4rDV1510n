@@ -1931,3 +1931,148 @@ def test_the_halt_row_is_read_from_either_stages_schema() -> None:
     assert decision.kind == "fix_required", decision
     assert "229264" in decision.reason, decision.reason
     assert "None" not in decision.reason
+
+
+# ---------------------------------------------------------------------------
+# A deliberate terminal halt is not a fault to re-diagnose on a timer
+# ---------------------------------------------------------------------------
+
+def _refusal_probe(**overrides) -> dict:
+    """The payload the HOST emits at exit 91, not a convenient shape.
+
+    Built from the live status published 2026-09-16: the supervisor refused a
+    queue where every interval exceeds the window, `RestartPreventExitStatus`
+    made 91 terminal, and the unit is `failed` with no supervisor and no
+    wrapper. Every test helper in this file defaults `supervisors=1`, which is
+    exactly how an arm can pass its suite against a census the host cannot
+    produce -- so this one states the census explicitly.
+    """
+    payload = {
+        "host_state": "running",
+        "runtime": "/srv/wizard/runtime/programming-integrated-20260713",
+        "status": {
+            "state": "no_interval_fits_disk_window",
+            "pending": 22,
+            "window_hours": 2.47,
+            "minimum_free_disk_gb": 150.0,
+            "burn_gb_per_hour": 167.96,
+            "shortest_eta_hours": 16.96,
+            "capacity": {
+                "pending_rows": 2758116,
+                "fastest_measured_rows_per_hour": 59778.1,
+                "hours_needed_at_fastest_rate": 46.1,
+                "hours_needed_at_measured_rates": 9288.4,
+                "intervals_priced": 22,
+                "intervals_total": 22,
+                "hours_available": 2.47,
+                "deficit_factor": 18.7,
+                "deficit_factor_at_measured_rates": 3760.5,
+                "splitting_cannot_help": True,
+            },
+        },
+        "supervisor_count": 0,
+        "wrapper_count": 0,
+        "status_age_seconds": 30.0,
+        "service_stage": "replay",
+        # The volume is NOT full. That is the whole reason 91 exists apart
+        # from 90, and an alarm that says "resize" here would be wrong.
+        "disk": {"free_gb": 565.18, "total_gb": 1023.5,
+                 "used_percent": 47.0, "inodes_used_percent": 0.0,
+                 "wrapper_enospc": False},
+        "memory": {"available_gb": 10.8, "total_gb": 15.26},
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_a_refused_queue_is_not_reported_as_an_unowned_terminal_state() -> None:
+    """Without this arm the bottom branch fires: true, useless, and repeating.
+
+    "no curriculum supervisor or wrapper owns terminal state
+    no_interval_fits_disk_window" is accurate and tells an operator nothing,
+    and `cooldown_elapsed` re-triggers an unchanged fingerprint on a timer --
+    the exact shape that billed an agent wake-up every 1800 s for days.
+    """
+    decision = classify_probe(_refusal_probe(), stall_seconds=1800)
+    assert decision.kind == "awaiting_user_decision"
+    assert "2,758,116 rows" in decision.reason
+    assert "NOT full" in decision.reason
+    assert decision.fingerprint
+
+
+def test_the_refusal_is_reported_once_and_never_re_fired_on_a_timer() -> None:
+    """Nothing an agent does between polls changes a purchase decision."""
+    decision = classify_probe(_refusal_probe(), stall_seconds=1800)
+    state = {"last_invoked_fingerprint": decision.fingerprint,
+             "last_invoked_unix": 0.0}
+    # A full day later, with the same situation, it must still not re-fire.
+    assert cooldown_elapsed(state, decision, now=86_400.0,
+                            retry_cooldown=1800.0) is False
+    # A `fix_required` with the same fingerprint still re-fires -- the
+    # suppression must be narrow.
+    ordinary = Decision("fix_required", "something real",
+                        decision.fingerprint)
+    assert cooldown_elapsed(state, ordinary, now=86_400.0,
+                            retry_cooldown=1800.0) is True
+
+
+def test_a_materially_changed_situation_re_fires() -> None:
+    """A halt that is reported once must not become a halt that is silent.
+
+    If the volume grows or the burn falls, the window changes and the operator
+    needs to know the refusal no longer describes the host.
+    """
+    before = classify_probe(_refusal_probe(), stall_seconds=1800)
+    grown = _refusal_probe()
+    grown["status"]["capacity"] = dict(grown["status"]["capacity"],
+                                       hours_available=48.0)
+    after = classify_probe(grown, stall_seconds=1800)
+    assert after.fingerprint != before.fingerprint
+    state = {"last_invoked_fingerprint": before.fingerprint,
+             "last_invoked_unix": 0.0}
+    assert cooldown_elapsed(state, after, now=1.0,
+                            retry_cooldown=1800.0) is True
+
+
+def test_a_real_disk_fault_still_outranks_the_refusal_notice() -> None:
+    """The lesson this file already paid for, applied to a NEW permanent state.
+
+    A lifecycle notice ranked above the fault arms outranks all of them once
+    its state becomes permanent -- which is how a volume under its own floor,
+    99% inode exhaustion and a 400 h drought all classified `quarantine_ready`.
+    This state is permanent until a human acts, so faults are classified first.
+    """
+    starved = _refusal_probe()
+    starved["disk"] = dict(starved["disk"], free_gb=3.0, used_percent=99.9)
+    decision = classify_probe(starved, stall_seconds=1800)
+    assert decision.kind == "fix_required"
+    assert "awaiting" not in decision.kind
+
+
+def test_both_emitters_agree_that_a_refused_queue_is_not_a_fault() -> None:
+    """CHANGE BOTH. They have drifted apart twice, and cost real money twice.
+
+    `admission_watchdog.faults` and `classify_probe` are independent emitters
+    against the same host. When only one learned to see a forward block the
+    host was simultaneously healthy and faulted, billing a wake-up every
+    30 minutes for days; the same happened with `disk_low`. At exit 91 the
+    unit is `failed` with no supervisor, so `supervisor_down`, `brain_down`
+    and `no_admission` would all fire here.
+    """
+    import scripts.aws.admission_watchdog as watchdog
+    refused = {
+        "state": "no_interval_fits_disk_window",
+        "unit": "failed",
+        "brain_up": False,
+        "deferred": 22,
+        "failed_since_deploy": 0,
+        "hours_since_admission": 120.0,
+        "disk_free_gb": 565.18,
+        "min_free_disk_gb": 150.0,
+        "mem_free_gb": 10.8,
+    }
+    assert watchdog.faults(refused, baseline_deferred=22) == []
+    # The suppression must be narrow: the SAME payload in any other state is
+    # still catastrophic, or this arm would mask a genuinely dead host.
+    still_broken = dict(refused, state="deferred_replay_training")
+    assert watchdog.faults(still_broken, baseline_deferred=22)
