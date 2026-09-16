@@ -1980,7 +1980,9 @@ REPLAY_STALL_KIND = "deferred_replay_interrupted_before_gate"
 
 
 def record_replay_stall(runtime: Path, interval_id: str, phase: str,
-                        reason: str = "") -> None:
+                        reason: str = "",
+                        rows_trained: int | None = None,
+                        hours: float | None = None) -> None:
     """Remember, ACROSS RESTARTS, that this interval never reached its gate.
 
     `rejected_this_pass` already stops one interval monopolising a single
@@ -2003,14 +2005,69 @@ def record_replay_stall(runtime: Path, interval_id: str, phase: str,
     never get a turn. `go-systems:0:131072` and `go-systems:131072:262144`
     admitted 16.6 h and 13.8 h ago with 1 and 4 yields, so the queue behind it
     is healthy and converting.
+
+    `rows_trained` and `hours` make the stall a MEASUREMENT and not just a
+    tally. A generation that was given a full resource window and got X rows
+    through in Y hours has measured this interval's own end-to-end rate, on
+    this host, under this burn -- which is strictly better evidence than a rate
+    inferred from some other interval that happened to admit. Without it the
+    window census had to wait for two admissions in a phase before it could
+    refuse anything, and on the host this was built for NO pending phase has
+    two admissions: the guard would have been inert on the only queue it
+    exists to protect, which is this repository's most expensive recurring
+    mistake.
     """
-    append_health_event(runtime, {
+    observation: dict = {
         "kind": REPLAY_STALL_KIND,
         "interval_id": interval_id,
         "phase": phase,
         "reason": reason,
         "updated_unix": time.time(),
-    })
+    }
+    # Only publish a rate that was actually observed. A zero-row or zero-hour
+    # generation measured nothing, and recording it as 0 rows/h would refuse
+    # every interval in the phase forever.
+    if (isinstance(rows_trained, int) and rows_trained > 0
+            and isinstance(hours, (int, float)) and hours > 0):
+        observation["rows_trained"] = rows_trained
+        observation["hours"] = round(float(hours), 4)
+        observation["rows_per_hour"] = round(rows_trained / float(hours), 1)
+    append_health_event(runtime, observation)
+
+
+def replay_stall_observations(runtime: Path) -> dict[str, list[dict]]:
+    """Per-interval rate samples left behind by generations that never converged.
+
+    Keyed by `interval_id`, because the strongest evidence that an interval
+    does not fit the window is its OWN progress inside one. A phase-level
+    average is a second-best proxy and is treated as such by the census.
+    """
+    observations: dict[str, list[dict]] = {}
+    try:
+        with (runtime / "curriculum-health.jsonl").open(
+                encoding="utf-8") as stream:
+            for line in stream:
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if event.get("kind") != REPLAY_STALL_KIND:
+                    continue
+                rate = event.get("rows_per_hour")
+                interval_id = event.get("interval_id")
+                if not isinstance(interval_id, str) or not interval_id:
+                    continue
+                if not isinstance(rate, (int, float)) or rate <= 0:
+                    continue
+                observations.setdefault(interval_id, []).append({
+                    "rows_per_hour": float(rate),
+                    "rows_trained": event.get("rows_trained"),
+                    "hours": event.get("hours"),
+                    "phase": event.get("phase"),
+                })
+    except (FileNotFoundError, OSError):
+        return observations
+    return observations
 
 
 def replay_stall_counts(runtime: Path) -> dict[str, int]:
@@ -2072,6 +2129,370 @@ def order_replay_candidates(pending: list[dict],
         return (stalls.get(interval_id, 0), max(0, span))
 
     return sorted(pending, key=key)
+
+
+#: Health-ledger kind recording what a rollback actually returned to the
+#: volume, measured by `df` either side of it. See `rollback_reclaim_bytes`.
+ROLLBACK_RECLAIM_KIND = "deferred_replay_rollback_reclaim"
+
+#: Health-ledger kind recording that no unresolved interval can reach its gate
+#: inside the volume's own window. See `replay_window_census`.
+NO_FITTING_INTERVAL_KIND = "no_interval_fits_disk_window"
+
+#: Every unresolved interval needs more training time than the volume can pay
+#: for, so selecting any of them spends a rollback to learn nothing. Distinct
+#: from `DISK_EXHAUSTED_EXIT`, which means the volume is below its floor right
+#: now; this one means the volume is fine and the WORK UNIT does not fit.
+NO_FITTING_INTERVAL_EXIT = 91
+
+#: Ignore phase rates derived from fewer than this many admissions when
+#: deciding an interval cannot fit. One admission is an anecdote, and refusing
+#: to train on an anecdote is how a measurement becomes a self-fulfilling halt.
+MIN_RATE_SAMPLES_TO_REFUSE = 2
+
+
+def health_event_unix(event: dict) -> float | None:
+    """The timestamp a health event carries, or None if it carries none.
+
+    Deliberately not `event.get("updated_unix") or event.get("unix")`. That
+    idiom reads a falsy value as a missing one, so a timestamp of exactly 0 --
+    and, more to the point, any future field that can legitimately be zero --
+    silently drops the record from the measurement. This repo has already
+    shipped one measurement that published `row: null` because a value that
+    existed was read as absent, and the alarm that followed was worse than a
+    wrong number: both branches of the classifier fell through.
+    """
+    for key in ("updated_unix", "unix"):
+        value = event.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+    return None
+
+
+def measure_disk_burn_gb_per_hour(runtime: Path,
+                                  sample: int = 120) -> dict:
+    """GB/h the volume actually loses while a replay trains.
+
+    Measured from the yields' OWN before/after pairs and timestamps rather than
+    from one `df` window, because an instantaneous rate on this host is a duty
+    cycle: the same block read 0.355 and 7.99 rows/s four hours apart, and the
+    volume only falls while a worker runs.
+
+    Segments where free space ROSE are excluded from both numerator and
+    denominator instead of being allowed to cancel burn out of the average. A
+    rise is a rollback or a prune -- the same counter-reset trap already
+    recorded for `durable_next_row` and `accepted_episodes` -- and averaging it
+    in reports a burn lower than anything that ever happened.
+
+    FLAT segments are kept, because they are duty cycle and not absence: the
+    volume genuinely stops falling during settlement, the admission gate and the
+    continuous canary, exactly as a frozen row does. But a sample in which the
+    volume NEVER fell returns None rather than 0.0. Zero is the dangerous
+    direction here -- it divides into an infinite window, every interval then
+    "fits", and the supervisor spends a rollback on one that cannot. No evidence
+    of burn is not evidence of no burn, and this repo has already shipped a
+    vacuous zero that read as health for five weeks.
+
+    Measured 2026-09-15 across the generation that halted: 445.94 GB over
+    3.91 h of falling segments spanning 101 stamped yields, so 114.12 GB/h.
+    """
+    points: list[tuple[float, int]] = []
+    try:
+        with (runtime / "curriculum-health.jsonl").open(
+                encoding="utf-8") as stream:
+            for line in stream:
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if event.get("kind") != "deferred_replay_resource_yield":
+                    continue
+                when = health_event_unix(event)
+                free = event.get("disk_free_bytes_after")
+                if when is not None and isinstance(free, (int, float)):
+                    points.append((when, int(free)))
+    except (FileNotFoundError, OSError):
+        return {"gb_per_hour": None, "samples": 0, "reason": "no ledger"}
+    points.sort()
+    points = points[-sample:]
+    fell_bytes = 0.0
+    fell_seconds = 0.0
+    for (t0, f0), (t1, f1) in zip(points, points[1:]):
+        if t1 <= t0 or f1 > f0:
+            continue
+        fell_bytes += f0 - f1
+        fell_seconds += t1 - t0
+    if fell_seconds <= 0 or fell_bytes <= 0:
+        return {"gb_per_hour": None, "samples": len(points),
+                "reason": "no falling segment"}
+    return {
+        "gb_per_hour": round(
+            (fell_bytes / (1024 ** 3)) / (fell_seconds / 3600.0), 2
+        ),
+        "samples": len(points),
+        "hours_measured": round(fell_seconds / 3600.0, 2),
+        "gb_burned": round(fell_bytes / (1024 ** 3), 2),
+    }
+
+
+def rollback_reclaim_bytes(runtime: Path) -> int | None:
+    """What a rollback last returned, by `df` -- never by summing file sizes.
+
+    `prune_resolved_deferred_bases` is the reclaim the disk guard calls, and on
+    this volume it is exhausted: three attempts returned 0.00 GB each before
+    the 2026-09-11 halt. The reclaim that DOES return bytes here is the
+    rollback, because `brain.wbrain` is a reflink clone of the guard plus
+    appends, so replacing it unlinks everything it does not share. Measured
+    2026-09-15 by extent subtraction: 854.02 GB allocated, 440.00 GB shared
+    with `brain.last-good.wbrain`, **414.02 GB unique**. The guard's own unique
+    blocks are 0.00 GB, which is why deleting IT reclaims nothing.
+
+    Returns None when no rollback has been measured yet. Callers must treat
+    that as "unknown", not as zero: a reclaim of zero and a reclaim never
+    attempted look identical in a count, and reading the second as the first is
+    what turns a working reclaim into a permanent halt.
+    """
+    reclaimed: int | None = None
+    try:
+        with (runtime / "curriculum-health.jsonl").open(
+                encoding="utf-8") as stream:
+            for line in stream:
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if event.get("kind") != ROLLBACK_RECLAIM_KIND:
+                    continue
+                value = event.get("reclaimed_bytes")
+                if isinstance(value, (int, float)) and value > 0:
+                    reclaimed = int(value)
+    except (FileNotFoundError, OSError):
+        return None
+    return reclaimed
+
+
+def measure_phase_rows_per_hour(runtime: Path) -> dict[str, dict]:
+    """End-to-end wall-clock rows/hour per phase, from intervals that ADMITTED.
+
+    Wall clock including every yield, settlement, recycle and gate -- because
+    that is the unit a wall-clock disk window is spent in. An instantaneous
+    training rate would flatter every phase by its duty cycle.
+
+    The spread across phases is the whole point, and it is enormous. Measured
+    2026-09-15: go-systems 59,778 rows/h (n=2), csn-python-para5 4,998 (n=1),
+    csn-python-full 330 (n=12), jupyter-scientific-para4 230 (n=1). So the
+    `span` key in `order_replay_candidates` -- a row count -- is a proxy for
+    cost that is wrong by a factor of 260 between the phases actually queued.
+    18,432 go rows are 0.3 h and 18,432 para4 rows are 80 h.
+    """
+    first_seen: dict[str, float] = {}
+    samples: dict[str, list[tuple[int, float]]] = {}
+    try:
+        with (runtime / "curriculum-health.jsonl").open(
+                encoding="utf-8") as stream:
+            for line in stream:
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                kind = event.get("kind")
+                if not str(kind or "").startswith("deferred_replay_"):
+                    continue
+                interval_id = event.get("interval_id")
+                when = health_event_unix(event)
+                if not isinstance(interval_id, str) or not interval_id:
+                    continue
+                if when is None:
+                    continue
+                first_seen.setdefault(interval_id, when)
+                if kind != "deferred_replay_admitted":
+                    continue
+                parts = interval_id.split(":")
+                if len(parts) != 3 or not parts[1].isdigit():
+                    continue
+                if not parts[2].isdigit():
+                    continue
+                span = int(parts[2]) - int(parts[1])
+                hours = (when - first_seen[interval_id]) / 3600.0
+                if span > 0 and hours > 0.05:
+                    samples.setdefault(
+                        str(event.get("phase") or ""), []
+                    ).append((span, hours))
+    except (FileNotFoundError, OSError):
+        return {}
+    # A STALL MEASURES A PHASE JUST AS AN ADMISSION DOES.
+    #
+    # Intervals within a phase share a corpus and therefore a cost per row --
+    # the 260x spread is BETWEEN phases, not inside one -- so a generation that
+    # spent a full window on one interval has measured the phase. Without this,
+    # only the stalled interval itself could ever be refused, and the queue
+    # would need one full window per interval to discover what it already knew:
+    # 22 intervals x ~3.9 h is ~86 h of billed compute to learn the same fact
+    # four measurements can establish.
+    for interval_id, observed in replay_stall_observations(runtime).items():
+        for row in observed:
+            phase = str(row.get("phase") or "")
+            hours = row.get("hours")
+            rows = row.get("rows_trained")
+            if phase and isinstance(hours, (int, float)) and hours > 0 \
+                    and isinstance(rows, int) and rows > 0:
+                samples.setdefault(phase, []).append((rows, float(hours)))
+    rates: dict[str, dict] = {}
+    for phase, observed in samples.items():
+        rows = sum(span for span, _ in observed)
+        hours = sum(hour for _, hour in observed)
+        if hours <= 0:
+            continue
+        rates[phase] = {
+            "rows_per_hour": round(rows / hours, 1),
+            "samples": len(observed),
+            "rows": rows,
+            "hours": round(hours, 2),
+        }
+    return rates
+
+
+def replay_window_census(runtime: Path, pending: list[dict],
+                         min_free_disk_gb: float,
+                         phase_rows_per_hour: dict[str, dict] | None = None,
+                         ) -> dict:
+    """Which unresolved intervals can reach a gate inside one disk window.
+
+    The window is what a rollback returns, above the floor, divided by the
+    burn -- all three measured on this host, none of them assumed. Measured
+    2026-09-15: a rollback returns 414.02 GB onto 151.16 GB free, so 565.18 GB
+    against a 150 GB floor is a 415.18 GB window, and at 114.12 GB/h that is
+    **3.64 h** of training per rollback.
+
+    Why this exists. `order_replay_candidates` reorders by `(stalls, span)` so
+    the queue drains what fits first, and that is correct -- but ordering is
+    inert when NOTHING fits, and it then costs one rollback per interval to
+    discover that. Measured against the live queue the same day: 0 of 22
+    unresolved intervals fit, missing by 8x (jupyter-scientific-partial, 75,876
+    rows needing 29.34 h) to 156x (jupyter-scientific-para4, 131,072 rows
+    needing 568.64 h). Cycling all 22 would have spent ~88 h of billed compute
+    and admitted nothing.
+
+    An interval is refused ONLY on evidence, and there are two grades of it.
+
+    The strong grade is the interval's OWN stall: a generation gave it a full
+    resource window and measured how far it got. That is not an estimate about
+    this interval, it is an observation of it, so one is enough. The weak grade
+    is the phase average from other intervals that admitted, which needs
+    `MIN_RATE_SAMPLES_TO_REFUSE` samples -- refusing on someone else's anecdote
+    would make the measurement a self-fulfilling halt.
+
+    Everything else is `unknown` and stays eligible, because a count of zero
+    from a path that has had no opportunity to run is not a refutation. This is
+    a REFUSAL TO SPEND, not a retirement -- every obligation stays in the
+    ledger, and the same census passes the moment the burn drops or the volume
+    grows.
+    """
+    burn = measure_disk_burn_gb_per_hour(runtime)
+    rates = (phase_rows_per_hour if phase_rows_per_hour is not None
+             else measure_phase_rows_per_hour(runtime))
+    stalled = replay_stall_observations(runtime)
+    free_now = int(shutil.disk_usage(runtime).free)
+    reclaim = rollback_reclaim_bytes(runtime)
+    floor_bytes = int(min_free_disk_gb * 1024 ** 3)
+    # A ROLLBACK DOES NOT EXTEND AN INTERVAL'S RUNWAY -- IT DISCARDS THE
+    # INTERVAL. An earlier draft of this added the measured reclaim to the
+    # window, reasoning that the bytes were available. They are, but not to
+    # this interval: reaching the floor and rolling back throws away every row
+    # the interval trained and starts the next one from its first row. So the
+    # runway is exactly what is above the floor at the moment the interval
+    # starts, and the census runs immediately before selection precisely so
+    # that `free_now` is that moment. The dry run against the live host caught
+    # this: it reported a 1.16 GB window because no rollback had been measured
+    # yet, and would have reported an 829 GB one straight after a rollback --
+    # both wrong, in opposite directions, for the same reason.
+    window_bytes = free_now - floor_bytes
+    burn_gb_per_hour = burn.get("gb_per_hour")
+    if window_bytes <= 0:
+        # At or below the floor, the disk guard is the authoritative owner and
+        # this is a `disk_exhausted_unrecoverable` question, not a work-unit
+        # one. Abstain rather than refuse every interval with the wrong name.
+        window_hours = None
+    else:
+        window_hours = (
+            round((window_bytes / (1024 ** 3)) / burn_gb_per_hour, 2)
+            if burn_gb_per_hour else None
+        )
+    intervals = []
+    for event in pending:
+        interval_id = str(event.get("interval_id") or "")
+        phase = str(event.get("phase") or "")
+        try:
+            span = int(event["end_row"]) - int(event["start_row"])
+        except (KeyError, TypeError, ValueError):
+            span = 0
+        own = stalled.get(interval_id) or []
+        phase_rate = rates.get(phase) or {}
+        if own:
+            # Slowest observation of this very interval. Slowest, not mean,
+            # because the question is whether it can finish inside a window and
+            # the generation that did least is the one that describes the risk.
+            rows_per_hour = min(row["rows_per_hour"] for row in own)
+            source = "own_stall"
+            samples = len(own)
+            enough = True
+        else:
+            rows_per_hour = phase_rate.get("rows_per_hour")
+            source = "phase_admissions"
+            samples = int(phase_rate.get("samples") or 0)
+            enough = samples >= MIN_RATE_SAMPLES_TO_REFUSE
+        eta = (round(span / rows_per_hour, 2)
+               if rows_per_hour else None)
+        if window_hours is None or eta is None or not enough:
+            verdict = "unknown"
+        elif eta <= window_hours:
+            verdict = "fits"
+        else:
+            verdict = "exceeds"
+        intervals.append({
+            "interval_id": interval_id,
+            "phase": phase,
+            "span": span,
+            "rows_per_hour": rows_per_hour,
+            "rate_source": source,
+            "rate_samples": samples,
+            "eta_hours": eta,
+            "verdict": verdict,
+        })
+    return {
+        "burn": burn,
+        "free_bytes": free_now,
+        # Diagnostics only -- deliberately NOT part of the window, see above.
+        # Published so an operator reading a refusal can tell a volume that is
+        # merely full from a work unit that is too large, which are the two
+        # different faults behind exits 90 and 91.
+        "rollback_reclaim_bytes": reclaim,
+        "expected_free_after_rollback_bytes": (
+            free_now + reclaim if reclaim else None
+        ),
+        "floor_bytes": floor_bytes,
+        "window_bytes": window_bytes,
+        "window_hours": window_hours,
+        "intervals": intervals,
+        "fits": [row["interval_id"] for row in intervals
+                 if row["verdict"] == "fits"],
+        "unknown": [row["interval_id"] for row in intervals
+                    if row["verdict"] == "unknown"],
+        "exceeds": [row["interval_id"] for row in intervals
+                    if row["verdict"] == "exceeds"],
+    }
+
+
+def replay_queue_is_hopeless(census: dict) -> bool:
+    """True only when EVERY interval is measured to exceed the window.
+
+    `unknown` counts as eligible, so a host that has never admitted anything --
+    and therefore has no rates at all -- always trains rather than halting on
+    an absence of evidence.
+    """
+    return bool(census.get("intervals")) and not (
+        census.get("fits") or census.get("unknown")
+    )
 
 
 def next_suspect_start(runtime: Path, phase: str, candidate_row: int,
@@ -3852,6 +4273,12 @@ def restore_rejected_deferred_replay(args: argparse.Namespace, runtime: Path,
     digest = hashlib.sha256(
         str(event["interval_id"]).encode("utf-8")
     ).hexdigest()[:16]
+    # Measure what this rollback returns to the volume. It is the only reclaim
+    # that works here -- `prune_resolved_deferred_bases` returned 0.00 GB on
+    # three consecutive attempts before the 2026-09-11 halt -- and until it was
+    # measured the disk guard had no way to know that, so it declared the floor
+    # unrecoverable while holding 414 GB it could have freed.
+    free_before_rollback = int(shutil.disk_usage(runtime).free)
     deferred_replay_resume_path(runtime, digest).unlink(missing_ok=True)
     (runtime / f"deferred-replay-{digest}.progress.json").unlink(
         missing_ok=True
@@ -3879,6 +4306,16 @@ def restore_rejected_deferred_replay(args: argparse.Namespace, runtime: Path,
     # creates an unrecoverable crash window between these two durable commits.
     finalize_canary_restore(runtime, restored, retain_guard=True)
     deferred_replay_marker_path(runtime).unlink(missing_ok=True)
+    free_after_rollback = int(shutil.disk_usage(runtime).free)
+    append_health_event(runtime, {
+        "kind": ROLLBACK_RECLAIM_KIND,
+        "passed": True,
+        "phase": phase.name,
+        "interval_id": str(event["interval_id"]),
+        "free_bytes_before": free_before_rollback,
+        "free_bytes_after": free_after_rollback,
+        "reclaimed_bytes": free_after_rollback - free_before_rollback,
+    })
 
 
 def recover_interrupted_deferred_replay(
@@ -3942,9 +4379,46 @@ def recover_interrupted_deferred_replay(
     # "consumed a generation without reaching a verdict" fact that
     # `rejected_this_pass` cannot carry, because that set died with the
     # process. Record it before the rollback so the next selection can see it.
+    # Measure what that dead generation achieved BEFORE the rollback deletes
+    # the evidence. `restore_rejected_deferred_replay` unlinks the progress
+    # file on its way through, so this is the only moment the rate is readable,
+    # and it is the strongest rate this host can produce: a full resource
+    # window spent on this exact interval. Reading it here is what lets the
+    # window census refuse an interval that has already proved it cannot fit,
+    # instead of waiting for two admissions in a phase that has none.
+    digest = hashlib.sha256(
+        interval_id.encode("utf-8")
+    ).hexdigest()[:16]
+    start_row = int(event["start_row"])
+    durable_row = replay_pass_durable_row(
+        runtime / f"deferred-replay-{digest}.progress.json",
+        start_row, int(event["end_row"]),
+    )
+
+    # END THE CLOCK WHERE TRAINING ENDED, NOT WHERE THIS PROCESS STARTED.
+    #
+    # `time.time() - created_unix` measures the outage, not the work. The
+    # 2026-09-11 halt sat `failed` for 107.7 h, so that subtraction would have
+    # scored 11,584 rows over 107.7 h -- 107.6 rows/h against a true 4,455 --
+    # and published an ETA 40x too long. The progress file's last write is when
+    # the row last advanced, so it is the honest end of the training window.
+    progress_path = runtime / f"deferred-replay-{digest}.progress.json"
+    try:
+        ended = progress_path.stat().st_mtime
+    except OSError:
+        ended = time.time()
+    created = marker.get("created_unix")
+    stall_hours = (
+        (ended - float(created)) / 3600.0
+        if isinstance(created, (int, float)) and created > 0 else None
+    )
+    if stall_hours is not None and stall_hours <= 0:
+        stall_hours = None
     record_replay_stall(
         runtime, interval_id, phase.name,
         f"generation ended in state {marker.get('state')!r} before a verdict",
+        rows_trained=max(0, durable_row - start_row),
+        hours=stall_hours,
     )
     restore_rejected_deferred_replay(
         args, runtime, phase, event,
@@ -4008,6 +4482,52 @@ def run_deferred_replays(args: argparse.Namespace, runtime: Path,
             pending = order_replay_candidates(
                 pending, replay_stall_counts(runtime)
             )
+            # ORDERING IS INERT WHEN NOTHING FITS.
+            #
+            # `order_replay_candidates` drains what fits first, which is right,
+            # but it discovers "too large" one rollback at a time. Measured
+            # 2026-09-15 against the live queue: 0 of 22 unresolved intervals
+            # could reach a gate inside the 3.64 h window a rollback buys,
+            # missing by 8x to 156x. Cycling them would have spent ~88 h of
+            # billed compute, one rollback and regrow per interval, and
+            # admitted nothing -- with every liveness signal healthy the whole
+            # time, which is the exact shape of failure this curriculum has
+            # already paid for twice.
+            #
+            # A refusal to spend, not a retirement: every obligation stays
+            # `deferred` and eligible, and the same census passes the moment
+            # the burn falls or the volume grows. `unknown` counts as eligible,
+            # so a phase that has never admitted is always attempted rather
+            # than refused on an absence of evidence.
+            census = replay_window_census(
+                runtime, pending, args.min_free_disk_gb
+            )
+            if replay_queue_is_hopeless(census):
+                append_health_event(runtime, {
+                    "kind": NO_FITTING_INTERVAL_KIND,
+                    "passed": False,
+                    "pending": len(pending),
+                    **census,
+                })
+                publish(status_path, {
+                    "state": NO_FITTING_INTERVAL_KIND,
+                    "pending": len(pending),
+                    "window_hours": census.get("window_hours"),
+                    "burn_gb_per_hour": (
+                        census.get("burn") or {}
+                    ).get("gb_per_hour"),
+                    "rollback_reclaim_bytes": census.get(
+                        "rollback_reclaim_bytes"
+                    ),
+                    "minimum_free_disk_gb": args.min_free_disk_gb,
+                    "shortest_eta_hours": min(
+                        (row["eta_hours"] for row in census["intervals"]
+                         if row.get("eta_hours") is not None),
+                        default=None,
+                    ),
+                    "updated_unix": time.time(),
+                })
+                return NO_FITTING_INTERVAL_EXIT
         if not pending:
             publish(status_path, {
                 "state": "deferred_replay_complete",
@@ -4044,12 +4564,16 @@ def run_deferred_replays(args: argparse.Namespace, runtime: Path,
             # it; never reuse the guard that protected the maintenance pass.
             settle_brain_for_admission(args, phase, runtime, phase.rows)
             ensure_live_last_good_guard(args, runtime, phase, phase.rows)
+        # The clock the interval's own rate is measured against. Same instant
+        # the transaction marker records, so a stall recorded here and a stall
+        # recorded by the next startup's recovery describe the same window.
+        replay_started = time.time()
         publish(deferred_replay_marker_path(runtime), {
             "state": "training",
             "phase": phase.name,
             "interval_id": interval_id,
             "interval": event,
-            "created_unix": time.time(),
+            "created_unix": replay_started,
         })
         digest = hashlib.sha256(
             interval_id.encode("utf-8")
@@ -4077,6 +4601,7 @@ def run_deferred_replays(args: argparse.Namespace, runtime: Path,
         stderr_path = runtime / f"deferred-replay-{digest}.stderr.log"
         error = ""
         infrastructure_error = False
+        disk_rolled_back = False
         report: dict = {}
         try:
             with stdout_path.open("a", encoding="utf-8") as stdout, \
@@ -4102,34 +4627,110 @@ def run_deferred_replays(args: argparse.Namespace, runtime: Path,
                     )
                     yielded = bool(getattr(worker, "resource_yield", False))
                     if getattr(worker, "disk_exhausted", False):
-                        # Bank whatever this pass made durable, then stop. The
-                        # interval stays unmarked -- neither admitted nor
-                        # failed -- so a supervisor started after the volume
-                        # grows resumes it from this row rather than replaying
-                        # the span from its start.
+                        # THE RECLAIM THAT WORKS IS NOT THE ONE THE GUARD TRIED.
+                        #
+                        # `reclaim_disk_for_floor` calls
+                        # `prune_resolved_deferred_bases` and nothing else, and
+                        # on this volume that is exhausted -- three attempts
+                        # returned 0.00 GB each on 2026-09-11, the supervisor
+                        # exited 90, `RestartPreventExitStatus=42 90` made it
+                        # terminal, and the host sat `failed` for 107.7 h.
+                        #
+                        # Meanwhile the rollback this interrupted interval
+                        # already owes returns 414.02 GB, because `brain.wbrain`
+                        # is a reflink clone of the guard plus appends and
+                        # replacing it unlinks every block it does not share.
+                        # That reclaim was only ever reachable from
+                        # `recover_interrupted_deferred_replay` on the STARTUP
+                        # path -- which an exit that forbids restart can never
+                        # reach. So the halt was terminal by construction while
+                        # holding the bytes that would have cleared its own
+                        # floor, and an operator restarting by hand was the
+                        # whole recovery mechanism.
+                        #
+                        # Banking the durable row here was inert and the comment
+                        # that justified it was wrong: any supervisor that
+                        # starts next reads this marker in state `training` and
+                        # rolls back, and `restore_rejected_deferred_replay`
+                        # unlinks the resume record on its way through. The
+                        # prefix cannot be kept AND the disk freed -- the prefix
+                        # is the disk growth.
                         banked = replay_pass_durable_row(
                             replay_progress, resume_row, interval_end
                         )
-                        if banked > resume_row:
-                            resume_row = banked
-                            record_deferred_replay_resume(
-                                runtime, digest, event, guard_identity,
-                                resume_row,
-                            )
+                        record_replay_stall(
+                            runtime, interval_id, phase.name,
+                            "disk floor reached before a verdict; rolled back "
+                            "to reclaim the volume",
+                            rows_trained=max(
+                                0, banked - int(event["start_row"])
+                            ),
+                            hours=(time.time() - replay_started) / 3600.0,
+                        )
+                        free_before = int(shutil.disk_usage(runtime).free)
+                        restore_rejected_deferred_replay(
+                            args, runtime, phase, event,
+                            "deferred replay rolled back to reclaim the "
+                            "volume at its disk floor",
+                        )
+                        replay_progress.unlink(missing_ok=True)
+                        deferred_replay_resume_path(
+                            runtime, digest
+                        ).unlink(missing_ok=True)
+                        free_after = int(shutil.disk_usage(runtime).free)
+                        floor_bytes = int(
+                            args.min_free_disk_gb * 1024 ** 3
+                        )
+                        cleared = free_after >= floor_bytes
+                        append_health_event(runtime, {
+                            "kind": "disk_floor_rollback_reclaim",
+                            "passed": cleared,
+                            "phase": phase.name,
+                            "interval_id": interval_id,
+                            "free_bytes_before": free_before,
+                            "free_bytes_after": free_after,
+                            "reclaimed_bytes": free_after - free_before,
+                            "minimum_free_disk_gb": args.min_free_disk_gb,
+                            "cleared_floor": cleared,
+                        })
+                        if not cleared:
+                            # The rollback returned nothing either. NOW the
+                            # volume is genuinely unrecoverable from inside
+                            # this process, and the terminal exit is correct.
+                            publish(status_path, {
+                                "state": "disk_exhausted_unrecoverable",
+                                "phase": phase.name,
+                                "interval_id": interval_id,
+                                "start_row": int(event["start_row"]),
+                                "resume_row": resume_row,
+                                "end_row": interval_end,
+                                "minimum_free_disk_gb": args.min_free_disk_gb,
+                                "disk_free_bytes": free_after,
+                                "rollback_reclaimed_bytes": (
+                                    free_after - free_before
+                                ),
+                                "updated_unix": time.time(),
+                            })
+                            return DISK_EXHAUSTED_EXIT
                         publish(status_path, {
-                            "state": "disk_exhausted_unrecoverable",
+                            "state": "deferred_replay_disk_rollback",
                             "phase": phase.name,
                             "interval_id": interval_id,
                             "start_row": int(event["start_row"]),
-                            "resume_row": resume_row,
                             "end_row": interval_end,
                             "minimum_free_disk_gb": args.min_free_disk_gb,
-                            "disk_free_bytes": int(
-                                shutil.disk_usage(runtime).free
-                            ),
+                            "disk_free_bytes": free_after,
+                            "reclaimed_bytes": free_after - free_before,
                             "updated_unix": time.time(),
                         })
-                        return DISK_EXHAUSTED_EXIT
+                        # No verdict was reached, so nothing is admitted and
+                        # nothing is failed: the interval stays `deferred` in
+                        # the ledger and stays eligible. The stall recorded
+                        # above is what stops it being re-selected immediately
+                        # by an order that is identical on every pass.
+                        rejected_this_pass.add(interval_id)
+                        disk_rolled_back = True
+                        break
                     if worker.returncode != 0 and not yielded:
                         raise replay_worker_failure(
                             worker.returncode,
@@ -4200,6 +4801,16 @@ def run_deferred_replays(args: argparse.Namespace, runtime: Path,
                         recycle_settled_runtime_node(
                             args, runtime, phase, interval_end, status_path
                         )
+            if disk_rolled_back:
+                # The rollback discarded every row this interval trained, so
+                # there is nothing for the gate to judge. Falling through would
+                # run the interval-recall check against a brain that no longer
+                # holds those rows and score the miss as a SEMANTIC failure --
+                # the same "never convert host pressure into a verdict" error
+                # that produced 288 `deferred_replay_failed` events against 19
+                # yields. The interval keeps its `deferred` obligation and the
+                # next candidate gets the window this one could not use.
+                continue
             interval_recall = run_admission_json_command(
                 runtime, phase, int(event["end_row"]),
                 "deferred_replay", "interval_recall",

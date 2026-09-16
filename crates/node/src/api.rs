@@ -735,6 +735,50 @@ impl ApiMetrics {
     }
 }
 
+/// Where one auto-checkpoint attempt has to write, given the storage backend.
+///
+/// This lives outside the checkpoint thread so a test can hold the branch in
+/// place.  The thread used to call `checkpoint(brain.bin)` unconditionally,
+/// which serialises a *borrowed view* of the in-RAM fabric; when the neurons
+/// live in the wbrain store that view cannot be written, and on production
+/// (:8090, PID 16108) every attempt died 179 bytes in — for 25 hours, on
+/// cadence, with nothing in the log.  A regression here is invisible from the
+/// outside, so it is pinned by a test rather than by a reader.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CheckpointRoute {
+    /// Neurons live in the wbrain store: flush them, never serialise the view.
+    Wbrain,
+    /// Whole-fabric bincode snapshot to brain.bin.
+    Bin,
+}
+
+impl CheckpointRoute {
+    /// The artifact whose mtime moves when this route succeeds.
+    pub(crate) fn artifact(self, brain_data_dir: &std::path::Path) -> PathBuf {
+        match self {
+            CheckpointRoute::Wbrain => brain_data_dir.join("brain.wbrain"),
+            CheckpointRoute::Bin => brain_data_dir.join("brain.bin"),
+        }
+    }
+
+    /// Name used in the log line, so an operator can tell the two apart.
+    pub(crate) fn storage_name(self) -> &'static str {
+        match self {
+            CheckpointRoute::Wbrain => "wbrain",
+            CheckpointRoute::Bin => "bin",
+        }
+    }
+}
+
+/// Pick the route the manual `/brain/checkpoint` handler already picks.
+pub(crate) fn checkpoint_route(uses_wbrain_storage: bool) -> CheckpointRoute {
+    if uses_wbrain_storage {
+        CheckpointRoute::Wbrain
+    } else {
+        CheckpointRoute::Bin
+    }
+}
+
 pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
     let ledger = build_ledger(&config)?;
     let mut data_mesh = None;
@@ -913,27 +957,24 @@ pub fn run_api(mut config: NodeConfig, addr: SocketAddr) -> Result<()> {
                         // moved 01:45:16 -> 01:55:28, the configured 600 s) and
                         // every single attempt died 179 bytes in, leaving a
                         // torn temp file and no checkpoint since 2026-08-19.
-                        let uses_wbrain = brain.uses_wbrain_storage();
-                        let result = if uses_wbrain {
-                            brain.serialize_all_neurons_for_idle().map(|_| ())
-                        } else {
-                            brain.checkpoint(&path)
+                        let route = checkpoint_route(brain.uses_wbrain_storage());
+                        let result = match route {
+                            CheckpointRoute::Wbrain => {
+                                brain.serialize_all_neurons_for_idle().map(|_| ())
+                            }
+                            CheckpointRoute::Bin => brain.checkpoint(&path),
                         };
-                        let written = if uses_wbrain {
-                            ckpt_dir.join("brain.wbrain")
-                        } else {
-                            path.clone()
-                        };
+                        let written = route.artifact(&ckpt_dir);
                         match result {
                             Ok(()) => tracing::info!(
                                 "brain auto-checkpoint saved to {} (storage {}, tick {}, lock-wait {:.1}s, save {:.1}s)",
                                 written.display(),
-                                if uses_wbrain { "wbrain" } else { "bin" },
+                                route.storage_name(),
                                 brain.fabric().current_tick(),
                                 lock_wait.as_secs_f32(), t1.elapsed().as_secs_f32()),
                             Err(e) => tracing::warn!(
                                 "brain auto-checkpoint failed ({} storage, {}): {}",
-                                if uses_wbrain { "wbrain" } else { "bin" },
+                                route.storage_name(),
                                 written.display(), e),
                         }
                     }
@@ -9674,6 +9715,35 @@ mod tests {
     use tempfile::tempdir;
     use w1z4rdv1510n::network::compute_payload_hash;
     use w1z4rdv1510n::streaming::{FigureAsset, KnowledgeDocument, TextBlock};
+
+    /// Production :8090 ran for 25 hours writing nothing, because the
+    /// auto-checkpoint thread routed a wbrain-backed brain through
+    /// `checkpoint(brain.bin)` — which serialises a borrowed view of the
+    /// in-RAM fabric and dies 179 bytes in.  The old behaviour is exactly
+    /// "always Bin", so this test fails against it on the first assertion.
+    #[test]
+    fn a_wbrain_backed_brain_is_not_auto_checkpointed_down_the_bin_path() {
+        let dir = tempdir().expect("tempdir");
+
+        let wbrain = checkpoint_route(true);
+        assert_eq!(
+            wbrain,
+            CheckpointRoute::Wbrain,
+            "a brain whose neurons live in the wbrain store must flush them, \
+             not serialise the in-RAM view to brain.bin"
+        );
+        assert_eq!(wbrain.artifact(dir.path()), dir.path().join("brain.wbrain"));
+        assert_eq!(wbrain.storage_name(), "wbrain");
+
+        let bin = checkpoint_route(false);
+        assert_eq!(
+            bin,
+            CheckpointRoute::Bin,
+            "a brain with no wbrain store still takes the whole-fabric snapshot"
+        );
+        assert_eq!(bin.artifact(dir.path()), dir.path().join("brain.bin"));
+        assert_eq!(bin.storage_name(), "bin");
+    }
 
     #[test]
     fn knowledge_persistence_roundtrip() {

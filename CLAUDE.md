@@ -635,6 +635,105 @@ Verify, do not assume:
   phase's measured rate against the disk window**; resizing on row count alone
   would have been another inert fix.
 
+- **A halt that forbids restart cannot reach a reclaim that only runs at
+  startup.** The disk guard calls `reclaim_disk_for_floor`, which calls
+  `prune_resolved_deferred_bases` and nothing else — and that reclaim is
+  exhausted here, returning 0.00 GB on three consecutive attempts. The
+  supervisor then exits 90, and `RestartPreventExitStatus=42 90` makes 90
+  terminal. But the reclaim that DOES return bytes on this volume is the
+  rollback any interrupted interval already owes, and it lived only in
+  `recover_interrupted_deferred_replay` on the STARTUP path — which an exit
+  that forbids restart can never reach. So the halt was terminal by
+  construction while holding the bytes that would have cleared its own floor,
+  and an operator restarting by hand was the entire recovery mechanism.
+  Measured 2026-09-15: the unit sat `failed` at `ExecMainStatus=90` for
+  **107.7 h** with 151.16 GB free, and one `systemctl start` returned
+  **444,551,897,088 bytes (414.02 GiB)**, taking it to 557.63 GB. Every
+  liveness rule in this file was satisfied throughout: the volume was not full,
+  no process was crash-looping, and the row was parked on a durable boundary.
+  Fixed: the halt rolls back FIRST and only exits 90 if the volume is still
+  below its floor afterwards. **When an exit code forbids restart, check what
+  runs only at startup** — that is the set of repairs the exit just deleted.
+
+- **Predict a rollback from extent subtraction, and the prediction is exact.**
+  `brain.wbrain` held 854.02 GB allocated, **440.00 GB shared** with
+  `brain.last-good.wbrain` and **414.02 GB unique**; the guard's own unique
+  blocks are **0.00 GB**, so deleting the guard returns nothing. The live `df`
+  delta after the rollback was 414.02 GiB — right to the second decimal. Parse
+  `filefrag -v` by its documented columns (`ext: logical..logical:
+  physical..physical: length: flags`) and subtract sorted INTERVALS: one probe
+  summed the wrong column and printed `wbrain_total_gb 5799882.57` for an
+  854 GB file, and another tried to build a per-block set of 223M blocks.
+
+- **A rollback does not extend an interval's runway — it DISCARDS the
+  interval.** The first version of the window census added the measured
+  reclaim to the headroom, reasoning the bytes were available. They are, but
+  not to the interval that is running: reaching the floor rolls back and starts
+  the next interval from its first row. The dry run against live state caught
+  it reporting a 1.16 GB window before any rollback had been measured, and it
+  would have reported 829 GB straight after one — both wrong, in opposite
+  directions, from the same error. **The runway is what sits above the floor at
+  the moment the interval starts, full stop.**
+
+- **Measuring a dead generation's rate to `now` measures the OUTAGE.** The
+  halted interval trained 11,584 rows in 2.59 h and then sat on a dead host for
+  107.7 h. `time.time() - created_unix` scores that as **103.6 rows/h against a
+  true 4,475** — a 43x understatement that would have refused intervals which
+  fit. End the clock at the progress file's mtime, which is when the row last
+  advanced. Verified against live state before deploying, then confirmed in the
+  event the recovery actually wrote: `rows_per_hour: 4475.0`.
+
+- **Ordering by span is inert when nothing fits, and a span is the wrong unit
+  anyway.** `order_replay_candidates` sorts by `(stalls, span)` so the queue
+  drains what fits first — correct, and useless when the answer is "nothing".
+  Measured 2026-09-15 against the live queue: **0 of 22** unresolved intervals
+  could reach a gate inside the 3.64 h window, missing by 8x
+  (jupyter-scientific-partial, 75,876 rows at 2,585.7 rows/h) to **156x**
+  (jupyter-scientific-para4, 131,072 rows at 230.5 rows/h). Cycling all 22
+  would have spent ~88 h of billed compute, one rollback and regrow each, and
+  admitted nothing — with the unit `active` and the row advancing throughout.
+  Row count is a proxy for cost that is wrong by **260x** between the phases
+  actually queued (go-systems 59,778 rows/h against para4 230 rows/h).
+  `replay_window_census` measures burn, runway and per-phase rate and refuses
+  to spend when nothing fits, exiting 91 — deliberately distinct from 90,
+  because 90 says resize or compact and 91 says split the work unit or cut the
+  burn. It is a REFUSAL TO SPEND, not a retirement: every obligation stays
+  `deferred` and eligible, and the census passes again the moment the burn
+  falls or the volume grows.
+
+- **A guard keyed on evidence the host cannot produce is inert, and that is
+  this repository's most expensive recurring mistake.** The census first
+  refused only on a phase rate with two or more admissions — and on the host it
+  was built for, NO pending phase has two: `jupyter-scientific-partial` and
+  `-full` have none at all and `para4` has one. The guard would have passed all
+  22 doomed intervals through. It now measures rates from the STALLS it
+  already records (`rows_trained`/`hours` per generation), treats an interval's
+  own stall as sufficient evidence about itself, and folds stalls into the
+  phase rate — so the queue converges in ~4 measured windows instead of 22.
+  **Before shipping a threshold, check the host can actually reach it.**
+
+- **The obstacle course's verdict is not reproducible: it fails on LOAD.**
+  Measured 2026-09-15 on the same tree, minutes apart: the full `tests/` run
+  (1,437 tests, 62 min) ended 12 failed / 1,425 passed with 10 of those in
+  `test_programming_obstacle_course.py`; re-running only the obstacle course
+  and its neighbours gave **2 failed / 518 passed** — and the two were
+  DIFFERENT tasks (`concurrency_async_distributed-0013`,
+  `architecture_multifile_integration-0006`) from the ten. Every failure
+  asserts `- passed / + timeout` or `- failed / + timeout`, so the harness is
+  timing out its subprocesses under concurrent load rather than judging them.
+  One task (`algorithms_data_structures-0009`) fails identically at HEAD, so
+  that one is real and pre-existing. **A flaky timeout cannot produce the clean
+  1,000/1,000 the acceptance contract requires**, and it fails in whichever
+  direction the machine happens to be busy — including scoring a broken
+  solution as passing. Size the per-task timeout against a loaded host, or
+  serialise the course, before reading any obstacle-course total as a result.
+
+- **`event.get("a") or event.get("b")` deletes a legitimate zero.** A
+  timestamp, row or count of 0 is falsy, so that idiom silently drops the
+  record from the measurement. Caught by a test here, and it is the same class
+  as the `row is not None` gate that published a bare drought alarm against a
+  converging replay. Use an explicit `isinstance` check (`health_event_unix`).
+
 ## Important Notes
 - Always commit and push after any code changes
 - Kill old processes before deploying new binary (port conflicts cause silent API thread death)

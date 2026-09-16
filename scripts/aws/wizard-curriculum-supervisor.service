@@ -18,12 +18,24 @@ RestartSec=10
 # instead of retraining and rejecting the same interval in a restart loop.
 #
 # Exit 90 means deferred replay stopped at a durable boundary below
-# `--min-free-disk-gb` after three reclaim attempts returned nothing. The
-# `.wbrain` store is append-only, so a restart burns the remaining headroom and
-# stops again at the same place; only a larger volume or a compaction changes
-# the outcome. Restarting also costs the interval: its marker is left
-# `state: training`, which the next generation rolls back to `start_row`.
-RestartPreventExitStatus=42 90
+# `--min-free-disk-gb` AND the rollback that normally reclaims this volume
+# returned nothing either. The `.wbrain` store is append-only, so a restart
+# burns the remaining headroom and stops again at the same place; only a larger
+# volume or a compaction changes the outcome.
+#
+# (Until 2026-09-15 this branch was reached without ever attempting that
+# rollback, so a volume holding 414 GB of reclaimable blocks halted terminally
+# and the unit sat `failed` for 107.7 h. The supervisor now rolls back first and
+# only exits 90 if the volume is still below its floor afterwards.)
+#
+# Exit 91 means the volume is FINE and no unresolved interval can reach its gate
+# inside the window a rollback buys -- measured 2026-09-15 at 3.64 h against a
+# shortest ETA of 29.34 h, 0 of 22 fitting. Restarting cannot change that: the
+# work unit is too large for the host's burn, so a respawn spends one rollback
+# per interval to rediscover it. Deliberately distinct from 90, because the
+# operator response is different -- 90 says resize or compact, 91 says the
+# corpus intervals must be split or the burn reduced.
+RestartPreventExitStatus=42 90 91
 # Automatic quarantine recovery may replace the original brain server with a
 # verified child process. Keep that recovered node alive across supervisor
 # restarts so the next invocation can attach to its endpoint.

@@ -1799,6 +1799,47 @@ Deleting the guard by hand would have freed nothing. Restarting the service
 freed **575.51 GB** (22.84 GB → 610.69 GB), and cost exactly the unadmitted
 interval the invariant discards anyway — the row went back to 201,344.
 
+### …and until 2026-09-15 a restart was the ONLY way to reach it
+
+That is the sentence this section should always have ended on, because it names
+a defect rather than a procedure. The disk guard's own reclaim is
+`prune_resolved_deferred_bases` and nothing else, and it is exhausted on this
+volume: three consecutive attempts returned 0.00 GB. The supervisor then exited
+`DISK_EXHAUSTED_EXIT` (90), which `RestartPreventExitStatus=42 90` makes
+terminal — so the halt deleted the only path to the rollback above.
+
+Measured 2026-09-15: the unit sat `failed` at `ExecMainStatus=90` for **107.7 h**
+holding 151.16 GB free, while `brain.wbrain` carried 414.02 GB of blocks it did
+not share. One `systemctl start` returned **444,551,897,088 bytes (414.02 GiB)**,
+taking the volume to 557.63 GB — and the extent-subtraction prediction matched
+the live `df` delta to the second decimal.
+
+The halt now performs that rollback itself before it may call the volume
+unrecoverable, and only exits 90 if free space is still below the floor
+afterwards. An operator restarting by hand is no longer the recovery mechanism.
+
+### Exit 91: the volume is fine and the work unit does not fit
+
+Rolling back and retrying is, on its own, a livelock — so the queue is
+censused before an interval is selected. Measured the same day, **0 of 22**
+unresolved intervals could reach a gate inside the 3.64 h window a rollback
+buys, missing by 8x to 156x; cycling them all would have cost ~88 h and
+admitted nothing.
+
+| Exit | Means | Operator response |
+|---|---|---|
+| 90 | Below the floor, and the rollback returned nothing either | Resize or compact the volume |
+| 91 | Volume is fine; no interval fits the window | Split the corpus intervals, or cut the burn |
+
+Both are in `RestartPreventExitStatus`. 91 is a refusal to spend, never a
+retirement: every obligation stays `deferred` and eligible, an interval whose
+rate is unmeasured always stays eligible, and the census passes again as soon
+as the burn falls or the volume grows. Read `window_hours`,
+`burn_gb_per_hour` and `shortest_eta_hours` out of the published status to see
+which of the two levers is short.
+
+
+
 ## The burn is a dozen hot atoms, not five million average neurons
 
 `df` divided by `page_outs` gave "39,971,683 bytes per body", which is three

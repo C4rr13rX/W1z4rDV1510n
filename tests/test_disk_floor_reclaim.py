@@ -226,10 +226,33 @@ def test_an_exhausted_disk_stops_the_pass_instead_of_respawning() -> None:
     replays = source.split("def run_deferred_replays", 1)[1]
     assert "disk_exhausted" in replays
     assert "return DISK_EXHAUSTED_EXIT" in replays
-    # Whatever the pass banked must be recorded before the halt, or the next
-    # generation replays the span from its start.
-    halt = replays.split("disk_exhausted", 1)[1][:1200]
-    assert "record_deferred_replay_resume" in halt
+
+    # This test used to require the halt to bank its durable row here, "or the
+    # next generation replays the span from its start". Verified 2026-09-15:
+    # the next generation replays it from the start ANYWAY, so the bank never
+    # did what the assertion claimed. The halt leaves the transaction marker in
+    # `state: "training"`; `recover_interrupted_deferred_replay` rolls back
+    # every marker that is not `admitted`; and `restore_rejected_deferred_replay`
+    # unlinks the resume record on its way through, deliberately, so the retry
+    # cannot resume onto rows the rollback discarded. The live host confirmed
+    # it: `deferred-replay-active.json` carried `state: "training"` for 107.7 h
+    # beside a banked `resume_row` of 142,656 that no restart could ever use.
+    #
+    # The prefix cannot be kept AND the disk freed, because the prefix IS the
+    # disk growth. So what the halt must actually do is roll back -- which
+    # reclaims 414.02 GB here -- and the resume record must go with it.
+    assert "def recover_interrupted_deferred_replay" in source
+    recovery = source.split(
+        "def recover_interrupted_deferred_replay", 1
+    )[1].split("\ndef ", 1)[0]
+    assert 'marker.get("state") == "admitted"' in recovery
+    assert "restore_rejected_deferred_replay(" in recovery
+    rollback = source.split(
+        "def restore_rejected_deferred_replay", 1
+    )[1].split("\ndef ", 1)[0]
+    assert "deferred_replay_resume_path(runtime, digest).unlink" in rollback, (
+        "the rollback must discard the resume boundary it invalidated"
+    )
 
     unit = (
         Path(__file__).parents[1]
