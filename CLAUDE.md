@@ -842,6 +842,92 @@ Verify, do not assume:
   as the `row is not None` gate that published a bare drought alarm against a
   converging replay. Use an explicit `isinstance` check (`health_event_unix`).
 
+- **A SAMPLING ESTIMATOR ON A HEAVY TAIL IS NOT A MEASUREMENT, and one draw
+  from it became the settled fact behind a halt.** `compaction::estimate`
+  computes `mean_sampled_body × live_neurons`, which is unbiased only when the
+  distribution is light-tailed. This brain has a dozen ~86 MB hub atoms against
+  a ~1.5 KB median. Run on the SAME 472.45 GB file at the same moment, strides
+  5000 / 500 / 50 / 5 return **848.9 / 119.53 / 49.38 / 44.50 GB** — the
+  loosest draw is larger than the container it is measuring, which is proof on
+  its face that a single draw cannot be trusted. **Settled exactly at stride 1**
+  (`sampled_neurons` 5,102,174 == `live_neurons` 5,102,174, so every live slot
+  was read and this is the live set rather than an extrapolation of it):
+  **43.83 GB live in a 472.45 GB container — 90.7 % garbage.** The operating
+  record's 363.34 GB (and the `71 KB mean body` it implies) is one draw from
+  the unstable estimator, high by **8.3x**, and it was the sole basis for
+  "compaction is net-negative". Cross-check killed it in one line before the
+  exact run finished: `/stats` reports 454,873,768 terminals at a confirmed
+  21 bytes = **9.55 GB of terminal payload in the entire fabric**, so 363 GB of
+  live bodies would need ~17.3 billion terminals. **Tighten the sample until
+  the number stops moving, and sanity-check it against a total the system
+  already reports.** `--estimate` now publishes `sampled_max_body_bytes` and
+  `exceeds_container` so an impossible draw says so itself.
+
+- **`--estimate` was on the deployed binary the whole time; its absence was
+  inferred from a usage banner.** This file recorded "there is no `--estimate`,
+  whatever CLAUDE.md says, so `--inspect` is the measurement". `usage()` has
+  never listed `--estimate` in ANY version of the source, so the banner was
+  never evidence — and the flag works. That wrong entry is what forced the
+  live-set question onto `--inspect`, which **cannot answer it**: its `live`
+  counter reads only `pool.neuron_offsets`, and all 13 pools here use slot
+  tables, so it printed `live_in_offset_vecs 0` in 0.0 s and read as an empty
+  container. The compaction path itself (`live_offsets`) has always handled
+  slot tables. **The blindness was in the REPORT, never in the capability** —
+  and it left the wrong live-set figure unchallenged for five days. `--inspect`
+  now prints `live_neurons_all_pools`. **Try the flag before concluding it is
+  missing.**
+
+- **Delta-encoded terminal updates is a 1.71x fix, not the architecture fix.**
+  Before authorising the one remedy that is code rather than a purchase,
+  measure what share of the burn it can reach. A byte-weighted census over a
+  103 GB window (499 neurons with repeat records) splits the rewrites in two:
+  **41.5 % append-shaped** — pool 5 hub atoms, `identical_fraction` 0.999394,
+  a 53 KB delta against an 87 MB body, 37.06 GB written for 1.8 MB of growth —
+  and **58.5 % perturbed**, where an append-delta saves nothing. Projected
+  reduction 1.71x against an **18.7x** deficit, and nothing at all against the
+  3,760x throughput deficit. The perturbed half is not rewritten either: byte
+  agreement is 0.74–0.79 with ~9,400 disagreeing runs per 64 KB, mean run 1.5,
+  and a stride cycle of **{4, 12, 5} summing to 21** — exactly bincode fixint
+  `Terminal{target:(u32,u32), weight:f32, consolidation:u8, last_fired_tick:u64}`.
+  Parsing at that width gives target agreement **1.0**, `weight_unchanged` **0**
+  and `last_fired_tick_changed` **20,000 of 20,000**: every terminal of a hub
+  atom is touched every cycle, on atoms carrying ~4.14 M terminals each. Note
+  the weight ratios are >1 (1.0006–1.30), so this is potentiation and NOT the
+  uniform decay it first looks like — a symbolic decay factor would not have
+  helped. **Exact-equality and common-prefix tests both score "one byte in
+  sixteen changed" identically to "everything changed"**; measure positional
+  agreement and run structure before classifying a rewrite.
+
+- **Compacting one container returns nothing, because the guard is a reflink
+  clone of the brain.** Measured 2026-09-16 straight after a rollback:
+  `brain.wbrain` and `brain.last-good.wbrain` each allocate 472.45 GB, **share
+  472.45 GB**, and have `brain_unique` and `guard_unique` of **0.00 GB**. Every
+  extent one stops referencing is still pinned by the other name — the same
+  block-sharing trap that made a 560 GB delete return 0.00 GB. `--in-place`
+  also returns space only at the unlink, so nothing moves until BOTH are done.
+
+- **Exit 91 repeated the exit-90 lesson: a terminal halt must attempt every
+  reclaim first.** `RestartPreventExitStatus=42 90 91` makes 91 terminal, so
+  whatever the refusal does not try is a repair it has just deleted. The census
+  reasons that "only a rollback returns bytes — which discards the interval",
+  and that was true while `prune_resolved_deferred_bases` was the only reclaim
+  (exhausted here: 0.00 GB over three attempts, 2 prunable directories against
+  399.56 GB pinned by cross-links). **A compaction is categorically different
+  from a rollback**: it rewrites the storage representation and preserves every
+  live neuron, so its bytes go to the interval that is RUNNING instead of
+  costing it. That is precisely why the census was right to keep a rollback's
+  bytes out of the window and wrong to keep a compaction's out. The halt now
+  compacts and re-censuses before refusing, and still halts if nothing came
+  back. The original container is kept until the reopened brain proves the same
+  topology (`COMPACTION_IDENTITY_FIELDS`, the same set `recycle_settled_runtime_node`
+  already trusts) and is restored if it does not.
+
+- **`recycle_settled_runtime_node` already stops and restarts the node — 768
+  times on this host — and that gap is the compaction window.** `wbrain_compact`
+  requires the brain not be running because the container has no locking
+  protocol. There is no need to invent a maintenance window; one runs every two
+  to three minutes by design.
+
 ## Important Notes
 - Always commit and push after any code changes
 - Kill old processes before deploying new binary (port conflicts cause silent API thread death)

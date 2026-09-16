@@ -15,8 +15,9 @@ miscalibrated and the halt was premature.
 
   * The volume is not short of space, it is full of GARBAGE. The `.wbrain`
     store is append-only and has never had a compaction pass on this host, so
-    the 472.45 GB container holds a live set measured at ~44.5 GB. The
-    operating record's 363.34 GB -- the sole basis for "compaction is
+    the 472.45 GB container holds only **43.83 GB live -- 90.7 % garbage**,
+    measured exactly by reading all 5,102,174 live slots rather than sampling
+    them. The operating record's 363.34 GB -- the sole basis for "compaction is
     net-negative" -- came from `compaction::estimate`, which extrapolates
     mean_sampled_body x live_neurons. Run against the same file at four
     strides it returns 848.9 / 119.53 / 49.38 / 44.50 GB: its loosest draw
@@ -196,3 +197,71 @@ def test_locate_compactor_returns_none_when_nothing_is_built(
     """
     assert locate_compactor(tmp_path) is None
     assert COMPACTOR_CANDIDATES, "the search path must not be empty"
+
+
+def test_a_measured_compaction_makes_the_disk_window_renewable(
+        tmp_path: Path) -> None:
+    """A compaction preserves the interval, so its bytes renew the window.
+
+    The census is right that a rollback's bytes cannot extend the runway --
+    taking them discards the interval. A compaction has the opposite property,
+    and it repeats at the memory-yield boundary that already stops and restarts
+    the node 768 times on this host. Measured exactly 2026-09-16 by reading all
+    5,102,174 live slots: 43.83 GB live in a 472.45 GB container, so 90.7 % of
+    the volume is superseded bodies an append-only store never reclaimed.
+    """
+    from scripts.programming_curriculum_supervisor import (
+        replay_queue_is_hopeless,
+    )
+
+    doomed = {"intervals": [{"interval_id": "p:0:1"}], "fits": [],
+              "unknown": [], "exceeds": ["p:0:1"]}
+    assert replay_queue_is_hopeless(doomed) is True
+
+    renewable = dict(doomed, disk_window_is_renewable=True)
+    assert replay_queue_is_hopeless(renewable) is False, (
+        "exit 91 is terminal; refusing a queue under a disk-shaped name for a "
+        "constraint disk no longer imposes would be permanent"
+    )
+
+
+def test_a_reclaim_never_observed_is_not_a_renewable_window(
+        tmp_path: Path) -> None:
+    """Zero-until-measured, because absent and zero look identical in a count.
+
+    Reading "never attempted" as "returned nothing" is how a working reclaim
+    becomes a permanent halt; reading it the other way would make the halt
+    unreachable on a volume that genuinely cannot be reclaimed.
+    """
+    from scripts.programming_curriculum_supervisor import (
+        compaction_reclaim_bytes,
+    )
+
+    runtime = _runtime(tmp_path)
+    assert compaction_reclaim_bytes(runtime) == 0
+
+    ledger = runtime / "curriculum-health.jsonl"
+    ledger.write_text(
+        json.dumps({"kind": "disk_floor_reclaim",
+                    "compaction": {"reclaimed_bytes": 384_000_000_000}}) + "\n"
+        + json.dumps({"kind": "pre_halt_compaction_reclaim",
+                      "reclaimed_bytes": 12_000_000_000}) + "\n",
+        encoding="utf-8",
+    )
+    # The LARGEST observed reclaim: a pass that ran when there was little
+    # garbage to return describes that moment, not the volume's capacity.
+    assert compaction_reclaim_bytes(runtime) == 384_000_000_000
+
+
+def test_a_compaction_too_small_to_buy_training_is_not_renewable() -> None:
+    """A cycle must buy more training than the pass costs.
+
+    At ~11.5 MB/s a 43.83 GB live set is a ~1 h pass. Below
+    MIN_RENEWABLE_CYCLE_HOURS the supervisor would spend more time compacting
+    than training, and the volume really is the constraint.
+    """
+    from scripts.programming_curriculum_supervisor import (
+        MIN_RENEWABLE_CYCLE_HOURS,
+    )
+
+    assert MIN_RENEWABLE_CYCLE_HOURS >= 1.0

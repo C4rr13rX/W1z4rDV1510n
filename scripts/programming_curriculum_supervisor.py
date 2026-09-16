@@ -105,6 +105,14 @@ COMPACTION_IDENTITY_FIELDS = (
     "total_binding", "total_terminals",
 )
 
+#: A compaction cycle must buy at least this much training to count as a
+#: renewable window. Below it the pass would spend more time compacting than
+#: training and the volume really is the constraint. Measured 2026-09-16: the
+#: container compacts at ~11.5 MB/s, so a 43.83 GB live set is a ~1 h pass,
+#: against ~840 GB of headroom which at 167.96 GB/h is ~5 h of training -- about
+#: a 17 % overhead.
+MIN_RENEWABLE_CYCLE_HOURS = 1.0
+
 
 class GateCommandFailure(RuntimeError):
     """A gate subprocess failed after it was launched successfully."""
@@ -1928,6 +1936,42 @@ def prune_resolved_deferred_bases(runtime: Path) -> list[Path]:
     return removed
 
 
+def compaction_reclaim_bytes(runtime: Path) -> int:
+    """Largest compaction reclaim this runtime has actually MEASURED.
+
+    Read from the health ledger rather than predicted, for the same reason
+    `rollback_reclaim_bytes` is: on an XFS reflink volume the bytes a pass
+    removes and the bytes it RETURNS are not the same order of magnitude, so
+    only a `df` delta that already happened is evidence.
+
+    Zero until a compaction has run, which is deliberate -- a window may only be
+    called renewable once the renewal has been observed once.
+    """
+    best = 0
+    try:
+        with (runtime / "curriculum-health.jsonl").open(
+                encoding="utf-8") as stream:
+            for line in stream:
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                blocks = []
+                if isinstance(event.get("compaction"), dict):
+                    blocks.append(event["compaction"])
+                if event.get("kind") == "pre_halt_compaction_reclaim":
+                    blocks.append(event)
+                for block in blocks:
+                    value = block.get("reclaimed_bytes")
+                    if isinstance(value, (int, float)) and value > best:
+                        best = int(value)
+    except (FileNotFoundError, OSError):
+        return 0
+    return best
+
+
 def locate_compactor(project: Path) -> Path | None:
     """First existing `wbrain_compact` under `project`, or None."""
     for relative in COMPACTOR_CANDIDATES:
@@ -2729,8 +2773,39 @@ def replay_window_census(runtime: Path, pending: list[dict],
     # this: it reported a 1.16 GB window because no rollback had been measured
     # yet, and would have reported an 829 GB one straight after a rollback --
     # both wrong, in opposite directions, for the same reason.
+    # A COMPACTION IS NOT A ROLLBACK, AND THE DIFFERENCE IS THE WHOLE WINDOW.
+    #
+    # The paragraph above is right that a rollback's bytes cannot be added to
+    # the runway, because taking them DISCARDS the interval that is running. A
+    # compaction has the opposite property: it rewrites the container's storage
+    # representation and preserves every live neuron, so its bytes go TO the
+    # running interval rather than costing it. It also repeats -- it runs at the
+    # memory-yield boundary that already stops and restarts the node 768 times
+    # on this host -- so the volume's training capacity is renewable rather than
+    # a one-shot budget.
+    #
+    # That matters because the container is overwhelmingly garbage: measured
+    # exactly 2026-09-16 by reading every one of 5,102,174 live slots, 43.83 GB
+    # live in 472.45 GB, so 90.7 % of the volume's "used" space is superseded
+    # bodies the append-only store has never reclaimed. Refusing a queue on a
+    # window computed from that is pricing a constraint that has not been
+    # relieved yet.
+    #
+    # Renewable only once the renewal has been MEASURED, and only if a cycle
+    # buys real training: a reclaim of zero and a reclaim never attempted look
+    # identical in a count, and reading the second as the first is exactly how a
+    # working reclaim becomes a permanent halt.
+    compaction_reclaim = compaction_reclaim_bytes(runtime)
     window_bytes = free_now - floor_bytes
     burn_gb_per_hour = burn.get("gb_per_hour")
+    renewable_cycle_hours = (
+        round((compaction_reclaim / (1024 ** 3)) / burn_gb_per_hour, 2)
+        if compaction_reclaim > 0 and burn_gb_per_hour else None
+    )
+    disk_window_is_renewable = bool(
+        renewable_cycle_hours is not None
+        and renewable_cycle_hours >= MIN_RENEWABLE_CYCLE_HOURS
+    )
     if window_bytes <= 0:
         # At or below the floor, the disk guard is the authoritative owner and
         # this is a `disk_exhausted_unrecoverable` question, not a work-unit
@@ -2877,6 +2952,9 @@ def replay_window_census(runtime: Path, pending: list[dict],
         "expected_free_after_rollback_bytes": (
             free_now + reclaim if reclaim else None
         ),
+        "compaction_reclaim_bytes": compaction_reclaim,
+        "renewable_cycle_hours": renewable_cycle_hours,
+        "disk_window_is_renewable": disk_window_is_renewable,
         "floor_bytes": floor_bytes,
         "window_bytes": window_bytes,
         "window_hours": window_hours,
@@ -2896,7 +2974,19 @@ def replay_queue_is_hopeless(census: dict) -> bool:
     `unknown` counts as eligible, so a host that has never admitted anything --
     and therefore has no rates at all -- always trains rather than halting on
     an absence of evidence.
+
+    A RENEWABLE DISK WINDOW IS NOT A REASON TO HALT AT ALL. Every `exceeds`
+    verdict is measured against a one-shot window, and once a compaction reclaim
+    has been observed the window is not one-shot: the pass preserves the
+    interval and repeats at the memory-yield boundary, so the volume sustains
+    training indefinitely rather than capping it. Halting then would refuse the
+    queue under a disk-shaped name for a constraint disk no longer imposes --
+    and exit 91 is terminal, so that refusal would be permanent. If the queue is
+    still too expensive it is too expensive in TIME, which the census reports
+    separately in `capacity` and which no reclaim can change.
     """
+    if census.get("disk_window_is_renewable"):
+        return False
     return bool(census.get("intervals")) and not (
         census.get("fits") or census.get("unknown")
     )
