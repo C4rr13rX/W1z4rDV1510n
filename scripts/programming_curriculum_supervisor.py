@@ -2024,13 +2024,32 @@ def record_replay_stall(runtime: Path, interval_id: str, phase: str,
         "reason": reason,
         "updated_unix": time.time(),
     }
-    # Only publish a rate that was actually observed. A zero-row or zero-hour
-    # generation measured nothing, and recording it as 0 rows/h would refuse
-    # every interval in the phase forever.
+    # Only publish a RATE that was actually observed. A zero-row generation
+    # measured no rate, and recording it as 0 rows/h would drag the phase
+    # average to zero and refuse every interval in the phase forever.
+    #
+    # BUT A ZERO-ROW GENERATION IS NOT A ZERO-EVIDENCE GENERATION, and the
+    # first version of this discarded it entirely -- which deleted exactly the
+    # evidence the census needs, in exactly the case it exists for. An interval
+    # too large for the window is an interval that gets killed, and one killed
+    # before its first durable commit banks nothing; so the more hopeless the
+    # interval, the less this recorded about it. Measured 2026-09-15: both
+    # `jupyter-scientific-full` stalls carried no `rows_trained`, no `hours` and
+    # no rate, so 115 h later the phase still had ZERO samples, every one of its
+    # intervals scored `unknown`, and the census -- whose whole purpose is to
+    # refuse a doomed spend -- selected `:393216:524288` and spent the volume's
+    # entire remaining 1.31 h window on a span needing ~41 h.
+    #
+    # So `hours` is now recorded unconditionally: "consumed H hours and banked
+    # nothing" is a measurement, and the census reads it as one. `rows_trained`
+    # is recorded unconditionally too, so a reader can tell a barren generation
+    # from one this function simply had no numbers for.
+    if isinstance(hours, (int, float)) and hours > 0:
+        observation["hours"] = round(float(hours), 4)
+    if isinstance(rows_trained, int) and rows_trained >= 0:
+        observation["rows_trained"] = rows_trained
     if (isinstance(rows_trained, int) and rows_trained > 0
             and isinstance(hours, (int, float)) and hours > 0):
-        observation["rows_trained"] = rows_trained
-        observation["hours"] = round(float(hours), 4)
         observation["rows_per_hour"] = round(rows_trained / float(hours), 1)
     append_health_event(runtime, observation)
 
@@ -2070,6 +2089,56 @@ def replay_stall_observations(runtime: Path) -> dict[str, list[dict]]:
     return observations
 
 
+def replay_barren_stalls(runtime: Path) -> dict[str, float]:
+    """Longest generation an interval consumed while banking ZERO durable rows.
+
+    Deliberately a channel of its own rather than a `rows_per_hour` of 0.
+    A rate of zero would be folded into the phase average by
+    `measure_phase_rows_per_hour` and refuse every interval sharing that
+    corpus forever, which is why `record_replay_stall` has always refused to
+    publish one. But the fact itself is the STRONGEST evidence the census can
+    hold about the interval it describes: a generation was given the volume's
+    whole window and did not reach a single durable commit.
+
+    So it is kept per-interval, never per-phase, and the census uses it only to
+    refuse that one interval. Keyed on the longest such generation because the
+    question is whether ANY window has been enough, and a two-minute reboot
+    that banked nothing measured nothing -- the census compares these hours
+    against the window before refusing anything.
+    """
+    barren: dict[str, float] = {}
+    try:
+        with (runtime / "curriculum-health.jsonl").open(
+                encoding="utf-8") as stream:
+            for line in stream:
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if event.get("kind") != REPLAY_STALL_KIND:
+                    continue
+                interval_id = event.get("interval_id")
+                if not isinstance(interval_id, str) or not interval_id:
+                    continue
+                rows = event.get("rows_trained")
+                hours = event.get("hours")
+                # An explicit zero, not a missing value. `rows_trained` is only
+                # absent on records written before this was measured at all,
+                # and those describe nothing.
+                if not isinstance(rows, int) or isinstance(rows, bool):
+                    continue
+                if rows != 0:
+                    continue
+                if not isinstance(hours, (int, float)) or hours <= 0:
+                    continue
+                barren[interval_id] = max(
+                    barren.get(interval_id, 0.0), float(hours)
+                )
+    except (FileNotFoundError, OSError):
+        return barren
+    return barren
+
+
 def replay_stall_counts(runtime: Path) -> dict[str, int]:
     """How many generations each interval has consumed without a verdict."""
     # An admitted interval leaves `unresolved_deferred_intervals` altogether,
@@ -2093,9 +2162,18 @@ def replay_stall_counts(runtime: Path) -> dict[str, int]:
     return counts
 
 
+#: Selection order for a census verdict. `fits` is measured to reach its gate
+#: inside the window; `unknown` has no verdict either way and training it is
+#: how it acquires one; `exceeds` is MEASURED to spend a whole window and
+#: admit nothing, so it is the last thing worth selecting.
+VERDICT_RANK = {"fits": 0, "unknown": 1, "exceeds": 2}
+
+
 def order_replay_candidates(pending: list[dict],
-                            stalls: dict[str, int]) -> list[dict]:
-    """Fewest stalls first, then smallest span first.
+                            stalls: dict[str, int],
+                            verdicts: dict[str, str] | None = None,
+                            ) -> list[dict]:
+    """Fits first, then unmeasured, then measured-to-exceed; then stalls, span.
 
     Deliberately a REORDERING and not a filter. Every obligation stays in the
     ledger and stays eligible, so nothing is admitted, discarded or retired by
@@ -2116,17 +2194,44 @@ def order_replay_candidates(pending: list[dict],
     14,336-18,432 rows, ~1.0-1.3 h at that rate -- so each generation converts
     instead of teaching the queue one more thing it cannot do.
 
-    The sort is stable and both keys are 0/constant on a host that has never
+    The sort is stable and every key is 0/constant on a host that has never
     stalled and whose spans are equal, so the existing `(phase, start_row)`
-    order is preserved exactly where neither key discriminates.
+    order is preserved exactly where no key discriminates.
+
+    THE VERDICT KEY IS THE ONE THAT SPENDS MONEY, and for a while it existed
+    without being read. `replay_window_census` computed a per-interval verdict;
+    `replay_queue_is_hopeless` collapsed it to one boolean over the WHOLE
+    queue; and selection then took `pending[0]` from a sort that had never
+    heard of it. So a single `unknown` anywhere kept the queue "not hopeless"
+    while the head was an interval measured to fail.
+
+    Verified live 2026-09-15, minutes after the barren-stall fix gave this
+    phase its first rate in 115 h: 21 of 22 intervals scored `exceeds`, the
+    lone `unknown` was a 2026-09-10 record carrying no measurement at all --
+    and the supervisor was training `jupyter-scientific-full:524288:655360`,
+    verdict `exceeds`, ETA 42.44 h against a 2.36 h window. An 18x miss,
+    measured, selected, and about to spend the whole window and roll back.
+
+    Still deliberately a REORDERING and not a filter. Every obligation stays in
+    the ledger and stays eligible; an `exceeds` interval is selected the moment
+    nothing else is left, which is also exactly when the census refuses the
+    queue outright and the question moves to the operator. And `unknown` sorts
+    AHEAD of `exceeds` on purpose: training an unmeasured interval at least
+    converts it into evidence, where training a measured one buys nothing.
     """
-    def key(event: dict) -> tuple[int, int]:
+    ranks = verdicts or {}
+
+    def key(event: dict) -> tuple[int, int, int]:
         interval_id = str(event.get("interval_id") or "")
         try:
             span = int(event["end_row"]) - int(event["start_row"])
         except (KeyError, TypeError, ValueError):
             span = 0
-        return (stalls.get(interval_id, 0), max(0, span))
+        # An unrecognised verdict ranks with `unknown`, never with `exceeds`:
+        # a name this function does not know is an absence of evidence, and
+        # refusing on one would halt the queue on a spelling.
+        rank = VERDICT_RANK.get(ranks.get(interval_id, "unknown"), 1)
+        return (rank, stalls.get(interval_id, 0), max(0, span))
 
     return sorted(pending, key=key)
 
@@ -2149,6 +2254,23 @@ NO_FITTING_INTERVAL_EXIT = 91
 #: deciding an interval cannot fit. One admission is an anecdote, and refusing
 #: to train on an anecdote is how a measurement becomes a self-fulfilling halt.
 MIN_RATE_SAMPLES_TO_REFUSE = 2
+
+#: ...unless the single sample misses by this factor or more, in which case it
+#: is not an anecdote. SAMPLE COUNT IS A POOR PROXY FOR EVIDENCE STRENGTH.
+#: Measured 2026-09-15: `jupyter-scientific-para4` had one sample -- but that
+#: sample observed 7,984 rows over 34.64 h, and at 230.5 rows/h a 131,072-row
+#: span needs 568.64 h against a 1.31 h window. Missing by 434x, the queue
+#: still had to spend a full window and a rollback to "confirm" it, because
+#: `samples: 1 < 2`. A second observation cannot move a 434x verdict, so
+#: buying one is pure cost.
+#:
+#: Sized well above the duty-cycle variance this host actually shows. An
+#: INSTANTANEOUS row rate swings ~22x here (0.355 to 7.99 rows/s on the same
+#: block), which is why nothing is ever refused on one; but these samples are
+#: end-to-end over 14-35 h, where that variance has averaged out. 10x leaves
+#: an order of magnitude of headroom over the measurement and still refuses
+#: the 434x and 32x misses that are actually in this queue.
+REFUSE_ON_ONE_SAMPLE_MISS_FACTOR = 10.0
 
 
 def health_event_unix(event: dict) -> float | None:
@@ -2392,6 +2514,7 @@ def replay_window_census(runtime: Path, pending: list[dict],
     rates = (phase_rows_per_hour if phase_rows_per_hour is not None
              else measure_phase_rows_per_hour(runtime))
     stalled = replay_stall_observations(runtime)
+    barren = replay_barren_stalls(runtime)
     free_now = int(shutil.disk_usage(runtime).free)
     reclaim = rollback_reclaim_bytes(runtime)
     floor_bytes = int(min_free_disk_gb * 1024 ** 3)
@@ -2428,6 +2551,7 @@ def replay_window_census(runtime: Path, pending: list[dict],
             span = 0
         own = stalled.get(interval_id) or []
         phase_rate = rates.get(phase) or {}
+        barren_hours = barren.get(interval_id)
         if own:
             # Slowest observation of this very interval. Slowest, not mean,
             # because the question is whether it can finish inside a window and
@@ -2443,7 +2567,33 @@ def replay_window_census(runtime: Path, pending: list[dict],
             enough = samples >= MIN_RATE_SAMPLES_TO_REFUSE
         eta = (round(span / rows_per_hour, 2)
                if rows_per_hour else None)
-        if window_hours is None or eta is None or not enough:
+        # SAMPLE COUNT IS A PROXY FOR CONFIDENCE, AND THE MISS FACTOR IS THE
+        # MEASUREMENT. One observation that misses by 434x cannot be overturned
+        # by a second, so requiring one buys nothing and costs a whole window
+        # plus a rollback. Marginal misses still need the second sample.
+        if (not enough and samples >= 1 and eta is not None
+                and window_hours is not None
+                and eta > window_hours * REFUSE_ON_ONE_SAMPLE_MISS_FACTOR):
+            enough = True
+            source += "_decisive_miss"
+        # A GENERATION THAT BANKED NOTHING MEASURED SOMETHING. It has no rate,
+        # so every arm above leaves it `unknown` -- which is how the two
+        # `jupyter-scientific-full` stalls left that phase with zero evidence
+        # for 115 h while its intervals were selected over and over. Refuse on
+        # the interval's own barren generation, but only once that generation
+        # was at least as long as the window: a short kill (a reboot, an
+        # operator stop) banked nothing because it was never given a chance,
+        # and reading that as a refusal would halt on an absence of evidence.
+        barren_refusal = (
+            window_hours is not None
+            and isinstance(barren_hours, (int, float))
+            and barren_hours >= window_hours
+        )
+        if barren_refusal:
+            verdict = "exceeds"
+            if not own:
+                source = "own_barren_stall"
+        elif window_hours is None or eta is None or not enough:
             verdict = "unknown"
         elif eta <= window_hours:
             verdict = "fits"
@@ -2456,12 +2606,69 @@ def replay_window_census(runtime: Path, pending: list[dict],
             "rows_per_hour": rows_per_hour,
             "rate_source": source,
             "rate_samples": samples,
+            "barren_stall_hours": (round(float(barren_hours), 3)
+                                   if isinstance(barren_hours, (int, float))
+                                   else None),
             "eta_hours": eta,
             "verdict": verdict,
         })
+    # WHY NO WORK UNIT FITS, WHICH IS A DIFFERENT QUESTION FROM WHICH ONE.
+    #
+    # A refusal that only says "nothing fits" invites the obvious repair --
+    # split the intervals until they do -- and on this host that repair is
+    # inert, for a reason worth publishing rather than rediscovering. The
+    # window is consumed by TRAINING HOURS, not by interval boundaries, and an
+    # admission returns no disk: the guard is re-cloned from the live brain, so
+    # the retired guard shares every block with it and freeing it returns ~0
+    # (measured: guard-unique 0.00 GB). Only a rollback returns bytes, and a
+    # rollback discards the interval. So `window_hours` is the volume's TOTAL
+    # remaining training capacity from here, whatever spans it is cut into --
+    # splitting changes only whether those hours end up admitted or discarded.
+    #
+    # Published beside the per-interval verdicts so the operator sees the
+    # ratio that actually decides this: hours the queue needs at the FASTEST
+    # rate this host has ever measured, against hours the volume can pay for.
+    pending_rows = sum(row["span"] for row in intervals if row["span"] > 0)
+    best_rate = max(
+        (float(row["rows_per_hour"]) for row in rates.values()
+         if isinstance(row.get("rows_per_hour"), (int, float))
+         and row["rows_per_hour"] > 0),
+        default=None,
+    )
+    hours_needed = (round(pending_rows / best_rate, 1)
+                    if best_rate else None)
+    # BOTH BOUNDS, BECAUSE THEY DIFFER BY 200x AND ONLY ONE IS HONEST.
+    # `hours_needed_at_fastest_rate` prices the queue at `go-systems` speed --
+    # 59,778 rows/h, the fastest this host has ever measured -- and NO pending
+    # interval is go-systems. It is the most generous bound that can be
+    # constructed, kept because an argument that the volume cannot finish is
+    # strongest when it concedes the best possible case. The measured bound
+    # prices each interval at ITS OWN phase's rate, which is what the queue
+    # would actually cost; on this host that is ~200x larger.
+    measured = [row["eta_hours"] for row in intervals
+                if isinstance(row.get("eta_hours"), (int, float))]
+    hours_measured = round(sum(measured), 1) if measured else None
     return {
         "burn": burn,
         "free_bytes": free_now,
+        "capacity": {
+            "pending_rows": pending_rows,
+            "fastest_measured_rows_per_hour": best_rate,
+            "hours_needed_at_fastest_rate": hours_needed,
+            "hours_needed_at_measured_rates": hours_measured,
+            "intervals_priced": len(measured),
+            "intervals_total": len(intervals),
+            "hours_available": window_hours,
+            "deficit_factor": (
+                round(hours_needed / window_hours, 1)
+                if hours_needed and window_hours else None
+            ),
+            "deficit_factor_at_measured_rates": (
+                round(hours_measured / window_hours, 1)
+                if hours_measured and window_hours else None
+            ),
+            "splitting_cannot_help": True,
+        },
         # Diagnostics only -- deliberately NOT part of the window, see above.
         # Published so an operator reading a refusal can tell a volume that is
         # merely full from a work unit that is too large, which are the two
@@ -4414,10 +4621,19 @@ def recover_interrupted_deferred_replay(
     )
     if stall_hours is not None and stall_hours <= 0:
         stall_hours = None
+    # The row THIS generation resumed from, so `rows_trained` and `hours`
+    # describe the same window. Absent on a marker written before the
+    # republish landed, or by a process that died between the two writes; the
+    # interval's own start is then the honest fallback and the previous
+    # behaviour exactly.
+    generation_start = marker.get("resume_row")
+    if not isinstance(generation_start, int) or isinstance(
+            generation_start, bool) or generation_start < start_row:
+        generation_start = start_row
     record_replay_stall(
         runtime, interval_id, phase.name,
         f"generation ended in state {marker.get('state')!r} before a verdict",
-        rows_trained=max(0, durable_row - start_row),
+        rows_trained=max(0, durable_row - generation_start),
         hours=stall_hours,
     )
     restore_rejected_deferred_replay(
@@ -4479,9 +4695,7 @@ def run_deferred_replays(args: argparse.Namespace, runtime: Path,
             # restart-identical `(phase, start_row)` order and no other
             # interval is ever tried. Reordering only -- every obligation
             # stays in the ledger and stays eligible.
-            pending = order_replay_candidates(
-                pending, replay_stall_counts(runtime)
-            )
+            stall_counts = replay_stall_counts(runtime)
             # ORDERING IS INERT WHEN NOTHING FITS.
             #
             # `order_replay_candidates` drains what fits first, which is right,
@@ -4525,9 +4739,28 @@ def run_deferred_replays(args: argparse.Namespace, runtime: Path,
                          if row.get("eta_hours") is not None),
                         default=None,
                     ),
+                    # The decision this halt is asking for. Without it the
+                    # refusal reads as "pick smaller spans", and on this volume
+                    # that is inert -- see `capacity` in `replay_window_census`.
+                    "capacity": census.get("capacity"),
                     "updated_unix": time.time(),
                 })
                 return NO_FITTING_INTERVAL_EXIT
+            # ORDER BY THE VERDICT THAT WAS JUST MEASURED.
+            #
+            # `replay_queue_is_hopeless` is an aggregate: it asks whether
+            # ANYTHING is worth training. It cannot answer WHICH, and for a
+            # while nothing did -- selection took `pending[0]` from a sort
+            # keyed on `(stalls, span)` that had never heard of the census. So
+            # one `unknown` anywhere kept the queue eligible while the head was
+            # an interval measured to fail, which is the exact spend this
+            # census exists to prevent. Measured live: 21 of 22 `exceeds`, and
+            # the one being trained was a measured 18x miss.
+            pending = order_replay_candidates(
+                pending, stall_counts,
+                verdicts={row["interval_id"]: row["verdict"]
+                          for row in census["intervals"]},
+            )
         if not pending:
             publish(status_path, {
                 "state": "deferred_replay_complete",
@@ -4587,6 +4820,26 @@ def run_deferred_replays(args: argparse.Namespace, runtime: Path,
         if resume_row <= int(event["start_row"]):
             replay_progress.unlink(missing_ok=True)
             deferred_replay_resume_path(runtime, digest).unlink(missing_ok=True)
+        # MEASURE ROWS FROM WHERE THIS GENERATION STARTED, NOT WHERE THE
+        # INTERVAL DID. Both stall sites divide rows banked by hours THIS
+        # generation ran; counting from `start_row` credits it with rows an
+        # earlier generation trained, which overstates the rate -- and an
+        # overstated rate produces an optimistic ETA, so the census fails to
+        # refuse. That is the one direction of error this guard must not have.
+        #
+        # Republished rather than folded into the publish above: the marker
+        # must exist in state `training` from the same instant as before, and
+        # everything between is a read. A process that dies in the gap leaves a
+        # marker without this field, and both readers fall back to `start_row`,
+        # which is exactly the previous behaviour.
+        publish(deferred_replay_marker_path(runtime), {
+            "state": "training",
+            "phase": phase.name,
+            "interval_id": interval_id,
+            "interval": event,
+            "created_unix": replay_started,
+            "resume_row": resume_row,
+        })
         publish(status_path, {
             "state": "deferred_replay_training",
             "phase": phase.name,
@@ -4662,9 +4915,10 @@ def run_deferred_replays(args: argparse.Namespace, runtime: Path,
                             runtime, interval_id, phase.name,
                             "disk floor reached before a verdict; rolled back "
                             "to reclaim the volume",
-                            rows_trained=max(
-                                0, banked - int(event["start_row"])
-                            ),
+                            # From `resume_row`, not `start_row`: see the
+                            # marker republish above. `hours` below covers this
+                            # generation only, so the numerator must too.
+                            rows_trained=max(0, banked - resume_row),
                             hours=(time.time() - replay_started) / 3600.0,
                         )
                         free_before = int(shutil.disk_usage(runtime).free)

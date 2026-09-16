@@ -286,12 +286,38 @@ def test_an_interval_that_fits_is_never_refused(tmp_path):
     assert sup.replay_queue_is_hopeless(census) is False
 
 
-def test_one_admission_is_an_anecdote_and_never_refuses(tmp_path):
-    """Refusing on a single sample would make the measurement self-fulfilling.
+def test_one_admission_does_not_refuse_a_MARGINAL_miss(tmp_path):
+    """Refusing on a thin sample would make the measurement self-fulfilling.
 
-    `jupyter-scientific-para4`'s 230.5 rows/h is n=1 on the live host. It is
-    good enough to ORDER by and not good enough to halt on, so a phase under
-    `MIN_RATE_SAMPLES_TO_REFUSE` samples stays eligible however bad it looks.
+    `jupyter-scientific-para4`'s 230.5 rows/h is n=1 on the live host. Where
+    the miss is small enough that a second observation could plausibly overturn
+    it, one sample orders the queue and must not halt it, so the interval stays
+    eligible. 8 h against a 4 h window is a 2x miss -- well inside the variance
+    a single end-to-end observation carries.
+    """
+    runtime = tmp_path / "runtime"
+    _census_ledger(runtime, burn_gb_per_hour=100.0, reclaim_gb=400.0,
+                   rates=_admissions("thin", 1000, 1.0, 1))
+    census = sup.replay_window_census(
+        runtime, [_interval("thin:0:8000", "thin", 0, 8_000)],
+        min_free_disk_gb=_floor_for_window(runtime, 400.0),
+    )
+    assert census["window_hours"] == pytest.approx(4.0, abs=0.1)
+    assert census["intervals"][0]["eta_hours"] == pytest.approx(8.0, rel=1e-3)
+    assert census["unknown"] == ["thin:0:8000"]
+    assert census["intervals"][0]["rate_samples"] == 1
+    assert sup.replay_queue_is_hopeless(census) is False
+
+
+def test_one_admission_DOES_refuse_a_decisive_miss(tmp_path):
+    """A second sample cannot overturn a 25,000x verdict, so buying one is cost.
+
+    SAMPLE COUNT IS A PROXY FOR CONFIDENCE; THE MISS FACTOR IS THE MEASUREMENT.
+    Measured 2026-09-15: `jupyter-scientific-para4` missed the live window by
+    434x on one sample -- a sample that had itself observed 7,984 rows over
+    34.64 h -- and the queue still had to spend a full window and a rollback
+    to "confirm" it, because `samples: 1 < MIN_RATE_SAMPLES_TO_REFUSE`. That is
+    a threshold reading the wrong quantity.
     """
     runtime = tmp_path / "runtime"
     _census_ledger(runtime, burn_gb_per_hour=100.0, reclaim_gb=400.0,
@@ -300,9 +326,12 @@ def test_one_admission_is_an_anecdote_and_never_refuses(tmp_path):
         runtime, [_interval("thin:0:1000000", "thin", 0, 1_000_000)],
         min_free_disk_gb=_floor_for_window(runtime, 400.0),
     )
-    assert census["unknown"] == ["thin:0:1000000"]
     assert census["intervals"][0]["rate_samples"] == 1
-    assert sup.replay_queue_is_hopeless(census) is False
+    assert census["intervals"][0]["eta_hours"] == pytest.approx(100_000.0,
+                                                                rel=1e-3)
+    assert census["exceeds"] == ["thin:0:1000000"]
+    assert census["intervals"][0]["rate_source"].endswith("_decisive_miss")
+    assert sup.replay_queue_is_hopeless(census) is True
 
 
 def test_a_phase_that_has_never_admitted_is_always_attempted(tmp_path):
@@ -433,10 +462,19 @@ def test_the_census_gates_selection_and_names_its_exit():
     assert "replay_window_census(" in body
     assert "replay_queue_is_hopeless(" in body
     assert "NO_FITTING_INTERVAL_EXIT" in body
-    # After the reorder (so it censuses the queue actually being selected from)
-    # and before `pending[0]` is taken (so nothing is spent discovering it).
+    # THE CENSUS NOW COMES FIRST, and the order consumes it.
+    #
+    # It used to run after `order_replay_candidates` so that it "censused the
+    # queue actually being selected from" -- but the census reads every pending
+    # interval and returns a row for each, so their order never changed its
+    # content. Meanwhile the ordering could not see the verdicts, which is how
+    # a measured 18x miss came to be selected while 21 of 22 intervals scored
+    # `exceeds`. Measuring first and ranking on the result is the fix.
+    assert body.index("replay_window_census(") < body.index(
+        "order_replay_candidates(")
+    # And still before `pending[0]`, so nothing is spent discovering it.
     assert body.index("order_replay_candidates(") < body.index(
-        "replay_window_census(")
+        "event = pending[0]")
     assert body.index("replay_window_census(") < body.index(
         "event = pending[0]")
 
@@ -684,13 +722,320 @@ def test_a_stall_measures_its_phase_not_just_its_own_interval(tmp_path):
 
 
 def test_one_stall_in_a_phase_still_does_not_refuse_its_siblings(tmp_path):
-    """The anecdote guard survives folding stalls in."""
+    """The anecdote guard survives folding stalls in.
+
+    Deliberately a MARGINAL miss -- 2 h against a 1 h window. The point under
+    test is that a single sample does not refuse a sibling, so the fixture must
+    not also trip `REFUSE_ON_ONE_SAMPLE_MISS_FACTOR` and pass for a reason the
+    name does not describe.
+    """
     runtime = tmp_path / "runtime"
     _census_ledger(runtime, burn_gb_per_hour=100.0, reclaim_gb=400.0,
                    rates=[_stall("p:0:100000", "p", 10_000, 1.0)])
     census = sup.replay_window_census(
-        runtime, [_interval("p:200000:300000", "p", 200_000, 300_000)],
+        runtime, [_interval("p:200000:220000", "p", 200_000, 220_000)],
         min_free_disk_gb=_floor_for_window(runtime, 100.0),
     )
-    assert census["unknown"] == ["p:200000:300000"]
+    assert census["window_hours"] == pytest.approx(1.0, abs=0.05)
+    assert census["intervals"][0]["eta_hours"] == pytest.approx(2.0, rel=1e-3)
+    assert census["unknown"] == ["p:200000:220000"]
     assert sup.replay_queue_is_hopeless(census) is False
+
+
+# ---------------------------------------------------------------------------
+# The barren stall: a generation that banked NOTHING
+# ---------------------------------------------------------------------------
+
+def _barren(interval_id: str, phase: str, hours: float,
+            unix: float = T0) -> dict:
+    """A stall that consumed `hours` and reached no durable commit."""
+    return {
+        "kind": sup.REPLAY_STALL_KIND,
+        "interval_id": interval_id,
+        "phase": phase,
+        "reason": "disk floor reached before a verdict",
+        "rows_trained": 0,
+        "hours": hours,
+        "updated_unix": unix,
+    }
+
+
+def test_a_generation_that_banked_nothing_refuses_its_own_interval(tmp_path):
+    """The strongest evidence there is, and the first version discarded it.
+
+    An interval too large for the window is an interval that gets killed, and
+    one killed before its first durable commit banks nothing -- so the more
+    hopeless the interval, the less the old `record_replay_stall` recorded
+    about it. Measured 2026-09-15: both `jupyter-scientific-full` stalls
+    carried no rows, no hours and no rate, so 115 h later the phase had ZERO
+    samples, all its intervals scored `unknown`, and the census spent the
+    volume's entire remaining window on a span needing ~41 h.
+    """
+    runtime = tmp_path / "runtime"
+    _census_ledger(runtime, burn_gb_per_hour=100.0, reclaim_gb=400.0,
+                   rates=[_barren("p:0:100000", "p", 6.0)])
+    census = sup.replay_window_census(
+        runtime, [_interval("p:0:100000", "p", 0, 100_000)],
+        min_free_disk_gb=_floor_for_window(runtime, 400.0),
+    )
+    row = census["intervals"][0]
+    assert census["window_hours"] == pytest.approx(4.0, abs=0.1)
+    assert row["barren_stall_hours"] == pytest.approx(6.0)
+    assert row["eta_hours"] is None, "a barren stall must not invent a rate"
+    assert row["rate_source"] == "own_barren_stall"
+    assert census["exceeds"] == ["p:0:100000"]
+
+
+def test_a_barren_stall_shorter_than_the_window_refuses_nothing(tmp_path):
+    """A reboot is not a measurement.
+
+    A generation killed after two minutes banked nothing because it was never
+    given a chance. Reading that as a refusal would halt the curriculum on an
+    absence of evidence -- this repository's most expensive recurring mistake.
+    """
+    runtime = tmp_path / "runtime"
+    _census_ledger(runtime, burn_gb_per_hour=100.0, reclaim_gb=400.0,
+                   rates=[_barren("p:0:100000", "p", 0.03)])
+    census = sup.replay_window_census(
+        runtime, [_interval("p:0:100000", "p", 0, 100_000)],
+        min_free_disk_gb=_floor_for_window(runtime, 400.0),
+    )
+    assert census["unknown"] == ["p:0:100000"]
+    assert sup.replay_queue_is_hopeless(census) is False
+
+
+def test_a_barren_stall_never_enters_the_phase_rate(tmp_path):
+    """A rate of zero would refuse every interval sharing that corpus forever.
+
+    This is why `record_replay_stall` has always refused to publish one, and
+    the reason the barren fact is carried on its own channel instead: it
+    refuses the interval it measured, and says nothing about its siblings.
+    """
+    runtime = tmp_path / "runtime"
+    _census_ledger(runtime, burn_gb_per_hour=100.0, reclaim_gb=400.0,
+                   rates=[_barren("p:0:100000", "p", 6.0)])
+    assert "p" not in sup.measure_phase_rows_per_hour(runtime)
+    census = sup.replay_window_census(
+        runtime, [_interval("p:500000:520000", "p", 500_000, 520_000)],
+        min_free_disk_gb=_floor_for_window(runtime, 400.0),
+    )
+    assert census["unknown"] == ["p:500000:520000"]
+
+
+def test_record_replay_stall_keeps_the_hours_of_a_barren_generation(tmp_path):
+    """The writer half. Built on the record the host actually emitted.
+
+    The two live `jupyter-scientific-full` stalls carried `reason` and nothing
+    else, which is how a phase reached 115 h with no evidence at all. `hours`
+    is now unconditional and `rows_trained` explicit, so a reader can tell a
+    barren generation from one this function had no numbers for.
+    """
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    sup.record_replay_stall(runtime, "p:0:100000", "p", "disk floor",
+                            rows_trained=0, hours=6.0)
+    written = json.loads(
+        (runtime / "curriculum-health.jsonl").read_text(
+            encoding="utf-8").splitlines()[-1])
+    assert written["rows_trained"] == 0
+    assert written["hours"] == pytest.approx(6.0)
+    # Still no rate: a zero would be folded into the phase average.
+    assert "rows_per_hour" not in written
+    assert sup.replay_barren_stalls(runtime) == {"p:0:100000": 6.0}
+    assert sup.replay_stall_observations(runtime) == {}
+
+
+def test_a_stall_record_from_before_this_measurement_is_not_barren(tmp_path):
+    """The two live records carry no `rows_trained` at all.
+
+    Absent is not zero. Reading a pre-measurement record as "banked nothing"
+    would refuse intervals on evidence that was never collected.
+    """
+    runtime = tmp_path / "runtime"
+    _ledger(runtime, [{
+        "kind": sup.REPLAY_STALL_KIND,
+        "interval_id": "jupyter-scientific-full:201344:262144",
+        "phase": "jupyter-scientific-full",
+        "reason": "generation ended in state 'training' before a verdict",
+        "updated_unix": 1789110500.680132,
+    }])
+    assert sup.replay_barren_stalls(runtime) == {}
+    assert sup.replay_stall_observations(runtime) == {}
+
+
+# ---------------------------------------------------------------------------
+# What the halt is actually asking for
+# ---------------------------------------------------------------------------
+
+def test_the_refusal_prices_the_queue_against_the_volumes_capacity(tmp_path):
+    """"Nothing fits" invites splitting, and splitting is inert here.
+
+    The window is consumed by TRAINING HOURS, not by interval boundaries, and
+    an admission returns no disk: the guard is re-cloned from the live brain,
+    so the retired guard shares every block with it (measured guard-unique:
+    0.00 GB). Only a rollback returns bytes and a rollback discards the
+    interval. So `window_hours` is the volume's TOTAL remaining training
+    capacity however the queue is cut up, and the refusal has to say so or the
+    obvious next repair wastes another week.
+
+    Measured 2026-09-15: 2,758,116 pending rows against a 1.11 h window.
+    """
+    runtime = tmp_path / "runtime"
+    _census_ledger(runtime, burn_gb_per_hour=100.0, reclaim_gb=400.0,
+                   rates=_admissions("fast", 100_000, 1.0, 2))
+    census = sup.replay_window_census(
+        runtime,
+        [_interval("fast:0:1000000", "fast", 0, 1_000_000),
+         _interval("fast:1000000:2000000", "fast", 1_000_000, 2_000_000)],
+        min_free_disk_gb=_floor_for_window(runtime, 400.0),
+    )
+    capacity = census["capacity"]
+    assert capacity["pending_rows"] == 2_000_000
+    assert capacity["fastest_measured_rows_per_hour"] == pytest.approx(
+        100_000.0)
+    # 2,000,000 rows at 100,000 rows/h is 20 h, against a 4 h window.
+    assert capacity["hours_needed_at_fastest_rate"] == pytest.approx(20.0)
+    assert capacity["hours_available"] == pytest.approx(4.0, abs=0.1)
+    assert capacity["deficit_factor"] == pytest.approx(5.0, abs=0.2)
+    assert capacity["splitting_cannot_help"] is True
+
+
+def test_capacity_publishes_the_honest_bound_beside_the_generous_one(tmp_path):
+    """The fastest rate on the host is not the rate the queue will pay.
+
+    On the live host `hours_needed_at_fastest_rate` prices 2.76 M rows at
+    go-systems' 59,778 rows/h -- and no pending interval is go-systems. The
+    measured bound prices each interval at its own phase's rate and is ~200x
+    larger. Publishing only the generous one would understate the decision.
+    """
+    runtime = tmp_path / "runtime"
+    _census_ledger(runtime, burn_gb_per_hour=100.0, reclaim_gb=400.0,
+                   rates=(_admissions("fast", 100_000, 1.0, 2)
+                          + _admissions("slow", 1_000, 1.0, 2)))
+    census = sup.replay_window_census(
+        runtime, [_interval("slow:0:100000", "slow", 0, 100_000)],
+        min_free_disk_gb=_floor_for_window(runtime, 400.0),
+    )
+    capacity = census["capacity"]
+    # Generous: 100,000 rows at the host's best 100,000 rows/h = 1 h.
+    assert capacity["hours_needed_at_fastest_rate"] == pytest.approx(1.0)
+    # Honest: this interval is `slow`, 1,000 rows/h, so 100 h.
+    assert capacity["hours_needed_at_measured_rates"] == pytest.approx(100.0)
+    assert capacity["intervals_priced"] == 1
+    assert capacity["intervals_total"] == 1
+    assert capacity["deficit_factor_at_measured_rates"] == pytest.approx(
+        25.0, abs=1.0)
+
+
+def test_an_unpriced_queue_reports_no_capacity_rather_than_zero(tmp_path):
+    """A phase with no rate contributes no hours, and must not read as cheap.
+
+    `intervals_priced` beside `intervals_total` is how a reader tells a queue
+    that was fully measured from one where the sum covers a fraction of it --
+    the same distinction a vacuous zero has already destroyed twice here.
+    """
+    runtime = tmp_path / "runtime"
+    _census_ledger(runtime, burn_gb_per_hour=100.0, reclaim_gb=400.0, rates=[])
+    census = sup.replay_window_census(
+        runtime, [_interval("new:0:100000", "new", 0, 100_000)],
+        min_free_disk_gb=_floor_for_window(runtime, 400.0),
+    )
+    capacity = census["capacity"]
+    assert capacity["hours_needed_at_measured_rates"] is None
+    assert capacity["intervals_priced"] == 0
+    assert capacity["intervals_total"] == 1
+    assert census["unknown"] == ["new:0:100000"]
+
+
+# ---------------------------------------------------------------------------
+# Selection must read the verdict the census just measured
+# ---------------------------------------------------------------------------
+
+def test_a_measured_exceeds_never_outranks_an_unmeasured_candidate():
+    """The gap that made the whole census inert for the interval it was on.
+
+    `replay_queue_is_hopeless` is an aggregate -- it answers whether ANYTHING
+    is worth training, never WHICH. Selection took `pending[0]` from a sort
+    keyed on `(stalls, span)` that had never heard of a verdict, so one
+    `unknown` anywhere kept the queue eligible while the head was measured to
+    fail. Verified live 2026-09-15: 21 of 22 `exceeds`, and the interval
+    actually training was `jupyter-scientific-full:524288:655360` at 42.44 h
+    against a 2.36 h window.
+    """
+    doomed = _interval("p:524288:655360", "p", 524_288, 655_360)
+    unmeasured = _interval("p:201344:262144", "p", 201_344, 262_144)
+    # Stalls and span both prefer the doomed one: it has no stall, and the
+    # unmeasured one is the smaller span only after the verdict is considered.
+    ordered = sup.order_replay_candidates(
+        [doomed, unmeasured], {"p:201344:262144": 1},
+        verdicts={"p:524288:655360": "exceeds",
+                  "p:201344:262144": "unknown"},
+    )
+    assert [row["interval_id"] for row in ordered] == [
+        "p:201344:262144", "p:524288:655360"]
+    # Without the verdict the old order stands, and it picks the doomed one.
+    assert sup.order_replay_candidates(
+        [doomed, unmeasured], {"p:201344:262144": 1},
+    )[0]["interval_id"] == "p:524288:655360"
+
+
+def test_fits_outranks_unknown_which_outranks_exceeds():
+    intervals = [
+        _interval("p:0:1000", "p", 0, 1000),
+        _interval("p:1000:2000", "p", 1000, 2000),
+        _interval("p:2000:3000", "p", 2000, 3000),
+    ]
+    ordered = sup.order_replay_candidates(
+        intervals, {},
+        verdicts={"p:0:1000": "exceeds", "p:1000:2000": "unknown",
+                  "p:2000:3000": "fits"},
+    )
+    assert [row["interval_id"] for row in ordered] == [
+        "p:2000:3000", "p:1000:2000", "p:0:1000"]
+
+
+def test_ordering_is_a_reordering_and_never_a_filter():
+    """Every obligation stays eligible; an `exceeds` is selected when alone.
+
+    This is the accept/quarantine invariant: nothing is admitted, discarded or
+    retired by ordering. An interval measured to exceed is still trained once
+    nothing else remains -- which is also exactly when `replay_queue_is_hopeless`
+    refuses the queue outright and the decision moves to the operator.
+    """
+    intervals = [_interval("p:0:1000", "p", 0, 1000),
+                 _interval("p:1000:2000", "p", 1000, 2000)]
+    ordered = sup.order_replay_candidates(
+        intervals, {},
+        verdicts={"p:0:1000": "exceeds", "p:1000:2000": "exceeds"},
+    )
+    assert len(ordered) == 2
+    assert {row["interval_id"] for row in ordered} == {"p:0:1000", "p:1000:2000"}
+
+
+def test_an_unrecognised_verdict_ranks_as_unknown_not_as_exceeds():
+    """A name this sort does not know is an absence of evidence.
+
+    Ranking it with `exceeds` would let a future verdict string -- or a typo --
+    silently push every interval to the back of the queue, which is a halt by
+    spelling.
+    """
+    intervals = [_interval("p:0:1000", "p", 0, 1000),
+                 _interval("p:1000:2000", "p", 1000, 2000)]
+    ordered = sup.order_replay_candidates(
+        intervals, {},
+        verdicts={"p:0:1000": "exceeds", "p:1000:2000": "something_new"},
+    )
+    assert ordered[0]["interval_id"] == "p:1000:2000"
+
+
+def test_selection_passes_the_census_verdicts_into_the_ordering():
+    """The wiring, not just the sort. A key nothing populates ranks nothing."""
+    source = (sup.ROOT / "scripts"
+              / "programming_curriculum_supervisor.py").read_text(
+        encoding="utf-8")
+    body = source.split("def run_deferred_replays")[1].split("\ndef ")[0]
+    census_at = body.index("census = replay_window_census")
+    order_at = body.index("verdicts={row[\"interval_id\"]: row[\"verdict\"]")
+    # The census must be measured BEFORE the order that consumes it.
+    assert census_at < order_at
+    assert "pending[0]" not in body.split("order_replay_candidates")[0][-400:]

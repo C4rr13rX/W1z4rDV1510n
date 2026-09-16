@@ -728,6 +728,96 @@ Verify, do not assume:
   solution as passing. Size the per-task timeout against a loaded host, or
   serialise the course, before reading any obstacle-course total as a result.
 
+- **The stall record deleted the evidence that its own failure mode produces.**
+  `record_replay_stall` published `rows_trained`/`hours`/`rows_per_hour` only
+  when `rows_trained > 0` — reasonable on its face, since a rate of 0 rows/h
+  folded into `measure_phase_rows_per_hour` would refuse every interval in the
+  phase forever. But an interval too large for the window is exactly an
+  interval that gets KILLED, and one killed before its first durable commit
+  banks nothing, so the more hopeless the interval the less this recorded about
+  it. Measured 2026-09-15: both `jupyter-scientific-full` stall records (written
+  2026-09-10) carried a `reason` and nothing else, so **115 h later the phase
+  still had zero rate samples**, all four of its intervals scored `unknown`,
+  and `unknown` counts as eligible — so the census whose entire purpose is to
+  refuse a doomed spend selected `:393216:524288` and spent the volume's whole
+  1.31 h window on a span needing ~41 h. Fixed: `hours` is recorded
+  unconditionally and a barren generation gets its own channel
+  (`replay_barren_stalls`), never folded into a phase rate, refusing only the
+  interval it measured and only once that generation was at least as long as
+  the window — a two-minute reboot banked nothing because it was never given a
+  chance. Verified live: the next stall carried `rows_per_hour: 3088.2` where
+  its two predecessors carried nothing.
+
+- **A per-interval verdict that selection never reads is inert, and this one
+  hid behind an aggregate.** `replay_window_census` computes `fits`/`unknown`/
+  `exceeds` per interval; `replay_queue_is_hopeless` collapses that to one
+  boolean over the WHOLE queue (true only when nothing fits and nothing is
+  unknown); and selection then took `pending[0]` from `order_replay_candidates`,
+  sorted on `(stalls, span)`, which had never heard of a verdict. So a single
+  `unknown` anywhere kept the queue "not hopeless" while the head was an
+  interval the census had just measured to fail. Measured live minutes after
+  the barren-stall fix gave the phase its first rate: **21 of 22 intervals
+  `exceeds`, and the supervisor was training `jupyter-scientific-full:524288:
+  655360` — ETA 42.44 h against a 2.36 h window, an 18x miss, measured and
+  selected.** The lone `unknown` holding the gate open was a 2026-09-10 record
+  carrying no measurement at all. Fixed by ranking on the verdict
+  (`fits` < `unknown` < `exceeds`) — still a REORDER, never a filter, so every
+  obligation stays eligible and an `exceeds` is selected the moment nothing
+  else remains, which is also exactly when the queue is refused outright.
+  **When a decision function publishes a per-item verdict, find the consumer
+  that acts on it; an aggregate over the set is not that consumer.**
+
+- **Sample count is a proxy for confidence; the MISS FACTOR is the
+  measurement.** `MIN_RATE_SAMPLES_TO_REFUSE = 2` exists so a measurement
+  cannot become a self-fulfilling halt, and that is right for a marginal miss.
+  It is wrong for `jupyter-scientific-para4`, which missed by **434x** on a
+  single sample that had itself observed 7,984 rows over 34.64 h — and still
+  had to spend a full window and a rollback to "confirm" what no second
+  observation could overturn. One sample now refuses when the miss exceeds
+  `REFUSE_ON_ONE_SAMPLE_MISS_FACTOR` (10x), sized well above the ~22x swing of
+  an INSTANTANEOUS row rate because these samples are end-to-end over 14–35 h.
+  Effect measured live: 18 of 22 intervals refused on evidence already in the
+  ledger, each of which would otherwise have cost one window plus a rollback.
+
+- **Splitting the work unit cannot help, because the window is consumed by
+  TRAINING HOURS and not by interval boundaries.** The obvious repair for "no
+  interval fits" is smaller intervals, and on this volume it is inert: an
+  admission returns no disk. The guard is re-cloned from the live brain, so the
+  retired guard shares every block with it (measured guard-unique **0.00 GB**),
+  and only a rollback returns bytes — which discards the interval. So
+  `window_hours` is the volume's TOTAL remaining training capacity however the
+  queue is cut up; splitting changes only whether those hours end up admitted
+  or discarded, not how many there are. The refusal now publishes a `capacity`
+  block so nobody rediscovers this. Measured 2026-09-15 at the halt:
+  **2,758,116 pending rows; 2.47 h available (415.18 GB above the floor at
+  167.96 GB/h over 120 samples); 46.1 h needed at 59,778 rows/h — the fastest
+  rate this host has EVER measured, on a phase with nothing pending — a 18.7x
+  deficit; and 9,288.4 h at each interval's own measured phase rate, a 3,760x
+  deficit, with 22 of 22 intervals priced.** Publish both bounds: the generous
+  one makes the argument unarguable, the measured one is what the queue costs.
+  The volume was **565.18 GB free of 1023.5 GB** throughout — this is exit 91,
+  not 90, and resizing a disk that is not full would fix nothing.
+
+  The root cause of both halves is one fact already in this file: a ~363 GB
+  brain on a 15.26 GB host evicts continuously, and that single pressure
+  produces the 167.96 GB/h of append-only full-body rewrites AND the 260x
+  spread in per-row cost (go-systems 59,778 rows/h against para4 230.5). More
+  RAM is therefore the one purchase that addresses both; a larger volume buys
+  only time; delta-encoded terminal updates are the architecture fix. All three
+  are user decisions, which is why the halt names the arithmetic rather than
+  guessing.
+
+- **`aws ssm send-command` caps parameters plus document at 97 KB, and the
+  error is deleted before you see it.** The supervisor is ~284 KB of source;
+  gzip+base64 is ~90 KB, and it crossed the limit mid-session as this change
+  added lines. `bootstrap_training_host.aws` runs the CLI with `check=True`
+  beside `capture_output=True` — the same evidence-deleting pair this file
+  already documents for `debug_eval` — so `MaxDocumentSizeExceeded` surfaced
+  only as `returned non-zero exit status 254`, which names nothing. Deploys of
+  this file must now CHUNK the payload (`_build_capacity_census_deploy.py`
+  emits `partN.sh` + `install.sh`, digest-checked on the host before install),
+  and it will keep growing, so trimming a fix to fit is not the answer.
+
 - **`event.get("a") or event.get("b")` deletes a legitimate zero.** A
   timestamp, row or count of 0 is falsy, so that idiom silently drops the
   record from the measurement. Caught by a test here, and it is the same class
