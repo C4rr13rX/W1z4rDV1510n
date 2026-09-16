@@ -807,6 +807,24 @@ Verify, do not assume:
   are user decisions, which is why the halt names the arithmetic rather than
   guessing.
 
+- **A halt BY DESIGN looks identical to a dead host, and both emitters said so.**
+  Exit 91 leaves the unit `failed` with no supervisor and no wrapper — exactly
+  the census every fault arm treats as catastrophic. `classify_probe` fell
+  through to "no curriculum supervisor or wrapper owns terminal state
+  `no_interval_fits_disk_window`", and since `cooldown_elapsed` re-triggers an
+  unchanged fingerprint on a timer, that would have billed an agent wake-up
+  every 1800 s forever against a state no agent can resolve;
+  `admission_watchdog.faults` would have reported `supervisor_down`,
+  `brain_down` and `no_admission` together. **Change both** — the third time
+  they have drifted. The new `awaiting_user_decision` kind fires ONCE per
+  distinct situation, with the capacity arithmetic in its fingerprint so a
+  grown volume or fallen burn still re-fires; note the fingerprint is built
+  inline, because `event_fingerprint` hashes a fixed identity set and would
+  have made a fire-once kind permanently silent — worse than the repeating
+  alarm. And it sits BELOW the disk arm: a lifecycle notice ranked above the
+  fault arms outranks all of them once its state is permanent, which this one
+  is until a human acts.
+
 - **`aws ssm send-command` caps parameters plus document at 97 KB, and the
   error is deleted before you see it.** The supervisor is ~284 KB of source;
   gzip+base64 is ~90 KB, and it crossed the limit mid-session as this change
