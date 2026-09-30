@@ -32,28 +32,56 @@ but which are true in the world, must never get worse.
 ## Where it stands (measured, not assumed)
 
 `python tools/scorecard.py --stress` trains a scene world of rooms, objects
-and properties, then probes it. Numbers from 2026-09-30:
+and properties, then probes it. Numbers from 2026-09-30, after the two
+changes below (the first column is where this page started the same day):
 
-| scale | facts | recall | integration | peak RAM | neuron data | hub fan-out |
-|---|---|---|---|---|---|---|
-| 1 | 152 | 100% | 0% | 56 MB | 1 MB | 270 |
-| 4 | 608 | 100% | 0% | 171 MB | 3 MB | 831 |
-| 16 | 2,432 | 100% | 0% | 626 MB | 8 MB | 2,683 |
-| 64 | 9,728 | 100% | 0% | **2,471 MB** | **24 MB** | 10,632 |
+| scale | facts | recall | integration | peak RAM was | peak RAM | neuron data | hub fan-out was | hub fan-out |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 152 | 100% | 0% | 56 MB | 15.1 MB | 0.3 MB | 270 | 152 |
+| 4 | 608 | 100% | 0% | 171 MB | 18.6 MB | 1.1 MB | 831 | 512 |
+| 16 | 2,432 | 100% | 0% | 626 MB | 28.0 MB | 3.6 MB | 2,683 | 512 |
+| 64 | 9,728 | 100% | 0% | **2,471 MB** | **58.3 MB** | 5.9 MB | 10,632 | **512** |
 
-Three facts follow from the table:
+RAM growth scale 1 → 64: **x44.91 → x3.86**. Both numbers moved for reasons
+worth keeping, and both were found by measuring rather than reasoning:
 
-1. **RAM grows linearly with the corpus.** It should stay flat.
-2. **About 99% of peak RAM is not neuron bodies.** Scale 64 holds 24 MB of
-   neurons in a 2.47 GB process. Measure where the rest goes before you
-   design anything: indexes, moment history, posting lists, EEM facts,
-   caches.
-3. **Hub fan-out grows with the corpus.** An atom is a byte, and every
-   byte atom holds a terminal to every concept containing it. In production
-   those hubs reached about 4 M terminals and 82 MB each, so they could
-   never leave RAM. Symbols should hold a bounded number of strong
-   connections, with the long tail on SSD. Recognising a concept should be
-   an index lookup, not a byte firing into millions of terminals.
+1. **Answering was the allocator, not learning.** One scorecard run per
+   phase at scale 16 (peak measured from outside by `tools/capped.py`): train
+   28.3 MB, recall 546.7 MB, infer 628.4 MB. The trained brain is 28 MB;
+   answering 2,432 questions allocated the other 518 MB.
+   `Pool::check_concept_emergence` inserted one permanent
+   `AHashMap<Vec<NeuronId>, u32>` key per run of length
+   2..=`max_concept_member_count` ending at every observed atom, so a 17-byte
+   question added ~1,071 entries nothing reclaims — ~2.6 M over the probe
+   set. The ledger is **empty after training**:
+   `pretrain_binding_episode` does not go through emergence at all.
+   `Brain::observe_read_only` suppresses emergence for one observe call.
+2. **The hub was a single byte.** The census names the top three neurons per
+   pool; at scale 16 they were the query-pool atoms `q:cg`, `q:IA` and `q:Pw`
+   at fan-out 2,432 each — the fact count exactly — against 21 on the largest
+   concept. The site is `Brain::promote_binding_concept`'s bottom-up
+   member→binding pass. `PoolConfig::max_atom_fanout` (default 512, 0 =
+   unbounded, serde-defaulted so old snapshots keep the old behaviour) caps
+   it, and recall stayed at 100% because `binding_sequence_index`,
+   `binding_feature_atom_index` and `label_to_id` already reach a binding
+   from its members by lookup — the index lookup this page asked for instead
+   of a byte firing into millions of terminals.
+
+What is left, measured at scale 64 with
+`target/release/examples/scorecard.exe --scale 64 --phase infer --census`:
+
+- **Every remaining growing structure is per-fact.** Brain-level index bytes
+  total 12.47 MB: `lifetime_recurrences` 5.13 MB over 9,728 entries (553 B
+  per fact) and `tentative_promoted` 5.13 MB storing the **same**
+  `MomentFingerprint` key a second time, plus `binding_sequence_index`
+  1.24 MB and `pool.label_index` 1.57 MB. A fingerprint owns three `Vec`s and
+  holds every atom id of query and answer twice (`ordered_per_pool` and
+  `members_per_pool`), so a ~22-atom fact costs ~1.1 KB across the two maps:
+  ~1.1 GB at 1 M facts. That is the next wall.
+- **~25 MB at scale 64 is still unaccounted.** 58.3 MB peak against 12.47
+  global + 1.57 pool-side + 5.9 neurons + ~13.7 MB fixed process. Name it
+  with a measurement before designing against it.
+- **Integration is still 0%** at every scale, and that is the second goal.
 
 Integration at 0% is the second goal. The scene world's integration probes
 chain two trained facts. For example, "r03 lamp on" gives "desk" and "r03 desk
