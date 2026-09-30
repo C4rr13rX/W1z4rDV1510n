@@ -4394,7 +4394,10 @@ impl Pool {
             if let Some(n) = self.neurons.get_mut(cid as usize) {
                 dropped += n.terminals.len();
                 n.terminals.clear();
-                n.terminal_idx.clear();
+                // Not `terminal_idx.clear()`: that keeps every bucket, and a
+                // concept pruned to zero terminals has no use for any of them.
+                // rebuild_terminal_idx releases both allocations.
+                n.rebuild_terminal_idx();
                 let label = n.label.clone();
                 self.label_to_id.remove(&label);
                 self.bloom.remove(&label);

@@ -173,6 +173,8 @@ impl Subject {
         // AHashMap each neuron carries, and a hash map allocates for its
         // capacity, not its length.
         let mut body = std::collections::BTreeMap::<&str, usize>::new();
+        let mut fanout_hist = std::collections::BTreeMap::<&str, usize>::new();
+        let mut fanout_terms = std::collections::BTreeMap::<&str, usize>::new();
         let mut neurons = 0usize;
         for pid in self.brain.fabric().pool_ids() {
             let Some(pool) = self.brain.fabric().pool(pid) else { continue };
@@ -189,6 +191,17 @@ impl Subject {
                 // control byte each, and `capacity()` is the usable count.
                 *body.entry("terminal_idx").or_default() += n.terminal_idx.capacity()
                     * (std::mem::size_of::<(NeuronRef, usize)>() + 1);
+                // Where a per-neuron index would still be worth its bytes: a
+                // linear scan over `terminals` answers the same question, so
+                // the map only earns its keep on high fan-out neurons. Bucket
+                // the fan-out so a threshold is chosen from the distribution
+                // rather than guessed.
+                let f = n.terminals.len();
+                let bucket = if f == 0 { "f0" } else if f < 8 { "f1_7" }
+                    else if f < 32 { "f8_31" } else if f < 64 { "f32_63" }
+                    else if f < 128 { "f64_127" } else { "f128_up" };
+                *fanout_hist.entry(bucket).or_default() += 1;
+                *fanout_terms.entry(bucket).or_default() += f;
             }
         }
         serde_json::json!({
@@ -198,6 +211,8 @@ impl Subject {
             "neuron_body_bytes": body,
             "neuron_body_total_bytes": body.values().sum::<usize>(),
             "neuron_body_count": neurons,
+            "fanout_neurons": fanout_hist,
+            "fanout_terminals": fanout_terms,
             "top_fanout": top,
         })
     }
@@ -205,8 +220,13 @@ impl Subject {
     /// (hub fan-out, estimated resident bytes) over every pool.
     fn footprint(&self) -> (usize, usize) {
         let terminal = std::mem::size_of::<w1z4rd_brain::Terminal>();
-        // A terminal also costs one terminal_idx entry (key + value + control byte).
-        let per_terminal = terminal + std::mem::size_of::<(w1z4rd_brain::NeuronRef, usize)>() + 1;
+        // A terminal used to cost a terminal_idx entry too. It no longer does:
+        // the index is kept only above Neuron::TERMINAL_INDEX_THRESHOLD, so the
+        // map is charged from its OWN capacity below rather than per terminal.
+        // Charging it per terminal read 4.1 MB at scale 16 both before and
+        // after the change that removed 4.3 MB of it.
+        let idx_entry = std::mem::size_of::<(w1z4rd_brain::NeuronRef, usize)>() + 1;
+        let per_terminal = terminal;
         let per_member = std::mem::size_of::<w1z4rd_brain::NeuronRef>();
         let per_neuron = std::mem::size_of::<w1z4rd_brain::Neuron>();
         let (mut hub, mut bytes) = (0usize, 0usize);
@@ -220,7 +240,8 @@ impl Subject {
                 bytes += per_neuron
                     + n.label.capacity()
                     + n.members.capacity() * per_member
-                    + n.terminals.capacity() * per_terminal;
+                    + n.terminals.capacity() * per_terminal
+                    + n.terminal_idx.capacity() * idx_entry;
             }
         }
         (hub, bytes)

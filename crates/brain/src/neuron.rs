@@ -120,20 +120,23 @@ pub struct Neuron {
     pub members:              Vec<NeuronRef>,
     pub terminals:            Vec<Terminal>,
     /// Address-by-name index over `terminals`: `target → position in
-    /// the Vec`.  Maintained alongside every terminal mutation so
-    /// reinforce_terminal becomes O(1): "ask the named connection if
-    /// it exists, on miss the error path triggers neurogenesis."
+    /// the Vec`.  A cache, never canonical state (#[serde(skip)]) — the
+    /// same question is answered by scanning `terminals`, so the map is
+    /// kept ONLY on neurons whose fan-out is at least
+    /// [`Neuron::TERMINAL_INDEX_THRESHOLD`].  Below it the Vec is the
+    /// index and this map is empty and unallocated.
     ///
-    /// Rebuilt on snapshot restore (#[serde(skip)]) — the index is a
-    /// cache over the persistent `terminals` Vec, not part of the
-    /// canonical state.  Cost: ~16 B per entry × 170 M terminals at
-    /// fabric peak = ~3 GB extra working set, acceptable for the
-    /// O(N) → O(1) speedup on the cross-pool wiring hot path.
+    /// Why: measured at scale 64 of the scorecard, 9,392 of 9,776
+    /// neurons hold NO terminals and 48 hold ≥128 (24,576 of the 24,975
+    /// terminals in the fabric), yet the map's capacity was 297,178
+    /// entries — 5.05 MB — because `clear()` retains capacity, so every
+    /// neuron pruned back to empty kept ~28 buckets forever.
     ///
-    /// INVARIANT: for every i ∈ 0..terminals.len(),
-    ///   terminal_idx[terminals[i].target] == i
-    /// Any prune/retain over `terminals` must also rebuild this map
-    /// (cheap — O(|terminals|), called via Neuron::rebuild_terminal_idx).
+    /// INVARIANT: either `terminal_idx.len() == terminals.len()` and for
+    /// every i, `terminal_idx[terminals[i].target] == i`; or the map is
+    /// empty and lookups scan.  [`Neuron::find_terminal`] reads the
+    /// discriminator off those two lengths, so a prune that forgets to
+    /// rebuild degrades to a scan rather than to a wrong answer.
     #[serde(skip)]
     pub terminal_idx:         ahash::AHashMap<NeuronRef, usize>,
     pub born_tick:            u64,
@@ -319,7 +322,7 @@ impl Neuron {
         // shift existing positions).  Any caller that prunes terminals
         // MUST call rebuild_terminal_idx — handled by decay_and_prune
         // and apply_pending_decay below.
-        if let Some(&idx) = self.terminal_idx.get(&target) {
+        if let Some(idx) = self.find_terminal(&target) {
             let t = &mut self.terminals[idx];
             t.weight = (t.weight + delta).min(max_weight);
             if t.last_fired_tick != tick {
@@ -330,9 +333,42 @@ impl Neuron {
         } else {
             let idx = self.terminals.len();
             self.terminals.push(Terminal::new(target, delta.min(max_weight), tick));
-            self.terminal_idx.insert(target, idx);
+            if self.terminals.len() >= Self::TERMINAL_INDEX_THRESHOLD {
+                if self.terminal_idx.len() == idx {
+                    // The index already covers 0..idx — extend it.
+                    self.terminal_idx.insert(target, idx);
+                } else {
+                    // This push crossed the threshold (or the index was
+                    // released by a prune): build it from the Vec.
+                    self.rebuild_terminal_idx();
+                }
+            }
             true
         }
+    }
+
+    /// Fan-out at or above which a neuron pays for a hash index over its
+    /// terminals.  Below it a linear scan over `len` 24-byte terminals is
+    /// both correct and cheaper than the map that would answer it: at
+    /// scale 64 only 48 of 9,776 neurons reach this threshold, and they
+    /// hold 24,576 of the 24,975 terminals.
+    ///
+    /// 64 is the smallest power of two above the measured non-hub maximum
+    /// (7 terminals), so no ordinary neuron allocates a map at all.
+    pub const TERMINAL_INDEX_THRESHOLD: usize = 64;
+
+    /// Position in `terminals` of the terminal aimed at `target`.
+    ///
+    /// Uses `terminal_idx` when it covers every terminal, otherwise
+    /// scans.  The discriminator is the two lengths, so the answer is
+    /// correct whether or not a caller rebuilt the index — a missing
+    /// rebuild costs a scan, never a wrong position.
+    #[inline]
+    pub fn find_terminal(&self, target: &NeuronRef) -> Option<usize> {
+        if !self.terminals.is_empty() && self.terminal_idx.len() == self.terminals.len() {
+            return self.terminal_idx.get(target).copied();
+        }
+        self.terminals.iter().position(|t| &t.target == target)
     }
 
     /// Number of terminals whose consolidation has reached the lock
@@ -345,11 +381,35 @@ impl Neuron {
     /// Call after any operation that removes entries from `terminals`
     /// (retain, drain, clear, pop) — append-only operations preserve
     /// the invariant and do NOT need a rebuild.
+    ///
+    /// This is also where both of a neuron's terminal allocations are
+    /// RELEASED.  `Vec::retain` and `HashMap::clear` keep capacity, so a
+    /// neuron grown to 24 terminals and pruned back to 0 held 24 terminal
+    /// slots and ~28 hash buckets for the rest of its life.  Measured at
+    /// scale 64: 254,736 Vec slots for 24,975 live terminals and 297,178
+    /// map entries, 11.2 MB between them on a 15.3 MB body total.
     pub fn rebuild_terminal_idx(&mut self) {
-        self.terminal_idx.clear();
-        self.terminal_idx.reserve(self.terminals.len());
-        for (i, t) in self.terminals.iter().enumerate() {
-            self.terminal_idx.insert(t.target, i);
+        if self.terminals.len() < Self::TERMINAL_INDEX_THRESHOLD {
+            // Below the threshold the Vec is the index. Drop the map
+            // outright — `clear()` alone would keep every bucket.
+            if self.terminal_idx.capacity() > 0 {
+                self.terminal_idx = ahash::AHashMap::new();
+            }
+        } else {
+            self.terminal_idx.clear();
+            self.terminal_idx.reserve(self.terminals.len());
+            for (i, t) in self.terminals.iter().enumerate() {
+                self.terminal_idx.insert(t.target, i);
+            }
+        }
+        // Return the spare half of a pruned terminal Vec, but only when the
+        // block is worth returning. Releasing the last 4 slots as well was
+        // MEASURED WORSE: it cut accounted bytes by 0.36 MB and raised the
+        // scale-64 peak 37.0 -> 38.0 MB, because 9,392 frees of 96 bytes
+        // fragment the arena instead of returning pages to the OS. Accounted
+        // bytes are not resident bytes; the peak is the number that is gated.
+        if self.terminals.capacity() > 4 && self.terminals.len() * 2 <= self.terminals.capacity() {
+            self.terminals.shrink_to_fit();
         }
     }
 
@@ -441,5 +501,74 @@ impl Neuron {
             self.rebuild_terminal_idx();
         }
         pruned
+    }
+}
+
+#[cfg(test)]
+mod terminal_index_tests {
+    use super::*;
+
+    fn atom() -> Neuron {
+        Neuron::new_atom(0, "atom".into(), NeuronKind::Excitatory, 1)
+    }
+
+    fn wire(n: &mut Neuron, count: u32) {
+        for i in 0..count {
+            n.reinforce_terminal(NeuronRef::new(1, i), 0.5, 1, 1.0);
+        }
+    }
+
+    /// The majority case: a low-fan-out neuron allocates NO index at all,
+    /// and every terminal is still addressable by name. This is the 5.05 MB
+    /// the map cost at scale 64, where 9,392 of 9,776 neurons hold nothing.
+    #[test]
+    fn a_neuron_below_the_threshold_carries_no_index() {
+        let mut n = atom();
+        wire(&mut n, Neuron::TERMINAL_INDEX_THRESHOLD as u32 - 1);
+        assert_eq!(n.terminal_idx.capacity(), 0, "no map below the threshold");
+        for i in 0..n.terminals.len() as u32 {
+            assert_eq!(n.find_terminal(&NeuronRef::new(1, i)), Some(i as usize));
+        }
+        assert_eq!(n.find_terminal(&NeuronRef::new(1, 9999)), None);
+        // And a repeat reinforcement must strengthen in place, not append.
+        let before = n.terminals.len();
+        assert!(!n.reinforce_terminal(NeuronRef::new(1, 3), 0.5, 2, 10.0));
+        assert_eq!(n.terminals.len(), before);
+    }
+
+    /// Crossing the threshold builds the index, and it must agree with a
+    /// scan at EVERY position — an off-by-one at the crossing would return
+    /// the wrong terminal, which a lookup-miss test cannot see.
+    #[test]
+    fn crossing_the_threshold_builds_an_index_that_agrees_with_a_scan() {
+        let mut n = atom();
+        wire(&mut n, Neuron::TERMINAL_INDEX_THRESHOLD as u32 + 40);
+        assert_eq!(n.terminal_idx.len(), n.terminals.len(), "index covers every terminal");
+        for (i, t) in n.terminals.iter().enumerate() {
+            assert_eq!(n.find_terminal(&t.target), Some(i));
+            assert_eq!(n.terminal_idx.get(&t.target).copied(), Some(i));
+        }
+    }
+
+    /// A prune back to empty must RELEASE both allocations. `Vec::retain`
+    /// and `HashMap::clear` keep capacity, which is how a neuron grown to
+    /// 24 terminals and pruned to 0 kept its bytes for life.
+    #[test]
+    fn a_prune_to_empty_releases_both_allocations() {
+        let mut n = atom();
+        wire(&mut n, Neuron::TERMINAL_INDEX_THRESHOLD as u32 + 40);
+        assert!(n.terminal_idx.capacity() > 0 && n.terminals.capacity() > 0);
+        // Nothing is consolidation-locked after one tick, so a decay past
+        // the floor prunes every terminal.
+        let wired = n.terminals.len();
+        let pruned = n.apply_pending_decay(500, 0.5, 0.01);
+        assert_eq!(pruned, wired, "every one of the {wired} terminals pruned");
+        assert!(n.terminals.is_empty(), "terminals pruned to empty");
+        assert_eq!(n.terminal_idx.capacity(), 0, "index allocation released");
+        assert!(
+            n.terminals.capacity() <= 4,
+            "terminal Vec released, held {} slots",
+            n.terminals.capacity(),
+        );
     }
 }
