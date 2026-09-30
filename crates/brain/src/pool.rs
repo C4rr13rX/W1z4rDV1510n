@@ -1646,6 +1646,21 @@ pub struct Pool {
     /// so request cleanup must never discard them.
     read_only_inference_active: bool,
     read_only_inference_residents: AHashSet<NeuronId>,
+    /// While set, `check_concept_emergence` counts nothing and promotes
+    /// nothing: perception is serving an ANSWER, not learning.
+    ///
+    /// Measured 2026-09-30 on the scorecard's scene world at scale 16: the
+    /// trained brain peaks at 28.3 MB, then answering 2,432 questions takes
+    /// the process to 546.7 MB. The bytes are the emergence ledger, which
+    /// `check_concept_emergence` grows by one `Vec<NeuronId>` key per run of
+    /// length 2..=`max_concept_member_count` ending at every atom observed --
+    /// ~1,071 permanent map entries per read-only question, ~2.6 M entries
+    /// over the probe set. Nothing about answering a trained question needs a
+    /// new concept, and the ledger is never reclaimed, so RAM grew with the
+    /// number of questions asked rather than with what the brain knows.
+    /// Transient runtime state: scoped by `Brain::observe_read_only`, never
+    /// serialised.
+    emergence_suppressed: bool,
 
     /// Disk offsets for currently-evicted neurons.  An ID in this map
     /// is one whose in-RAM slot has been zeroed out (terminals + members
@@ -1748,6 +1763,7 @@ impl Pool {
             wbrain_store: None,
             shape_only_residents: AHashSet::new(),
             read_only_inference_active: false,
+            emergence_suppressed: false,
             read_only_inference_residents: AHashSet::new(),
             cold_offsets: AHashMap::new(),
             evicted: AHashSet::new(),
@@ -2156,6 +2172,18 @@ impl Pool {
 
     /// Mark the start of a read-only request. Nested activations share one
     /// scope so multi-pool inference retains the complete set of page-ins.
+    /// Set by `Brain::observe_read_only` around one observe call and cleared
+    /// straight after, so a suppressed scope can never leak into training.
+    pub(crate) fn set_emergence_suppressed(&mut self, suppressed: bool) {
+        self.emergence_suppressed = suppressed;
+    }
+
+    /// Entries in the concept-emergence recurrence ledger. Exposed so a test
+    /// can assert that answering does not grow it.
+    pub fn sequence_ledger_entries(&self) -> usize {
+        self.sequences.len()
+    }
+
     pub(crate) fn begin_read_only_inference(&mut self) {
         if !self.read_only_inference_active {
             self.read_only_inference_residents.clear();
@@ -2564,6 +2592,7 @@ impl Pool {
             wbrain_store: Some(store),
             shape_only_residents: AHashSet::new(),
             read_only_inference_active: false,
+            emergence_suppressed: false,
             read_only_inference_residents: AHashSet::new(),
             cold_offsets: AHashMap::new(),
             evicted: AHashSet::new(),
@@ -3826,6 +3855,7 @@ impl Pool {
             wbrain_store: None,
             shape_only_residents: AHashSet::new(),
             read_only_inference_active: false,
+            emergence_suppressed: false,
             read_only_inference_residents: AHashSet::new(),
             cold_offsets: snap.cold_offsets.iter().copied().collect(),
             evicted: snap.cold_offsets.iter().map(|(id, _)| *id).collect(),
@@ -4437,6 +4467,11 @@ impl Pool {
     /// produce overly-specific concepts (memorize one phrase verbatim);
     /// the cap keeps emergent concepts useful.
     fn check_concept_emergence(&mut self, tick: u64) {
+        // Answering is not learning. See `emergence_suppressed`: without this
+        // the ledger grew by ~1,071 permanent keys per question asked.
+        if self.emergence_suppressed {
+            return;
+        }
         // P3 predictive-coding gate.  Only crystallise new concepts
         // when the substrate's recent surprise is above the gate
         // strength.  Already-predicted patterns add no information

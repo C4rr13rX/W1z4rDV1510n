@@ -1750,6 +1750,36 @@ impl Brain {
         self.fabric.activate_shape_for_prediction(pool_id, frame)
     }
 
+    /// Observe a frame that is being ANSWERED, not learned from.
+    ///
+    /// Identical to [`Self::observe`] except that concept emergence is
+    /// suppressed for the duration, so the question does not enter the
+    /// per-pool recurrence ledger. Measured 2026-09-30 on the scorecard's
+    /// scene world at scale 16: the trained brain peaks at 28.3 MB and then
+    /// answering its 2,432 trained questions with [`Self::observe`] takes the
+    /// process to 546.7 MB, because every atom of every question inserts one
+    /// permanent ledger key per run length 2..=64. Peak RAM therefore tracked
+    /// questions asked rather than knowledge held.
+    ///
+    /// The suppression is scoped to this one call, so a caller that later
+    /// trains on a miss still crystallises normally -- which is the design:
+    /// the brain learns when it is taught or when it misses, not every time
+    /// it is asked something it already knows.
+    pub fn observe_read_only(&mut self, pool_id: PoolId, frame: &[u8]) -> Vec<NeuronId> {
+        self.set_emergence_suppressed(true);
+        let fired = self.observe(pool_id, frame);
+        self.set_emergence_suppressed(false);
+        fired
+    }
+
+    fn set_emergence_suppressed(&mut self, suppressed: bool) {
+        for pool_id in self.fabric.pool_ids() {
+            if let Some(pool) = self.fabric.pool(pool_id) {
+                pool.write().set_emergence_suppressed(suppressed);
+            }
+        }
+    }
+
     fn begin_read_only_inference(&mut self) {
         for pool_id in self.fabric.pool_ids() {
             if let Some(pool) = self.fabric.pool(pool_id) {

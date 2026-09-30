@@ -109,7 +109,7 @@ impl Subject {
     /// (crates/node/src/brain_api.rs): the trained binding first, integrate()
     /// as the fallback, then release whatever the query paged in.
     fn recall(&mut self, query: &str) -> Vec<u8> {
-        self.brain.observe(QUERY_POOL, query.as_bytes());
+        self.brain.observe_read_only(QUERY_POOL, query.as_bytes());
         let legacy = self.brain.integrate(QUERY_POOL, ANSWER_POOL);
         let answer = self.brain.decode_best_trained_binding(QUERY_POOL, ANSWER_POOL).or(legacy.answer);
         let _ = self.brain.finish_read_only_inference();
@@ -117,11 +117,38 @@ impl Subject {
     }
 
     fn infer(&mut self, query: &str) -> Vec<u8> {
-        self.brain.observe(QUERY_POOL, query.as_bytes());
+        self.brain.observe_read_only(QUERY_POOL, query.as_bytes());
         self.brain
             .integrate_autonomous(QUERY_POOL, ANSWER_POOL, 100.0, 3, 200)
             .answer
             .unwrap_or_default()
+    }
+
+    /// Where the bytes actually are, at the moment of the call: the
+    /// Brain-level maps, the per-pool side structures that survive eviction,
+    /// and the neuron bodies. `est_resident_mb` only ever counted the last of
+    /// those, which is why it reads 24 MB inside a 2.47 GB process.
+    fn census(&self) -> serde_json::Value {
+        let mut side = std::collections::BTreeMap::<&str, usize>::new();
+        for pid in self.brain.fabric().pool_ids() {
+            let Some(pool) = self.brain.fabric().pool(pid) else { continue };
+            let s = pool.read().side_structure_bytes();
+            for (k, v) in [
+                ("concept_sequence_index", s.concept_sequence_index),
+                ("concept_multiset_index", s.concept_multiset_index),
+                ("label_index", s.label_index),
+                ("sequence_ledger", s.sequence_ledger),
+                ("evicted_set", s.evicted_set),
+                ("cold_offsets", s.cold_offsets),
+            ] {
+                *side.entry(k).or_default() += v;
+            }
+        }
+        serde_json::json!({
+            "global": self.brain.global_index_sizes(),
+            "pool_side_bytes": side,
+            "pool_side_total_bytes": side.values().sum::<usize>(),
+        })
     }
 
     /// (hub fan-out, estimated resident bytes) over every pool.
@@ -172,21 +199,52 @@ fn main() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(1usize);
 
+    // `--phase train|recall|infer|all` stops after that phase. Peak process
+    // memory is measured from OUTSIDE (tools/capped.py), so running the same
+    // scale once per phase attributes the peak to a phase without needing any
+    // platform memory API. Default `all` is what the gate runs.
+    let phase = args
+        .iter()
+        .position(|a| a == "--phase")
+        .and_then(|i| args.get(i + 1))
+        .map(String::as_str)
+        .unwrap_or("all")
+        .to_string();
+    let census_wanted = args.iter().any(|a| a == "--census");
+
     let world = SceneWorld::new(scale);
     let mut subject = Subject::new();
     let t0 = Instant::now();
     subject.train(&world.facts);
     let train_s = t0.elapsed().as_secs_f64();
 
-    let (recall_pct, recall_ms) = score(&world.facts, |q| subject.recall(q));
-    let (integration_pct, infer_ms) = score(&world.integration, |q| subject.infer(q));
+    let census_after_train = census_wanted.then(|| subject.census());
+    let (mut recall_pct, mut recall_ms) = (f64::NAN, f64::NAN);
+    let (mut integration_pct, mut infer_ms) = (f64::NAN, f64::NAN);
+    if phase != "train" {
+        (recall_pct, recall_ms) = score(&world.facts, |q| subject.recall(q));
+    }
+    if phase != "train" && phase != "recall" {
+        (integration_pct, infer_ms) = score(&world.integration, |q| subject.infer(q));
+    }
     let (hub, bytes) = subject.footprint();
     let s = subject.brain.stats();
+    if let Some(after_train) = census_after_train {
+        eprintln!(
+            "census after train: {}",
+            serde_json::to_string_pretty(&after_train).unwrap_or_default()
+        );
+        eprintln!(
+            "census after {phase}: {}",
+            serde_json::to_string_pretty(&subject.census()).unwrap_or_default()
+        );
+    }
 
     println!(
         "{}",
         serde_json::json!({
             "scale": scale,
+            "phase": phase,
             "facts": world.facts.len(),
             "integration_probes": world.integration.len(),
             "recall_pct": recall_pct,
