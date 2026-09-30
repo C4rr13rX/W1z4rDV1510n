@@ -144,10 +144,32 @@ impl Subject {
                 *side.entry(k).or_default() += v;
             }
         }
+        // Fan-out is the last scorecard number still linear in the corpus
+        // (152 at scale 1, 9,728 at scale 64 -- exactly one per fact). Which
+        // neuron carries it decides whether bounding it is safe, so name it
+        // rather than reporting a bare maximum.
+        let mut top: Vec<serde_json::Value> = Vec::new();
+        for pid in self.brain.fabric().pool_ids() {
+            let Some(pool) = self.brain.fabric().pool(pid) else { continue };
+            let pool = pool.read();
+            let mut ranked: Vec<(usize, u32, String, bool, usize)> = pool
+                .iter_neurons()
+                .map(|n| (n.terminals.len(), n.id, n.label.clone(), n.is_atom(), n.members.len()))
+                .collect();
+            ranked.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+            for (fanout, id, label, is_atom, members) in ranked.into_iter().take(3) {
+                top.push(serde_json::json!({
+                    "pool": pid, "id": id, "fanout": fanout,
+                    "is_atom": is_atom, "members": members,
+                    "label": label.chars().take(48).collect::<String>(),
+                }));
+            }
+        }
         serde_json::json!({
             "global": self.brain.global_index_sizes(),
             "pool_side_bytes": side,
             "pool_side_total_bytes": side.values().sum::<usize>(),
+            "top_fanout": top,
         })
     }
 
