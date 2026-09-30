@@ -100,8 +100,9 @@ What is left, measured at scale 64 with
 
 - **Brain-level index bytes are 12.47 → 4.72 MB** and `pool.label_index`
   1.57 → 0.61 MB. The remainder is still per-fact and still the same shape:
-  `fingerprint_keys` 2.17 MB over 9,728 (223 B per fact, now just
-  `ordered_per_pool` plus the struct), `binding_sequence_index` 1.30 MB over
+  `fingerprint_keys` 2.79 MB over 9,728 (287 B per fact, now just
+  `ordered_per_pool` plus the struct — the census counts Vec CAPACITY here
+  now, which is 29 % more than the `len` it counted before), `binding_sequence_index` 1.30 MB over
   9,742 (134 B — the query's atom sequence, a THIRD copy of what the
   fingerprint already holds), `binding_feature_atom_index` 0.64 MB and
   `binding_motif_index` 0.37 MB. Deduplicating the sequence index against the

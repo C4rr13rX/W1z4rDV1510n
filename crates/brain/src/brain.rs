@@ -1610,18 +1610,21 @@ impl Brain {
     /// moment ever observed, keyed by a `MomentFingerprint` that owns three
     /// `Vec`s, and only ever cleared wholesale.
     pub fn global_index_sizes(&self) -> serde_json::Value {
+        // CAPACITY, not len. A `Vec` holds the buffer it grew, and counting
+        // `len` here is the same error `Neuron::footprint` had -- correcting
+        // it there moved `est_resident_mb` at scale 64 from 5.9 to 14.9 MB.
         fn fp_bytes(fp: &MomentFingerprint) -> usize {
+            fn per_pool(v: &Vec<(PoolId, Vec<NeuronId>)>) -> usize {
+                v.capacity() * std::mem::size_of::<(PoolId, Vec<NeuronId>)>()
+                    + v.iter()
+                        .map(|(_, ids)| ids.capacity() * std::mem::size_of::<NeuronId>())
+                        .sum::<usize>()
+            }
             std::mem::size_of::<MomentFingerprint>()
-                + fp.legacy_pairs.as_ref().map_or(0, |p| p.len())
+                + fp.legacy_pairs.as_ref().map_or(0, |p| p.capacity())
                     * std::mem::size_of::<(PoolId, NeuronId)>()
-                + fp.ordered_per_pool.iter().map(|(_, v)| {
-                    std::mem::size_of::<(PoolId, Vec<NeuronId>)>()
-                        + v.len() * std::mem::size_of::<NeuronId>()
-                }).sum::<usize>()
-                + fp.members_extra.iter().map(|(_, v)| {
-                    std::mem::size_of::<(PoolId, Vec<NeuronId>)>()
-                        + v.len() * std::mem::size_of::<NeuronId>()
-                }).sum::<usize>()
+                + per_pool(&fp.ordered_per_pool)
+                + per_pool(&fp.members_extra)
         }
         // The five fingerprint-keyed structures share ONE `Arc` per moment,
         // so charging each of them the full key would count the same bytes up
