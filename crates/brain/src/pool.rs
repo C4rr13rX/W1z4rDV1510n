@@ -610,6 +610,27 @@ pub struct PoolConfig {
     /// least `concept_emergence_threshold` times in `recent_atoms` is
     /// promoted to a concept.  Per spec §4.A.
     pub max_concept_member_count: usize,
+    /// Upper bound on the bottom-up terminals ONE ATOM may hold. 0 is
+    /// unbounded, which is how every brain behaved before this field existed
+    /// and what a snapshot without it restores to.
+    ///
+    /// An atom is a byte, so the bytes that occur in every sentence acquire
+    /// one terminal per concept that contains them. Measured 2026-09-30 on the
+    /// scorecard's scene world, the three largest neurons in the query pool at
+    /// scale 16 are the single bytes `q:cg`, `q:IA` and `q:Pw` at fan-out
+    /// 2,432 each -- exactly one per fact -- while the largest CONCEPT holds
+    /// 21. docs/RAM_GOAL.md records the same shape in production at ~4 M
+    /// terminals and 82 MB per atom, a body that can never leave RAM.
+    ///
+    /// Capping it costs nothing that recognition needs: the concept keeps its
+    /// top-down concept->member terminals, and `label_to_id`,
+    /// `concept_sequence_to_id` and `concept_multiset_to_id` already resolve a
+    /// member sequence to its concept by exact lookup. What the cap drops is
+    /// the byte's ability to spray activation into every concept it ever
+    /// appeared in, which is the "index lookup, not a byte firing into
+    /// millions of terminals" the goal asks for.
+    #[serde(default = "default_max_atom_fanout")]
+    pub max_atom_fanout: usize,
     pub concept_emergence_threshold: u32,
     pub max_weight: f32,
     pub decay_rate: f32,
@@ -1345,6 +1366,14 @@ fn default_sparsity_min_neurons() -> usize {
 fn default_heterosynaptic_ltd_mode() -> ControlMode {
     ControlMode::Constant(0.0)
 }
+/// Bounded by default: a byte that fires into every concept containing it is
+/// the one structure the scorecard still grows linearly with the corpus.
+/// 512 is two orders of magnitude above the largest CONCEPT fan-out measured
+/// (21), so it bounds hubs without touching ordinary structure.
+fn default_max_atom_fanout() -> usize {
+    512
+}
+
 fn default_predict_gate_mode() -> ControlMode {
     ControlMode::Constant(0.0)
 }
@@ -1357,6 +1386,7 @@ impl PoolConfig {
             frame_rate: 30,
             recent_atoms_window: 32,
             max_concept_member_count: 8,
+            max_atom_fanout: default_max_atom_fanout(),
             concept_emergence_threshold: 3,
             max_weight: 4.0,
             decay_rate: 0.0005,
@@ -4705,10 +4735,23 @@ impl Pool {
         // concept→member (concept→atom top-down).  Both Hebbian-strengthen
         // on subsequent activations.
         let mut added_terminals: usize = 0;
+        let atom_cap = self.config.max_atom_fanout;
         for &mid in &members {
             let target = NeuronRef::new(self.config.id, id);
             if let Some(member_neuron) = self.neurons.get_mut(mid as usize) {
-                if member_neuron.reinforce_terminal(target, 0.5, tick, self.config.max_weight) {
+                // See `PoolConfig::max_atom_fanout`: a saturated byte keeps the
+                // terminals it has and stops acquiring one per concept it ever
+                // appears in. Concepts are never capped -- their fan-out is
+                // bounded by their own member count -- and the concept's
+                // top-down terminal below is always wired, so the pair is only
+                // ever missing in the bottom-up direction that the label and
+                // sequence indexes already cover.
+                let saturated = atom_cap > 0
+                    && member_neuron.is_atom()
+                    && member_neuron.terminals.len() >= atom_cap;
+                if !saturated
+                    && member_neuron.reinforce_terminal(target, 0.5, tick, self.config.max_weight)
+                {
                     added_terminals += 1;
                 }
             }

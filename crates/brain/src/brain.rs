@@ -2378,13 +2378,26 @@ impl Brain {
 
         // Wire member → binding terminals bottom-up so co-firing all
         // members activates the binding.
+        //
+        // Bounded per `PoolConfig::max_atom_fanout`. This is the site that
+        // produced the hub: one binding per trained fact, each wiring every
+        // member ATOM to itself, so a byte that occurs in every question ends
+        // up with one terminal per fact. Measured 2026-09-30 at scale 16 of the
+        // scorecard, `q:cg`, `q:IA` and `q:Pw` each held 2,432 -- the fact
+        // count exactly -- against 21 on the largest concept. The binding keeps
+        // its top-down terminals above, and `binding_sequence_index` /
+        // `binding_feature_atom_index` already address a binding from its
+        // members by lookup, so the cap removes fan-out and not reachability.
         let binding_ref = NeuronRef::new(self.binding_pool_id, id);
         for m in &terminal_members {
             if let Some(p) = self.fabric.pool(m.pool) {
                 let mut pp = p.write();
                 let mxw = pp.config.max_weight;
+                let atom_cap = pp.config.max_atom_fanout;
                 let was_added = if let Some(n) = pp.get_mut(m.neuron) {
-                    n.reinforce_terminal(binding_ref, 0.5, now, mxw)
+                    let saturated =
+                        atom_cap > 0 && n.is_atom() && n.terminals.len() >= atom_cap;
+                    !saturated && n.reinforce_terminal(binding_ref, 0.5, now, mxw)
                 } else {
                     false
                 };

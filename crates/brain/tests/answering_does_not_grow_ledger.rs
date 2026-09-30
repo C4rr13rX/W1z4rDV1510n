@@ -92,3 +92,64 @@ fn suppression_does_not_leak_past_one_observe() {
         "a read-only observe left emergence suppressed for the next caller"
     );
 }
+
+/// A byte must not acquire one terminal per fact.
+///
+/// Measured 2026-09-30 at scale 16 of the scorecard, the three largest neurons
+/// in the query pool were the single bytes `q:cg`, `q:IA` and `q:Pw`, each at
+/// fan-out 2,432 -- the fact count exactly -- while the largest concept held 21.
+/// docs/RAM_GOAL.md records the same shape in production at ~4 M terminals and
+/// 82 MB on one atom. The cap is `PoolConfig::max_atom_fanout`.
+#[test]
+fn an_atom_stops_acquiring_a_terminal_per_fact() {
+    const CAP: usize = 8;
+    let mut cfg = BrainConfig::default();
+    cfg.binding_emergence_threshold = 3;
+    cfg.moment_history_window = 256;
+    let mut brain = Brain::new(cfg);
+    for (name, id, prefix) in [("query", QUERY_POOL, "q"), ("answer", ANSWER_POOL, "a")] {
+        let mut pc = PoolConfig::defaults(name, id);
+        pc.recent_atoms_window = 2048;
+        pc.concept_emergence_threshold = 2;
+        pc.max_concept_member_count = 64;
+        pc.max_atom_fanout = CAP;
+        brain.create_pool(pc, Box::new(BytePassthroughEncoding { prefix }) as Box<dyn AtomEncoding>);
+    }
+    // Every question contains "r", " " and "?", so under the old wiring each of
+    // those bytes would end up with one terminal per fact -- 64 here.
+    for room in 0..64 {
+        brain.pretrain_binding_episode(&[
+            (QUERY_POOL, format!("r{room:03} lamp color?").into_bytes()),
+            (ANSWER_POOL, b"red".to_vec()),
+        ]);
+    }
+    let worst_atom = brain
+        .fabric()
+        .pool_ids()
+        .into_iter()
+        .filter_map(|id| brain.fabric().pool(id))
+        .flat_map(|pool| {
+            pool.read()
+                .iter_neurons()
+                .filter(|n| n.is_atom())
+                .map(|n| n.terminals.len())
+                .collect::<Vec<_>>()
+        })
+        .max()
+        .unwrap_or(0);
+    assert!(
+        worst_atom <= CAP,
+        "an atom reached fan-out {worst_atom} against a cap of {CAP}"
+    );
+    // ...and the facts are still recalled, which is the whole point: the
+    // binding is reached by index, not by the byte firing into it.
+    for room in 0..64 {
+        brain.observe_read_only(QUERY_POOL, format!("r{room:03} lamp color?").as_bytes());
+        let answer = brain.decode_best_trained_binding(QUERY_POOL, ANSWER_POOL);
+        assert_eq!(
+            answer.as_deref(),
+            Some(&b"red"[..]),
+            "fact r{room:03} was lost when atom fan-out was capped"
+        );
+    }
+}
