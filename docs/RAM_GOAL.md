@@ -90,9 +90,11 @@ What is left, measured at scale 64 with
   trained brain (it cost 518 MB at scale 16 before), and everything left is
   allocated by training: 55.8 MB against 12.47 global + 1.57 pool-side + 5.9
   neurons + ~13.7 MB fixed process. Do not look for it in the recall path.
-  Note the per-structure census counts `len`, never `capacity` or allocator
-  overhead, and each neuron's `terminal_idx` is a separate `AHashMap` — start
-  there.
+  9 MB of it was `Vec` capacity slack in neuron bodies: `footprint()` counted
+  `len`, and counting `capacity` moved `est_resident_mb` at scale 64 from 5.9
+  to 14.9 MB, which narrows the unexplained remainder to ~13 MB. The
+  Brain-level census still counts `len` only, and every neuron carries its own
+  `terminal_idx` `AHashMap` whose capacity nothing counts — start there.
 - **Integration is still 0%** at every scale, and that is the second goal.
 
 Integration at 0% is the second goal. The scene world's integration probes

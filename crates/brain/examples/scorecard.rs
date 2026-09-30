@@ -185,8 +185,13 @@ impl Subject {
             let Some(pool) = self.brain.fabric().pool(pid) else { continue };
             for n in pool.read().iter_neurons() {
                 hub = hub.max(n.terminals.len());
-                bytes += per_neuron + n.label.len() + n.members.len() * per_member
-                    + n.terminals.len() * per_terminal;
+                // CAPACITY, not len. A Vec grown by push holds up to 2x what
+                // it uses, and a `len`-only estimate is how this number came
+                // to read 5.9 MB against a 55.8 MB training peak at scale 64.
+                bytes += per_neuron
+                    + n.label.capacity()
+                    + n.members.capacity() * per_member
+                    + n.terminals.capacity() * per_terminal;
             }
         }
         (hub, bytes)
