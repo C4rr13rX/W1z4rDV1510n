@@ -38,9 +38,9 @@ changes below (the first column is where this page started the same day):
 | scale | facts | recall | integration | peak RAM was | peak RAM | neuron data | hub fan-out was | hub fan-out |
 |---|---|---|---|---|---|---|---|---|
 | 1 | 152 | 100% | 0% | 56 MB | 15.1 MB | 0.3 MB | 270 | 152 |
-| 4 | 608 | 100% | 0% | 171 MB | 18.6 MB | 1.1 MB | 831 | 512 |
-| 16 | 2,432 | 100% | 0% | 626 MB | 28.0 MB | 3.6 MB | 2,683 | 512 |
-| 64 | 9,728 | 100% | 0% | **2,471 MB** | **58.3 MB** | 5.9 MB | 10,632 | **512** |
+| 4 | 608 | 100% | 0% | 171 MB | 18.6 MB | 1.3 MB | 831 | 512 |
+| 16 | 2,432 | 100% | 0% | 626 MB | 28.0 MB | 4.3 MB | 2,683 | 512 |
+| 64 | 9,728 | 100% | 0% | **2,471 MB** | **58.3 MB** | 14.9 MB | 10,632 | **512** |
 
 RAM growth scale 1 → 64: **x44.91 → x3.86**. Both numbers moved for reasons
 worth keeping, and both were found by measuring rather than reasoning:
@@ -96,10 +96,9 @@ What is left, measured at scale 64 with
   Brain-level census still counts `len` only, and every neuron carries its own
   `terminal_idx` `AHashMap` whose capacity nothing counts — start there.
 - **Integration is still 0%** at every scale, and that is the second goal.
-
-Integration at 0% is the second goal. The scene world's integration probes
-chain two trained facts. For example, "r03 lamp on" gives "desk" and "r03 desk
-material" gives "oak", so "r03 lamp on material?" should give "oak".
+  The scene world's integration probes chain two trained facts: "r03 lamp on"
+  gives "desk" and "r03 desk material" gives "oak", so "r03 lamp on material?"
+  should give "oak". Nothing this pass touched it in either direction.
 
 ## How to work
 
