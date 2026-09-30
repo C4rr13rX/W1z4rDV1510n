@@ -37,13 +37,13 @@ changes below (the first column is where this page started the same day):
 
 | scale | facts | recall | integration | peak RAM was | peak RAM | neuron data | hub fan-out was | hub fan-out |
 |---|---|---|---|---|---|---|---|---|
-| 1 | 152 | 100% | 0% | 56 MB | 15.1 MB | 0.3 MB | 270 | 152 |
-| 4 | 608 | 100% | 0% | 171 MB | 18.6 MB | 1.3 MB | 831 | 512 |
-| 16 | 2,432 | 100% | 0% | 626 MB | 28.0 MB | 4.3 MB | 2,683 | 512 |
-| 64 | 9,728 | 100% | 0% | **2,471 MB** | **58.3 MB** | 14.9 MB | 10,632 | **512** |
+| 1 | 152 | 100% | 0% | 56 MB | 15.0 MB | 0.3 MB | 270 | 152 |
+| 4 | 608 | 100% | 0% | 171 MB | 17.6 MB | 1.2 MB | 831 | 512 |
+| 16 | 2,432 | 100% | 0% | 626 MB | 24.3 MB | 4.1 MB | 2,683 | 512 |
+| 64 | 9,728 | 100% | 0% | **2,471 MB** | **45.6 MB** | 13.9 MB | 10,632 | **512** |
 
-RAM growth scale 1 → 64: **x44.91 → x3.86**. Both numbers moved for reasons
-worth keeping, and both were found by measuring rather than reasoning:
+RAM growth scale 1 → 64: **x44.91 → x2.98**. Every number moved for reasons
+worth keeping, and every one was found by measuring rather than reasoning:
 
 1. **Answering was the allocator, not learning.** One scorecard run per
    phase at scale 16 (peak measured from outside by `tools/capped.py`): train
@@ -67,25 +67,56 @@ worth keeping, and both were found by measuring rather than reasoning:
    from its members by lookup — the index lookup this page asked for instead
    of a byte firing into millions of terminals.
 
+Three further changes, all in the same structure, took scale-64 peak from
+58.3 MB to **45.6 MB** and RAM growth from x3.86 to **x2.98**. Every one was a
+duplicate the census had been reporting as two different things:
+
+3. **Five indexes held five copies of one fingerprint.** `moment_history`,
+   `binding_recurrences`, `lifetime_recurrences`, `tentative_promoted` and
+   `promoted_fingerprints` each cloned the whole `MomentFingerprint`. They
+   share one `Arc` now; `Arc<T>: Borrow<T>` left every call site taking a
+   plain `&MomentFingerprint`. The census was charging each map the full key,
+   which is why `lifetime_recurrences` and `tentative_promoted` both read
+   5.13 MB — it charges a map its pointer plus its value and the pointee once,
+   under `fingerprint_keys`.
+4. **A binding's label spelled its membership.** `"p1n0|p1n0|p1n2|…|ordered:…"`
+   — 170 bytes per binding, held in `pool.label_index` and again in the
+   neuron. Nothing parses it; it is read back only through `label_to_id`, so
+   it is a 35-byte symbol (two 64-bit digests of the fingerprint's own `Hash`).
+   A miss falls back to building the legacy form so an old snapshot still
+   dedups.
+5. **The fingerprint stored its atom stream three times.** `members_per_pool`
+   was a clone of `ordered_per_pool` that enrichment extended (nothing is
+   enriched on the training path), and `pairs` is that same stream sorted and
+   flattened at 8 bytes a pair against 4. Both are derived now
+   (`members_per_pool()`, `pairs()`); `members_extra` holds only the
+   enrichment suffix. `pairs` could not simply be deleted: legacy bincode
+   snapshots persisted the pair signature and NO temporal order, so those
+   records restore with an empty `ordered_per_pool` and keep their list in
+   `legacy_pairs`.
+
 What is left, measured at scale 64 with
 `target/release/examples/scorecard.exe --scale 64 --phase infer --census`:
 
-- **Every remaining growing structure is per-fact.** Brain-level index bytes
-  total 12.47 MB: `lifetime_recurrences` 5.13 MB over 9,728 entries (553 B
-  per fact) and `tentative_promoted` 5.13 MB storing the **same**
-  `MomentFingerprint` key a second time, plus `binding_sequence_index`
-  1.24 MB and `pool.label_index` 1.57 MB. A fingerprint owns three `Vec`s and
-  holds every atom id of query and answer twice (`ordered_per_pool` and
-  `members_per_pool`), so a ~22-atom fact costs ~1.1 KB across the two maps:
-  ~1.1 GB at 1 M facts. That is the next wall. Note before planning it:
-  `lifetime_recurrences` has ~30 call sites and is persisted in three formats
-  (`persistence::SerializableFingerprint`, `wbrain_metadata`,
-  `streaming_migration`), and two sites iterate its keys rather than looking
-  one up — so replacing the key with a hash is a migration, not an edit.
-  Deduplicating the key SHARED with `tentative_promoted` is the cheaper half
-  of the same 10.26 MB.
-- **~22 MB at scale 64 is still unaccounted, and it is built while
-  TRAINING.** Per-phase peaks at scale 64 after both fixes: train 55.8 MB,
+- **Brain-level index bytes are 12.47 → 4.72 MB** and `pool.label_index`
+  1.57 → 0.61 MB. The remainder is still per-fact and still the same shape:
+  `fingerprint_keys` 2.17 MB over 9,728 (223 B per fact, now just
+  `ordered_per_pool` plus the struct), `binding_sequence_index` 1.30 MB over
+  9,742 (134 B — the query's atom sequence, a THIRD copy of what the
+  fingerprint already holds), `binding_feature_atom_index` 0.64 MB and
+  `binding_motif_index` 0.37 MB. Deduplicating the sequence index against the
+  fingerprint is the next one of these, and it is worth less than the neuron
+  bodies below.
+- **Neuron bodies are now the largest pot, and the biggest number here is
+  still unexplained.** `est_resident_mb` is 13.9 MB over **9,776 neurons** —
+  ~1,490 bytes each for a binding whose members are ~22 `NeuronRef` (176 B).
+  Against a 45.6 MB peak with ~15 MB of fixed process, that is a third of
+  everything per-fact. `size_of::<Neuron>()` and the `terminal_idx` `AHashMap`
+  each neuron carries — whose capacity the Brain-level census still does not
+  count — are the candidates. Start there, not in the indexes above.
+
+- **~22 MB at scale 64 was unaccounted after the first two changes, and it is
+  built while TRAINING.** Per-phase peaks at scale 64 after both fixes: train 55.8 MB,
   recall 58.3 MB, infer 58.7 MB. So answering now costs 2.9 MB over the
   trained brain (it cost 518 MB at scale 16 before), and everything left is
   allocated by training: 55.8 MB against 12.47 global + 1.57 pool-side + 5.9
