@@ -78,9 +78,15 @@ What is left, measured at scale 64 with
   holds every atom id of query and answer twice (`ordered_per_pool` and
   `members_per_pool`), so a ~22-atom fact costs ~1.1 KB across the two maps:
   ~1.1 GB at 1 M facts. That is the next wall.
-- **~25 MB at scale 64 is still unaccounted.** 58.3 MB peak against 12.47
-  global + 1.57 pool-side + 5.9 neurons + ~13.7 MB fixed process. Name it
-  with a measurement before designing against it.
+- **~22 MB at scale 64 is still unaccounted, and it is built while
+  TRAINING.** Per-phase peaks at scale 64 after both fixes: train 55.8 MB,
+  recall 58.3 MB, infer 58.7 MB. So answering now costs 2.9 MB over the
+  trained brain (it cost 518 MB at scale 16 before), and everything left is
+  allocated by training: 55.8 MB against 12.47 global + 1.57 pool-side + 5.9
+  neurons + ~13.7 MB fixed process. Do not look for it in the recall path.
+  Note the per-structure census counts `len`, never `capacity` or allocator
+  overhead, and each neuron's `terminal_idx` is a separate `AHashMap` — start
+  there.
 - **Integration is still 0%** at every scale, and that is the second goal.
 
 Integration at 0% is the second goal. The scene world's integration probes
