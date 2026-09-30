@@ -153,8 +153,8 @@ fn decode_fingerprint_posting_key(key: &[u8], expected_kind: u8) -> Option<Momen
     }
     Some(MomentFingerprint {
         pairs,
-        members_per_pool: ordered_per_pool.clone(),
         ordered_per_pool,
+        members_extra: Vec::new(),
     })
 }
 
@@ -362,11 +362,18 @@ struct MomentFingerprint {
     /// firing orders is still the same binding for emergence
     /// purposes.
     ordered_per_pool: Vec<(PoolId, Vec<NeuronId>)>,
-    /// Full binding membership captured for promotion. This begins with the
-    /// stable ordered atom stream and may additionally contain currently
-    /// firing concepts. Concept emergence must enrich what a binding stores,
-    /// not change the identity/hash of the sensory episode itself.
-    members_per_pool: Vec<(PoolId, Vec<NeuronId>)>,
+    /// The concepts that were firing when the episode was captured, per pool
+    /// — ONLY those. Full binding membership is the ordered atom stream above
+    /// followed by these, which is what `members_per_pool()` materialises.
+    ///
+    /// This used to be the whole membership, stored as a clone of
+    /// `ordered_per_pool` that enrichment then extended. Measured at scale 64
+    /// of the scorecard, nothing is enriched on the training path, so it was
+    /// a second copy of every atom id of query and answer: ~150 of the 549
+    /// bytes a fingerprint costs. Concept emergence must enrich what a
+    /// binding stores, not change the identity/hash of the sensory episode
+    /// itself, so this is deliberately outside `Hash`/`Eq` as before.
+    members_extra: Vec<(PoolId, Vec<NeuronId>)>,
 }
 
 impl MomentFingerprint {
@@ -392,9 +399,55 @@ impl MomentFingerprint {
         pairs.sort();
         Some(Self {
             pairs,
-            members_per_pool: ordered_per_pool.clone(),
             ordered_per_pool,
+            members_extra: Vec::new(),
         })
+    }
+
+    /// Full binding membership: the stable ordered atom stream, then whatever
+    /// concepts were firing for that pool. Materialised on demand — it is read
+    /// once per promotion and once per persist, not held per fingerprint.
+    fn members_per_pool(&self) -> Vec<(PoolId, Vec<NeuronId>)> {
+        self.ordered_per_pool
+            .iter()
+            .map(|(pid, ids)| {
+                let extra = self
+                    .members_extra
+                    .iter()
+                    .find(|(p, _)| p == pid)
+                    .map(|(_, v)| v.as_slice())
+                    .unwrap_or(&[]);
+                let mut all = Vec::with_capacity(ids.len() + extra.len());
+                all.extend_from_slice(ids);
+                all.extend_from_slice(extra);
+                (*pid, all)
+            })
+            .collect()
+    }
+
+    /// Split a persisted full membership back into the enrichment suffix.
+    /// Older snapshots store the whole list; a pool whose persisted membership
+    /// is not an extension of its ordered stream keeps all of it, so a
+    /// hand-written or migrated record cannot silently lose members.
+    fn extra_from_full(
+        ordered: &[(PoolId, Vec<NeuronId>)],
+        full: Vec<(PoolId, Vec<NeuronId>)>,
+    ) -> Vec<(PoolId, Vec<NeuronId>)> {
+        full.into_iter()
+            .filter_map(|(pid, ids)| {
+                let prefix = ordered
+                    .iter()
+                    .find(|(p, _)| *p == pid)
+                    .map(|(_, v)| v.as_slice())
+                    .unwrap_or(&[]);
+                let tail = if ids.starts_with(prefix) {
+                    ids[prefix.len()..].to_vec()
+                } else {
+                    ids
+                };
+                (!tail.is_empty()).then_some((pid, tail))
+            })
+            .collect()
     }
 }
 
@@ -1531,7 +1584,7 @@ impl Brain {
                     std::mem::size_of::<(PoolId, Vec<NeuronId>)>()
                         + v.len() * std::mem::size_of::<NeuronId>()
                 }).sum::<usize>()
-                + fp.members_per_pool.iter().map(|(_, v)| {
+                + fp.members_extra.iter().map(|(_, v)| {
                     std::mem::size_of::<(PoolId, Vec<NeuronId>)>()
                         + v.len() * std::mem::size_of::<NeuronId>()
                 }).sum::<usize>()
@@ -1901,18 +1954,27 @@ impl Brain {
             let moment = self.fabric.current_moment();
             let mut fingerprint = MomentFingerprint::from_fabric_moment(&moment.fired);
             if let Some(fingerprint) = fingerprint.as_mut() {
-                for (pid, sequence) in &mut fingerprint.members_per_pool {
-                    if *pid == self.binding_pool_id {
+                let pools: Vec<PoolId> = fingerprint
+                    .ordered_per_pool
+                    .iter()
+                    .map(|(pid, _)| *pid)
+                    .collect();
+                for pid in pools {
+                    if pid == self.binding_pool_id {
                         continue;
                     }
-                    if let Some(pool) = self.fabric.pool(*pid) {
+                    if let Some(pool) = self.fabric.pool(pid) {
                         let pool = pool.read();
                         let mut concepts: Vec<NeuronId> = pool
                             .currently_firing()
                             .filter(|nid| pool.get(*nid).is_some_and(|n| !n.is_atom()))
                             .collect();
                         concepts.sort_unstable();
-                        sequence.extend(concepts);
+                        // Only the enrichment is stored; the atom stream is
+                        // already in `ordered_per_pool` and is not copied.
+                        if !concepts.is_empty() {
+                            fingerprint.members_extra.push((pid, concepts));
+                        }
                     }
                 }
             }
@@ -2396,7 +2458,7 @@ impl Brain {
         // 'animal' atoms (a,n,i,m,a,l) decode as 'aaniml' because
         // sorting by NeuronId interleaves the duplicates.
         let members: Vec<NeuronRef> = fp
-            .members_per_pool
+            .members_per_pool()
             .iter()
             .flat_map(|(pid, ns)| ns.iter().map(|&nid| NeuronRef::new(*pid, nid)))
             .collect();
@@ -8617,7 +8679,7 @@ impl Brain {
         let persist = |fingerprint: &MomentFingerprint| PersistedMomentFingerprint {
             pairs: fingerprint.pairs.clone(),
             ordered_per_pool: fingerprint.ordered_per_pool.clone(),
-            members_per_pool: fingerprint.members_per_pool.clone(),
+            members_per_pool: fingerprint.members_per_pool(),
         };
         let metadata = WbrainBrainMetadata {
             config: self.config.clone(),
@@ -9044,7 +9106,7 @@ impl Brain {
             std::sync::Arc::new(MomentFingerprint {
                 pairs: f.pairs,
                 ordered_per_pool: Vec::new(),
-                members_per_pool: Vec::new(),
+                members_extra: Vec::new(),
             })
         };
         let mut moment_history = VecDeque::with_capacity(snap.moment_history_window);
@@ -9133,10 +9195,14 @@ impl Brain {
         let metadata: WbrainBrainMetadata = bincode::deserialize(&file.brain_metadata())
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         let restore_fingerprint = |fingerprint: PersistedMomentFingerprint| -> FpKey {
+            let members_extra = MomentFingerprint::extra_from_full(
+                &fingerprint.ordered_per_pool,
+                fingerprint.members_per_pool,
+            );
             std::sync::Arc::new(MomentFingerprint {
                 pairs: fingerprint.pairs,
                 ordered_per_pool: fingerprint.ordered_per_pool,
-                members_per_pool: fingerprint.members_per_pool,
+                members_extra,
             })
         };
         let mut fabric = Fabric::new(metadata.config.fabric.clone());
