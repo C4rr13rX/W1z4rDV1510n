@@ -95,6 +95,57 @@ fn a_fingerprint_key_is_stored_once_however_many_indexes_hold_it() {
     }
 }
 
+/// A binding's dedup label must not grow with the fact it names.
+///
+/// Measured 2026-09-30 at scale 64: the label SPELLED the membership
+/// ("p1n0|p1n0|p1n0|p1n2|..." plus an ordered hash), 170 bytes per binding,
+/// held once in `pool.label_index` (1.65 MB) and again in the neuron. Nothing
+/// parses it -- it is written once and read back only through `label_to_id`.
+#[test]
+fn a_binding_label_is_a_symbol_not_a_spelled_out_membership() {
+    let mut brain = subject();
+    // Two questions an order of magnitude apart in length. A label that spells
+    // its members grows with the second; a symbol does not.
+    brain.pretrain_binding_episode(&[
+        (QUERY_POOL, b"r000 lamp color?".to_vec()),
+        (ANSWER_POOL, b"red".to_vec()),
+    ]);
+    brain.pretrain_binding_episode(&[
+        (
+            QUERY_POOL,
+            format!("r001 {} lamp color?", "very ".repeat(40)).into_bytes(),
+        ),
+        (ANSWER_POOL, b"blue".to_vec()),
+    ]);
+
+    let binding_pool = brain.binding_pool_id();
+    let pool = brain.fabric().pool(binding_pool).expect("binding pool");
+    let pool = pool.read();
+    let labels: Vec<String> = pool
+        .iter_neurons()
+        .filter(|n| !n.is_atom())
+        .map(|n| n.label.clone())
+        .collect();
+    drop(pool);
+
+    assert!(
+        labels.len() >= 2,
+        "expected a binding per episode, got {}",
+        labels.len()
+    );
+    let longest = labels.iter().map(|l| l.len()).max().unwrap();
+    assert!(
+        longest <= 48,
+        "longest binding label is {longest} bytes ({:?}) -- it still spells its members",
+        labels.iter().max_by_key(|l| l.len()).unwrap()
+    );
+    // Distinct episodes must still get distinct labels, or dedup collapses them.
+    let mut sorted = labels.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(sorted.len(), labels.len(), "two episodes share one label");
+}
+
 #[test]
 fn recall_survives_the_shared_key() {
     let mut brain = subject();

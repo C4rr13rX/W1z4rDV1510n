@@ -411,6 +411,35 @@ impl MomentFingerprint {
 /// taking a plain `&MomentFingerprint`.
 type FpKey = std::sync::Arc<MomentFingerprint>;
 
+/// Fixed-width dedup symbol for a binding concept.
+///
+/// `MomentFingerprint`'s `Hash` covers `pairs` and `ordered_per_pool`, which is
+/// the episode's whole identity, so hashing it twice under different salts
+/// gives 128 bits that distinguish exactly what equality distinguishes.
+fn binding_label(fp: &MomentFingerprint) -> String {
+    let mut low = DefaultHasher::new();
+    fp.hash(&mut low);
+    let mut high = DefaultHasher::new();
+    0xa5a5_5a5a_c3c3_3c3cu64.hash(&mut high);
+    fp.hash(&mut high);
+    format!("fp:{:016x}{:016x}", low.finish(), high.finish())
+}
+
+/// The label format written before `binding_label`: the membership spelled out
+/// pair by pair, then an ordered hash. Kept so a brain restored from an older
+/// snapshot still finds the binding it already has.
+fn legacy_binding_label(fp: &MomentFingerprint) -> String {
+    let member_label: String = fp
+        .pairs
+        .iter()
+        .map(|(p, n)| format!("p{}n{}", p, n))
+        .collect::<Vec<_>>()
+        .join("|");
+    let mut ordered_hasher = DefaultHasher::new();
+    fp.hash(&mut ordered_hasher);
+    format!("{}|ordered:{:016x}", member_label, ordered_hasher.finish())
+}
+
 // A binding is a temporal episode, not merely a bag of fired neurons.
 // `pairs` keeps the canonical set/multiset signature while
 // `ordered_per_pool` distinguishes anagrams and reordered source/code
@@ -2341,19 +2370,24 @@ impl Brain {
     fn promote_binding_concept(&mut self, fp: &MomentFingerprint) -> Option<NeuronId> {
         let binding_pool = self.fabric.pool(self.binding_pool_id)?;
         let mut binding = binding_pool.write();
-        // Composite label = sorted member references, joined.  Stable
-        // and unique per fingerprint (used for dedup).
-        let member_label: String = fp
-            .pairs
-            .iter()
-            .map(|(p, n)| format!("p{}n{}", p, n))
-            .collect::<Vec<_>>()
-            .join("|");
-        let mut ordered_hasher = DefaultHasher::new();
-        fp.hash(&mut ordered_hasher);
-        let label = format!("{}|ordered:{:016x}", member_label, ordered_hasher.finish());
+        // The label is a dedup key and nothing else -- it is written once and
+        // only ever read back through `label_to_id`; nothing parses it. It used
+        // to SPELL the membership ("p1n0|p1n0|p1n0|p1n2|..." plus an ordered
+        // hash), so it grew with the fact: measured at scale 64 of the
+        // scorecard, 170 bytes per binding, held once in `pool.label_index`
+        // (1.65 MB) and again in the neuron. A symbol names the same episode
+        // in 35 bytes whatever its length. Two independent 64-bit digests
+        // because one is too narrow to key a corpus-scale binding pool on.
+        let label = binding_label(fp);
         if let Some(existing) = binding.label_to_id(&label) {
             return Some(existing); // already exists, idempotent.
+        }
+        // Snapshots written before the symbol carry the spelled-out label.
+        // Building it costs a temporary on the promotion path only; nothing
+        // stores it, so an old brain still dedups instead of growing a second
+        // neuron for an episode it already holds.
+        if let Some(existing) = binding.label_to_id(&legacy_binding_label(fp)) {
+            return Some(existing);
         }
         // Members stored in FIRING ORDER (per-pool sequence as
         // observed at training time), NOT NeuronId-sorted order.
