@@ -107,13 +107,24 @@ What is left, measured at scale 64 with
   `binding_motif_index` 0.37 MB. Deduplicating the sequence index against the
   fingerprint is the next one of these, and it is worth less than the neuron
   bodies below.
-- **Neuron bodies are now the largest pot, and the biggest number here is
-  still unexplained.** `est_resident_mb` is 13.9 MB over **9,776 neurons** —
-  ~1,490 bytes each for a binding whose members are ~22 `NeuronRef` (176 B).
-  Against a 45.6 MB peak with ~15 MB of fixed process, that is a third of
-  everything per-fact. `size_of::<Neuron>()` and the `terminal_idx` `AHashMap`
-  each neuron carries — whose capacity the Brain-level census still does not
-  count — are the candidates. Start there, not in the indexes above.
+- **Neuron bodies are now the largest pot, and the census names the split.**
+  `--census` reports `neuron_body_bytes` over 9,776 neurons at scale 64:
+  `terminals` 6.11 MB, **`terminal_idx` 5.05 MB**, `struct` 2.11 MB
+  (`size_of::<Neuron>()` = 216 B), `members` 1.70 MB (the ~22 refs, 174 B) and
+  `label` 0.34 MB (35 B — the symbol above). 15.32 MB total, against a 45.6 MB
+  peak with ~15 MB of fixed process, so this is a third of everything
+  per-fact.
+
+  **`terminal_idx` is 83 % of what `terminals` itself costs, and it is a
+  cache.** It is `#[serde(skip)]`, rebuilt on restore, and exists only to make
+  `reinforce_terminal` O(1) over the `terminals` `Vec` it indexes — 17 bytes
+  of bucket per terminal against the ~21 the terminal occupies. Its own doc
+  comment budgets ~3 GB for it at fabric peak. It is the one component here
+  that stores no information the brain does not already hold, so it is the
+  next change: a `Vec` kept sorted by target, or a map only on neurons above
+  a fan-out floor, buys back most of 5 MB at scale 64. Note the map allocates
+  for its CAPACITY, not its length, which is why nothing counting `len` ever
+  saw it.
 
 - **~22 MB at scale 64 was unaccounted after the first two changes, and it is
   built while TRAINING.** Per-phase peaks at scale 64 after both fixes: train 55.8 MB,

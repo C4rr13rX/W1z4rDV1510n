@@ -18,7 +18,8 @@
 //! Run: `cargo run --release --example scorecard -p w1z4rd-brain -- --scale 4`
 
 use std::time::Instant;
-use w1z4rd_brain::{AtomEncoding, Brain, BrainConfig, BytePassthroughEncoding, PoolConfig};
+use w1z4rd_brain::{AtomEncoding, Brain, BrainConfig, BytePassthroughEncoding, Neuron, NeuronRef,
+    PoolConfig, Terminal};
 
 const QUERY_POOL: u32 = 1;
 const ANSWER_POOL: u32 = 2;
@@ -165,10 +166,38 @@ impl Subject {
                 }));
             }
         }
+        // Neuron bodies are the largest per-fact pot left (13.9 MB over 9,776
+        // neurons at scale 64 -- ~1,490 bytes each for members that are ~22
+        // NeuronRef, so 176 B). Name the components rather than reporting the
+        // total: `footprint()` counts Vec CAPACITY but never the `terminal_idx`
+        // AHashMap each neuron carries, and a hash map allocates for its
+        // capacity, not its length.
+        let mut body = std::collections::BTreeMap::<&str, usize>::new();
+        let mut neurons = 0usize;
+        for pid in self.brain.fabric().pool_ids() {
+            let Some(pool) = self.brain.fabric().pool(pid) else { continue };
+            let pool = pool.read();
+            for n in pool.iter_neurons() {
+                neurons += 1;
+                *body.entry("struct").or_default() += std::mem::size_of::<Neuron>();
+                *body.entry("label").or_default() += n.label.capacity();
+                *body.entry("members").or_default() +=
+                    n.members.capacity() * std::mem::size_of::<NeuronRef>();
+                *body.entry("terminals").or_default() +=
+                    n.terminals.capacity() * std::mem::size_of::<Terminal>();
+                // hashbrown allocates capacity buckets of (K, V) plus one
+                // control byte each, and `capacity()` is the usable count.
+                *body.entry("terminal_idx").or_default() += n.terminal_idx.capacity()
+                    * (std::mem::size_of::<(NeuronRef, usize)>() + 1);
+            }
+        }
         serde_json::json!({
             "global": self.brain.global_index_sizes(),
             "pool_side_bytes": side,
             "pool_side_total_bytes": side.values().sum::<usize>(),
+            "neuron_body_bytes": body,
+            "neuron_body_total_bytes": body.values().sum::<usize>(),
+            "neuron_body_count": neurons,
             "top_fanout": top,
         })
     }
