@@ -77,7 +77,13 @@ What is left, measured at scale 64 with
   1.24 MB and `pool.label_index` 1.57 MB. A fingerprint owns three `Vec`s and
   holds every atom id of query and answer twice (`ordered_per_pool` and
   `members_per_pool`), so a ~22-atom fact costs ~1.1 KB across the two maps:
-  ~1.1 GB at 1 M facts. That is the next wall.
+  ~1.1 GB at 1 M facts. That is the next wall. Note before planning it:
+  `lifetime_recurrences` has ~30 call sites and is persisted in three formats
+  (`persistence::SerializableFingerprint`, `wbrain_metadata`,
+  `streaming_migration`), and two sites iterate its keys rather than looking
+  one up — so replacing the key with a hash is a migration, not an edit.
+  Deduplicating the key SHARED with `tentative_promoted` is the cheaper half
+  of the same 10.26 MB.
 - **~22 MB at scale 64 is still unaccounted, and it is built while
   TRAINING.** Per-phase peaks at scale 64 after both fixes: train 55.8 MB,
   recall 58.3 MB, infer 58.7 MB. So answering now costs 2.9 MB over the
