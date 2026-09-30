@@ -151,8 +151,9 @@ fn decode_fingerprint_posting_key(key: &[u8], expected_kind: u8) -> Option<Momen
     if at != key.len() {
         return None;
     }
+    let legacy_pairs = ordered_per_pool.is_empty().then_some(pairs);
     Some(MomentFingerprint {
-        pairs,
+        legacy_pairs,
         ordered_per_pool,
         members_extra: Vec::new(),
     })
@@ -349,9 +350,19 @@ impl BindingMatch {
 /// signature.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct MomentFingerprint {
-    /// Sorted (pool, neuron) pairs used as the dedup key for
-    /// recurring-fingerprint emergence detection.
-    pairs: Vec<(PoolId, NeuronId)>,
+    /// Sorted (pool, neuron) pairs, and ONLY for a legacy pair-only record.
+    ///
+    /// The signature is the sorted flattening of `ordered_per_pool`, so a
+    /// fingerprint that has its ordered stream was storing every atom id of
+    /// query and answer a second time: 176 of the 549 bytes one costs at
+    /// scale 64 of the scorecard, over 9,728 of them. `pairs()` derives it.
+    ///
+    /// Legacy bincode snapshots persisted the pair signature and no temporal
+    /// order at all, so those records restore with an EMPTY
+    /// `ordered_per_pool` and nothing to derive from. They keep their list
+    /// here, which is also what `force_promote_tentative` tests for when it
+    /// refuses to invent an order for them.
+    legacy_pairs: Option<Vec<(PoolId, NeuronId)>>,
     /// Original firing order (per-pool sequence).  Preserved
     /// separately from `pairs` so binding-pool concepts retain the
     /// temporal order in which atoms fired — which is what
@@ -396,12 +407,34 @@ impl MomentFingerprint {
         let mut ordered_per_pool: Vec<(PoolId, Vec<NeuronId>)> =
             fired.iter().map(|(&pid, ns)| (pid, ns.clone())).collect();
         ordered_per_pool.sort_by_key(|(p, _)| *p);
-        pairs.sort();
         Some(Self {
-            pairs,
+            legacy_pairs: None,
             ordered_per_pool,
             members_extra: Vec::new(),
         })
+    }
+
+    /// Sorted (pool, neuron) signature. Derived from the ordered stream --
+    /// the two carry the same multiset by construction -- so the byte keys
+    /// this feeds are identical to the ones written before it was derived.
+    fn pairs(&self) -> Vec<(PoolId, NeuronId)> {
+        if let Some(pairs) = self.legacy_pairs.as_ref() {
+            return pairs.clone();
+        }
+        let mut pairs: Vec<(PoolId, NeuronId)> = self
+            .ordered_per_pool
+            .iter()
+            .flat_map(|(pid, ns)| ns.iter().map(move |&nid| (*pid, nid)))
+            .collect();
+        pairs.sort();
+        pairs
+    }
+
+    fn pair_count(&self) -> usize {
+        match self.legacy_pairs.as_ref() {
+            Some(pairs) => pairs.len(),
+            None => self.ordered_per_pool.iter().map(|(_, v)| v.len()).sum(),
+        }
     }
 
     /// Full binding membership: the stable ordered atom stream, then whatever
@@ -483,7 +516,7 @@ fn binding_label(fp: &MomentFingerprint) -> String {
 /// snapshot still finds the binding it already has.
 fn legacy_binding_label(fp: &MomentFingerprint) -> String {
     let member_label: String = fp
-        .pairs
+        .pairs()
         .iter()
         .map(|(p, n)| format!("p{}n{}", p, n))
         .collect::<Vec<_>>()
@@ -499,13 +532,13 @@ fn legacy_binding_label(fp: &MomentFingerprint) -> String {
 // sequences that carry different meaning.
 impl std::cmp::PartialEq for MomentFingerprint {
     fn eq(&self, other: &Self) -> bool {
-        self.pairs == other.pairs && self.ordered_per_pool == other.ordered_per_pool
+        self.pairs() == other.pairs() && self.ordered_per_pool == other.ordered_per_pool
     }
 }
 impl std::cmp::Eq for MomentFingerprint {}
 impl std::hash::Hash for MomentFingerprint {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.pairs.hash(state);
+        self.pairs().hash(state);
         self.ordered_per_pool.hash(state);
     }
 }
@@ -1579,7 +1612,8 @@ impl Brain {
     pub fn global_index_sizes(&self) -> serde_json::Value {
         fn fp_bytes(fp: &MomentFingerprint) -> usize {
             std::mem::size_of::<MomentFingerprint>()
-                + fp.pairs.len() * std::mem::size_of::<(PoolId, NeuronId)>()
+                + fp.legacy_pairs.as_ref().map_or(0, |p| p.len())
+                    * std::mem::size_of::<(PoolId, NeuronId)>()
                 + fp.ordered_per_pool.iter().map(|(_, v)| {
                     std::mem::size_of::<(PoolId, Vec<NeuronId>)>()
                         + v.len() * std::mem::size_of::<NeuronId>()
@@ -2261,13 +2295,13 @@ impl Brain {
             if let Some(id) = id {
                 self.network.pending_motif_out.push(GossipMotif {
                     source_brain: self.network.brain_id.clone(),
-                    fingerprint: fp.pairs.clone(),
+                    fingerprint: fp.pairs(),
                     observation_count: effective_count,
                     local_confidence: (effective_count as f32 / (consolidated_thr.max(1) as f32))
                         .min(1.0),
                     observed_at_tick: self.fabric.current_tick(),
                 });
-                self.eem.register_fact(id, fp.pairs.clone());
+                self.eem.register_fact(id, fp.pairs());
                 self.promoted_fingerprints.insert(fp, id);
                 if upgrade_id.is_some() {
                     self.tentative_binding_count_total =
@@ -2939,7 +2973,7 @@ impl Brain {
 
     fn fingerprint_scalar(&self, kind: u8, fingerprint: &MomentFingerprint) -> Option<u32> {
         let key =
-            encode_fingerprint_posting_key(kind, &fingerprint.pairs, &fingerprint.ordered_per_pool);
+            encode_fingerprint_posting_key(kind, &fingerprint.pairs(), &fingerprint.ordered_per_pool);
         self.disk_scalar(&key).or_else(|| {
             if fingerprint.ordered_per_pool.is_empty() {
                 return None;
@@ -2950,7 +2984,7 @@ impl Brain {
             // historical count causes a new promotion.
             self.disk_scalar(&encode_fingerprint_posting_key(
                 kind,
-                &fingerprint.pairs,
+                &fingerprint.pairs(),
                 &[],
             ))
         })
@@ -3231,7 +3265,7 @@ impl Brain {
                 builder.insert(
                     &encode_fingerprint_posting_key(
                         FINGERPRINT_LIFETIME_KEY,
-                        &fingerprint.pairs,
+                        &fingerprint.pairs(),
                         &fingerprint.ordered_per_pool,
                     ),
                     *count,
@@ -3241,7 +3275,7 @@ impl Brain {
                 builder.insert(
                     &encode_fingerprint_posting_key(
                         FINGERPRINT_TENTATIVE_KEY,
-                        &fingerprint.pairs,
+                        &fingerprint.pairs(),
                         &fingerprint.ordered_per_pool,
                     ),
                     *id,
@@ -3251,7 +3285,7 @@ impl Brain {
                 builder.insert(
                     &encode_fingerprint_posting_key(
                         FINGERPRINT_PROMOTED_KEY,
-                        &fingerprint.pairs,
+                        &fingerprint.pairs(),
                         &fingerprint.ordered_per_pool,
                     ),
                     *id,
@@ -3289,7 +3323,7 @@ impl Brain {
                     candidates.insert(
                         &encode_fingerprint_posting_key(
                             FINGERPRINT_LIFETIME_KEY,
-                            &fingerprint.pairs,
+                            &fingerprint.pairs(),
                             &fingerprint.ordered_per_pool,
                         ),
                         *count,
@@ -7901,7 +7935,7 @@ impl Brain {
                 }
             }
         } else {
-            for &(pid, nid) in &fp.pairs {
+            for &(pid, nid) in &fp.pairs() {
                 if let Some(pool) = self.fabric.pool(pid) {
                     let p = pool.read();
                     if let Some(neuron) = p.get(nid) {
@@ -8019,7 +8053,7 @@ impl Brain {
                     }
                 }
             } else {
-                for &(pid, nid) in &fp.pairs {
+                for &(pid, nid) in &fp.pairs() {
                     if let Some(pool) = self.fabric.pool(pid) {
                         pool.write().inject_activation(nid, strength, now);
                     }
@@ -8083,7 +8117,7 @@ impl Brain {
                     }
                 }
             } else {
-                for &(pid, nid) in &fp.pairs {
+                for &(pid, nid) in &fp.pairs() {
                     if let Some(pool) = self.fabric.pool(pid) {
                         pool.write().inject_activation(nid, strength, now);
                     }
@@ -8144,7 +8178,7 @@ impl Brain {
                     }
                 }
             } else {
-                for &(pid, nid) in &fp.pairs {
+                for &(pid, nid) in &fp.pairs() {
                     if let Some(pool) = self.fabric.pool(pid) {
                         pool.write().inject_activation(nid, strength, now);
                     }
@@ -8180,7 +8214,7 @@ impl Brain {
             .moment_history
             .iter()
             .map(|f| crate::persistence::SerializableFingerprint {
-                pairs: f.pairs.clone(),
+                pairs: f.pairs(),
             })
             .collect();
         let binding_recurrences: Vec<(crate::persistence::SerializableFingerprint, u32)> = self
@@ -8189,7 +8223,7 @@ impl Brain {
             .map(|(f, &c)| {
                 (
                     crate::persistence::SerializableFingerprint {
-                        pairs: f.pairs.clone(),
+                        pairs: f.pairs(),
                     },
                     c,
                 )
@@ -8201,7 +8235,7 @@ impl Brain {
                 .map(|(f, &n)| {
                     (
                         crate::persistence::SerializableFingerprint {
-                            pairs: f.pairs.clone(),
+                            pairs: f.pairs(),
                         },
                         n,
                     )
@@ -8213,7 +8247,7 @@ impl Brain {
             .map(|(f, &n)| {
                 (
                     crate::persistence::SerializableFingerprint {
-                        pairs: f.pairs.clone(),
+                        pairs: f.pairs(),
                     },
                     n,
                 )
@@ -8225,7 +8259,7 @@ impl Brain {
             .map(|(f, &c)| {
                 (
                     crate::persistence::SerializableFingerprint {
-                        pairs: f.pairs.clone(),
+                        pairs: f.pairs(),
                     },
                     c,
                 )
@@ -8296,7 +8330,7 @@ impl Brain {
         }
 
         let fingerprint = |f: &MomentFingerprint| crate::persistence::SerializableFingerprint {
-            pairs: f.pairs.clone(),
+            pairs: f.pairs(),
         };
         let borrowed = BrainSnapshotRef {
             format_version: crate::persistence::CURRENT_SNAPSHOT_VERSION,
@@ -8677,7 +8711,7 @@ impl Brain {
     fn stage_wbrain_brain_metadata(&self, file: &crate::store::WbrainFile) -> std::io::Result<()> {
         use self::wbrain_metadata::{PersistedMomentFingerprint, WbrainBrainMetadata};
         let persist = |fingerprint: &MomentFingerprint| PersistedMomentFingerprint {
-            pairs: fingerprint.pairs.clone(),
+            pairs: fingerprint.pairs(),
             ordered_per_pool: fingerprint.ordered_per_pool.clone(),
             members_per_pool: fingerprint.members_per_pool(),
         };
@@ -9104,7 +9138,7 @@ impl Brain {
         // Legacy bincode snapshots persist only the canonical pair signature.
         let legacy = |f: crate::persistence::SerializableFingerprint| -> FpKey {
             std::sync::Arc::new(MomentFingerprint {
-                pairs: f.pairs,
+                legacy_pairs: Some(f.pairs),
                 ordered_per_pool: Vec::new(),
                 members_extra: Vec::new(),
             })
@@ -9199,8 +9233,12 @@ impl Brain {
                 &fingerprint.ordered_per_pool,
                 fingerprint.members_per_pool,
             );
+            // A record with an ordered stream derives its signature; one
+            // without is the legacy pair-only shape and keeps its list.
+            let legacy_pairs =
+                fingerprint.ordered_per_pool.is_empty().then_some(fingerprint.pairs);
             std::sync::Arc::new(MomentFingerprint {
-                pairs: fingerprint.pairs,
+                legacy_pairs,
                 ordered_per_pool: fingerprint.ordered_per_pool,
                 members_extra,
             })
