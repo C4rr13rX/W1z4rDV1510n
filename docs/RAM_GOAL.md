@@ -94,7 +94,13 @@ What is left, measured at scale 64 with
   `len`, and counting `capacity` moved `est_resident_mb` at scale 64 from 5.9
   to 14.9 MB, which narrows the unexplained remainder to ~13 MB. The
   Brain-level census still counts `len` only, and every neuron carries its own
-  `terminal_idx` `AHashMap` whose capacity nothing counts — start there.
+  `terminal_idx` `AHashMap` whose capacity nothing counts — start there. One
+  more number to start from: scale 64 holds only **9,776 neurons** (9,728 of
+  them concepts) and 24,975 terminals, so 14.9 MB is ~1,600 bytes per neuron
+  for a body whose members are ~22 refs. `size_of::<Neuron>()` and the
+  composite label string are the candidates. The census is unchanged by the
+  fan-out cap: 12.47 MB and the same entry counts before and after, as
+  expected, since a cap removes terminals and not fingerprints.
 - **Integration is still 0%** at every scale, and that is the second goal.
   The scene world's integration probes chain two trained facts: "r03 lamp on"
   gives "desk" and "r03 desk material" gives "oak", so "r03 lamp on material?"
