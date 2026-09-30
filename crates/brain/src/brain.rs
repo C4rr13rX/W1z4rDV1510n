@@ -398,6 +398,19 @@ impl MomentFingerprint {
     }
 }
 
+/// One shared, immutable fingerprint behind every index that keys on it.
+///
+/// `register_fingerprint` used to clone the whole `MomentFingerprint` into
+/// `moment_history`, `binding_recurrences`, `lifetime_recurrences` and
+/// `tentative_promoted` — four copies of the same three `Vec`s per observed
+/// moment. Measured at scale 64 of the scorecard: `lifetime_recurrences`
+/// 5.13 MB over 9,728 entries and `tentative_promoted` 5.13 MB storing the
+/// SAME key a second time. The fingerprint is never mutated after
+/// construction, so the indexes can share one allocation and hold an 8-byte
+/// pointer each. `Arc<T>: Borrow<T>` keeps every `get`/`remove` call site
+/// taking a plain `&MomentFingerprint`.
+type FpKey = std::sync::Arc<MomentFingerprint>;
+
 // A binding is a temporal episode, not merely a bag of fired neurons.
 // `pairs` keeps the canonical set/multiset signature while
 // `ordered_per_pool` distinguishes anagrams and reordered source/code
@@ -756,16 +769,16 @@ pub struct Brain {
     wbrain_file: Option<std::sync::Arc<crate::store::WbrainFile>>,
     binding_pool_id: PoolId,
     /// Fingerprint history.  Bounded by `moment_history_window`.
-    moment_history: VecDeque<MomentFingerprint>,
+    moment_history: VecDeque<FpKey>,
     /// Active-count of each fingerprint within the window.  Decays
     /// when an old fingerprint scrolls out of `moment_history`.
-    binding_recurrences: AHashMap<MomentFingerprint, u32>,
+    binding_recurrences: AHashMap<FpKey, u32>,
     /// Lifetime co-firing count per fingerprint — *never* decays.
     /// Sparsely-trained patterns (round-robin training where the
     /// same pair recurs far outside `moment_history_window`) never
     /// accumulate in `binding_recurrences`, so this is the fallback
     /// signal for promotion under sparse schedules.
-    lifetime_recurrences: AHashMap<MomentFingerprint, u32>,
+    lifetime_recurrences: AHashMap<FpKey, u32>,
     /// Overlay entries tolerated before `advance_tick` spills to disk.
     /// See `flush_overlay_if_oversized`.
     overlay_flush_entry_limit: usize,
@@ -777,10 +790,10 @@ pub struct Brain {
     /// concepts regardless of tier).  Invisible to EEM chain
     /// exploration.  Upgraded to `promoted_fingerprints` when the
     /// count crosses `binding_emergence_threshold`.
-    tentative_promoted: AHashMap<MomentFingerprint, NeuronId>,
+    tentative_promoted: AHashMap<FpKey, NeuronId>,
     /// "Consolidated" tier promotion — these have an EEM grounded
     /// fact and have been gossiped to peers.
-    promoted_fingerprints: AHashMap<MomentFingerprint, NeuronId>,
+    promoted_fingerprints: AHashMap<FpKey, NeuronId>,
     /// Persisted tier cardinalities include disk generations plus the live
     /// overlay. They keep pressure/statistics exact without hydrating every
     /// historical fingerprint key.
@@ -1494,15 +1507,31 @@ impl Brain {
                         + v.len() * std::mem::size_of::<NeuronId>()
                 }).sum::<usize>()
         }
+        // The five fingerprint-keyed structures share ONE `Arc` per moment,
+        // so charging each of them the full key would count the same bytes up
+        // to five times — which is exactly the reading that made
+        // `lifetime_recurrences` and `tentative_promoted` look like 5.13 MB
+        // each. Each map is charged its pointer plus its value; the pointee is
+        // charged once, to `fingerprint_keys`.
+        let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let mut shared = 0usize;
+        let mut charge = |fp: &FpKey| {
+            if seen.insert(std::sync::Arc::as_ptr(fp) as usize) {
+                shared += fp_bytes(fp);
+            }
+            std::mem::size_of::<FpKey>()
+        };
         let lifetime: usize = self.lifetime_recurrences.keys()
-            .map(|k| fp_bytes(k) + std::mem::size_of::<u32>()).sum();
+            .map(|k| charge(k) + std::mem::size_of::<u32>()).sum();
         let recurrences: usize = self.binding_recurrences.keys()
-            .map(|k| fp_bytes(k) + std::mem::size_of::<u32>()).sum();
+            .map(|k| charge(k) + std::mem::size_of::<u32>()).sum();
         let promoted: usize = self.promoted_fingerprints.keys()
-            .map(|k| fp_bytes(k) + std::mem::size_of::<NeuronId>()).sum();
+            .map(|k| charge(k) + std::mem::size_of::<NeuronId>()).sum();
         let tentative: usize = self.tentative_promoted.keys()
-            .map(|k| fp_bytes(k) + std::mem::size_of::<NeuronId>()).sum();
-        let history: usize = self.moment_history.iter().map(fp_bytes).sum();
+            .map(|k| charge(k) + std::mem::size_of::<NeuronId>()).sum();
+        let history: usize = self.moment_history.iter().map(|fp| charge(fp)).sum();
+        let fingerprint_keys = shared;
+        let distinct_fingerprints = seen.len();
         let seq_index: usize = self.binding_sequence_index.iter()
             .map(|((_, _, k), v)| {
                 std::mem::size_of::<(PoolId, PoolId, Vec<NeuronId>)>()
@@ -1524,6 +1553,7 @@ impl Brain {
             }).sum();
         serde_json::json!({
             "bytes": {
+                "fingerprint_keys":           fingerprint_keys,
                 "lifetime_recurrences":       lifetime,
                 "binding_recurrences":        recurrences,
                 "promoted_fingerprints":      promoted,
@@ -1534,6 +1564,7 @@ impl Brain {
                 "binding_motif_index":        motif_index,
             },
             "entries": {
+                "fingerprint_keys":           distinct_fingerprints,
                 "lifetime_recurrences":       self.lifetime_recurrences.len(),
                 "binding_recurrences":        self.binding_recurrences.len(),
                 "promoted_fingerprints":      self.promoted_fingerprints.len(),
@@ -1543,7 +1574,7 @@ impl Brain {
                 "binding_feature_atom_index": self.binding_feature_atom_index.len(),
                 "binding_motif_index":        self.binding_motif_index.len(),
             },
-            "total_bytes": lifetime + recurrences + promoted + tentative
+            "total_bytes": fingerprint_keys + lifetime + recurrences + promoted + tentative
                 + history + seq_index + feat_index + motif_index,
         })
     }
@@ -1671,6 +1702,7 @@ impl Brain {
             profile.fingerprint_ns = stage.elapsed().as_nanos() as u64;
             return (None, profile);
         };
+        let fingerprint: FpKey = std::sync::Arc::new(fingerprint);
         profile.fingerprint_ns = stage.elapsed().as_nanos() as u64;
         self.total_observations = self.total_observations.saturating_add(1);
         let stage = std::time::Instant::now();
@@ -2022,6 +2054,9 @@ impl Brain {
     }
 
     fn register_fingerprint(&mut self, fp: MomentFingerprint) {
+        // One allocation per observed moment; every index below holds a
+        // pointer to it rather than its own copy of the three Vecs.
+        let fp: FpKey = std::sync::Arc::new(fp);
         // Decay the oldest entry out of the window.  Lifetime count
         // does NOT decay — it's the sparse-schedule fallback.
         if self.moment_history.len() >= self.config.moment_history_window {
@@ -2207,7 +2242,7 @@ impl Brain {
     /// tentative-promoted by this call.  Already-promoted
     /// fingerprints are not re-promoted (idempotent).
     pub fn force_promote_tentative(&mut self, min_count: u32) -> Vec<NeuronId> {
-        let candidates: Vec<MomentFingerprint> = self
+        let candidates: Vec<FpKey> = self
             .lifetime_recurrences
             .iter()
             .filter(|&(_, c)| *c >= min_count)
@@ -2263,6 +2298,7 @@ impl Brain {
                     {
                         return Ok(());
                     }
+                    let fp: FpKey = std::sync::Arc::new(fp);
                     if let Some(id) = self.promote_binding_concept(&fp) {
                         self.tentative_promoted.insert(fp, id);
                         self.tentative_binding_count_total =
@@ -2832,13 +2868,14 @@ impl Brain {
             .unwrap_or(0)
     }
 
-    fn increment_lifetime_recurrence(&mut self, fingerprint: &MomentFingerprint) -> u32 {
+    fn increment_lifetime_recurrence(&mut self, fingerprint: &FpKey) -> u32 {
         if let Some(count) = self.lifetime_recurrences.get_mut(fingerprint) {
             *count = count.saturating_add(1);
             return *count;
         }
         let next = self.lifetime_recurrence(fingerprint).saturating_add(1);
-        self.lifetime_recurrences.insert(fingerprint.clone(), next);
+        self.lifetime_recurrences
+            .insert(std::sync::Arc::clone(fingerprint), next);
         next
     }
 
@@ -7813,7 +7850,7 @@ impl Brain {
             return 0;
         }
         // 1. Score every moment.
-        let scored: Vec<(f32, MomentFingerprint)> = self
+        let scored: Vec<(f32, FpKey)> = self
             .moment_history
             .iter()
             .map(|fp| (self.moment_salience_score(fp), fp.clone()))
@@ -7851,7 +7888,7 @@ impl Brain {
             ((mixed >> 40) as f32) / ((1u32 << 24) as f32)
         };
         let n_target = count.min(scored.len());
-        let mut chosen: Vec<MomentFingerprint> = Vec::with_capacity(n_target);
+        let mut chosen: Vec<FpKey> = Vec::with_capacity(n_target);
         for _ in 0..n_target {
             if remaining_total <= 0.0 {
                 break;
@@ -7921,7 +7958,7 @@ impl Brain {
         // Score every moment in history.  Avoid scoring more than we need
         // to consider — sort by score, take top-K.  At typical
         // moment_history_window sizes (256-1024) this is fast.
-        let mut scored: Vec<(f32, MomentFingerprint)> = self
+        let mut scored: Vec<(f32, FpKey)> = self
             .moment_history
             .iter()
             .map(|fp| (self.moment_salience_score(fp), fp.clone()))
@@ -7935,7 +7972,7 @@ impl Brain {
         // selecting those whose fingerprints match.  Cheap because count
         // is small.  Simpler: just replay in score-descending order, which
         // gives an emphasis on most-salient-first.
-        let to_replay: Vec<MomentFingerprint> = scored.into_iter().map(|(_, fp)| fp).collect();
+        let to_replay: Vec<FpKey> = scored.into_iter().map(|(_, fp)| fp).collect();
 
         let mut replayed = 0usize;
         for fp in &to_replay {
@@ -7985,7 +8022,7 @@ impl Brain {
         // Snapshot the last `count` fingerprints.  Replay in original
         // temporal order (oldest first) so any sequential structure
         // between them is preserved.
-        let recent: Vec<MomentFingerprint> = self
+        let recent: Vec<FpKey> = self
             .moment_history
             .iter()
             .rev()
@@ -8174,7 +8211,7 @@ impl Brain {
             fabric: crate::fabric::FabricSnapshotRef(&self.fabric),
             eem: self.eem.snapshot(),
             annealer: self.annealer.snapshot(),
-            moment_history: self.moment_history.iter().map(fingerprint).collect(),
+            moment_history: self.moment_history.iter().map(|f| fingerprint(f)).collect(),
             binding_recurrences: self
                 .binding_recurrences
                 .iter()
@@ -8551,7 +8588,7 @@ impl Brain {
         let metadata = WbrainBrainMetadata {
             config: self.config.clone(),
             binding_pool_id: self.binding_pool_id,
-            moment_history: self.moment_history.iter().map(persist).collect(),
+            moment_history: self.moment_history.iter().map(|f| persist(f)).collect(),
             binding_recurrences: self
                 .binding_recurrences
                 .iter()
@@ -8968,57 +9005,33 @@ impl Brain {
             annealer: snap.annealer.config.clone(),
         };
 
-        let mut moment_history = VecDeque::with_capacity(snap.moment_history_window);
-        for f in snap.moment_history {
-            moment_history.push_back(MomentFingerprint {
+        // Legacy bincode snapshots persist only the canonical pair signature.
+        let legacy = |f: crate::persistence::SerializableFingerprint| -> FpKey {
+            std::sync::Arc::new(MomentFingerprint {
                 pairs: f.pairs,
                 ordered_per_pool: Vec::new(),
                 members_per_pool: Vec::new(),
-            });
+            })
+        };
+        let mut moment_history = VecDeque::with_capacity(snap.moment_history_window);
+        for f in snap.moment_history {
+            moment_history.push_back(legacy(f));
         }
         let mut binding_recurrences = AHashMap::new();
         for (f, c) in snap.binding_recurrences {
-            binding_recurrences.insert(
-                MomentFingerprint {
-                    pairs: f.pairs,
-                    ordered_per_pool: Vec::new(),
-                    members_per_pool: Vec::new(),
-                },
-                c,
-            );
+            binding_recurrences.insert(legacy(f), c);
         }
         let mut promoted_fingerprints = AHashMap::new();
         for (f, n) in snap.promoted_fingerprints {
-            promoted_fingerprints.insert(
-                MomentFingerprint {
-                    pairs: f.pairs,
-                    ordered_per_pool: Vec::new(),
-                    members_per_pool: Vec::new(),
-                },
-                n,
-            );
+            promoted_fingerprints.insert(legacy(f), n);
         }
         let mut tentative_promoted = AHashMap::new();
         for (f, n) in snap.tentative_promoted {
-            tentative_promoted.insert(
-                MomentFingerprint {
-                    pairs: f.pairs,
-                    ordered_per_pool: Vec::new(),
-                    members_per_pool: Vec::new(),
-                },
-                n,
-            );
+            tentative_promoted.insert(legacy(f), n);
         }
         let mut lifetime_recurrences = AHashMap::new();
         for (f, c) in snap.lifetime_recurrences {
-            lifetime_recurrences.insert(
-                MomentFingerprint {
-                    pairs: f.pairs,
-                    ordered_per_pool: Vec::new(),
-                    members_per_pool: Vec::new(),
-                },
-                c,
-            );
+            lifetime_recurrences.insert(legacy(f), c);
         }
         let mut pending_actions = AHashMap::new();
         for (k, v) in snap.pending_actions {
@@ -9085,10 +9098,12 @@ impl Brain {
         let file = crate::store::WbrainFile::open(path)?;
         let metadata: WbrainBrainMetadata = bincode::deserialize(&file.brain_metadata())
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-        let restore_fingerprint = |fingerprint: PersistedMomentFingerprint| MomentFingerprint {
-            pairs: fingerprint.pairs,
-            ordered_per_pool: fingerprint.ordered_per_pool,
-            members_per_pool: fingerprint.members_per_pool,
+        let restore_fingerprint = |fingerprint: PersistedMomentFingerprint| -> FpKey {
+            std::sync::Arc::new(MomentFingerprint {
+                pairs: fingerprint.pairs,
+                ordered_per_pool: fingerprint.ordered_per_pool,
+                members_per_pool: fingerprint.members_per_pool,
+            })
         };
         let mut fabric = Fabric::new(metadata.config.fabric.clone());
         let mut missing = Vec::new();
