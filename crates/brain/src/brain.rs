@@ -7306,6 +7306,26 @@ impl Brain {
             // The best SUB-ceiling rewrite, which is what answers when nothing
             // reaches 1.0 -- unchanged behaviour for that case.
             let mut best: Option<(f32, Vec<u8>, Vec<u8>)> = None;
+            // The best rewrite the brain was NEVER taught, kept as a next
+            // QUESTION and never as an answer.
+            //
+            // An n-hop question's intermediate question is untrained by
+            // construction -- that is what makes it an integration probe
+            // rather than a recall probe. `"r000 next lamp on material?"`
+            // rewrites to `"r001 lamp on material?"`, which is itself a
+            // held-out probe, and only the hop AFTER it reaches the taught
+            // `"r001 desk material?"`. So requiring every rewrite to be taught
+            // is correct for the ANSWER and fatal for the SEARCH: measured, it
+            // took `next_on_material` from 1/8, 5/32 and 20/128 to 0 at every
+            // scale while taking the other families up.
+            //
+            // Splitting the two roles costs nothing in honesty. An untaught
+            // rewrite can advance `current` but cannot assign `derived`, so
+            // every answer this method returns still comes from a question the
+            // brain was taught; the chain is merely allowed to walk through
+            // questions it was not. A chain that never reaches a taught
+            // question returns `None`.
+            let mut continuation: Option<(f32, Vec<u8>)> = None;
             for (round_idx, spans) in rounds.into_iter().enumerate() {
                 // The hint round answered, so the rest of the scan is work
                 // whose result the vote already has.
@@ -7339,6 +7359,15 @@ impl Brain {
                     let taught = self.is_trained_frame(query_pool, &rewrite);
                     if !taught {
                         self.derivation_stats.rejected_untaught += 1;
+                        // Not an answer, but possibly the next question. Same
+                        // selection rule the answer arm uses -- best score
+                        // strictly above the question we came from -- and no
+                        // decode, because nothing reads this rewrite's answer.
+                        if score > base_score
+                            && continuation.as_ref().map_or(true, |(c, _)| score > *c)
+                        {
+                            continuation = Some((score, rewrite));
+                        }
                         continue;
                     }
                     // `base_score < 1.0` is guaranteed by the break above, so a
@@ -7413,9 +7442,21 @@ impl Brain {
                 }
                 best = Some((1.0, rewrite, winner));
             }
-            let Some((_, next_question, next_answer)) = best else { break };
-            derived = Some(next_answer);
-            current = next_question;
+            match best {
+                // A taught rewrite: its answer IS the derivation.
+                Some((_, next_question, next_answer)) => {
+                    derived = Some(next_answer);
+                    current = next_question;
+                }
+                // Nothing taught at this hop. Walk to the best untaught
+                // rewrite and try again, WITHOUT recording an answer -- see
+                // `continuation`. `derived` keeps whatever an earlier taught
+                // hop established, or stays `None`.
+                None => match continuation {
+                    Some((_, next_question)) => current = next_question,
+                    None => break,
+                },
+            }
         }
 
         self.observe_fabric_read_only(query_pool, query);
