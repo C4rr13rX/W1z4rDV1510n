@@ -287,3 +287,141 @@ fn derivation_is_silent_on_a_question_that_was_taught() {
         derived.as_deref().map(String::from_utf8_lossy)
     );
 }
+
+/// Does the PRODUCTION entry point derive, or only the mechanism behind it?
+///
+/// `derive_by_substitution` passed 32 of 32 here while the scorecard's
+/// `integration_pct` stayed 0.0, for one reason: it had no callers. The answer
+/// path is `Brain::integrate_autonomous`, so this test asks the question the
+/// way `crates/brain/examples/scorecard.rs:389` and the node's routes do --
+/// `observe_read_only` then `integrate_autonomous` -- and prints the tier and
+/// the grounding of every miss, because "empty" and "wrong" and "rejected as
+/// ungrounded" are three different faults with three different repairs and the
+/// percentage alone cannot tell them apart.
+#[test]
+fn the_production_answer_path_derives_untrained_answers() {
+    const ROOMS: u32 = 16;
+    let mut brain = subject();
+    // Off by default -- the default is a RAM measurement, not caution. See
+    // `Brain::derivation_probe_budget`.
+    assert_eq!(brain.derivation_probe_budget(), 0, "the derivation must be off by default");
+    brain.set_derivation_probe_budget(MAX_PROBES);
+    teach_on_material(&mut brain, ROOMS);
+    teach_next_colour(&mut brain, ROOMS);
+
+    // Every trained question must still answer through the path the
+    // scorecard's `recall()` uses, and we separately COUNT how many answer
+    // through `integrate_autonomous`. Those are different numbers and the
+    // second one is a pre-existing hole this change does not touch -- see the
+    // assertion at the bottom.
+    let mut trained_ok = 0u32;
+    let mut trained_recall_ok = 0u32;
+    let mut trained_total = 0u32;
+    for room in 0..ROOMS {
+        for (q, want) in [
+            (format!("r{room:03} lamp on"), "desk"),
+            (format!("r{room:03} desk material"), "oak"),
+        ] {
+            trained_total += 1;
+            brain.observe_read_only(QUERY_POOL, q.as_bytes());
+            let got = brain
+                .integrate_autonomous(QUERY_POOL, ANSWER_POOL, 100.0, 3, 200)
+                .answer
+                .unwrap_or_default();
+            if got == want.as_bytes() {
+                trained_ok += 1;
+            }
+            if recall(&mut brain, &q).as_deref() == Some(want.as_bytes()) {
+                trained_recall_ok += 1;
+            }
+        }
+    }
+    println!(
+        "trained: {trained_ok}/{trained_total} through integrate_autonomous,          {trained_recall_ok}/{trained_total} through decode_best_trained_binding"
+    );
+
+    // WHY, measured rather than guessed. The step-0 gate reads
+    // `best_binding_match_v2` off the firing state, so the two observe entry
+    // points are the suspects: `observe_read_only` goes through
+    // `Brain::observe` (bookkeeping, ticks), `observe_fabric_read_only` does
+    // not -- and the derivation's own probes use the latter and score fine.
+    let probe = format!("r000 lamp on");
+    brain.observe_read_only(QUERY_POOL, probe.as_bytes());
+    let via_brain = brain.best_binding_match_v2(QUERY_POOL);
+    let decode_brain = brain.decode_best_trained_binding(QUERY_POOL, ANSWER_POOL);
+    brain.observe_fabric_read_only(QUERY_POOL, probe.as_bytes());
+    let via_fabric = brain.best_binding_match_v2(QUERY_POOL);
+    let decode_fabric = brain.decode_best_trained_binding(QUERY_POOL, ANSWER_POOL);
+    println!(
+        "  observe_read_only    -> precision {:.4} recall {:.4} tier {:?} score {:.4} decode {:?}",
+        via_brain.precision, via_brain.recall, via_brain.tier, via_brain.score(),
+        decode_brain.as_deref().map(String::from_utf8_lossy)
+    );
+    println!(
+        "  observe_fabric_ro    -> precision {:.4} recall {:.4} tier {:?} score {:.4} decode {:?}",
+        via_fabric.precision, via_fabric.recall, via_fabric.tier, via_fabric.score(),
+        decode_fabric.as_deref().map(String::from_utf8_lossy)
+    );
+
+    // And the untrained ones must derive.
+    let mut hits = 0u32;
+    let mut empty = 0u32;
+    let mut wrong = 0u32;
+    let mut ungrounded = 0u32;
+    let mut asked = 0u32;
+    for room in 0..ROOMS {
+        for (q, want) in [
+            (format!("r{room:03} lamp on material"), "oak"),
+            (format!("c{room:03} after shade"), "warm"),
+        ] {
+            asked += 1;
+            brain.observe_read_only(QUERY_POOL, q.as_bytes());
+            let res = brain.integrate_autonomous(QUERY_POOL, ANSWER_POOL, 100.0, 3, 200);
+            let tier = res.confidence_tier;
+            let got = res.answer.unwrap_or_default();
+            if got == want.as_bytes() {
+                hits += 1;
+            } else if got.is_empty() {
+                empty += 1;
+                if tier == w1z4rd_brain::ConfidenceTier::Ungrounded {
+                    ungrounded += 1;
+                }
+                if empty <= 2 {
+                    println!(
+                        "  EMPTY {q:?} tier={tier:?} outside_grounding={} fabric_conf={:.4}",
+                        res.grounding.outside_grounding, res.grounding.fabric_confidence
+                    );
+                }
+            } else {
+                wrong += 1;
+                if wrong <= 2 {
+                    println!("  WRONG {q:?} -> {:?} want {want:?} tier={tier:?}",
+                             String::from_utf8_lossy(&got));
+                }
+            }
+        }
+    }
+    println!(
+        "integrate_autonomous on untrained: {hits}/{asked} derived, {empty} empty \
+         ({ungrounded} of those rejected as Ungrounded), {wrong} wrong"
+    );
+
+    // Recall is measured on the path the scorecard measures it on, and must
+    // be perfect. `integrate_autonomous` answering 0 of 32 TRAINED questions
+    // is a SEPARATE, pre-existing hole that predates this change and is not
+    // asserted here: with `fabric_confidence_threshold` at 100.0 its fabric
+    // arm can never be taken, the legacy `integrate()` finds nothing in this
+    // world, and the derivation correctly declines a question that is already
+    // fully explained (nothing scores strictly better than 1.0). That is why
+    // the scorecard's `recall()` puts `decode_best_trained_binding` first and
+    // its `infer()` does not -- filed rather than fixed inside this change.
+    assert_eq!(
+        trained_recall_ok, trained_total,
+        "recall through the scorecard's own recall path regressed"
+    );
+    assert_eq!(wrong, 0, "the derivation answered {wrong} untrained questions WRONGLY");
+    assert_eq!(
+        hits, asked,
+        "the production answer path derived {hits} of {asked}: {empty} empty ({ungrounded} ungrounded), {wrong} wrong"
+    );
+}
