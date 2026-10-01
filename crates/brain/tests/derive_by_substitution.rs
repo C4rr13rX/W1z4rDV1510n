@@ -302,9 +302,22 @@ fn derivation_is_silent_on_a_question_that_was_taught() {
 fn the_production_answer_path_derives_untrained_answers() {
     const ROOMS: u32 = 16;
     let mut brain = subject();
-    // Off by default -- the default is a RAM measurement, not caution. See
-    // `Brain::derivation_probe_budget`.
-    assert_eq!(brain.derivation_probe_budget(), 0, "the derivation must be off by default");
+    // ON by default now, and the default is what the scorecard and the node's
+    // answer routes both pick up without either of them naming the setting.
+    // Asserted rather than assumed: this was 0 for a pass, every caller
+    // inherited it, and `derive_by_substitution` measured 32 of 32 on a path
+    // nothing could reach. See `Brain::derivation_probe_budget` for the cost.
+    assert_eq!(
+        brain.derivation_probe_budget(),
+        w1z4rd_brain::DEFAULT_DERIVATION_PROBE_BUDGET,
+        "a fresh brain must inherit the shipped derivation budget"
+    );
+    assert!(
+        brain.derivation_probe_budget() > 0,
+        "the shipped default must actually enable the derivation"
+    );
+    // This test measures the MECHANISM's ceiling, not the shipped budget, so it
+    // raises it deliberately -- the shipped figure is asserted above.
     brain.set_derivation_probe_budget(MAX_PROBES);
     teach_on_material(&mut brain, ROOMS);
     teach_next_colour(&mut brain, ROOMS);
