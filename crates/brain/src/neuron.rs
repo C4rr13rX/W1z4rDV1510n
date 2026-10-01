@@ -134,11 +134,21 @@ pub struct Neuron {
     ///
     /// INVARIANT: either `terminal_idx.len() == terminals.len()` and for
     /// every i, `terminal_idx[terminals[i].target] == i`; or the map is
-    /// empty and lookups scan.  [`Neuron::find_terminal`] reads the
+    /// absent and lookups scan.  [`Neuron::find_terminal`] reads the
     /// discriminator off those two lengths, so a prune that forgets to
     /// rebuild degrades to a scan rather than to a wrong answer.
+    ///
+    /// BOXED, and that is the point. An inline `AHashMap` is a hasher plus a
+    /// `RawTable` — measured 64 bytes, 29.6 % of a 216-byte `Neuron` and its
+    /// largest single field — and every neuron paid it whether or not a map
+    /// was ever allocated. Keeping the BUCKETS off non-hubs (the threshold
+    /// above) did nothing about the header. `None` is 8 bytes, so the same
+    /// minority that allocates a map is now the only minority that carries
+    /// one. Private so the absent case cannot be spelled two ways: go
+    /// through [`Neuron::find_terminal`] and
+    /// [`Neuron::release_terminal_index`].
     #[serde(skip)]
-    pub terminal_idx:         ahash::AHashMap<NeuronRef, usize>,
+    terminal_idx:             Option<Box<ahash::AHashMap<NeuronRef, usize>>>,
     pub born_tick:            u64,
     pub last_fired_tick:      u64,
     pub use_count:            u64,
@@ -217,7 +227,7 @@ impl Neuron {
             salience: 0.0,
             salience_ema: 0.0,
             last_decayed_tick: tick,
-            terminal_idx: ahash::AHashMap::new(),
+            terminal_idx: None,
             domain_id: 0,
             bridges: Vec::new(),
         }
@@ -247,7 +257,7 @@ impl Neuron {
             salience: 0.01,
             salience_ema: 0.01,
             last_decayed_tick: tick,
-            terminal_idx: ahash::AHashMap::new(),
+            terminal_idx: None,
             domain_id: 0,
             bridges: Vec::new(),
         }
@@ -334,9 +344,13 @@ impl Neuron {
             let idx = self.terminals.len();
             self.terminals.push(Terminal::new(target, delta.min(max_weight), tick));
             if self.terminals.len() >= Self::TERMINAL_INDEX_THRESHOLD {
-                if self.terminal_idx.len() == idx {
+                if self.terminal_index_len() == idx {
                     // The index already covers 0..idx — extend it.
-                    self.terminal_idx.insert(target, idx);
+                    if let Some(m) = self.terminal_idx.as_mut() {
+                        m.insert(target, idx);
+                    } else {
+                        self.rebuild_terminal_idx();
+                    }
                 } else {
                     // This push crossed the threshold (or the index was
                     // released by a prune): build it from the Vec.
@@ -365,10 +379,42 @@ impl Neuron {
     /// rebuild costs a scan, never a wrong position.
     #[inline]
     pub fn find_terminal(&self, target: &NeuronRef) -> Option<usize> {
-        if !self.terminals.is_empty() && self.terminal_idx.len() == self.terminals.len() {
-            return self.terminal_idx.get(target).copied();
+        if let Some(m) = self.terminal_idx.as_deref() {
+            if !self.terminals.is_empty() && m.len() == self.terminals.len() {
+                return m.get(target).copied();
+            }
         }
         self.terminals.iter().position(|t| &t.target == target)
+    }
+
+    /// Entries in the terminal index, 0 when no index is allocated.
+    #[inline]
+    pub fn terminal_index_len(&self) -> usize {
+        self.terminal_idx.as_deref().map_or(0, |m| m.len())
+    }
+
+    /// Usable slots the terminal index has allocated, 0 when there is none.
+    /// The census charges this through `brain::hash_table_bytes`, which turns
+    /// it into the bucket count actually allocated.
+    #[inline]
+    pub fn terminal_index_capacity(&self) -> usize {
+        self.terminal_idx.as_deref().map_or(0, |m| m.capacity())
+    }
+
+    /// Position of `target` according to the index alone, without the scan
+    /// fallback. For tests and the store round-trip, which must distinguish
+    /// "the index answered" from "a scan did".
+    #[inline]
+    pub fn terminal_index_get(&self, target: &NeuronRef) -> Option<usize> {
+        self.terminal_idx.as_deref().and_then(|m| m.get(target).copied())
+    }
+
+    /// Drop the index and its buckets outright. `clear()` would keep every
+    /// bucket, which is the allocation this field exists to avoid paying for
+    /// on a neuron that no longer needs one.
+    #[inline]
+    pub fn release_terminal_index(&mut self) {
+        self.terminal_idx = None;
     }
 
     /// Number of terminals whose consolidation has reached the lock
@@ -391,16 +437,15 @@ impl Neuron {
     pub fn rebuild_terminal_idx(&mut self) {
         if self.terminals.len() < Self::TERMINAL_INDEX_THRESHOLD {
             // Below the threshold the Vec is the index. Drop the map
-            // outright — `clear()` alone would keep every bucket.
-            if self.terminal_idx.capacity() > 0 {
-                self.terminal_idx = ahash::AHashMap::new();
-            }
+            // outright — `clear()` alone would keep every bucket, and now
+            // the 64-byte header goes with it.
+            self.terminal_idx = None;
         } else {
-            self.terminal_idx.clear();
-            self.terminal_idx.reserve(self.terminals.len());
+            let mut m = ahash::AHashMap::with_capacity(self.terminals.len());
             for (i, t) in self.terminals.iter().enumerate() {
-                self.terminal_idx.insert(t.target, i);
+                m.insert(t.target, i);
             }
+            self.terminal_idx = Some(Box::new(m));
         }
         // Return the spare half of a pruned terminal Vec, but only when the
         // block is worth returning. Releasing the last 4 slots as well was
@@ -518,6 +563,50 @@ mod terminal_index_tests {
         }
     }
 
+    /// What a neuron costs before it holds anything, field by field.
+    ///
+    /// `neuron_body_bytes.struct` is the second-largest line in the scale-64
+    /// census (2.01 MB over 9,776 neurons) and it is pure `size_of`, so it
+    /// falls only if the struct shrinks. Printing the components is how the
+    /// next change gets chosen on a number rather than on a guess: an inline
+    /// `AHashMap` is a hasher plus a `RawTable`, paid by EVERY neuron whether
+    /// or not the map is ever allocated, while only neurons at or above
+    /// `TERMINAL_INDEX_THRESHOLD` populate one.
+    #[test]
+    fn the_struct_is_priced_field_by_field() {
+        use std::mem::size_of;
+        let total = size_of::<Neuron>();
+        let header = size_of::<ahash::AHashMap<NeuronRef, usize>>();
+        let field = size_of::<Option<Box<ahash::AHashMap<NeuronRef, usize>>>>();
+        println!("size_of::<Neuron>() = {total}");
+        for (name, n) in [
+            ("label: String", size_of::<String>()),
+            ("members: Vec", size_of::<Vec<NeuronRef>>()),
+            ("terminals: Vec", size_of::<Vec<Terminal>>()),
+            ("bridges: Vec", size_of::<Vec<Terminal>>()),
+            ("terminal_idx: Option<Box<AHashMap>>", field),
+            ("  (the AHashMap it points at)", header),
+            ("id: NeuronId", size_of::<NeuronId>()),
+            ("3 x u64 ticks/count", 3 * size_of::<u64>()),
+        ] {
+            println!("  {n:4} B  {:5.1}%  {name}", 100.0 * n as f64 / total as f64);
+        }
+        // Not an assertion about the exact layout, which the compiler owns.
+        // Two facts the layout must keep: the index costs a pointer inline,
+        // and a null-pointer-optimised `Option<Box<_>>` adds nothing for the
+        // absent case, which is 9,728 of 9,776 neurons at scale 64.
+        assert_eq!(
+            field,
+            size_of::<usize>(),
+            "the terminal index field is {field} B, so it is no longer just a pointer"
+        );
+        assert!(
+            header >= 4 * field,
+            "the AHashMap header is {header} B against a {field} B field -- if the map \
+             ever becomes pointer-sized, inlining it is cheaper than boxing it"
+        );
+    }
+
     /// The majority case: a low-fan-out neuron allocates NO index at all,
     /// and every terminal is still addressable by name. This is the 5.05 MB
     /// the map cost at scale 64, where 9,392 of 9,776 neurons hold nothing.
@@ -525,7 +614,7 @@ mod terminal_index_tests {
     fn a_neuron_below_the_threshold_carries_no_index() {
         let mut n = atom();
         wire(&mut n, Neuron::TERMINAL_INDEX_THRESHOLD as u32 - 1);
-        assert_eq!(n.terminal_idx.capacity(), 0, "no map below the threshold");
+        assert_eq!(n.terminal_index_capacity(), 0, "no map below the threshold");
         for i in 0..n.terminals.len() as u32 {
             assert_eq!(n.find_terminal(&NeuronRef::new(1, i)), Some(i as usize));
         }
@@ -543,10 +632,10 @@ mod terminal_index_tests {
     fn crossing_the_threshold_builds_an_index_that_agrees_with_a_scan() {
         let mut n = atom();
         wire(&mut n, Neuron::TERMINAL_INDEX_THRESHOLD as u32 + 40);
-        assert_eq!(n.terminal_idx.len(), n.terminals.len(), "index covers every terminal");
+        assert_eq!(n.terminal_index_len(), n.terminals.len(), "index covers every terminal");
         for (i, t) in n.terminals.iter().enumerate() {
             assert_eq!(n.find_terminal(&t.target), Some(i));
-            assert_eq!(n.terminal_idx.get(&t.target).copied(), Some(i));
+            assert_eq!(n.terminal_index_get(&t.target), Some(i));
         }
     }
 
@@ -557,14 +646,14 @@ mod terminal_index_tests {
     fn a_prune_to_empty_releases_both_allocations() {
         let mut n = atom();
         wire(&mut n, Neuron::TERMINAL_INDEX_THRESHOLD as u32 + 40);
-        assert!(n.terminal_idx.capacity() > 0 && n.terminals.capacity() > 0);
+        assert!(n.terminal_index_capacity() > 0 && n.terminals.capacity() > 0);
         // Nothing is consolidation-locked after one tick, so a decay past
         // the floor prunes every terminal.
         let wired = n.terminals.len();
         let pruned = n.apply_pending_decay(500, 0.5, 0.01);
         assert_eq!(pruned, wired, "every one of the {wired} terminals pruned");
         assert!(n.terminals.is_empty(), "terminals pruned to empty");
-        assert_eq!(n.terminal_idx.capacity(), 0, "index allocation released");
+        assert_eq!(n.terminal_index_capacity(), 0, "index allocation released");
         assert!(
             n.terminals.capacity() <= 4,
             "terminal Vec released, held {} slots",

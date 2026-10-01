@@ -265,7 +265,7 @@ impl Subject {
                 // One spelling of the table's real size, shared with the
                 // Brain-level census: capacity is NOT the bucket count.
                 *body.entry("terminal_idx").or_default() +=
-                    hash_table_bytes::<NeuronRef, usize>(n.terminal_idx.capacity());
+                    hash_table_bytes::<NeuronRef, usize>(n.terminal_index_capacity());
                 // Where a per-neuron index would still be worth its bytes: a
                 // linear scan over `terminals` answers the same question, so
                 // the map only earns its keep on high fan-out neurons. Bucket
@@ -331,7 +331,9 @@ impl Subject {
                     + n.label.capacity()
                     + n.members.capacity() * per_member
                     + n.terminals.capacity() * per_terminal
-                    + hash_table_bytes::<w1z4rd_brain::NeuronRef, usize>(n.terminal_idx.capacity());
+                    + hash_table_bytes::<w1z4rd_brain::NeuronRef, usize>(
+                        n.terminal_index_capacity(),
+                    );
             }
         }
         (hub, bytes)

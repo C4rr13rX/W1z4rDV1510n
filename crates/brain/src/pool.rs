@@ -1991,8 +1991,7 @@ impl Pool {
             let dropped = n.terminals.len();
             n.terminals.clear();
             n.terminals.shrink_to_fit();
-            n.terminal_idx.clear();
-            n.terminal_idx.shrink_to_fit();
+            n.release_terminal_index();
             n.prediction_error_ema = 0.0;
             self.total_terminals = self.total_terminals.saturating_sub(dropped);
             // Salience/EMA stay in RAM — they're the signal eviction policy

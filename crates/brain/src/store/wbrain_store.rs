@@ -1372,7 +1372,7 @@ mod tests {
         // And the rebuilt index must cover the folded-in terminals, or an
         // O(1) lookup would miss exactly the connections just learned.
         assert_eq!(
-            read_back.terminal_idx.get(&NeuronRef::new(3, 65)).copied(),
+            read_back.terminal_index_get(&NeuronRef::new(3, 65)),
             Some(65),
         );
 
