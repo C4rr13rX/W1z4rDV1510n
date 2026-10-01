@@ -271,14 +271,14 @@ Silence and uncertainty are first-class outputs here. A tokenized model cannot p
 
 ### Integration: deriving answers that were never taught
 
-The primary measurement is `python tools/scorecard.py --stress`, which trains a synthetic world of rooms, objects and properties at four scales and then asks **held-out** questions — questions no training episode contained. The numbers below are read off `logs/scorecard-latest.json`, not off the screen.
+The primary measurement is `python tools/scorecard.py --stress`, which trains a synthetic world of rooms, objects and properties at four scales and then asks **held-out** questions — questions no training episode contained. Every number below is read back off `docs/scorecard-baseline.json`, which is committed — so a reader can check the table against a file in this repository rather than against a run nobody can reproduce. (Peak RSS jitters a few tenths of a MB run to run, so quoting it from a different run than the one that set the baseline is how a table like this goes quietly wrong.)
 
 | scale | facts | recall % | integration % | **wrong %** | peak MB | wall s |
 |---|---|---|---|---|---|---|
-| 1 | 186 | 100.0 | 74.1 | **0.0** | 16.9 | 11.8 |
-| 4 | 744 | 100.0 | 76.9 | **0.0** | 19.3 | 3.6 |
-| 16 | 2,976 | 100.0 | 64.5 | **0.0** | 25.4 | 23.6 |
-| 64 | 11,904 | 100.0 | 38.5 | **0.0** | 40.8 | 126.9 |
+| 1 | 186 | 100.0 | 74.1 | **0.0** | 16.5 | 0.6 |
+| 4 | 744 | 100.0 | 76.9 | **0.0** | 19.1 | 3.9 |
+| 16 | 2,976 | 100.0 | 64.5 | **0.0** | 25.2 | 25.1 |
+| 64 | 11,904 | 100.0 | 38.5 | **0.0** | 40.4 | 133.4 |
 
 The previous measurement, for contrast, was integration 53.7 / 50.0 / 44.3 / 20.6 with wrong 35.2 / 44.0 / 35.8 / 31.9 — **four confident wrong answers for every right one at every scale**, and every gate rule reported green on it for five passes.
 
