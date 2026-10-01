@@ -1064,10 +1064,10 @@ pub struct Brain {
     /// Questions [`Self::integrate_autonomous`] may ask the fabric when the
     /// trained bindings answered nothing, before giving up.
     ///
-    /// **Zero by default, which disables the derivation**, and that default is
-    /// a measurement rather than caution. Wired on, the mechanism works --
-    /// `integration_pct` goes 0.0 -> 4.1 at scale 64 with recall still 100.0 at
-    /// every scale -- and it costs RAM and wall time the gate refuses:
+    /// [`DEFAULT_DERIVATION_PROBE_BUDGET`] by default; `0` disables the
+    /// derivation entirely.
+    ///
+    /// It was 0 — off — for one pass, and that default was a measurement:
     ///
     /// | budget | scale-64 peak | baseline | scale-64 wall |
     /// |--------|---------------|----------|---------------|
@@ -1075,10 +1075,13 @@ pub struct Brain {
     /// | 32     | 49.1 MB       | 39.2 MB  | 234 s         |
     /// | 256    | did not complete (300 s timeout at scales 16 and 64)    |
     ///
-    /// So the derivation is committed, tested and OFF, and turning it on is
-    /// gated on the per-probe cost rather than on a decision. The cost is in
-    /// the probes: each one is a full `observe_fabric_read_only` over the whole
-    /// query pool, so 32 probes is 32 observes per unanswered question.
+    /// The +9.6 MB in that middle row was not the cost of asking questions. It
+    /// was [`Fabric::observe`] appending every probe's firing to the current
+    /// learning MOMENT — a `Vec`, no dedup, cleared only on tick close, and
+    /// read by exactly one consumer (`advance_tick`'s fingerprint) that the
+    /// answer path never reaches. `observe_fabric_read_only` now uses
+    /// [`Fabric::observe_without_moment`], so a probe allocates nothing that
+    /// outlives it, and the budget's remaining cost is wall time alone.
     derivation_probe_budget: usize,
 }
 
@@ -1340,6 +1343,23 @@ fn rank_bounded_binding_evidence(
 /// amplification on the training path.
 const DEFAULT_OVERLAY_FLUSH_ENTRY_LIMIT: usize = 250_000;
 
+/// Questions `integrate_autonomous` may ask the fabric when the trained
+/// bindings answered nothing — see [`Brain::derivation_probe_budget`] for what
+/// each setting costs, and why the figure in that table stopped being the
+/// reason to keep this at 0.
+///
+/// 32 rather than "enough for three hops": the measured cost of a two-hop
+/// prefix-shaped derivation is ~26 questions and the budget is a CEILING, so a
+/// cheaper question spends less. A budget of 256 covered three hops and did not
+/// complete inside the scorecard's 300 s timeout at scale 16, so the deeper
+/// families stay out of reach until the per-probe cost falls, not because the
+/// mechanism cannot reach them.
+///
+/// Applied on the restore paths as well as on `new`: a brain reloaded from a
+/// snapshot that answers differently from a fresh one is a worse defect than
+/// either behaviour.
+pub const DEFAULT_DERIVATION_PROBE_BUDGET: usize = 32;
+
 impl Brain {
     /// Construct a fresh brain with no sensor pools yet.  The binding
     /// pool is auto-created at pool_id = `binding_pool_config.id`.
@@ -1394,7 +1414,7 @@ impl Brain {
             feedback_loops: Vec::new(),
             delayed_feedback: Vec::new(),
             feedback_events_emitted: 0,
-            derivation_probe_budget: 0,
+            derivation_probe_budget: DEFAULT_DERIVATION_PROBE_BUDGET,
         }
     }
 
@@ -2028,9 +2048,12 @@ impl Brain {
     /// Suppression is scoped to this one call, exactly as in
     /// [`Self::observe_read_only`]: a route that later trains on a miss
     /// still crystallises normally.
+    /// Nor does it join the current learning moment — see
+    /// [`Fabric::observe_without_moment`] for why that is both a correctness
+    /// fix and the only unbounded allocation a read-only probe was making.
     pub fn observe_fabric_read_only(&mut self, pool_id: PoolId, frame: &[u8]) -> Vec<NeuronId> {
         self.set_emergence_suppressed(true);
-        let fired = self.fabric.observe(pool_id, frame);
+        let fired = self.fabric.observe_without_moment(pool_id, frame);
         self.set_emergence_suppressed(false);
         fired
     }
@@ -6861,18 +6884,53 @@ impl Brain {
             // The full span search stays as the fallback, so a world whose
             // sub-questions are not prefix-shaped still derives; it just costs
             // what it always did.
+            // A PREFIX is the wrong shape, and that was measured rather than
+            // reasoned. Scoring every prefix of `"r000 lamp on material?"`
+            // against a world whose trained questions all end in `?` gives
+            // 1:0.12 … 11:0.80 12:0.90 13:0.90 14:0.90 15:0.90 16:0.81 …
+            // 21:0.76 — the peak is 0.90 and NOTHING reaches 1.0, because the
+            // taught sub-question is `"r000 lamp on?"` and every prefix either
+            // lacks the terminator or carries text past it. So all `n-1` probes
+            // were spent to find nothing, which is why `on_material` (1,536 of
+            // 3,456 probes at scale 64) sat at 0 under any budget.
+            //
+            // The general shape is a DELETION, not a prefix: the taught
+            // sub-question is this question with a contiguous middle span
+            // removed, `current[..k] ++ current[n-t..]`, and `t == 0` is the
+            // prefix case. Searching every deletion is `n(n+1)/2`. `t <= 1` is
+            // a BUDGET, not a grammar — it reaches a one-byte terminator and no
+            // more, and a longer one needs `t <= 2` at `3(n-1)` probes, which
+            // does not fit 32 at `n = 22`. Nothing here reads the byte: a
+            // terminator is not recognised, it is whatever the tail turns out
+            // to be.
+            //
+            // `k` outer and `t` inner, because the order decides whether this
+            // fits. Scanning all of `t = 0` and then all of `t = 1` finds the
+            // hit at probe 33; interleaved it lands at 25, inside a ceiling of
+            // 32 with ~13 left for the splice.
+            const MAX_DELETION_TAIL: usize = 1;
             let mut known_prefix: Option<(usize, Vec<u8>)> = None;
-            for k in 1..n {
-                if probes >= max_probes {
-                    break;
-                }
-                probes += 1;
-                let (score, answer) = self.probe_question(query_pool, target_pool, &current[..k]);
-                if score >= 1.0 {
-                    if let Some(answer) = answer {
-                        known_prefix = Some((k, answer));
+            'deletion: for k in 1..n {
+                for t in 0..=MAX_DELETION_TAIL.min(n - k) {
+                    if probes >= max_probes {
+                        break 'deletion;
                     }
-                    break;
+                    // `n - t == k` deletes nothing, so the probe would re-ask
+                    // `current`, whose score is already `base_score`.
+                    if t > 0 && n - t == k {
+                        continue;
+                    }
+                    let mut sub = Vec::with_capacity(k + t);
+                    sub.extend_from_slice(&current[..k]);
+                    sub.extend_from_slice(&current[n - t..]);
+                    probes += 1;
+                    let (score, answer) = self.probe_question(query_pool, target_pool, &sub);
+                    if score >= 1.0 {
+                        if let Some(answer) = answer {
+                            known_prefix = Some((k, answer));
+                        }
+                        break 'deletion;
+                    }
                 }
             }
 
@@ -6915,7 +6973,18 @@ impl Brain {
                 if score > base_score
                     && best.as_ref().map_or(true, |(best_score, _, _)| score > *best_score)
                 {
+                    let perfect = score >= 1.0;
                     best = Some((score, rewrite, answer));
+                    // 1.0 is the ceiling of precision x recall, and a rewrite
+                    // that reaches it IS a question the brain was taught, so no
+                    // later span can beat it. Same early exit as the base-score
+                    // break above, applied to the splice search: the correct
+                    // splice point is wherever the taught sub-question's
+                    // variable part begins, so without this the loop always ran
+                    // to k+1 regardless of where it had already won.
+                    if perfect {
+                        break;
+                    }
                 }
             }
             let Some((_, next_question, next_answer)) = best else { break };
@@ -9694,7 +9763,7 @@ impl Brain {
             feedback_loops: Vec::new(),
             delayed_feedback: Vec::new(),
             feedback_events_emitted: 0,
-            derivation_probe_budget: 0,
+            derivation_probe_budget: DEFAULT_DERIVATION_PROBE_BUDGET,
         };
         brain.rebuild_binding_sequence_index();
         (brain, missing)
@@ -9879,7 +9948,7 @@ impl Brain {
             feedback_loops: Vec::new(),
             delayed_feedback: Vec::new(),
             feedback_events_emitted: 0,
-            derivation_probe_budget: 0,
+            derivation_probe_budget: DEFAULT_DERIVATION_PROBE_BUDGET,
         };
         if let Some(count) = brain.disk_scalar(FINGERPRINT_TENTATIVE_COUNT_KEY) {
             brain.tentative_binding_count_total = count as usize;

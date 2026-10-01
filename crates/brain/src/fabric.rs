@@ -1208,6 +1208,40 @@ impl Fabric {
         fired
     }
 
+    /// [`Self::observe`] without joining the current learning moment.
+    ///
+    /// The moment exists for one consumer: `Brain::advance_tick` reads
+    /// `current_moment()` to build the `MomentFingerprint` that drives
+    /// cross-pool Hebbian wiring and binding emergence. Grep confirms it is
+    /// the only reader — nothing on the answer path consumes it, because
+    /// `best_binding_match_v2` scores against the POOL's firing state.
+    ///
+    /// So a frame observed purely to ANSWER a question has nothing to
+    /// contribute to it, and contributing anyway costs twice. It is wrong:
+    /// a route that answers and then trains on the miss wires the questions
+    /// it asked itself into the next tick. And it is unbounded: `fired` is a
+    /// `Vec` extended without dedup and cleared only on tick close, so a path
+    /// that asks many questions between ticks grows it without limit.
+    /// Measured at the scale that made it visible — `derive_by_substitution`
+    /// asks up to 32 questions per unanswered probe, 3,456 probes at scale 64,
+    /// ~17 atoms each — that is ~1.9 M `NeuronId`s and the ~9.6 MB the
+    /// derivation's cost table charged to a budget of 32.
+    ///
+    /// Deliberately NOT applied to [`crate::Brain::observe_read_only`]: this
+    /// is the marginal cost of the derivation, and widening the change to the
+    /// recall path would move the baseline in the same commit that measures
+    /// against it.
+    pub fn observe_without_moment(&mut self, pool_id: PoolId, frame: &[u8]) -> Vec<NeuronId> {
+        let total_t0 = std::time::Instant::now();
+        let pool = self.pools.get(&pool_id).expect("unknown pool").clone();
+        let prof = self.observe_profile.clone();
+        let fired = pool.write().observe_frame(frame, self.tick, Some(&prof));
+        let total_ns = total_t0.elapsed().as_nanos() as u64;
+        prof.observes.fetch_add(1, Ordering::Relaxed);
+        prof.total_ns.fetch_add(total_ns, Ordering::Relaxed);
+        fired
+    }
+
     /// Query-time activation that is deliberately excluded from the current
     /// learning moment. Unknown atoms are ignored rather than created.
     pub fn activate_for_prediction(&mut self, pool_id: PoolId, frame: &[u8]) -> Vec<NeuronId> {
