@@ -320,6 +320,20 @@ Nothing calls this yet: both ends of the live path are in `brain.rs`
 (`promote_binding_concept` wires the hub, `routed_binding_candidates` reads it),
 so no scorecard number has moved.
 
+**And do not read this subsection as a recommendation.** Hours after it was
+written, a four-line change to `rank_bounded_binding_evidence` — read path only,
+no cap raised, peak 40.3 MB against a 40.4 baseline — took scale-64 integration
+**38.54 → 77.29 %** with `wrong` 0.0 and recall 100.0, and took scale-64 empty
+misses from 889 to **2 of 1,536** on `on_material` and 0 of 1,024 on
+`next_color`. So the reach deficit this mechanism closes was real and was NOT
+the binding one, and there is now almost no reach hole left for it. What
+survives is the exchange rate: an over-bound terminal costs 8.13 B instead of
+~72.6 B, and nothing is dropped. Wire it when a measurement shows a reach
+deficit again, and read `probes_per_answer` at scale 64 (baseline 91,715/1,332
+= 68.9) BEFORE integration when you do — 94 % of the old empty misses coincided
+with `derivation_starved` at 26.54 of a 32-probe budget, so extra candidates can
+cost probes rather than buy answers.
+
 ## How to work
 
 - **Measure first.** Find which structure holds the RAM (counts × sizes, or a
