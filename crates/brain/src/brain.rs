@@ -1129,6 +1129,25 @@ pub struct Brain {
     /// deliberately NOT persisted: it is a cache of the current question
     /// distribution, and a restored brain re-earns it in one question.
     derivation_cut_hints: Vec<(usize, usize, usize)>,
+    /// Where the taught sub-question's answer has been spliced in before, as
+    /// `(question length, cut point, splice offset)`.
+    ///
+    /// [`Self::derivation_cut_hints`] made LOCATING the taught sub-question
+    /// one question instead of `~2k`. It left the other half of the search
+    /// untouched: once the cut `k` is known the answer still has to be tried
+    /// at every `j` in `0..=k`, which at the scorecard's `k = 12` is 13 more
+    /// questions of a budget of 32 — so a 2-hop derivation cost ~16 and a
+    /// 3-hop one could not fit at all.
+    ///
+    /// The splice point is a property of the same SHAPE the cut is, and it
+    /// repeats for the same reason, so it is remembered the same way: keyed
+    /// on `(n, k)`, holding the smallest `j` ever seen, bounded at
+    /// [`DERIVATION_SPLICE_HINTS`], and not persisted. It is strictly a
+    /// REORDER — every `j` is still tried behind the hint and the acceptance
+    /// test is the unchanged `score > base_score` — so unlike a cut hint it
+    /// cannot return a sub-question the scan would not have returned. The
+    /// worst a stale hint costs is its own probe.
+    derivation_splice_hints: Vec<(usize, usize, usize)>,
     /// What the derivation has SPENT, cumulative over this brain's life.
     derivation_stats: DerivationStats,
 }
@@ -1464,6 +1483,15 @@ pub const DEFAULT_DERIVATION_PROBE_BUDGET: usize = 32;
 /// 64 entries is 64 lengths at three `usize` each.
 pub const DERIVATION_CUT_HINTS: usize = 64;
 
+/// How many splice shapes [`Brain::derive_by_substitution`] remembers.
+///
+/// Keyed on `(n, k)` rather than `n` alone, so it needs more room than
+/// [`DERIVATION_CUT_HINTS`]: a world with 64 question lengths and a handful of
+/// cuts at each still fits in 256 entries at three `usize` apiece (6 KB), and
+/// a miss costs zero questions because a non-matching entry is skipped
+/// without asking anything.
+pub const DERIVATION_SPLICE_HINTS: usize = 256;
+
 impl Brain {
     /// Construct a fresh brain with no sensor pools yet.  The binding
     /// pool is auto-created at pool_id = `binding_pool_config.id`.
@@ -1520,6 +1548,7 @@ impl Brain {
             feedback_events_emitted: 0,
             derivation_probe_budget: DEFAULT_DERIVATION_PROBE_BUDGET,
             derivation_cut_hints: Vec::new(),
+            derivation_splice_hints: Vec::new(),
             derivation_stats: DerivationStats::default(),
         }
     }
@@ -6868,12 +6897,32 @@ impl Brain {
         target_pool: PoolId,
         question: &[u8],
     ) -> (f32, Option<Vec<u8>>) {
+        let score = self.probe_question_score(query_pool, question);
+        (score, self.probe_answer(query_pool, target_pool))
+    }
+
+    /// The score half of [`Self::probe_question`], without decoding an answer.
+    ///
+    /// Both searches inside `derive_by_substitution_profiled` test the SCORE
+    /// first and read the answer only for the probe that wins, so decoding
+    /// every probe is work whose result is thrown away. Measured by counting
+    /// the calls rather than by reasoning about them: a 2-hop derivation at
+    /// scale 16 ran ~16 probes per hop and used the answer of 1 of them, so
+    /// the decode ran 15 times for nothing. Splitting the two halves changes
+    /// no result — [`Self::probe_answer`] decodes from the activation this
+    /// method leaves behind, which is exactly the state the combined version
+    /// decoded from.
+    fn probe_question_score(&mut self, query_pool: PoolId, question: &[u8]) -> f32 {
         self.observe_fabric_read_only(query_pool, question);
-        let score = self.best_binding_match_v2(query_pool).score();
-        let answer = self
-            .decode_best_trained_binding(query_pool, target_pool)
-            .filter(|a| !a.is_empty());
-        (score, answer)
+        self.best_binding_match_v2(query_pool).score()
+    }
+
+    /// Decode the answer for whatever question was last probed into
+    /// `query_pool`. Must follow a [`Self::probe_question_score`] on the same
+    /// pool: it reads the firing state that call installed.
+    fn probe_answer(&mut self, query_pool: PoolId, target_pool: PoolId) -> Option<Vec<u8>> {
+        self.decode_best_trained_binding(query_pool, target_pool)
+            .filter(|a| !a.is_empty())
     }
 
     /// Derive an answer to a question the brain was NEVER trained on, by
@@ -7061,9 +7110,11 @@ impl Brain {
                 sub.extend_from_slice(&current[..k]);
                 sub.extend_from_slice(&current[n - t..]);
                 probes += 1;
-                let (score, answer) = self.probe_question(query_pool, target_pool, &sub);
+                // Score first: the answer is read only by the `>= 1.0` arm, so
+                // decoding every miss is work nothing consumes.
+                let score = self.probe_question_score(query_pool, &sub);
                 if score >= 1.0 {
-                    if let Some(answer) = answer {
+                    if let Some(answer) = self.probe_answer(query_pool, target_pool) {
                         known_prefix = Some((k, answer));
                         self.note_derivation_cut(n, k, t);
                     }
@@ -7087,9 +7138,9 @@ impl Brain {
                         sub.extend_from_slice(&current[..k]);
                         sub.extend_from_slice(&current[n - t..]);
                         probes += 1;
-                        let (score, answer) = self.probe_question(query_pool, target_pool, &sub);
+                        let score = self.probe_question_score(query_pool, &sub);
                         if score >= 1.0 {
-                            if let Some(answer) = answer {
+                            if let Some(answer) = self.probe_answer(query_pool, target_pool) {
                                 known_prefix = Some((k, answer));
                                 self.note_derivation_cut(n, k, t);
                             }
@@ -7102,7 +7153,22 @@ impl Brain {
             let mut spans: Vec<(usize, usize)> = Vec::new();
             let splice_answer = match &known_prefix {
                 Some((k, answer)) => {
+                    // The splice point that has worked before for this shape,
+                    // first. Same cache discipline as `derivation_cut_hints`
+                    // one block up, and the same reason: locating the cut was
+                    // only half the search, and the other half is `k + 1`
+                    // questions of a budget of 32 spent re-finding a splice
+                    // the brain has already found for every other probe of
+                    // this family. A hint can only REORDER — every `j` is
+                    // still tried, and the acceptance test below is unchanged
+                    // — so a wrong hint costs nothing but its own position.
+                    if let Some(hint_j) = self.derivation_splice_hint(n, *k) {
+                        spans.push((hint_j, *k));
+                    }
                     for j in 0..=*k {
+                        if spans.first().map_or(false, |(hj, _)| *hj == j) {
+                            continue;
+                        }
                         spans.push((j, *k));
                     }
                     answer.clone()
@@ -7131,14 +7197,24 @@ impl Brain {
                     continue;
                 }
                 probes += 1;
-                let (score, answer) = self.probe_question(query_pool, target_pool, &rewrite);
-                let Some(answer) = answer else { continue };
+                let score = self.probe_question_score(query_pool, &rewrite);
                 // Strictly better-known than the question we started from, and
-                // the best such rewrite found.
+                // the best such rewrite found. Tested BEFORE the decode,
+                // because a rewrite that is not the new best has its answer
+                // discarded — so decoding it is the same wasted work the
+                // deletion scan above was doing.
                 if score > base_score
                     && best.as_ref().map_or(true, |(best_score, _, _)| score > *best_score)
                 {
+                    let Some(answer) = self.probe_answer(query_pool, target_pool) else {
+                        continue;
+                    };
                     let perfect = score >= 1.0;
+                    if perfect {
+                        if let Some((k, _)) = known_prefix.as_ref() {
+                            self.note_derivation_splice(n, *k, j);
+                        }
+                    }
                     best = Some((score, rewrite, answer));
                     // 1.0 is the ceiling of precision x recall, and a rewrite
                     // that reaches it IS a question the brain was taught, so no
@@ -7318,6 +7394,41 @@ impl Brain {
     /// from a probe count.
     pub fn derivation_cut_hints(&self) -> &[(usize, usize, usize)] {
         &self.derivation_cut_hints
+    }
+
+    /// Remember a splice point that produced a question the brain knows
+    /// perfectly. See [`Self::derivation_splice_hints`] for why the smallest
+    /// `j` is kept.
+    fn note_derivation_splice(&mut self, n: usize, k: usize, j: usize) {
+        if let Some(pos) = self
+            .derivation_splice_hints
+            .iter()
+            .position(|(hn, hk, _)| *hn == n && *hk == k)
+        {
+            let mut hit = self.derivation_splice_hints.remove(pos);
+            if j < hit.2 {
+                hit = (n, k, j);
+            }
+            self.derivation_splice_hints.insert(0, hit);
+            return;
+        }
+        self.derivation_splice_hints.insert(0, (n, k, j));
+        self.derivation_splice_hints.truncate(DERIVATION_SPLICE_HINTS);
+    }
+
+    /// The splice offset to try first for a question of length `n` cut at `k`.
+    fn derivation_splice_hint(&self, n: usize, k: usize) -> Option<usize> {
+        self.derivation_splice_hints
+            .iter()
+            .find(|(hn, hk, _)| *hn == n && *hk == k)
+            .map(|(_, _, j)| *j)
+    }
+
+    /// The splice points [`Self::derive_by_substitution`] will try first.
+    /// Exposed so a test can assert the cache is bounded and that it learned
+    /// the shape, rather than inferring either from a probe count.
+    pub fn derivation_splice_hints(&self) -> &[(usize, usize, usize)] {
+        &self.derivation_splice_hints
     }
 
     pub fn set_derivation_probe_budget(&mut self, probes: usize) {
@@ -9973,6 +10084,7 @@ impl Brain {
             feedback_events_emitted: 0,
             derivation_probe_budget: DEFAULT_DERIVATION_PROBE_BUDGET,
             derivation_cut_hints: Vec::new(),
+            derivation_splice_hints: Vec::new(),
             derivation_stats: DerivationStats::default(),
         };
         brain.rebuild_binding_sequence_index();
@@ -10160,6 +10272,7 @@ impl Brain {
             feedback_events_emitted: 0,
             derivation_probe_budget: DEFAULT_DERIVATION_PROBE_BUDGET,
             derivation_cut_hints: Vec::new(),
+            derivation_splice_hints: Vec::new(),
             derivation_stats: DerivationStats::default(),
         };
         if let Some(count) = brain.disk_scalar(FINGERPRINT_TENTATIVE_COUNT_KEY) {
