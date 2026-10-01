@@ -127,23 +127,56 @@ What is left, measured at scale 64 with
   for its CAPACITY, not its length, which is why nothing counting `len` ever
   saw it.
 
-- **~22 MB at scale 64 was unaccounted after the first two changes, and it is
-  built while TRAINING.** Per-phase peaks at scale 64 after both fixes: train 55.8 MB,
-  recall 58.3 MB, infer 58.7 MB. So answering now costs 2.9 MB over the
-  trained brain (it cost 518 MB at scale 16 before), and everything left is
-  allocated by training: 55.8 MB against 12.47 global + 1.57 pool-side + 5.9
-  neurons + ~13.7 MB fixed process. Do not look for it in the recall path.
-  9 MB of it was `Vec` capacity slack in neuron bodies: `footprint()` counted
-  `len`, and counting `capacity` moved `est_resident_mb` at scale 64 from 5.9
-  to 14.9 MB, which narrows the unexplained remainder to ~13 MB. The
-  Brain-level census still counts `len` only, and every neuron carries its own
-  `terminal_idx` `AHashMap` whose capacity nothing counts — start there. One
-  more number to start from: scale 64 holds only **9,776 neurons** (9,728 of
-  them concepts) and 24,975 terminals, so 14.9 MB is ~1,600 bytes per neuron
-  for a body whose members are ~22 refs. `size_of::<Neuron>()` and the
-  composite label string are the candidates. The census is unchanged by the
-  fan-out cap: 12.47 MB and the same entry counts before and after, as
-  expected, since a cap removes terminals and not fingerprints.
+- **The residual is no longer a residual: the allocator itself splits it, and
+  most of it is not the brain.** Every census here is a model of what the
+  brain *believes* it owns, and `peak_mb` is measured from OUTSIDE by
+  `tools/capped.py`, so the gap between them had three possible owners
+  needing three different fixes and nothing told them apart. The scorecard now
+  installs a counting `GlobalAlloc`, so every byte the process requests is
+  booked. Measured at scale 64, infer phase
+  (`target/release/examples/scorecard.exe --scale 64 --phase infer --census`):
+
+  | scale | peak_out | process overhead | transient churn | live heap | census-accounted | harness probes | fixed brain construction | uncounted |
+  |---|---|---|---|---|---|---|---|---|
+  | 1 | 14.9 | 10.84 | 0.01 | 4.04 | 0.42 | 0.02 | 3.27 | 0.33 |
+  | 4 | 16.9 | 11.50 | 0.05 | 5.34 | 1.62 | 0.07 | 3.27 | 0.38 |
+  | 16 | 22.9 | 13.25 | 0.09 | 9.55 | 5.44 | 0.29 | 3.27 | 0.55 |
+  | 64 | **37.2** | **15.13** | **2.93** | **19.14** | **13.43** | **1.17** | **3.27** | **1.27** |
+
+  Read the columns, because they have different futures. **Process overhead
+  never passed through the brain's allocator at all** — the Rust runtime, the
+  mapped binary, allocator arenas — and no representation change touches it;
+  at scale 64 it is 41 % of peak and it is the floor the growth ratio is
+  measured against. **`fixed brain construction` is 3.27 MB at every scale**,
+  identical to two decimals from 152 facts to 9,728, so it is `Brain::new`
+  with two empty pools (the EEM's equation tables, the annealer, the fabric)
+  and is NOT a per-fact residual however large it looks at scale 1, where it
+  is 81 % of live heap. **The harness's own probe set** — 9,728 facts and
+  1,536 integration probes held as `Vec<u8>` by `SceneWorld` — is 1.17 MB that
+  belongs to the question, not the answer. What is left genuinely uncounted is
+  **1.27 MB**, so the census names **91.4 %** of the per-fact live heap, and
+  looking for a large unnamed structure is now a dead end.
+
+  Two of these columns are the next work, and neither is a neuron. Transient
+  churn goes 0.01 → 0.09 → 2.93 MB, superlinear in facts: allocation made and
+  freed inside the run, which raises peak without raising the brain. And
+  process overhead rises 10.84 → 15.13, which for a fixed binary is the
+  allocator holding freed arenas — the same churn seen from outside. Those are
+  one phenomenon counted twice, and together they are 18.06 MB of a 37.2 MB
+  peak.
+
+  How this was reached: 9 MB was `Vec` capacity slack in neuron bodies
+  (`footprint()` counted `len`); the Brain-level census and `side_structure_bytes`
+  counted `len` for every hash map, which misses the whole control-byte array
+  and the ~1/8 of buckets load factor leaves spare (`hash_table_bytes`
+  inverts hashbrown's `capacity = buckets - buckets/8`; 9,728 facts allocate
+  16,384 buckets, a 68 % undercount per map); `SequenceFingerprint` IS a
+  `Vec<NeuronId>`, so the ledger charged a 24-byte header and none of the
+  key's heap; and the neuron slot table and the transient firing state were
+  allocations no census charged to anything. Per-phase peaks say the brain is
+  built while TRAINING, not while answering, so do not look in the recall
+  path. The census is unchanged by the fan-out cap, as expected, since a cap
+  removes terminals and not fingerprints.
 - **Integration is still 0%** at every scale, and that is the second goal.
   The scene world's integration probes chain two trained facts: "r03 lamp on"
   gives "desk" and "r03 desk material" gives "oak", so "r03 lamp on material?"
