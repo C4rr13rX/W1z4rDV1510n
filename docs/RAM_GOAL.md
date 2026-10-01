@@ -109,8 +109,19 @@ What is left, measured at scale 64 with
   fingerprint is the next one of these, and it is worth less than the neuron
   bodies below.
 Two more changes, both the same defect: a cache that a MINORITY of neurons
-uses was charged to ALL of them. Scale-64 peak 36.6 → **35.3 MB**, growth
-x2.47 → **x2.34**, census-accounted 13.43 → **12.11 MB**.
+uses was charged to ALL of them. Census-accounted 13.43 → **12.11 MB**.
+
+**Read the peak and the growth off the saved baseline, not off a prose
+sentence.** This paragraph said `peak 36.6 → 35.3 MB, growth x2.47 → x2.34`
+while the `docs/scorecard-baseline.json` committed in the SAME commit
+(ee741d4) recorded scale-64 `peak_mb` 36.6 → **36.4** and scale-1 14.8 →
+**16.2**, i.e. growth x2.47 → **x2.25**. 35.3 and x2.34 came from a different
+run of the same tree and appear in no artifact. `peak_mb` is a sampled RSS
+peak from `tools/capped.py`, so it moves between runs on an unchanged tree —
+the same class as the overlay spill flake named on
+`tests/fingerprint_keys_are_shared.rs`. A one-run prose figure is therefore
+not a result: quote the committed baseline, and quote the spread when a
+single run is all there is.
 
 6. **Only a hub allocates a terminal index; every neuron carried its
    header.** Keeping the index BUCKETS off non-hubs did nothing about the
