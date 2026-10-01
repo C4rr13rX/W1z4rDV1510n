@@ -47,15 +47,79 @@
 //! below unfixable by any tie-break, since `"r0desk material?"` and
 //! `"r000 desk material?"` have the identical set of distinct bytes.
 //!
-//! The naive repair -- run emergence on the training path -- is NOT shippable as
-//! it stands, and the arithmetic is the suppression comment's own: ~1,071
-//! permanent ledger entries per observed frame, which at scale 64's 11,904 facts
-//! is ~12.7 M entries. That is the same RAM failure the suppression was added to
-//! stop, merely moved from "grows with questions asked" to "grows with facts
-//! taught". Putting emergence back on the train path therefore needs the ledger
-//! bounded first -- a shorter maximum run length, or discarding runs that never
-//! reach the promotion threshold -- and the cost of that bound measured before
-//! the emergence is re-enabled.
+//! # The repair is affordable, and ONE constant is the whole difference
+//!
+//! The first reading of the suppression comment said the train-path repair was
+//! unshippable: ~1,071 ledger entries per observed frame is ~12.7 M entries over
+//! scale 64's 11,904 facts, the same RAM failure moved from "grows with questions
+//! asked" to "grows with facts taught". That is right at the CURRENT
+//! `max_concept_member_count = 64`, and wrong in general, because the entry count
+//! is not linear in the bound.
+//!
+//! `check_concept_emergence` adds one ledger key per run of length
+//! `2..=max_concept_member_count` ending at every observed atom, so the keys are
+//! byte runs -- and the number of DISTINCT short runs is bounded by the ALPHABET,
+//! not by the corpus. This world has ~59 distinct bytes. Counting distinct runs
+//! exactly over the scorecard's own corpus, both epochs, concatenated in training
+//! order because `recent_atoms` persists across frames at a window of 2048, and
+//! costing one entry at `max_len * 4` heap + 24 `Vec` + 8 count + ~16 map
+//! overhead:
+//!
+//! ```text
+//!  bound M  | distinct keys: scale 1 / 4 / 16 / 64 | MB at scale 64
+//!       64  |  169,216 / 698,226 / 2,773,654 / 11,009,761 |  3347.0
+//!        8  |    2,617 /   6,412 /    20,203 /     62,421 |     5.0
+//!        6  |    1,275 /   2,802 /     7,872 /     20,484 |     1.5
+//!        4  |      494 /     846 /     1,825 /      3,024 |     0.2
+//! ```
+//!
+//! At `M = 64` the keys grow 65x while facts grow 64x -- linear, and 3.3 GB. At
+//! `M = 6` they grow 16x for the same 64x of facts, SUB-LINEAR, and cost 1.5 MB
+//! against a scale-64 peak of 40.3 MB. So the bound is not a compromise that
+//! merely reduces the damage; below about 8 it changes the growth class, because
+//! the key space saturates.
+//!
+//! And `M = 6` is still wide enough to be useful for exactly the ambiguity this
+//! file measures: telling `"r000 desk material?"` from `"r0desk material?"` needs
+//! a concept covering the 5-byte room name `"r000 "`, which fits.
+//!
+//! # THREE different bounds are live, and the scorecard does not use the node's
+//!
+//! `max_concept_member_count` is set at 25 sites and they do not agree:
+//! `PoolConfig::defaults` says 8 (pool.rs:1399); the NODE -- the product -- says
+//! 32, at five sites in `crates/node/src/brain_api.rs` and four in
+//! `crates/node/src/bin/brain_server.rs`; the scorecard and fourteen brain tests,
+//! this file included, say 64. Priced the same way, over the same corpus:
+//!
+//! ```text
+//!   M | who                   | keys@1  | keys@16   | keys@64    | MB@64  | growth
+//!   8 | PoolConfig::defaults  |   2,617 |    20,203 |     62,421 |    5.0 |  23.9x
+//!  16 | --                    |  18,700 |   233,733 |    861,936 |   96.5 |  46.1x
+//!  32 | the NODE (product)    |  68,608 | 1,068,694 |  4,189,921 |  737.4 |  61.1x
+//!  64 | scorecard + 14 tests  | 169,216 | 2,773,654 | 11,009,761 | 3347.0 |  65.1x
+//! ```
+//!
+//! Growth is against 64x the facts, so only `M = 8` -- the default nobody sets --
+//! is sub-linear; by 32 the ledger is essentially linear in the corpus. The
+//! standing rule is that the scorecard must measure what the product does, and on
+//! this parameter it measures 64 against the node's 32: a 4.5x difference in
+//! ledger bytes, on the one structure whose growth the RAM goal is about.
+//!
+//! And the bound is not even a new decision. `PoolConfig::defaults` already sets
+//! `max_concept_member_count = 8` (pool.rs:1399) -- 5.0 MB at scale 64, growing
+//! 24x for 64x the facts. The value of 64 comes from the SCORECARD's own pool
+//! setup (examples/scorecard.rs:296), copied into this file and several other
+//! brain tests. So the harness that measures RAM is the one thing that put the
+//! ledger into the linear 3.3 GB regime, by overriding a default that was already
+//! sane; and a pass that enables emergence on the train path while leaving that
+//! 64 in place will measure a blow-up the product's defaults would never have
+//! had, and conclude the repair is unaffordable. Check which value is live before
+//! pricing it.
+//!
+//! So the next change is: stop raising the bound in the harness, and run
+//! `push_recent` / `collapse_tail_to_concept` / `check_concept_emergence` from
+//! `ensure_frame_atoms_for_pretrain_profiled` (pool.rs:3300). The guard that says
+//! it worked is the `total_concepts == total_binding` assertion below going RED.
 
 use w1z4rd_brain::{
     AtomEncoding, Brain, BrainConfig, BytePassthroughEncoding, MatchTier, PoolConfig,
