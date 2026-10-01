@@ -221,6 +221,12 @@ enum ResolutionPath {
     BrainSubstrate,
     /// `integrate_autonomous_tuned()` succeeded via EEM `chain_explore`.
     BrainEemChain,
+    /// `derive_by_substitution()` composed the answer out of questions the
+    /// brain WAS taught -- the chain explorer reached nothing. Distinct from
+    /// `BrainEemChain` because the provenance is a set of spliced taught
+    /// bindings and not a walk of the grounded-fact graph, and a caller
+    /// reading `/hypothesis/queue` to audit an answer needs to know which.
+    BrainDerivedBySubstitution,
     /// `node.EquationMatrixRuntime.search()` returned a high-relevance
     /// physical equation whose text answers the question.  This is the
     /// "Einstein thought experiment" path — when the brain's own
@@ -7948,6 +7954,8 @@ async fn hypothesis_resolve(
                 Some("external_research")    => ResolutionPath::ExternalResearch,
                 Some("brain_substrate")      => ResolutionPath::BrainSubstrate,
                 Some("brain_eem_chain")      => ResolutionPath::BrainEemChain,
+                Some("brain_derived_by_substitution")
+                                             => ResolutionPath::BrainDerivedBySubstitution,
                 Some("node_equation_matrix") => ResolutionPath::NodeEquationMatrix,
                 _                            => ResolutionPath::Human,
             });
@@ -7977,6 +7985,142 @@ struct BrainAskRequest {
     /// Override the target pool (defaults to action pool = 4).
     #[serde(default)]
     target_pool: Option<u32>,
+}
+
+/// What `/brain/ask` decided, lifted out of the handler so a test can reach
+/// it. The handler held the whole answer decision inside an `async fn` behind
+/// a `State` extractor and a mutex, which is why the route's behaviour has
+/// only ever been checked by compiling it -- see `[9b8e013f]`. Everything the
+/// route reports is in here, including `paged_neurons_released`, so a RAM
+/// regression on the answer path is visible to a test and not only to the
+/// scorecard.
+pub(crate) struct BrainAskAnswer {
+    pub answer: Option<Vec<u8>>,
+    pub outside_grounding: bool,
+    pub confidence: f32,
+    pub tier: String,
+    /// What `Brain::finish_read_only_inference` returned: bodies paged in to
+    /// answer this one question and handed straight back. 0 with no `.wbrain`
+    /// store attached, because nothing was paged in.
+    pub paged_neurons_released: usize,
+}
+
+/// The answer decision for `/brain/ask` and for the hypothesis research
+/// loop's brain attempt: observe read-only, recall, then derive, then release
+/// every body the question paged in.
+///
+/// # Why the release is here and not at the call sites
+///
+/// `Brain::finish_read_only_inference` is the drain half of the read-only
+/// inference window, and `api.rs` never called it -- measured 2026-10-01 on
+/// `[5c69d85f]`, `grep -n finish_read_only_inference crates/node/src/api.rs`
+/// returned nothing against 10 call sites in `brain_api.rs`. Both of this
+/// file's answer paths page bodies in through `observe_fabric_read_only` and
+/// through the derivation's probes, and neither released them, so the
+/// deployed node's working set grew with every question asked. The count is
+/// returned rather than logged so a test can assert on it.
+///
+/// It reports 0 until `Brain::begin_read_only_inference` is opened on this
+/// path (`brain.rs`, owned by `[5c69d85f]`): the drain is correct and the
+/// window is what is missing. Calling it now is what makes that fix reach the
+/// product in the commit that lands it, instead of a pass later.
+pub(crate) fn brain_ask_answer(
+    brain: &mut w1z4rd_brain::Brain,
+    query_pool: w1z4rd_brain::neuron::PoolId,
+    target_pool: w1z4rd_brain::neuron::PoolId,
+    text: &str,
+) -> BrainAskAnswer {
+    // ANSWER path, not training: the question seeds the firing state the
+    // integrator reads and must not enter the per-pool emergence ledger.
+    // Measured 2026-09-30 at scorecard scale 16, answering 2,432 questions
+    // through the mutating observe took the process 28.3 -> 546.7 MB.
+    brain.observe_fabric_read_only(query_pool, text.as_bytes());
+    let legacy = brain.integrate(query_pool, target_pool);
+    let authoritative = brain.decode_best_trained_binding(query_pool, target_pool);
+    let answer = authoritative.or(legacy.answer);
+    // How well the prompt that is firing matches the binding the answer above
+    // was decoded from. MEASURED 2026-10-01 by RUNNING the route for the
+    // first time (`the_ask_route_*` below; the gate's node step is a `cargo
+    // check`, so this file's answer path had never been executed by a test):
+    //
+    //   * `/brain/ask` answered the never-taught two-hop question
+    //     "r000 lamp on material?" with "desk" -- the answer to
+    //     "r000 lamp on?" -- and reported it GROUNDED, so the derivation arm
+    //     below never ran and derived 0 of 8. The pass-11 claim that this
+    //     route derives rested on a `cargo check` and was wrong.
+    //   * It answered "quasarithmetic zxqv" with "desk" as well, also
+    //     grounded, on a brain that was taught nothing of the sort.
+    //
+    // Both are one defect: `decode_best_trained_binding` returns the answer
+    // of the CLOSEST trained binding however far away it is, and nothing here
+    // re-read how close that was. The floor is not a new threshold -- it is
+    // the same 0.70 binding precision `integrate_autonomous` hardcodes and
+    // `derived_by_substitution_reply` re-reads, so a prompt this brain cannot
+    // bind is now reported as ungrounded and takes the route's own
+    // "I don't know -> research -> human" path, which is what it is for.
+    let binding_match = brain.best_binding_match_v2(query_pool);
+    let grounded_in_this_prompt = binding_match.precision >= 0.70;
+    // An exact match is a RECALL; anything less is an answer to a different
+    // question, and a question the brain was never asked is exactly where a
+    // derivation belongs. Without this the two arms above shadow the
+    // derivation on every composite prompt, because a composite CONTAINS its
+    // own sub-questions and so always matches one of them.
+    //
+    // RECALL and not precision, and the arithmetic is why -- read off
+    // `brain.rs:4120`: `precision = intersect / bind_query.len()` and
+    // `recall = intersect / q_atoms.len()`, where `q_atoms` is the prompt
+    // that is firing. A composite prompt swallows its sub-question's binding
+    // whole, so precision is 1.0 for it and a precision test here would be
+    // INERT -- the exact defect it is meant to fix. Its recall is below 1.0
+    // because the prompt carries atoms the binding does not. A prompt that IS
+    // the taught question has both at 1.0, which is why recall is safe to
+    // gate on.
+    let recalled_exactly = binding_match.recall >= 0.999;
+    // Nothing recalled: compose an answer out of questions the brain WAS
+    // taught, which is the only route here that answers a question it was
+    // never asked. It cannot run before the two arms above -- it is the
+    // only one that costs probes -- and it cannot cost OOV honesty,
+    // because it re-reads the same 0.70 binding precision floor
+    // `integrate_autonomous` hardcodes and derives nothing for a prompt
+    // this brain cannot bind.
+    //
+    // It takes the question BYTES rather than going through
+    // `integrate_autonomous`'s own derivation arm, and that is the point:
+    // that arm recovers its question from `recent_frames`, written only
+    // inside `Brain::observe`, and this route deliberately uses
+    // `observe_fabric_read_only` above -- so the arm returns before
+    // probing. `Brain::probe_question` observes each candidate itself
+    // read-only, so no learning moment and no emergence ledger entry.
+    let derived = if answer.as_ref().is_none_or(|a| a.is_empty())
+        || legacy.grounding.outside_grounding
+        || !recalled_exactly
+    {
+        crate::brain_api::derived_by_substitution_reply(brain, query_pool, target_pool, text, &[])
+    } else {
+        None
+    };
+    // After every arm, including the derivation's probes -- a probe pages in
+    // the same way a recall does.
+    let paged_neurons_released = brain.finish_read_only_inference().unwrap_or(0);
+    match derived {
+        // Composition, not retrieval: grounded by the questions it was
+        // assembled from, so `outside_grounding` is false or the route
+        // would report a non-empty answer as ungrounded.
+        Some(d) => BrainAskAnswer {
+            answer: Some(d.into_bytes()),
+            outside_grounding: false,
+            confidence: legacy.grounding.integrated_confidence,
+            tier: "Speculative".to_string(),
+            paged_neurons_released,
+        },
+        None => BrainAskAnswer {
+            answer,
+            outside_grounding: legacy.grounding.outside_grounding || !grounded_in_this_prompt,
+            confidence: legacy.grounding.integrated_confidence,
+            tier: format!("{:?}", legacy.confidence_tier),
+            paged_neurons_released,
+        },
+    }
 }
 
 /// POST /brain/ask
@@ -8011,48 +8155,9 @@ async fn brain_ask(
     let qp = req.query_pool.unwrap_or(POOL_TEXT_ID);
     let tp = req.target_pool.unwrap_or(POOL_ACTION_ID);
 
-    let (answer_bytes, outside_grounding, conf, tier) = {
+    let BrainAskAnswer { answer: answer_bytes, outside_grounding, confidence: conf, tier, .. } = {
         let mut brain = state.brain.lock().await;
-        // ANSWER path, not training: the question seeds the firing state the
-        // integrator reads and must not enter the per-pool emergence ledger.
-        // Measured 2026-09-30 at scorecard scale 16, answering 2,432 questions
-        // through the mutating observe took the process 28.3 -> 546.7 MB.
-        brain.observe_fabric_read_only(qp, req.text.as_bytes());
-        let legacy = brain.integrate(qp, tp);
-        let authoritative = brain.decode_best_trained_binding(qp, tp);
-        let answer = authoritative.or(legacy.answer);
-        // Nothing recalled: compose an answer out of questions the brain WAS
-        // taught, which is the only route here that answers a question it was
-        // never asked. It cannot run before the two arms above -- it is the
-        // only one that costs probes -- and it cannot cost OOV honesty,
-        // because it re-reads the same 0.70 binding precision floor
-        // `integrate_autonomous` hardcodes and derives nothing for a prompt
-        // this brain cannot bind.
-        //
-        // It takes the question BYTES rather than going through
-        // `integrate_autonomous`'s own derivation arm, and that is the point:
-        // that arm recovers its question from `recent_frames`, written only
-        // inside `Brain::observe`, and this route deliberately uses
-        // `observe_fabric_read_only` above -- so the arm returns before
-        // probing. `Brain::probe_question` observes each candidate itself
-        // read-only, so no learning moment and no emergence ledger entry.
-        let derived = if answer.as_ref().is_none_or(|a| a.is_empty())
-            || legacy.grounding.outside_grounding
-        {
-            crate::brain_api::derived_by_substitution_reply(&mut brain, qp, tp, &req.text, &[])
-        } else {
-            None
-        };
-        match derived {
-            // Composition, not retrieval: grounded by the questions it was
-            // assembled from, so `outside_grounding` is false or the route
-            // would report a non-empty answer as ungrounded.
-            Some(d) => (Some(d.into_bytes()), false, legacy.grounding.integrated_confidence, "Speculative".to_string()),
-            None => (answer,
-             legacy.grounding.outside_grounding,
-             legacy.grounding.integrated_confidence,
-             format!("{:?}", legacy.confidence_tier)),
-        }
+        brain_ask_answer(&mut brain, qp, tp, &req.text)
     };
 
     if !outside_grounding && answer_bytes.is_some() {
@@ -8169,7 +8274,7 @@ async fn hypothesis_research_loop(
         // the annealer, assembles multi-fact answers.  Skipped when
         // the foreground is actively training to keep /brain/observe
         // latency bounded; Strategies 2 + 3 still run below.
-        let brain_attempt: Option<(String, Vec<String>, f32)> = if foreground_busy {
+        let brain_attempt: Option<(String, Vec<String>, f32, bool)> = if foreground_busy {
             None
         } else {
             // Observe the question into the query pool so the
@@ -8200,16 +8305,55 @@ async fn hypothesis_research_loop(
                     })
                 })
                 .collect();
+            // The chain explorer reached nothing: derive the answer out of
+            // questions the brain WAS taught, exactly as `/brain/ask` does
+            // above. This loop is why the node queues an "I don't know" at
+            // all, so a derivation is the work it exists to do -- and it has
+            // to take the question BYTES, because `integrate_autonomous`'s
+            // own derivation arm recovers its question from `recent_frames`,
+            // which only the mutating `Brain::observe` writes and this site
+            // deliberately avoids.
+            //
+            // Cost, measured on `[d9c3ddbc]`: 32 probes at
+            // `DEFAULT_DERIVATION_PROBE_BUDGET`, each one
+            // `observe_fabric_read_only`. This cycle sleeps 30 s and takes at
+            // most ONE question, and it is already skipped while the
+            // foreground is training, so that is bounded by construction --
+            // unlike the 200 ms idle thinking loop, which needs its own
+            // decision. `W1Z4RD_HQ_DERIVE=0` turns it off without a rebuild.
+            let derived = if answer.as_ref().is_none_or(|a| a.is_empty())
+                && std::env::var("W1Z4RD_HQ_DERIVE").as_deref() != Ok("0")
+            {
+                crate::brain_api::derived_by_substitution_reply(
+                    &mut b, query_pool, POOL_ACTION_ID, &question, &[],
+                )
+            } else {
+                None
+            };
+            // Release every body this cycle paged in. Without this the
+            // unattended loop grows the working set once per queued
+            // hypothesis for as long as the node is up -- the same defect as
+            // the emergence ledger, one layer down.
+            let _ = b.finish_read_only_inference();
             drop(b);
-            answer.map(|a| (a, chain_labels, conf))
+            match derived {
+                // Reports the confidence it actually measured, and carries a
+                // flag instead -- lifting the number to clear this loop's 0.5
+                // floor would persist a confidence nothing measured into the
+                // hypothesis queue. The floor exists to reject atom-soup
+                // decodes; a derivation has already passed the 0.70 binding
+                // precision gate, which is the stricter test.
+                Some(d) => Some((d, chain_labels, conf, true)),
+                None => answer.map(|a| (a, chain_labels, conf, false)),
+            }
         };
 
         // Confidence floor — the substrate is now honest about
         // atom-soup decodes (returns None and outside_grounding=true
         // when there's nothing substantive), so we just gate on
         // confidence here.
-        if let Some((answer, chain, conf)) = brain_attempt {
-            if conf >= 0.5 && !answer.is_empty() {
+        if let Some((answer, chain, conf, derived)) = brain_attempt {
+            if (conf >= 0.5 || derived) && !answer.is_empty() {
                 {
                     let mut guard = hq.lock().expect("hypothesis mutex");
                     if let Some(entry) = guard.iter_mut().find(|e| e.question == question) {
@@ -8217,7 +8361,11 @@ async fn hypothesis_research_loop(
                         entry.resolved        = true;
                         entry.answer          = Some(answer);
                         entry.confidence      = Some(conf);
-                        entry.resolution_path = Some(ResolutionPath::BrainEemChain);
+                        entry.resolution_path = Some(if derived {
+                            ResolutionPath::BrainDerivedBySubstitution
+                        } else {
+                            ResolutionPath::BrainEemChain
+                        });
                         entry.chain_of_facts  = chain;
                     }
                     persist_hypothesis_queue(&guard, &persist_path);
@@ -10148,4 +10296,153 @@ async fn mesh_template() -> (StatusCode, Json<serde_json::Value>) {
         "threejs_snippet": "// Load OBJ response in Three.js:\nimport { OBJLoader } from 'three/addons/loaders/OBJLoader.js';\nimport { MTLLoader } from 'three/addons/loaders/MTLLoader.js';\n\nasync function loadNeuroMesh(query) {\n  const res = await fetch('/mesh/synthesize', {\n    method: 'POST',\n    headers: { 'Content-Type': 'application/json' },\n    body: JSON.stringify({ query, hops: 2, min_activation: 0.05 })\n  });\n  const { obj, mtl } = await res.json();\n  const mtlBlob = URL.createObjectURL(new Blob([mtl], { type: 'text/plain' }));\n  const objBlob = URL.createObjectURL(new Blob([obj], { type: 'text/plain' }));\n  const materials = await new MTLLoader().loadAsync(mtlBlob);\n  materials.preload();\n  const loader = new OBJLoader();\n  loader.setMaterials(materials);\n  return loader.loadAsync(objBlob);\n}",
         "architecture_note": "mesh_gen module is a pure consumer of centroid data — it has no imports from the neural layer. The brain stays the brain. This route file is the only coupling point."
     })))
+}
+
+/// The ANSWER PATH of this file, which until now had no test at all.
+///
+/// `[9b8e013f]` records that the gate's node step is a `cargo check`, so
+/// nothing in `crates/node` is ever RUN by it -- these are run explicitly:
+///
+/// ```text
+/// python tools/capped.py --mb 9000 -- cargo test -p w1z4rdv1510n-node \
+///     --release -j 2 --bin w1z4rdv1510n-node answer_path
+/// ```
+#[cfg(test)]
+mod answer_path_tests {
+    use super::{brain_ask_answer, BrainAskAnswer};
+    use crate::brain_api::build_default_brain;
+    use w1z4rd_brain::neuron::PoolId;
+
+    const POOL_TEXT: PoolId = 1;
+    const POOL_ACTION: PoolId = 4;
+
+    /// "r000 lamp on? -> desk" and "r000 desk material? -> oak", so
+    /// "r000 lamp on material?" is oak and is never taught. Same world as
+    /// `brain_api`'s `the_chat_route_derives_an_answer_it_was_never_trained_on`,
+    /// because the point is that BOTH routes now reach it.
+    fn two_hop_brain() -> w1z4rd_brain::Brain {
+        let mut brain = build_default_brain().unwrap();
+        for room in 0..8 {
+            let material = if room % 2 == 0 { "oak" } else { "steel" };
+            brain.pretrain_binding_episode(&[
+                (POOL_TEXT, format!("r{room:03} lamp on?").into_bytes()),
+                (POOL_ACTION, b"desk".to_vec()),
+            ]);
+            brain.pretrain_binding_episode(&[
+                (POOL_TEXT, format!("r{room:03} desk material?").into_bytes()),
+                (POOL_ACTION, material.as_bytes().to_vec()),
+            ]);
+        }
+        brain
+    }
+
+    /// `/brain/ask` answers a two-hop question it was never trained on.
+    /// Before the derivation arm this returned nothing on all 8 and the route
+    /// enqueued a hypothesis instead.
+    #[test]
+    fn the_ask_route_derives_an_answer_it_was_never_trained_on() {
+        let mut brain = two_hop_brain();
+        let mut derived = 0usize;
+        for room in 0..8 {
+            let question = format!("r{room:03} lamp on material?");
+            let want = if room % 2 == 0 { "oak" } else { "steel" };
+            let got = brain_ask_answer(&mut brain, POOL_TEXT, POOL_ACTION, &question);
+            if got.answer.as_deref() == Some(want.as_bytes()) {
+                assert!(
+                    !got.outside_grounding,
+                    "a derived answer was reported as ungrounded, so the route \
+                     would enqueue a hypothesis instead of returning it"
+                );
+                derived += 1;
+            }
+        }
+        assert!(
+            derived > 0,
+            "/brain/ask derived 0 of 8 never-trained two-hop answers, so \
+             integration is not real in the product"
+        );
+    }
+
+    /// Recall is what the route is FOR, and a derivation arm that broke it
+    /// would still pass the test above.
+    #[test]
+    fn the_ask_route_still_recalls_every_taught_answer() {
+        let mut brain = two_hop_brain();
+        for room in 0..8 {
+            let got = brain_ask_answer(
+                &mut brain,
+                POOL_TEXT,
+                POOL_ACTION,
+                &format!("r{room:03} lamp on?"),
+            );
+            assert_eq!(
+                got.answer.as_deref(),
+                Some(&b"desk"[..]),
+                "/brain/ask lost a taught answer for room {room}"
+            );
+            // The route returns early ONLY when the answer is grounded, so a
+            // grounding floor that caught a taught question would enqueue a
+            // hypothesis instead of answering it -- a recall regression the
+            // assertion above cannot see, because the answer bytes are right
+            // either way. A taught prompt scores 1.0 on this scorer, so this
+            // is the check that the 0.70 floor is above nothing it needs.
+            assert!(
+                !got.outside_grounding,
+                "/brain/ask reported a TAUGHT answer as ungrounded for room \
+                 {room}, so the route would research a question it knows"
+            );
+        }
+    }
+
+    /// OOV honesty: a prompt this brain cannot bind derives nothing. Without
+    /// this the derivation test is satisfiable by a route that answers
+    /// everything, which is the failure mode `[0935d42d]` tracks.
+    #[test]
+    fn the_ask_route_derives_nothing_for_a_prompt_it_cannot_bind() {
+        let mut brain = two_hop_brain();
+        let got = brain_ask_answer(&mut brain, POOL_TEXT, POOL_ACTION, "quasarithmetic zxqv");
+        assert!(
+            got.answer.as_deref().is_none_or(|a| a.is_empty()) || got.outside_grounding,
+            "an ungrounded prompt was answered as grounded: {:?}",
+            got.answer.as_deref().map(String::from_utf8_lossy)
+        );
+    }
+
+    /// A zero probe budget derives nothing -- the knob that turns this route's
+    /// cost off is real, and a deployment that sets it to 0 gets the old
+    /// behaviour rather than a slow one.
+    #[test]
+    fn a_zero_probe_budget_derives_nothing_on_the_ask_route() {
+        let mut brain = two_hop_brain();
+        brain.set_derivation_probe_budget(0);
+        for room in 0..8 {
+            let question = format!("r{room:03} lamp on material?");
+            let want = if room % 2 == 0 { "oak" } else { "steel" };
+            let got = brain_ask_answer(&mut brain, POOL_TEXT, POOL_ACTION, &question);
+            assert_ne!(
+                got.answer.as_deref(),
+                Some(want.as_bytes()),
+                "a zero probe budget still derived an answer, so the budget \
+                 is not what gates the cost"
+            );
+        }
+    }
+
+    /// The route RELEASES the read-only inference window instead of leaving
+    /// every paged-in body resident. With no `.wbrain` store attached nothing
+    /// is paged in, so the count is 0 and this test is about the call being on
+    /// the path at all: it reads the value the route reports, which is the
+    /// field a store-attached run makes non-zero once
+    /// `begin_read_only_inference` is opened on this path (`[5c69d85f]`).
+    #[test]
+    fn the_ask_route_reports_what_it_released() {
+        let mut brain = two_hop_brain();
+        let BrainAskAnswer { paged_neurons_released, .. } =
+            brain_ask_answer(&mut brain, POOL_TEXT, POOL_ACTION, "r000 lamp on?");
+        assert_eq!(
+            paged_neurons_released, 0,
+            "no store is attached, so nothing could have been paged in; a \
+             non-zero count here means the drain is counting something else"
+        );
+    }
 }
