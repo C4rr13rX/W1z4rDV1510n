@@ -17,6 +17,18 @@ const RECORD_HEADER_BYTES: u64 = 24;
 const HASHED_RECORD_BYTES: u64 = 44;
 const MAX_BUCKETS: u64 = 4 * 1024 * 1024;
 
+/// How many leading digest bytes a hashed posting record is verified on.
+///
+/// The record field is still 32 bytes wide, and `insert` still fills all of
+/// it, so every generation ever written stays readable. Only the COMPARISON
+/// is narrowed, which is what lets an in-RAM overlay hold the key as a fixed
+/// [`POSTING_KEY_DIGEST_BYTES`]-byte digest instead of an unbounded atom
+/// sequence: 128 bits of BLAKE3 is far beyond collision reach for an index
+/// whose entry count is bounded by the corpus, and the alternative — keeping
+/// the full key in RAM so the full digest can be recomputed at flush — is the
+/// duplication this exists to remove.
+pub(crate) const POSTING_KEY_DIGEST_BYTES: usize = 16;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PostingKeyMode {
     Full,
@@ -324,6 +336,40 @@ impl PostingIndexBuilder {
         Ok(())
     }
 
+    /// Insert a posting whose key has already been reduced to its leading
+    /// [`POSTING_KEY_DIGEST_BYTES`] digest bytes.
+    ///
+    /// A hashed index never stores key bytes, so a caller that keeps only the
+    /// digest in RAM can still write a record a full-key [`lookup`] resolves.
+    /// The remaining digest bytes are written as zero and never compared.
+    pub(crate) fn insert_digest(
+        &mut self,
+        digest_prefix: &[u8; POSTING_KEY_DIGEST_BYTES],
+        value: NeuronId,
+    ) -> io::Result<()> {
+        if self.key_mode != PostingKeyMode::Hashed {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "digest-only postings require a hashed posting index",
+            ));
+        }
+        let hash = u64::from_le_bytes(digest_prefix[..8].try_into().unwrap());
+        let bucket_index = usize::try_from(hash & (self.bucket_count - 1)).unwrap();
+        let old_head = self.bucket_heads[bucket_index];
+        let record = self.next_record_offset;
+        self.file.write_all(&old_head.to_le_bytes())?;
+        self.file.write_all(digest_prefix)?;
+        self.file
+            .write_all(&[0_u8; 32 - POSTING_KEY_DIGEST_BYTES])?;
+        self.file.write_all(&value.to_le_bytes())?;
+        self.bucket_heads[bucket_index] = record + 1;
+        self.next_record_offset = record
+            .checked_add(HASHED_RECORD_BYTES)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "posting index overflow"))?;
+        self.entries += 1;
+        Ok(())
+    }
+
     pub(crate) fn finish(
         mut self,
         destination: &Arc<WbrainFile>,
@@ -437,9 +483,15 @@ pub(crate) fn lookup(
                 }
             }
             PostingKeyMode::Hashed => {
-                let stored_digest = &raw[8..40];
+                // Compare the leading digest bytes only. Generations written
+                // before `insert_digest` carry all 32 and still match on their
+                // prefix; records written from a digest-keyed overlay carry
+                // the prefix and zeros.
+                let stored_prefix = &raw[8..8 + POSTING_KEY_DIGEST_BYTES];
                 let value = u32::from_le_bytes(raw[40..44].try_into().unwrap());
-                if stored_digest == digest.as_bytes() && found.last().copied() != Some(value) {
+                if stored_prefix == &digest.as_bytes()[..POSTING_KEY_DIGEST_BYTES]
+                    && found.last().copied() != Some(value)
+                {
                     found.push(value);
                 }
             }
@@ -625,6 +677,64 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::Unsupported);
         drop(store);
         drop(file);
+        std::fs::remove_dir_all(directory).ok();
+    }
+
+    /// A caller that retains only the digest prefix must produce a record a
+    /// full-key lookup still resolves -- that equivalence is what lets the
+    /// in-RAM sequence overlay drop the atom sequence it was keyed by.
+    #[test]
+    fn digest_only_postings_resolve_a_full_key_lookup() {
+        let directory = temp_directory("digest-only");
+        std::fs::create_dir_all(&directory).unwrap();
+        let destination = directory.join("brain.wbrain");
+        let full_key = vec![0x3C; 2048];
+        let other_key = vec![0xC3; 1024];
+        let prefix: [u8; POSTING_KEY_DIGEST_BYTES] = blake3::hash(&full_key).as_bytes()
+            [..POSTING_KEY_DIGEST_BYTES]
+            .try_into()
+            .unwrap();
+
+        let mut builder = PostingIndexBuilder::create_hashed(&directory, 7, 3).unwrap();
+        builder.insert_digest(&prefix, 11).unwrap();
+        builder.insert_digest(&prefix, 12).unwrap();
+        // A full-key insert into the same generation keeps all 32 bytes, so
+        // both record shapes must coexist and both must be found.
+        builder.insert(&other_key, 13).unwrap();
+
+        let file = WbrainFile::open(&destination).unwrap();
+        let reference = builder.finish(&file, 7).unwrap();
+        let store = file.pool(7);
+        assert_eq!(
+            lookup(&store, reference, &full_key, 8).unwrap(),
+            vec![11, 12],
+            "a digest-only record must answer the key it was derived from"
+        );
+        assert_eq!(lookup(&store, reference, &other_key, 8).unwrap(), vec![13]);
+        assert!(
+            lookup(&store, reference, b"never-inserted", 8)
+                .unwrap()
+                .is_empty()
+        );
+        drop(store);
+        drop(file);
+        std::fs::remove_dir_all(directory).ok();
+    }
+
+    /// Digest-only inserts are meaningless in a full-key index, because that
+    /// mode verifies against the key bytes it stores.
+    #[test]
+    fn digest_only_postings_are_rejected_by_a_full_key_index() {
+        let directory = temp_directory("digest-only-full");
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut builder = PostingIndexBuilder::create(&directory, 7, 2).unwrap();
+        let error = builder
+            .insert_digest(&[0x11; POSTING_KEY_DIGEST_BYTES], 5)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        let path = builder.path.clone();
+        drop(builder);
+        std::fs::remove_file(path).ok();
         std::fs::remove_dir_all(directory).ok();
     }
 

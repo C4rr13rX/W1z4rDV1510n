@@ -181,19 +181,48 @@ fn decode_fingerprint_posting_key(key: &[u8], expected_kind: u8) -> Option<Momen
     })
 }
 
+/// In-RAM identity of an exact-sequence binding route.
+///
+/// The route's natural key is `(query pool, target pool, atom sequence)`, and
+/// that sequence is already held by `MomentFingerprint::ordered_per_pool` and
+/// by the binding's own members. Keeping a third copy per route cost 1.96 MB
+/// over 9,742 entries at scale 64. Point lookup is the only operation this
+/// index supports — nothing prefix-scans it, on disk or in RAM — so a digest
+/// of the encoded key is a complete substitute for the key.
+type SequenceRouteDigest = [u8; crate::store::posting_index::POSTING_KEY_DIGEST_BYTES];
+
+fn encode_sequence_posting_key(query: PoolId, target: PoolId, sequence: &[NeuronId]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(13 + sequence.len() * 4);
+    out.push(1);
+    out.extend_from_slice(&query.to_le_bytes());
+    out.extend_from_slice(&target.to_le_bytes());
+    out.extend_from_slice(&(sequence.len() as u32).to_le_bytes());
+    for id in sequence {
+        out.extend_from_slice(&id.to_le_bytes());
+    }
+    out
+}
+
+/// The digest a sequence route is keyed and persisted by. It must agree with
+/// what `posting_index::lookup` derives from the same encoded key, or a
+/// flushed generation stops answering the query that wrote it.
+fn sequence_route_digest(
+    query: PoolId,
+    target: PoolId,
+    sequence: &[NeuronId],
+) -> SequenceRouteDigest {
+    let encoded = encode_sequence_posting_key(query, target, sequence);
+    let digest = blake3::hash(&encoded);
+    digest.as_bytes()[..crate::store::posting_index::POSTING_KEY_DIGEST_BYTES]
+        .try_into()
+        .expect("digest prefix is fixed width")
+}
+
 impl BindingPostingKey {
     fn encode(&self) -> Vec<u8> {
         match self {
             Self::Sequence(query, target, sequence) => {
-                let mut out = Vec::with_capacity(13 + sequence.len() * 4);
-                out.push(1);
-                out.extend_from_slice(&query.to_le_bytes());
-                out.extend_from_slice(&target.to_le_bytes());
-                out.extend_from_slice(&(sequence.len() as u32).to_le_bytes());
-                for id in sequence {
-                    out.extend_from_slice(&id.to_le_bytes());
-                }
-                out
+                encode_sequence_posting_key(*query, *target, sequence)
             }
             Self::Feature(pool, neuron) => {
                 let mut out = Vec::with_capacity(9);
@@ -941,7 +970,11 @@ pub struct Brain {
     /// grow linearly with the curriculum.  This derived (non-persisted) index
     /// narrows exact episodic recall to bindings that contain the observed
     /// query sequence and requested target pool.  It is rebuilt on restore.
-    binding_sequence_index: AHashMap<(PoolId, PoolId, Vec<NeuronId>), Vec<NeuronId>>,
+    ///
+    /// Keyed by [`SequenceRouteDigest`], not by the sequence: the atoms are
+    /// already stored on the fingerprint and on the binding's members, and a
+    /// point-lookup index does not need a third copy of them.
+    binding_sequence_index: AHashMap<SequenceRouteDigest, Vec<NeuronId>>,
     /// Inverted access from a raw feature atom to bindings containing that
     /// atom either directly or beneath a collapsed feature concept. Derived
     /// from the atom substrate and rebuilt on restore.
@@ -1686,12 +1719,13 @@ impl Brain {
         fn ids(v: &Vec<NeuronId>) -> usize {
             std::mem::size_of::<Vec<NeuronId>>() + v.capacity() * std::mem::size_of::<NeuronId>()
         }
-        let seq_index: usize = hash_table_bytes::<(PoolId, PoolId, Vec<NeuronId>), Vec<NeuronId>>(
+        let seq_index: usize = hash_table_bytes::<SequenceRouteDigest, Vec<NeuronId>>(
             self.binding_sequence_index.capacity(),
-        ) + self.binding_sequence_index.iter()
-            .map(|((_, _, k), v)| {
-                k.capacity() * std::mem::size_of::<NeuronId>() + ids(v)
-            }).sum::<usize>();
+        ) + self
+            .binding_sequence_index
+            .values()
+            .map(ids)
+            .sum::<usize>();
         let feat_index: usize = hash_table_bytes::<(PoolId, NeuronId), Vec<NeuronId>>(
             self.binding_feature_atom_index.capacity(),
         ) + self.binding_feature_atom_index.values().map(ids).sum::<usize>();
@@ -2728,10 +2762,15 @@ impl Brain {
         for key in self.binding_posting_keys(members) {
             match key {
                 BindingPostingKey::Sequence(query, target, sequence) => {
+                    // Measured at scale 64: 9,742 routes against 9,728 facts,
+                    // so virtually every exact-sequence route posts ONE
+                    // binding. `Vec::push` on an empty vector allocates four
+                    // slots, charging 16 bytes to hold 4 -- 117 KB of the
+                    // index. Start at one and let doubling take over.
                     let ids = self
                         .binding_sequence_index
-                        .entry((query, target, sequence))
-                        .or_default();
+                        .entry(sequence_route_digest(query, target, &sequence))
+                        .or_insert_with(|| Vec::with_capacity(1));
                     append_binding_posting(ids, binding_id, usize::MAX);
                 }
                 BindingPostingKey::Feature(pool, neuron) => {
@@ -3074,7 +3113,7 @@ impl Brain {
         const MAX_EXACT_POSTINGS: usize = 512;
         let overlay = self
             .binding_sequence_index
-            .get(&(query, target, sequence.to_vec()))
+            .get(&sequence_route_digest(query, target, sequence))
             .cloned()
             .unwrap_or_default();
         self.bounded_binding_postings_across_generations(
@@ -3232,10 +3271,12 @@ impl Brain {
                 self.binding_pool_id,
                 binding_entries as u64,
             )?;
-            for ((query, target, sequence), ids) in &self.binding_sequence_index {
-                let key = BindingPostingKey::Sequence(*query, *target, sequence.clone()).encode();
+            // The overlay holds each sequence route as the digest the index
+            // is keyed by, so the record goes out without rebuilding (or
+            // retaining) the atom sequence it was derived from.
+            for (digest, ids) in &self.binding_sequence_index {
                 for id in ids {
-                    builder.insert(&key, *id)?;
+                    builder.insert_digest(digest, *id)?;
                 }
             }
             for ((pool, neuron), ids) in &self.binding_feature_atom_index {
@@ -8741,6 +8782,17 @@ impl Brain {
 
     fn stage_wbrain_brain_metadata(&self, file: &crate::store::WbrainFile) -> std::io::Result<()> {
         use self::wbrain_metadata::{PersistedMomentFingerprint, WbrainBrainMetadata};
+        if !self.binding_sequence_index.is_empty() {
+            // Not silent: the only caller flushes first, so a non-empty
+            // overlay here means a new staging path skipped the flush and
+            // these routes would live only in the generation that was never
+            // written.
+            tracing::warn!(
+                "staging .wbrain metadata with {} unflushed sequence routes; \
+                 flush_binding_posting_overlay must run first",
+                self.binding_sequence_index.len()
+            );
+        }
         let persist = |fingerprint: &MomentFingerprint| PersistedMomentFingerprint {
             pairs: fingerprint.pairs(),
             ordered_per_pool: fingerprint.ordered_per_pool.clone(),
@@ -8770,11 +8822,14 @@ impl Brain {
                 .iter()
                 .map(|(fingerprint, id)| (persist(fingerprint), *id))
                 .collect(),
-            binding_sequence_index: self
-                .binding_sequence_index
-                .iter()
-                .map(|(key, ids)| (key.clone(), ids.clone()))
-                .collect(),
+            // This vector's wire type is the legacy full-key one and is kept
+            // so every existing `.wbrain` manifest still deserializes. It is
+            // now always written empty: `serialize_all_neurons_for_idle`
+            // flushes the overlay into a hashed posting generation
+            // immediately before staging, and a digest-keyed overlay cannot
+            // reproduce the sequences this shape wants. `restore_wbrain`
+            // converts a legacy non-empty vector into digests.
+            binding_sequence_index: Vec::new(),
             binding_feature_atom_index: self
                 .binding_feature_atom_index
                 .iter()
@@ -9395,7 +9450,17 @@ impl Brain {
                 .collect(),
             tentative_binding_count_total,
             consolidated_binding_count_total,
-            binding_sequence_index: metadata.binding_sequence_index.into_iter().collect(),
+            // Migration: a manifest written before the overlay was keyed by
+            // digest carries full `(query, target, sequence)` keys. Hash each
+            // one into the digest the live index and every posting generation
+            // agree on, so a legacy overlay keeps resolving its routes.
+            binding_sequence_index: metadata
+                .binding_sequence_index
+                .into_iter()
+                .map(|((query, target, sequence), ids)| {
+                    (sequence_route_digest(query, target, &sequence), ids)
+                })
+                .collect(),
             binding_feature_atom_index: metadata.binding_feature_atom_index.into_iter().collect(),
             binding_feature_pair_index: AHashMap::new(),
             binding_motif_index: metadata.binding_motif_index.into_iter().collect(),
@@ -9603,6 +9668,85 @@ mod decode_shape_tests {
         assert_eq!(tiled_fraction(b"x"), 0.0);
         // Two identical bytes IS a tiling of period 1.
         assert!(decode_is_runaway_tiling(b"xx"));
+    }
+}
+
+#[cfg(test)]
+mod sequence_route_digest_tests {
+    use super::{
+        encode_sequence_posting_key, sequence_route_digest, BindingPostingKey, SequenceRouteDigest,
+    };
+    use crate::store::posting_index::POSTING_KEY_DIGEST_BYTES;
+
+    /// The overlay key and the on-disk record must be derived from the same
+    /// bytes. If they drift, a flush silently stops answering the query that
+    /// wrote it -- the overlay is cleared, the generation exists, and recall
+    /// just returns nothing.
+    #[test]
+    fn overlay_key_matches_what_a_posting_lookup_derives() {
+        for sequence in [
+            vec![],
+            vec![7_u32],
+            (0..64_u32).collect::<Vec<_>>(),
+            (0..4096_u32).map(|i| i.wrapping_mul(7)).collect::<Vec<_>>(),
+        ] {
+            let encoded =
+                BindingPostingKey::Sequence(3, 5, sequence.clone()).encode();
+            assert_eq!(
+                encoded,
+                encode_sequence_posting_key(3, 5, &sequence),
+                "the enum arm and the free encoder must agree"
+            );
+            let expected: SequenceRouteDigest = blake3::hash(&encoded).as_bytes()
+                [..POSTING_KEY_DIGEST_BYTES]
+                .try_into()
+                .unwrap();
+            assert_eq!(sequence_route_digest(3, 5, &sequence), expected);
+        }
+    }
+
+    /// The whole key must be in the digest: pools and sequence order included,
+    /// or two different routes collapse onto one posting list.
+    #[test]
+    fn distinct_routes_have_distinct_digests() {
+        let base = sequence_route_digest(3, 5, &[1, 2, 3]);
+        for other in [
+            sequence_route_digest(5, 3, &[1, 2, 3]),
+            sequence_route_digest(3, 6, &[1, 2, 3]),
+            sequence_route_digest(3, 5, &[3, 2, 1]),
+            sequence_route_digest(3, 5, &[1, 2]),
+            sequence_route_digest(3, 5, &[1, 2, 3, 0]),
+        ] {
+            assert_ne!(base, other);
+        }
+    }
+
+    /// A legacy `.wbrain` manifest carries full `(query, target, sequence)`
+    /// overlay keys. The restore migration must land each one on the digest
+    /// the live index and the posting generations both use, so an old overlay
+    /// keeps resolving instead of becoming unreachable.
+    #[test]
+    fn legacy_full_key_overlay_migrates_onto_the_live_digest() {
+        let legacy: Vec<((u32, u32, Vec<u32>), Vec<u32>)> = vec![
+            ((3, 5, vec![11, 12, 13]), vec![901]),
+            ((5, 3, vec![11, 12, 13]), vec![902, 903]),
+        ];
+        let migrated: ahash::AHashMap<SequenceRouteDigest, Vec<u32>> = legacy
+            .clone()
+            .into_iter()
+            .map(|((query, target, sequence), ids)| {
+                (sequence_route_digest(query, target, &sequence), ids)
+            })
+            .collect();
+        assert_eq!(migrated.len(), 2, "the two routes must stay distinct");
+        for ((query, target, sequence), ids) in legacy {
+            assert_eq!(
+                migrated
+                    .get(&sequence_route_digest(query, target, &sequence))
+                    .cloned(),
+                Some(ids)
+            );
+        }
     }
 }
 
