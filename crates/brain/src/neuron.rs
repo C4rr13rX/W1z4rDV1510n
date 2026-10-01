@@ -367,9 +367,21 @@ impl Neuron {
     /// scale 64 only 48 of 9,776 neurons reach this threshold, and they
     /// hold 24,576 of the 24,975 terminals.
     ///
-    /// 64 is the smallest power of two above the measured non-hub maximum
-    /// (7 terminals), so no ordinary neuron allocates a map at all.
-    pub const TERMINAL_INDEX_THRESHOLD: usize = 64;
+    /// 64 was the smallest power of two above the measured non-hub maximum
+    /// (7 terminals), so no ordinary neuron allocated a map. 1024 is chosen
+    /// against a different number: `PoolConfig::max_atom_fanout` caps a
+    /// neuron at 512 terminals, and at that cap the index costs MORE than the
+    /// thing it indexes. Measured at scale 64, the 48 neurons above 64 held
+    /// 0.797 MB of buckets -- ~17 KB each, against the ~12 KB their 512
+    /// terminals occupy -- because a bucket is 17 bytes per 24-byte terminal
+    /// and hashbrown rounds 512 entries up to 1024 buckets. A scan over 512
+    /// contiguous terminals compares an 8-byte `NeuronRef` and fits in L1, so
+    /// while the fan-out cap holds, the map can never repay its bytes.
+    ///
+    /// Above the cap it still can, which is why this is a threshold and not a
+    /// deletion: an uncapped pool (`max_atom_fanout = 0`) grows hubs without
+    /// limit and those get an index at 1024.
+    pub const TERMINAL_INDEX_THRESHOLD: usize = 1024;
 
     /// Position in `terminals` of the terminal aimed at `target`.
     ///

@@ -1369,12 +1369,13 @@ mod tests {
         assert_eq!(read_back.terminals.len(), 66);
         assert_eq!(read_back.terminals[65].target, NeuronRef::new(3, 65));
         assert_eq!(read_back.label, "atom:0");
-        // And the rebuilt index must cover the folded-in terminals, or an
-        // O(1) lookup would miss exactly the connections just learned.
-        assert_eq!(
-            read_back.terminal_index_get(&NeuronRef::new(3, 65)),
-            Some(65),
-        );
+        // And address-by-name must reach the folded-in terminals, or a lookup
+        // would miss exactly the connections just learned. Asserted through
+        // `find_terminal` rather than the index, because which of the two
+        // answers is a function of `TERMINAL_INDEX_THRESHOLD`: at 66
+        // terminals the Vec IS the index, and a test that insists on the map
+        // is asserting the threshold rather than the recall.
+        assert_eq!(read_back.find_terminal(&NeuronRef::new(3, 65)), Some(65));
 
         std::fs::remove_file(&path).ok();
     }
