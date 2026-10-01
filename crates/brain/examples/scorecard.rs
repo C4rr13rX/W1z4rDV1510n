@@ -17,9 +17,82 @@
 //!
 //! Run: `cargo run --release --example scorecard -p w1z4rd-brain -- --scale 4`
 
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
+use w1z4rd_brain::brain::hash_table_bytes;
 use w1z4rd_brain::{AtomEncoding, Brain, BrainConfig, BytePassthroughEncoding, Neuron, NeuronRef,
     PoolConfig, Terminal};
+
+/// Live heap bytes and their high-water mark, counted by the allocator itself.
+///
+/// `est_resident_mb` is a census of structures the brain knows it owns; the
+/// peak is measured from OUTSIDE by tools/capped.py. So the gap between them
+/// had no owner and could not be attributed: it was either heap the census
+/// fails to count, transient allocation the census cannot see because it is
+/// already freed, or process overhead the brain never asked for. Those need
+/// different fixes, and nothing distinguished them. Every byte the program
+/// requests passes through `GlobalAlloc`, so counting here splits the three
+/// without a platform memory API:
+///
+///   peak_rss - HEAP_PEAK  = process overhead (runtime, binary, allocator arenas)
+///   HEAP_PEAK - HEAP_LIVE = transient churn, freed before the mark was taken
+///   HEAP_LIVE - accounted = live structures the census does not count
+static HEAP_LIVE: AtomicUsize = AtomicUsize::new(0);
+static HEAP_PEAK: AtomicUsize = AtomicUsize::new(0);
+
+struct Counting;
+
+/// Adds `delta` to the live total and raises the high-water mark.
+fn grew(delta: usize) {
+    let live = HEAP_LIVE.fetch_add(delta, Ordering::Relaxed) + delta;
+    HEAP_PEAK.fetch_max(live, Ordering::Relaxed);
+}
+
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+        let p = unsafe { System.alloc(l) };
+        if !p.is_null() {
+            grew(l.size());
+        }
+        p
+    }
+    unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
+        let p = unsafe { System.alloc_zeroed(l) };
+        if !p.is_null() {
+            grew(l.size());
+        }
+        p
+    }
+    unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+        HEAP_LIVE.fetch_sub(l.size(), Ordering::Relaxed);
+        unsafe { System.dealloc(p, l) }
+    }
+    unsafe fn realloc(&self, p: *mut u8, l: Layout, new: usize) -> *mut u8 {
+        // A failed realloc leaves the old block live, so only a non-null
+        // result may move the counter.
+        let q = unsafe { System.realloc(p, l, new) };
+        if !q.is_null() {
+            if new >= l.size() {
+                grew(new - l.size());
+            } else {
+                HEAP_LIVE.fetch_sub(l.size() - new, Ordering::Relaxed);
+            }
+        }
+        q
+    }
+}
+
+#[global_allocator]
+static ALLOC: Counting = Counting;
+
+/// (live, peak) heap megabytes at the moment of the call.
+fn heap_mb() -> (f64, f64) {
+    (
+        HEAP_LIVE.load(Ordering::Relaxed) as f64 / 1_048_576.0,
+        HEAP_PEAK.load(Ordering::Relaxed) as f64 / 1_048_576.0,
+    )
+}
 
 const QUERY_POOL: u32 = 1;
 const ANSWER_POOL: u32 = 2;
@@ -141,6 +214,8 @@ impl Subject {
                 ("sequence_ledger", s.sequence_ledger),
                 ("evicted_set", s.evicted_set),
                 ("cold_offsets", s.cold_offsets),
+                ("neuron_slot_table", s.neuron_slot_table),
+                ("transient_firing", s.transient_firing),
             ] {
                 *side.entry(k).or_default() += v;
             }
@@ -187,10 +262,10 @@ impl Subject {
                     n.members.capacity() * std::mem::size_of::<NeuronRef>();
                 *body.entry("terminals").or_default() +=
                     n.terminals.capacity() * std::mem::size_of::<Terminal>();
-                // hashbrown allocates capacity buckets of (K, V) plus one
-                // control byte each, and `capacity()` is the usable count.
-                *body.entry("terminal_idx").or_default() += n.terminal_idx.capacity()
-                    * (std::mem::size_of::<(NeuronRef, usize)>() + 1);
+                // One spelling of the table's real size, shared with the
+                // Brain-level census: capacity is NOT the bucket count.
+                *body.entry("terminal_idx").or_default() +=
+                    hash_table_bytes::<NeuronRef, usize>(n.terminal_idx.capacity());
                 // Where a per-neuron index would still be worth its bytes: a
                 // linear scan over `terminals` answers the same question, so
                 // the map only earns its keep on high fan-out neurons. Bucket
@@ -217,6 +292,22 @@ impl Subject {
         })
     }
 
+    /// Every byte the census can name: Brain-level maps, per-pool side
+    /// structures, neuron bodies. Compared against `HEAP_LIVE` this is the one
+    /// number that says whether a residual is an uncounted structure or not a
+    /// structure at all.
+    fn accounted_bytes(&self) -> usize {
+        let c = self.census();
+        let at = |a: &str, b: &str| {
+            c.get(a)
+                .and_then(|v| if b.is_empty() { Some(v) } else { v.get(b) })
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as usize
+        };
+        at("global", "total_bytes") + at("pool_side_total_bytes", "")
+            + at("neuron_body_total_bytes", "")
+    }
+
     /// (hub fan-out, estimated resident bytes) over every pool.
     fn footprint(&self) -> (usize, usize) {
         let terminal = std::mem::size_of::<w1z4rd_brain::Terminal>();
@@ -225,7 +316,6 @@ impl Subject {
         // map is charged from its OWN capacity below rather than per terminal.
         // Charging it per terminal read 4.1 MB at scale 16 both before and
         // after the change that removed 4.3 MB of it.
-        let idx_entry = std::mem::size_of::<(w1z4rd_brain::NeuronRef, usize)>() + 1;
         let per_terminal = terminal;
         let per_member = std::mem::size_of::<w1z4rd_brain::NeuronRef>();
         let per_neuron = std::mem::size_of::<w1z4rd_brain::Neuron>();
@@ -241,7 +331,7 @@ impl Subject {
                     + n.label.capacity()
                     + n.members.capacity() * per_member
                     + n.terminals.capacity() * per_terminal
-                    + n.terminal_idx.capacity() * idx_entry;
+                    + hash_table_bytes::<w1z4rd_brain::NeuronRef, usize>(n.terminal_idx.capacity());
             }
         }
         (hub, bytes)
@@ -290,12 +380,24 @@ fn main() {
     let census_wanted = args.iter().any(|a| a == "--census");
 
     let world = SceneWorld::new(scale);
+    // The probe set is built before the brain, so this mark separates heap the
+    // BRAIN allocates from heap the harness allocates for its own questions.
+    let (live_world, _) = heap_mb();
     let mut subject = Subject::new();
+    // A brain with two empty pools. Whatever this holds is fixed construction
+    // cost -- the EEM's equation tables, the annealer, the fabric -- and is NOT
+    // part of any per-fact residual, however large it looks at small scale.
+    let (live_new, _) = heap_mb();
     let t0 = Instant::now();
     subject.train(&world.facts);
     let train_s = t0.elapsed().as_secs_f64();
 
     let census_after_train = census_wanted.then(|| subject.census());
+    // Marks taken at each phase boundary. Training is the phase that allocates
+    // what is left (measured at scale 64: train 55.8 / recall 58.3 / infer 58.7
+    // MB of peak RSS), so the mark after training is the one that matters.
+    let (live_train, peak_train) = heap_mb();
+    let accounted_train = subject.accounted_bytes() as f64 / 1_048_576.0;
     let (mut recall_pct, mut recall_ms) = (f64::NAN, f64::NAN);
     let (mut integration_pct, mut infer_ms) = (f64::NAN, f64::NAN);
     if phase != "train" {
@@ -304,6 +406,8 @@ fn main() {
     if phase != "train" && phase != "recall" {
         (integration_pct, infer_ms) = score(&world.integration, |q| subject.infer(q));
     }
+    let (live_end, peak_end) = heap_mb();
+    let accounted_end = subject.accounted_bytes() as f64 / 1_048_576.0;
     let (hub, bytes) = subject.footprint();
     let s = subject.brain.stats();
     if let Some(after_train) = census_after_train {
@@ -334,6 +438,18 @@ fn main() {
             "terminals": s.total_terminals,
             "hub_fanout": hub,
             "est_resident_mb": bytes as f64 / 1_048_576.0,
+            // The allocator's own books. `heap_peak_mb` is every byte this
+            // process ever held at once; `peak_mb` (tools/capped.py, from
+            // outside) minus it is process overhead the brain never allocated.
+            "heap_live_world_mb": live_world,
+            "heap_live_new_mb": live_new,
+            "heap_live_train_mb": live_train,
+            "heap_peak_train_mb": peak_train,
+            "accounted_train_mb": accounted_train,
+            "heap_live_mb": live_end,
+            "heap_peak_mb": peak_end,
+            "accounted_mb": accounted_end,
+            "unaccounted_live_mb": live_end - accounted_end,
         })
     );
 }

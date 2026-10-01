@@ -83,14 +83,37 @@ fn a_fingerprint_key_is_stored_once_however_many_indexes_hold_it() {
     );
 
     // A map now costs a pointer plus its value per entry, not a fingerprint.
-    // 32 bytes per entry is generous for 8 (pointer) + 4 (value) plus slack.
+    // The bound is the TABLE's own arithmetic rather than a constant: an entry
+    // is `(Arc<MomentFingerprint>, u32)` plus hashbrown's control byte, and the
+    // table allocates a power-of-two bucket count at no more than 7/8 load, so
+    // the per-entry charge is up to ~2.3 buckets' worth. A flat 32 was written
+    // when the census counted `len` and no bucket table at all; the real
+    // allocation at 64 facts is 128 buckets x 17 B = 34 B per entry, which is
+    // the table being measured properly and not the map owning its keys.
+    let entry = std::mem::size_of::<(std::sync::Arc<()>, u32)>() + 1;
     for map in ["lifetime_recurrences", "tentative_promoted"] {
         let b = bytes[map].as_u64().unwrap();
         let n = entries[map].as_u64().unwrap().max(1);
         assert!(
-            b / n <= 32,
-            "{map} charges {} bytes per entry, so it still owns its keys",
-            b / n
+            (b / n) as usize <= 3 * entry,
+            "{map} charges {} bytes per entry against a {} B bucket, so it still owns its keys",
+            b / n,
+            entry
+        );
+    }
+
+    // The discriminator the constant above cannot express: a map that owned its
+    // keys would charge what the key PAYLOAD costs. `fingerprint_keys` is that
+    // payload, counted once for the shared Arc, so a per-entry charge an order
+    // below it is the sharing this file is named for -- and it stays true if
+    // the fingerprint grows, which a fixed byte count does not.
+    let payload_per_fact = shared_bytes / distinct.max(1);
+    for map in ["lifetime_recurrences", "tentative_promoted"] {
+        let per = bytes[map].as_u64().unwrap() / entries[map].as_u64().unwrap().max(1);
+        assert!(
+            per * 4 < payload_per_fact,
+            "{map} charges {per} B per entry against a {payload_per_fact} B fingerprint -- \
+             that is the key, not a pointer to it"
         );
     }
 }

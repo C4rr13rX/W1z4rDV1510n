@@ -34,6 +34,28 @@ use crate::network::{
 use crate::neuron::{Neuron, NeuronId, NeuronKind, NeuronRef, PoolId};
 use crate::pool::{AtomEncoding, BytePassthroughEncoding, Pool, PoolConfig};
 
+/// Bytes a hashbrown table of `capacity` usable slots actually allocates.
+///
+/// Every RAM census in this crate had been charging a map `len * size_of`,
+/// which is wrong twice over: a table allocates for its CAPACITY, and
+/// hashbrown holds a control byte per bucket on top of each `(K, V)`. The
+/// bucket count is not the capacity either -- hashbrown keeps one bucket in
+/// eight spare, so `capacity = buckets - buckets / 8`, and inverting that
+/// (`capacity * 8 / 7`, rounded up to a power of two) recovers what was
+/// allocated. Measured at scale 64: 9,728 facts in `lifetime_recurrences`
+/// report 16,384 buckets, not 9,728 slots -- a 68 % undercount per map.
+///
+/// Public because `examples/scorecard.rs` must charge `Neuron::terminal_idx`
+/// by the same rule; two spellings of one allocation is how a residual stays
+/// unnamed.
+pub fn hash_table_bytes<K, V>(capacity: usize) -> usize {
+    if capacity == 0 {
+        return 0;
+    }
+    let buckets = ((capacity * 8) / 7).next_power_of_two().max(4);
+    buckets * (std::mem::size_of::<(K, V)>() + 1)
+}
+
 /// Page concept membership trees back from the cold tier before a decoder
 /// expands them into atom evidence. Eviction deliberately leaves neuron IDs
 /// stable but clears heavy member vectors; treating that placeholder as an
@@ -1640,36 +1662,42 @@ impl Brain {
             }
             std::mem::size_of::<FpKey>()
         };
-        let lifetime: usize = self.lifetime_recurrences.keys()
-            .map(|k| charge(k) + std::mem::size_of::<u32>()).sum();
-        let recurrences: usize = self.binding_recurrences.keys()
-            .map(|k| charge(k) + std::mem::size_of::<u32>()).sum();
-        let promoted: usize = self.promoted_fingerprints.keys()
-            .map(|k| charge(k) + std::mem::size_of::<NeuronId>()).sum();
-        let tentative: usize = self.tentative_promoted.keys()
-            .map(|k| charge(k) + std::mem::size_of::<NeuronId>()).sum();
-        let history: usize = self.moment_history.iter().map(|fp| charge(fp)).sum();
+        // A map allocates for its CAPACITY, not its length, and hashbrown
+        // holds one control byte per slot on top of each (K, V). Charging
+        // per-key understates every one of these by the ~1/8 of the table
+        // that load factor leaves spare plus the whole control array.
+        for k in self.lifetime_recurrences.keys() { charge(k); }
+        for k in self.binding_recurrences.keys() { charge(k); }
+        for k in self.promoted_fingerprints.keys() { charge(k); }
+        for k in self.tentative_promoted.keys() { charge(k); }
+        for fp in self.moment_history.iter() { charge(fp); }
+        let lifetime = hash_table_bytes::<FpKey, u32>(self.lifetime_recurrences.capacity());
+        let recurrences = hash_table_bytes::<FpKey, u32>(self.binding_recurrences.capacity());
+        let promoted = hash_table_bytes::<FpKey, NeuronId>(self.promoted_fingerprints.capacity());
+        let tentative = hash_table_bytes::<FpKey, NeuronId>(self.tentative_promoted.capacity());
+        let history = self.moment_history.capacity() * std::mem::size_of::<FpKey>();
         let fingerprint_keys = shared;
         let distinct_fingerprints = seen.len();
-        let seq_index: usize = self.binding_sequence_index.iter()
+        // The three binding indexes counted `len` on every Vec and charged
+        // nothing for the bucket table the maps themselves allocate. Measured
+        // at scale 64, correcting `len` to `capacity` on the neuron side alone
+        // moved est_resident 5.9 -> 14.9 MB, so an uncounted allocation here is
+        // how a residual stays unnamed.
+        fn ids(v: &Vec<NeuronId>) -> usize {
+            std::mem::size_of::<Vec<NeuronId>>() + v.capacity() * std::mem::size_of::<NeuronId>()
+        }
+        let seq_index: usize = hash_table_bytes::<(PoolId, PoolId, Vec<NeuronId>), Vec<NeuronId>>(
+            self.binding_sequence_index.capacity(),
+        ) + self.binding_sequence_index.iter()
             .map(|((_, _, k), v)| {
-                std::mem::size_of::<(PoolId, PoolId, Vec<NeuronId>)>()
-                    + k.len() * std::mem::size_of::<NeuronId>()
-                    + std::mem::size_of::<Vec<NeuronId>>()
-                    + v.len() * std::mem::size_of::<NeuronId>()
-            }).sum();
-        let feat_index: usize = self.binding_feature_atom_index.iter()
-            .map(|(_, v)| {
-                std::mem::size_of::<(PoolId, NeuronId)>()
-                    + std::mem::size_of::<Vec<NeuronId>>()
-                    + v.len() * std::mem::size_of::<NeuronId>()
-            }).sum();
-        let motif_index: usize = self.binding_motif_index.iter()
-            .map(|(_, v)| {
-                std::mem::size_of::<(PoolId, [u8; 3])>()
-                    + std::mem::size_of::<Vec<NeuronId>>()
-                    + v.len() * std::mem::size_of::<NeuronId>()
-            }).sum();
+                k.capacity() * std::mem::size_of::<NeuronId>() + ids(v)
+            }).sum::<usize>();
+        let feat_index: usize = hash_table_bytes::<(PoolId, NeuronId), Vec<NeuronId>>(
+            self.binding_feature_atom_index.capacity(),
+        ) + self.binding_feature_atom_index.values().map(ids).sum::<usize>();
+        let motif_index: usize = hash_table_bytes::<(PoolId, [u8; 3]), Vec<NeuronId>>(
+            self.binding_motif_index.capacity(),
+        ) + self.binding_motif_index.values().map(ids).sum::<usize>();
         serde_json::json!({
             "bytes": {
                 "fingerprint_keys":           fingerprint_keys,
@@ -9575,5 +9603,49 @@ mod decode_shape_tests {
         assert_eq!(tiled_fraction(b"x"), 0.0);
         // Two identical bytes IS a tiling of period 1.
         assert!(decode_is_runaway_tiling(b"xx"));
+    }
+}
+
+#[cfg(test)]
+mod hash_table_bytes_tests {
+    use super::hash_table_bytes;
+    use ahash::AHashMap;
+
+    /// `capacity()` is the usable slot count, NOT the bucket count, and every
+    /// census in this crate was charging the first for the second. hashbrown
+    /// keeps one bucket in eight spare, so a map holding 9,728 facts allocates
+    /// 16,384 buckets -- the undercount that let a residual stay unnamed.
+    /// Pin the inversion against the real map rather than against the formula.
+    #[test]
+    fn buckets_are_recovered_from_capacity() {
+        for n in [1usize, 2, 3, 7, 8, 9, 100, 1_000, 9_728] {
+            let mut m: AHashMap<u64, u32> = AHashMap::new();
+            for i in 0..n as u64 {
+                m.insert(i, 0);
+            }
+            let cap = m.capacity();
+            assert!(cap >= n, "capacity {cap} below the {n} entries it holds");
+            let entry = std::mem::size_of::<(u64, u32)>() + 1;
+            let bytes = hash_table_bytes::<u64, u32>(cap);
+            assert_eq!(bytes % entry, 0, "n={n}: {bytes} is not a whole number of buckets");
+            let buckets = bytes / entry;
+            assert!(buckets.is_power_of_two(), "n={n}: {buckets} buckets is not a power of two");
+            assert!(buckets >= cap, "n={n}: {buckets} buckets cannot hold {cap} slots");
+            // Never more than one doubling above what the table needs: a census
+            // that over-charges hides a real structure just as badly as one
+            // that under-charges.
+            assert!(buckets <= 2 * cap.next_power_of_two(),
+                    "n={n}: {buckets} buckets for {cap} slots over-charges");
+        }
+    }
+
+    /// An empty map has no allocation at all, so charging it a minimum bucket
+    /// count would invent bytes. hashbrown's empty table is a static dangling
+    /// pointer; `Brain::new` makes dozens of these.
+    #[test]
+    fn an_empty_table_costs_nothing() {
+        let m: AHashMap<u64, u32> = AHashMap::new();
+        assert_eq!(m.capacity(), 0);
+        assert_eq!(hash_table_bytes::<u64, u32>(0), 0);
     }
 }

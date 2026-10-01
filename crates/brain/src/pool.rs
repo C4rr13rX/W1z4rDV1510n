@@ -16,6 +16,7 @@ use std::io::Write;
 use std::ops::{Index, IndexMut};
 use std::sync::Arc;
 
+use crate::brain::hash_table_bytes;
 use crate::neuron::{Neuron, NeuronId, NeuronKind, NeuronRef, PoolId};
 use crate::store::posting_index::{self, PostingIndexBuilder};
 use crate::store::{
@@ -46,6 +47,16 @@ pub struct SideStructureBytes {
     pub sequence_ledger: usize,
     pub evicted_set: usize,
     pub cold_offsets: usize,
+    /// The slot table itself: the `Box<Neuron>` pointers and the three
+    /// parallel per-slot Vecs, NOT the neuron bodies they point at (those are
+    /// `neuron_body_bytes` in the scorecard census).
+    pub neuron_slot_table: usize,
+    /// Rebuilt-every-observe state: `recent_atoms`, `currently_firing`,
+    /// `activation`, `last_observed_sequence`. Nothing counted these, and they
+    /// are sized by the pool's windows rather than by the corpus -- which is
+    /// why naming them separately matters: a term that does not grow with
+    /// facts is not where a growth defect lives.
+    pub transient_firing: usize,
     pub concept_sequence_entries: usize,
     pub concept_multiset_entries: usize,
     pub label_entries: usize,
@@ -2990,28 +3001,45 @@ impl Pool {
     /// be done about them.
     pub fn side_structure_bytes(&self) -> SideStructureBytes {
         let id = std::mem::size_of::<NeuronId>();
-        let vec_hdr = std::mem::size_of::<Vec<NeuronId>>();
-        // AHashMap overhead per entry is roughly the key+value plus control
-        // bytes; close enough to attribute GBs to a structure.
-        let seq: usize = self
-            .concept_sequence_to_id
-            .keys()
-            .map(|k| vec_hdr + k.len() * id + id)
-            .sum();
-        let multiset: usize = self
-            .concept_multiset_to_id
-            .keys()
-            .map(|k| vec_hdr + k.len() * id + id)
-            .sum();
-        let labels: usize = self
-            .label_to_id
-            .keys()
-            .map(|k| std::mem::size_of::<String>() + k.len() + id)
-            .sum();
-        let sequences = self.sequences.len()
-            * (std::mem::size_of::<SequenceFingerprint>() + std::mem::size_of::<u32>());
-        let evicted = self.evicted.len() * id;
-        let cold_offsets = self.cold_offsets.len() * (id + std::mem::size_of::<u64>());
+        // Every term here used to be `len * size_of`, which undercounts twice:
+        // a hash table allocates for its bucket count (see
+        // `crate::brain::hash_table_bytes`), and a `Vec` key holds the buffer
+        // it grew rather than the elements it uses. The ledger term was the
+        // worst of them -- `SequenceFingerprint` IS a `Vec<NeuronId>`, so
+        // charging `size_of::<Vec<_>>()` counted the 24-byte header and none of
+        // the key's own heap. Measured at scale 64 the correction moves the
+        // uncounted live heap from 5.23 MB toward 0, which is what turns a
+        // residual into a named structure.
+        let keybuf = |k: &Vec<NeuronId>| k.capacity() * id;
+        let seq = hash_table_bytes::<SequenceFingerprint, NeuronId>(
+            self.concept_sequence_to_id.capacity(),
+        ) + self.concept_sequence_to_id.keys().map(keybuf).sum::<usize>();
+        let multiset = hash_table_bytes::<SequenceFingerprint, NeuronId>(
+            self.concept_multiset_to_id.capacity(),
+        ) + self.concept_multiset_to_id.keys().map(keybuf).sum::<usize>();
+        let labels = hash_table_bytes::<String, NeuronId>(self.label_to_id.capacity())
+            + self.label_to_id.keys().map(String::capacity).sum::<usize>();
+        let sequences = hash_table_bytes::<SequenceFingerprint, u32>(self.sequences.capacity())
+            + self.sequences.keys().map(keybuf).sum::<usize>();
+        let evicted = hash_table_bytes::<NeuronId, ()>(self.evicted.capacity());
+        let cold_offsets = hash_table_bytes::<NeuronId, u64>(self.cold_offsets.capacity());
+        // The slot table and the transient firing state: allocations no census
+        // has ever charged to anything.
+        let slots = match &self.neurons {
+            NeuronSlots::Dense { slots, kinds, concepts, born_ticks } => {
+                slots.capacity() * std::mem::size_of::<Option<Box<Neuron>>>()
+                    + kinds.capacity() * std::mem::size_of::<NeuronKind>()
+                    + concepts.capacity()
+                    + born_ticks.capacity() * std::mem::size_of::<u64>()
+            }
+            NeuronSlots::Paged { residents, .. } => {
+                hash_table_bytes::<NeuronId, Box<Neuron>>(residents.capacity())
+            }
+        };
+        let transient = self.recent_atoms.capacity() * id
+            + hash_table_bytes::<NeuronId, ()>(self.currently_firing.capacity())
+            + hash_table_bytes::<NeuronId, f32>(self.activation.capacity())
+            + self.last_observed_sequence.capacity() * id;
         SideStructureBytes {
             concept_sequence_index: seq,
             concept_multiset_index: multiset,
@@ -3019,6 +3047,8 @@ impl Pool {
             sequence_ledger: sequences,
             evicted_set: evicted,
             cold_offsets,
+            neuron_slot_table: slots,
+            transient_firing: transient,
             concept_sequence_entries: self.concept_sequence_to_id.len(),
             concept_multiset_entries: self.concept_multiset_to_id.len(),
             label_entries: self.label_to_id.len(),
@@ -5006,5 +5036,50 @@ mod resident_slot_tests {
         );
 
         let _ = std::fs::remove_file(&final_path);
+    }
+}
+
+#[cfg(test)]
+mod side_structure_census_tests {
+    use super::*;
+
+    /// The slot table and the transient firing state were allocations NO census
+    /// charged to anything, and `label_index` was charged `len` with no bucket
+    /// table. Measured at scale 64 of the scorecard this pair was 1.18 MB
+    /// reported as 0.61 -- so pin that the terms exist and exceed the naive
+    /// `len * size_of` they replaced, rather than trusting the arithmetic.
+    #[test]
+    fn the_census_charges_the_slot_table_and_the_whole_label_table() {
+        let mut pool = Pool::new(
+            PoolConfig::defaults("census", 1),
+            Box::new(BytePassthroughEncoding { prefix: "c" }) as Box<dyn AtomEncoding>,
+        );
+        let empty = pool.side_structure_bytes();
+        assert_eq!(empty.neuron_slot_table, 0, "an empty pool allocates no slots");
+        assert_eq!(empty.label_index, 0, "an empty pool allocates no label table");
+        for tick in 0..64u64 {
+            pool.observe_frame(b"the room holds a lamp on a desk", tick, None);
+        }
+        let full = pool.side_structure_bytes();
+        assert!(full.neuron_slot_table > 0, "neurons exist but the slot table costs nothing");
+        let naive: usize = pool
+            .label_to_id
+            .keys()
+            .map(|k| std::mem::size_of::<String>() + k.len() + std::mem::size_of::<NeuronId>())
+            .sum();
+        assert!(
+            full.label_index > naive,
+            "label_index {} does not exceed the len-only estimate {naive} it replaced",
+            full.label_index
+        );
+        // The slot table must not be confused with the bodies it points at:
+        // one Box pointer plus three parallel per-slot lanes is 18 bytes, far
+        // under `size_of::<Neuron>()`.
+        let neurons = pool.neuron_count();
+        assert!(
+            full.neuron_slot_table < neurons * std::mem::size_of::<Neuron>(),
+            "the slot table ({}) is charging the bodies too, over {neurons} neurons",
+            full.neuron_slot_table
+        );
     }
 }
