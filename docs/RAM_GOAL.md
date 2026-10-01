@@ -108,6 +108,33 @@ What is left, measured at scale 64 with
   `binding_motif_index` 0.37 MB. Deduplicating the sequence index against the
   fingerprint is the next one of these, and it is worth less than the neuron
   bodies below.
+Two more changes, both the same defect: a cache that a MINORITY of neurons
+uses was charged to ALL of them. Scale-64 peak 36.6 → **35.3 MB**, growth
+x2.47 → **x2.34**, census-accounted 13.43 → **12.11 MB**.
+
+6. **Only a hub allocates a terminal index; every neuron carried its
+   header.** Keeping the index BUCKETS off non-hubs did nothing about the
+   struct field. An inline `AHashMap` is a hasher plus a `RawTable` —
+   measured 64 bytes, **29.6 % of a 216-byte `Neuron` and its largest single
+   field** — paid by all 9,776 whether or not a map was ever allocated.
+   Boxed, it is a null-pointer-optimised 8, and `size_of::<Neuron>()` is
+   **216 → 160**. The field is private now behind `find_terminal`,
+   `terminal_index_len/capacity/get` and `release_terminal_index`, so the
+   absent case cannot be spelled two ways.
+7. **A capped hub cannot repay a hash index over its own terminals.** The
+   threshold was 64 because 64 was just above the non-hub maximum; the number
+   that matters is the other end. `max_atom_fanout` caps a neuron at 512
+   terminals, and a bucket is 17 bytes per 24-byte terminal with 512 entries
+   rounded up to 1024 buckets — so the 48 indexed neurons held ~17 KB of
+   table each against the ~12 KB their terminals occupy. At 1024 the
+   threshold sits above the cap and `terminal_idx` is **0.797 → 0.000 MB**.
+   Not a latency trade: a scan over 512 contiguous terminals fits in L1 and
+   measured FASTER than the map plus its cache misses (infer 2.46 → 1.97 ms,
+   recall 1.31 → 1.26 ms). An uncapped pool still gets an index past 1024.
+
+   Both numbers came from `the_struct_is_priced_field_by_field`, which prints
+   the layout field by field — the measurement that picked the change.
+
 - **Neuron bodies are now the largest pot, and the census names the split.**
   `--census` reports `neuron_body_bytes` over 9,776 neurons at scale 64:
   `terminals` 6.11 MB, **`terminal_idx` 5.05 MB**, `struct` 2.11 MB
