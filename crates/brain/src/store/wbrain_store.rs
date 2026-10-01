@@ -1933,6 +1933,19 @@ mod tests {
     }
 
     #[test]
+    // KNOWN LOAD-FLAKY, measured 2026-09-30 on one unchanged tree: `errors`
+    // came back 1 against an expected 0 three times -- twice in the full
+    // `cargo test -j 2 -- --test-threads=2` run and once in a 27-test
+    // `--lib store::wbrain_store` subset -- while the SAME tree passed it
+    // alone, under the gate's retry, in an immediate re-run of that subset
+    // (27/27), and in two clean 369/0 tallies. Commit 1b67930 blamed a sibling
+    // skipping its `remove_file` and that explanation is WRONG: `tmpfile`
+    // nonces on pid plus nanoseconds, so the path cannot collide. The spill
+    // is timing-dependent under concurrent load, the same class as the
+    // obstacle-course timeouts CLAUDE.md records. It is a REAL flake, not a
+    // real failure -- do not "fix" it by relaxing the assertion, and do not
+    // read a single red run here as a regression in whatever you just
+    // changed.
     fn overlay_drains_on_size_without_reaching_a_row_boundary() {
         let path = tmpfile("overlay-size-flush");
         let mut brain = Brain::new(BrainConfig::default());
