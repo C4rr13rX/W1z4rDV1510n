@@ -383,6 +383,37 @@ What is *not* the cause, measured rather than assumed: the deletion scan's size.
 
 A third candidate is dead the same way. `Brain::derive_by_substitution` marked a remembered cut *settled* even when the answer to it would not decode, which skipped the full deletion scan with no prefix found and spent the rest of the budget splicing the answer to the question being rewritten. Requiring the answer to actually arrive is **exactly inert**: `derivation_starved` 257 of 864 before and 257 of 864 after at scale 16, integration 64.5 → 64.5, wrong 0.0, every per-family count digit-identical. The branch never executes, so it is a latent defect with no opportunity to run rather than a cause, and it was reverted.
 
+### The sixth candidate is the cause, and it is reach, not budget (measured 2026-10-01)
+
+`routed_binding_candidates` consults `binding_sequence_postings` — the one posting key that is unique per distinct taught question, and therefore the one that can never saturate — only when it is handed a target pool. Both tier scorers passed `None`. So the two halves of a derivation probe had different reach:
+
+- `decode_best_trained_binding_with_context`, the ANSWER half, passed the target pool and had the exact ordered route.
+- `probe_question_score` → `best_binding_match_v2`, the SCORE half, did not, and saw only per-byte feature postings. Those are capped at 512 and selected NEWEST-first in `bounded_binding_postings_across_generations`.
+
+Posting-cap saturation is now counted rather than inferred. `Brain::posting_cap_stats()` returns a `PostingCapStats` of lookups and FULL lookups per key kind, taken at the single chokepoint and published per family and per scale in `logs/scorecard-latest.json`. Its predecessor was one boolean on one key kind for the duration of one call, so "the cap is biting at scale 64" could only be argued from a fact count. Read off that artifact:
+
+| scale | feature lookups | came back FULL | share | sequence lookups | FULL |
+|---|---|---|---|---|---|
+| 1 | 11,941 | 0 | 0 % | 1,425 | 0 |
+| 4 | 44,497 | 22,548 | 51 % | 4,911 | 0 |
+| 16 | 198,530 | 173,407 | 87 % | 21,905 | 0 |
+| 64 | 1,095,061 | **1,095,061** | **100 %** | 126,269 | **0** |
+
+At scale 64 every feature posting lookup in the entire run came back full, and no exact-sequence lookup ever did. A byte like `r` or a space is a member of nearly every one of 11,904 facts, so its posting list is ~23× the cap and the newest 512 hold only the last rooms taught. The atom fan-out bound pulls the other way — it is first-come, so the EARLIEST facts keep their terminals into the binding pool — which leaves the MIDDLE of the training order reachable by neither route. A candidate that was never a candidate cannot be accepted by a `>= 1.0` test however many questions are asked, so no probe budget reaches it.
+
+That is also why the budget-starvation measurement reads as a refutation and is not one: `tests/empty_integration_is_budget_starvation.rs` reports the taught cut scoring 1.0000 at 8, 128 and 512 rooms, and every question it probes is `r000` — the first room taught, the one position the first-come fan-out protects. `tests/posting_cap_hides_early_facts.rs` probes first, middle and last, and asserts at least one is hidden without the exact route, so it fails rather than going vacuous if the cap ever stops biting.
+
+Passing the target pool through to the score half, changing nothing else (`python tools/scorecard.py --stress`, read back off `logs/scorecard-latest.json`):
+
+| scale | integration % | wrong % | recall % | empty (on_material) | peak MB | wall s |
+|---|---|---|---|---|---|---|
+| 1 | 74.07 → 74.07 | 0.0 → 0.0 | 100.0 | 2 → 2 | 16.8 → 16.9 | 0.3 → 12.1 |
+| 4 | 76.85 → 76.85 | 0.0 → 0.0 | 100.0 | 2 → 2 | 19.1 → 19.4 | 10.5 → 3.0 |
+| 16 | 64.47 → 65.62 | 0.0 → 0.0 | 100.0 | 101 → 93 | 25.1 → 25.7 | 33.1 → 19.4 |
+| 64 | 38.54 → 39.00 | 0.0 → 0.0 | 100.0 | 889 → 881 | 40.7 → 39.3 | 113.8 → 104.7 |
+
+Scales 1 and 4 are digit-identical, which is the control: nothing saturates at scale 1, so a reach fix must not move it. The gain is small at scale 64 for a reason the same artifact names — `rank_bounded_binding_evidence` sorts candidates by vote count and truncates to 512, and a binding hidden from every feature posting arrives with exactly one vote, so exact identity can still be outvoted out of the candidate set by fuzzy per-byte evidence. Nothing in this change is a ranking change: the acceptance test is still `score >= 1.0` AND `is_trained_frame`, an exact digest of the taught bytes, which is why wrong stays 0.0 at every scale.
+
 So five candidate causes have now been refuted with numbers, every one of them proposed without measuring the arm it blamed. `DerivationStats` therefore carries `cut_hint_probes` and `cut_hint_hits`, published per family in the scorecard JSON with a hit rate: a cut hint costs exactly one question per matching entry and replaces a scan of ~2k, so the hit rate is the quantity that separates "the cache stopped helping" from "the scan is expensive". Read it before proposing a sixth. Tracked as backlog item `823bb127`.
 
 ### The scorecard and the node now ask the same question the same way (2026-10-01)
