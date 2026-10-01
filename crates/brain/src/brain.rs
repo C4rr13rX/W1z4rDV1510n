@@ -6759,9 +6759,13 @@ impl Brain {
     /// which is the honest answer rather than a guess.
     ///
     /// `max_probes` bounds total work exactly as `chain_max_visit` bounds the
-    /// walk: a span search over a question of `n` bytes is `n(n+1)/2`
-    /// rewrites, so the caller sizes the budget and never discovers the cost
-    /// at runtime.
+    /// walk, so the caller sizes the budget and never discovers the cost at
+    /// runtime. The cost itself has two regimes: when the taught sub-question
+    /// is a PREFIX of the asked one it is found by its score alone (a question
+    /// scoring 1.0 is one the brain was taught) and only the splice point
+    /// varies, which is `~2k` questions; otherwise the full span search runs at
+    /// `n(n+1)/2`. Read the count off `derive_by_substitution_profiled` rather
+    /// than off either formula.
     ///
     /// The caller's query activation is restored before returning, because
     /// every later stage of the answer path reads the firing state and this
@@ -6805,33 +6809,93 @@ impl Brain {
             let (base_score, base_answer) =
                 self.probe_question(query_pool, target_pool, &current);
             let Some(base_answer) = base_answer else { break };
+            // A question the brain already knows PERFECTLY cannot be improved
+            // on, because the acceptance test is "strictly better known than
+            // this one" and 1.0 is the ceiling. Stopping here is what makes the
+            // LAST hop free: without it the terminal hop of every derivation
+            // ran a full span search that could not win by construction, which
+            // measured as 161 questions per 2-hop derivation against the 26 the
+            // productive hop actually needs.
+            if base_score >= 1.0 {
+                break;
+            }
 
             let n = current.len();
+
+            // Which spans are worth rewriting?
+            //
+            // The general answer is "all of them", which is n(n+1)/2 questions
+            // and measured at 353 per 2-hop derivation — far too many to run on
+            // an answer path that already asks 3,456 integration questions at
+            // scale 64.
+            //
+            // The cheap answer uses a property of the score. A question scores
+            // 1.0 only when precision AND recall are 1 — the matched binding's
+            // query atoms are exactly the question's, nothing unexplained
+            // either way — so a prefix that scores 1.0 IS a question the brain
+            // was taught. The SHORTEST such prefix is the taught sub-question,
+            // and then the only freedom left is where its answer is spliced in:
+            // k is known, so only j varies. That is `k + (k+1)` questions
+            // instead of `n(n+1)/2`.
+            //
+            // The full span search stays as the fallback, so a world whose
+            // sub-questions are not prefix-shaped still derives; it just costs
+            // what it always did.
+            let mut known_prefix: Option<(usize, Vec<u8>)> = None;
+            for k in 1..n {
+                if probes >= max_probes {
+                    break;
+                }
+                probes += 1;
+                let (score, answer) = self.probe_question(query_pool, target_pool, &current[..k]);
+                if score >= 1.0 {
+                    if let Some(answer) = answer {
+                        known_prefix = Some((k, answer));
+                    }
+                    break;
+                }
+            }
+
+            let mut spans: Vec<(usize, usize)> = Vec::new();
+            let splice_answer = match &known_prefix {
+                Some((k, answer)) => {
+                    for j in 0..=*k {
+                        spans.push((j, *k));
+                    }
+                    answer.clone()
+                }
+                None => {
+                    for j in 0..n {
+                        for k in (j + 1)..=n {
+                            spans.push((j, k));
+                        }
+                    }
+                    base_answer.clone()
+                }
+            };
+
             // score, rewritten question, its answer
             let mut best: Option<(f32, Vec<u8>, Vec<u8>)> = None;
-            'spans: for j in 0..n {
-                for k in (j + 1)..=n {
-                    if probes >= max_probes {
-                        break 'spans;
-                    }
-                    let mut rewrite = Vec::with_capacity(n + base_answer.len());
-                    rewrite.extend_from_slice(&current[..j]);
-                    rewrite.extend_from_slice(&base_answer);
-                    rewrite.extend_from_slice(&current[k..]);
-                    if rewrite == current || rewrite.is_empty() {
-                        continue;
-                    }
-                    probes += 1;
-                    let (score, answer) =
-                        self.probe_question(query_pool, target_pool, &rewrite);
-                    let Some(answer) = answer else { continue };
-                    // Strictly better-known than the question we started from,
-                    // and the best such rewrite found.
-                    if score > base_score
-                        && best.as_ref().map_or(true, |(best_score, _, _)| score > *best_score)
-                    {
-                        best = Some((score, rewrite, answer));
-                    }
+            for (j, k) in spans {
+                if probes >= max_probes {
+                    break;
+                }
+                let mut rewrite = Vec::with_capacity(n + splice_answer.len());
+                rewrite.extend_from_slice(&current[..j]);
+                rewrite.extend_from_slice(&splice_answer);
+                rewrite.extend_from_slice(&current[k..]);
+                if rewrite == current || rewrite.is_empty() {
+                    continue;
+                }
+                probes += 1;
+                let (score, answer) = self.probe_question(query_pool, target_pool, &rewrite);
+                let Some(answer) = answer else { continue };
+                // Strictly better-known than the question we started from, and
+                // the best such rewrite found.
+                if score > base_score
+                    && best.as_ref().map_or(true, |(best_score, _, _)| score > *best_score)
+                {
+                    best = Some((score, rewrite, answer));
                 }
             }
             let Some((_, next_question, next_answer)) = best else { break };
