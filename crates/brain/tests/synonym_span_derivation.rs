@@ -724,9 +724,33 @@ fn beside_next_is_unreachable_and_on_material_is_ambiguous() {
         beside_deletion_hits, 0,
         "beside_next's misses are empty because NO sub-question of it is known perfectly"
     );
-    assert_eq!(
-        beside_right, 0,
-        "if this ever becomes non-zero the mechanism changed and this file's claim is stale"
+    // The production call's own result, which is now a TWO-VALUED fact rather
+    // than a zero, and that is the point of the change.
+    //
+    // This asserted `beside_right == 0` and said "if this ever becomes non-zero
+    // the mechanism changed and this file's claim is stale". The mechanism did
+    // change, deliberately: `tests/relation_transfer_derivation.rs` measures
+    // that borrowing a span from a trained QUESTION -- reverse-decoding the
+    // query's own best answer into the query pool -- answers 6 of 6, and that
+    // fallback is being wired into `derive_by_substitution_profiled`. So a
+    // strict zero reds this file for exactly the repair it argued for.
+    //
+    // What survives is the structural claim ABOVE, which is about the search
+    // space and is unaffected: `beside_deletion_hits` stays 0 whether or not
+    // the transfer lands, because the transfer does not use the deletion search
+    // at all. The production answer is therefore allowed to be 0 (no transfer
+    // yet) or 6 (transfer landed) and nothing in between -- a partial count
+    // would mean the transfer is firing non-deterministically, which is the one
+    // outcome neither value covers.
+    assert!(
+        beside_right == 0 || beside_right == 6,
+        "beside_next from the production call must be 0 (no relation transfer) or 6 \
+         (transfer landed), measured {beside_right} right / {beside_wrong} wrong / \
+         {beside_empty} empty -- anything between is the transfer firing on some probes only"
+    );
+    println!(
+        "production beside_next right {beside_right}: relation transfer {}",
+        if beside_right == 0 { "NOT wired" } else { "wired" }
     );
 
     // ---- on_material: the wrong-answer family -----------------------------
