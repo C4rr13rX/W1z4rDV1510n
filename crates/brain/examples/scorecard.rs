@@ -1,3 +1,8 @@
+// `serde_json::json!` expands one macro level per key, and the row below is
+// long enough that two more fields crossed the default 128. The limit is a
+// compile-time recursion budget for macro expansion and nothing else -- it
+// costs the measurement nothing.
+#![recursion_limit = "256"]
 //! Scorecard: does the brain stay small while it stays right?
 //!
 //! One scene world -- rooms full of objects, each object with properties --
@@ -710,6 +715,7 @@ fn main() {
     let accounted_train = subject.accounted_bytes() as f64 / 1_048_576.0;
     let (mut recall_pct, mut recall_ms) = (f64::NAN, f64::NAN);
     let (mut integration_pct, mut infer_ms) = (f64::NAN, f64::NAN);
+    let mut integration_wrong_pct = f64::NAN;
     let mut family_rows: Vec<serde_json::Value> = Vec::new();
     // Query-pool neurons lit per question, trained against untrained. 144 of 144
     // integration misses return `empty`, so the only thing that separates "the
@@ -729,6 +735,19 @@ fn main() {
         // family at 100% against three at 0% must not be able to print as 90%,
         // so the breakdown is reported beside the total and never instead of it.
         let (mut hits, mut probes, mut secs) = (0usize, 0usize, 0.0f64);
+        // Probes answered with a NON-EMPTY string that is not what the world
+        // says is true. Until the derivation was switched on every family read
+        // `[empty:N]` and this was 0 by construction, so integration_pct alone
+        // was a sufficient summary. It is not any more: the first run with the
+        // derivation live moved `next_color` from `[empty:64]` to
+        // `[color:17, empty:43, material:2]` -- 2 correct, and 19 confident
+        // wrong answers where there had been none. Those two outcomes are the
+        // same 0.0 % in `integration_pct` and they call for opposite repairs
+        // (reach further vs. stop guessing), and a brain that invents an answer
+        // is worse in the product than one that says nothing. One number, next
+        // to the score, so a rise in integration bought with a larger rise in
+        // invention cannot read as a gain.
+        let mut wrong = 0usize;
         for fam in &world.families {
             let t0 = Instant::now();
             let mut h = 0usize;
@@ -754,11 +773,14 @@ fn main() {
             secs += t0.elapsed().as_secs_f64();
             hits += h;
             probes += fam.probes.len();
+            let fam_wrong = fam.probes.len() - h - kinds.get("empty").copied().unwrap_or(0);
+            wrong += fam_wrong;
             family_rows.push(serde_json::json!({
                 "name": fam.name,
                 "hops": fam.hops,
                 "probes": fam.probes.len(),
                 "hits": h,
+                "wrong": fam_wrong,
                 "pct": 100.0 * h as f64 / fam.probes.len().max(1) as f64,
                 "miss_kinds": kinds,
                 "lit_mean": lit as f64 / fam.probes.len().max(1) as f64,
@@ -766,6 +788,7 @@ fn main() {
             }));
         }
         integration_pct = 100.0 * hits as f64 / probes.max(1) as f64;
+        integration_wrong_pct = 100.0 * wrong as f64 / probes.max(1) as f64;
         infer_ms = secs * 1000.0 / probes.max(1) as f64;
     }
     let (live_end, peak_end) = heap_mb();
@@ -792,6 +815,10 @@ fn main() {
             "integration_probes": world.integration_count(),
             "recall_pct": recall_pct,
             "integration_pct": integration_pct,
+            // Non-empty answers that are WRONG, as a percentage of the same
+            // probe count integration_pct uses. The two do not sum to 100:
+            // what is left is silence.
+            "integration_wrong_pct": integration_wrong_pct,
             "integration_families": family_rows,
             // What TRAINING put into the composition engine. Read off the row
             // rather than inferred: these were 0/0 at every scale and the
