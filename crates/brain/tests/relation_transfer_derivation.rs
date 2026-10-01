@@ -1151,28 +1151,21 @@ fn at_scale_four_no_vote_threshold_separates_the_two_families() {
         agg("majority_128")
     );
 
-    // WHAT DOES HOLD: every family except `next_color` improves under the
-    // plurality, and that is the per-family contract this file can assert.
+    // RETIRED 2026-10-01, the same way and for the same reason as 70bba62:
+    // "the plurality must beat production" per family and in aggregate went
+    // red the moment PRODUCTION improved -- the exact-ordered accept rule took
+    // on_material to 94/96 with 0 wrong, above the vote's 74/96 -- and a test
+    // must never red because the product got better. The vote arm also
+    // answers WRONG (22/96 on_material here), and the owner's rule is that the
+    // brain never hallucinates, so no vote arm can ship anyway. The census is
+    // kept as output for any future pass that revisits voting.
     for family in ["on_material", "next_on_material", "beside_next"] {
         let p = arms[&(family, "production_32")];
         let v = arms[&(family, "plurality_128")];
-        assert!(
-            v.0 >= p.0,
-            "{family} fell at scale 4 under the plurality: {}/{} -> {}/{}",
-            p.0,
-            p.0 + p.1 + p.2,
-            v.0,
-            v.0 + v.1 + v.2
-        );
+        eprintln!("s4 census {family}: production {p:?} plurality {v:?}");
     }
-    // A plain `>`, not a margin. The production call is another agent's file
-    // and the vote is landing INSIDE it, so the base arm's own number is
-    // rising under me; a margin asserted against it reds this file for the
-    // change it argues for. Measured here against a pre-vote base:
-    // 87/216 -> 167/216.
-    assert!(
-        agg("plurality_128") > agg("production_32"),
-        "the plurality must still be an aggregate gain at scale 4: {} -> {}",
+    eprintln!(
+        "s4 census aggregate: production {} plurality {}",
         agg("production_32"),
         agg("plurality_128")
     );
