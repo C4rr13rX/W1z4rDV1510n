@@ -445,6 +445,279 @@ fn relation_transfer_derives_the_family_that_is_zero_at_every_scale() {
     );
 }
 
+/// CAN THE REVERSE DECODE ALSO TELL A TAUGHT REWRITE FROM AN UNTAUGHT ONE?
+///
+/// `on_material` is the opposite failure from `beside_next` and the larger one:
+/// 1,536 probes at scale 64 at 11.1 %, 513 of the misses a WRONG material and
+/// 852 empty. `synonym_span_derivation.rs` measured the cause -- the accept rule
+/// "a question scoring 1.0 IS a question the brain was taught" is FALSE, because
+/// the score is precision x recall over an unordered distinct byte set and
+/// `"r0desk material?"` has the identical byte set to `"r000 desk material?"`.
+/// So a truncated subject is accepted at the ceiling.
+///
+/// The transfer above needed a trained QUESTION for a different purpose, and the
+/// same call is a candidate soundness test: ask the rewrite, take its answer,
+/// reverse-decode that answer, and require the question that comes back to be
+/// BYTE-EQUAL to the rewrite. A rewrite that was really taught should decode
+/// back to itself; `"r0desk material?"` never can.
+///
+/// The complement, and it is the likely one: many questions share each material
+/// answer (6 materials over 8 objects x 8 rooms), so the reverse decode returns
+/// the best of ~10 and almost never the rewrite -- in which case the test
+/// rejects the CORRECT rewrite too and is useless. This test measures which,
+/// per splice, and asserts only what it measures.
+///
+/// MEASURED, AND IT IS THE COMPLEMENT: 184 perfect splices of which 24 were
+/// really taught; round-trip to self 0; as a detector, true-pos 0, false-pos 0,
+/// false-neg 24, true-neg 160. It rejects every taught rewrite as well as every
+/// untaught one, so it carries NO information and is dead. Kept as a test
+/// rather than deleted, because "reverse-decode the answer and check it comes
+/// back" is the obvious next idea for anyone reading the transfer above, and
+/// the 2x2 here costs 0.6 s against a scorecard run. The reason is in the
+/// numbers: a material answer is shared by ~10 trained questions, so the
+/// reverse decode returns the best of the ten and the odds it is the rewrite
+/// are ~1 in 10 even when the rewrite WAS taught -- and measured, 0 in 24.
+/// A one-best reverse decode cannot test set membership.
+#[test]
+fn does_the_reverse_decode_separate_a_taught_rewrite_from_a_byte_set_twin() {
+    let mut brain = subject();
+    let facts = teach_world(&mut brain);
+
+    let mut perfect_total = 0usize;
+    let mut perfect_taught = 0usize;
+    let mut roundtrip_self = 0usize;
+    // The 2x2 that decides it: does round-tripping to yourself predict having
+    // been taught?
+    let (mut tp, mut fp, mut fn_, mut tn) = (0usize, 0usize, 0usize, 0usize);
+    for r in 0..ROOMS {
+        for (obj, base) in RESTS_ON {
+            let q = format!("{} {obj} on material?", room(r));
+            // The sub-question the production deletion search accepts first, and
+            // its answer, which is what gets spliced.
+            let qb = q.as_bytes().to_vec();
+            let n = qb.len();
+            let mut prefix: Option<(usize, String)> = None;
+            'del: for k in 1..n {
+                for t in 0..=1usize.min(n - k) {
+                    if t > 0 && n - t == k {
+                        continue;
+                    }
+                    let mut sub = Vec::with_capacity(k + t);
+                    sub.extend_from_slice(&qb[..k]);
+                    sub.extend_from_slice(&qb[n - t..]);
+                    let (score, answer) = ask(&mut brain, &String::from_utf8_lossy(&sub));
+                    if score >= 1.0 {
+                        if let Some(answer) = answer {
+                            prefix = Some((k, answer));
+                            break 'del;
+                        }
+                    }
+                }
+            }
+            let Some((k, spliced)) = prefix else { continue };
+            for j in 0..=k {
+                let mut rw = Vec::with_capacity(n);
+                rw.extend_from_slice(&qb[..j]);
+                rw.extend_from_slice(spliced.as_bytes());
+                rw.extend_from_slice(&qb[k..]);
+                if rw == qb || rw.is_empty() {
+                    continue;
+                }
+                let text = String::from_utf8_lossy(&rw).to_string();
+                let (score, answer) = ask(&mut brain, &text);
+                if score < 1.0 {
+                    continue;
+                }
+                let Some(answer) = answer else { continue };
+                perfect_total += 1;
+                // GROUND TRUTH, available only to the test: was this exact
+                // string ever taught? The mechanism never gets to look.
+                let taught = facts.iter().any(|(fq, _)| *fq == text);
+                if taught {
+                    perfect_taught += 1;
+                }
+                let back = reverse(&mut brain, &answer);
+                let same = back.as_deref() == Some(text.as_str());
+                if same {
+                    roundtrip_self += 1;
+                }
+                match (same, taught) {
+                    (true, true) => tp += 1,
+                    (true, false) => fp += 1,
+                    (false, true) => fn_ += 1,
+                    (false, false) => tn += 1,
+                }
+            }
+        }
+    }
+    println!(
+        "on_material perfect splices {perfect_total}; TAUGHT {perfect_taught}; \
+         round-trip to self {roundtrip_self}"
+    );
+    println!(
+        "round-trip as a taught-detector: true-pos {tp} false-pos {fp} false-neg {fn_} true-neg {tn}"
+    );
+    assert!(perfect_total > 0, "there must be perfect splices, or the census is vacuous");
+    // The one thing that must hold for the test to be worth anything: there
+    // ARE untaught rewrites scoring at the ceiling. That is the defect, and it
+    // is asserted so the census cannot go vacuous if the matcher changes.
+    assert!(
+        perfect_total > perfect_taught,
+        "untaught rewrites must reach the ceiling, or the accept-at-1.0 rule is already sound: \
+         {perfect_total} perfect of which {perfect_taught} taught"
+    );
+    // THE REFUTATION, pinned. If the reverse decode ever becomes a usable
+    // membership test -- say it gains a top-k form -- this assertion fails and
+    // says so, which is the only honest way to keep a dead idea on file.
+    assert_eq!(
+        (tp, fp),
+        (0, 0),
+        "the round-trip detector accepted something: it was measured to accept NOTHING \
+         (tp 0, fp 0, fn 24, tn 160), so it is worth re-measuring as a soundness test"
+    );
+    assert!(fn_ > 0, "there were taught rewrites for it to have accepted and it accepted none");
+    let mut recalled = 0usize;
+    for (q, a) in &facts {
+        if ask(&mut brain, q).1.as_deref() == Some(a.as_str()) {
+            recalled += 1;
+        }
+    }
+    assert_eq!(recalled, facts.len(), "recall must still be 100%");
+}
+
+/// WHAT DOES WORK ON `on_material`: STOP ACCEPTING THE FIRST CEILING REWRITE
+/// AND TAKE THE ANSWER THE CEILING REWRITES AGREE ON.
+///
+/// The production splice loop enumerates `j in 0..=k` and breaks on the first
+/// rewrite scoring 1.0. Measured in `synonym_span_derivation.rs`, that first
+/// one is routinely a rewrite with a TRUNCATED SUBJECT:
+///
+/// ```text
+///   r001 lamp on material?  want steel  got oak
+///     perfect splices: (2,"r0desk material?","oak") (3,"r00desk material?","oak")
+///                      (4,"r001desk material?","steel") (5,"r001 desk material?","steel")
+///                      (6,"r001 ldesk material?","steel") (7,..,"steel") (8,..,"steel")
+/// ```
+///
+/// Two of the seven lost a byte of `r001` and answered `r000`'s material; five
+/// kept it and answered correctly. The information needed to pick is already in
+/// the probes the search makes -- it is thrown away by the early break.
+///
+/// So: probe every `j`, and return the MOST COMMON answer among the ceiling
+/// rewrites rather than the first. Nothing here is specific to a family or a
+/// wording: it is a vote over the search the derivation already performs.
+///
+/// The complement is live and is why both arms run on the same brain: a vote
+/// could just as easily be dominated by the truncations, since there are more
+/// short `j` than long ones in some shapes, and `next_color`'s correct rewrite
+/// is `j = 0` -- the MOST truncated one. If the vote costs `next_color` it is
+/// the `.rev()` trap again and unshippable.
+#[test]
+fn a_vote_over_ceiling_rewrites_beats_the_first_one() {
+    use std::collections::BTreeMap;
+    let mut brain = subject();
+    let facts = teach_world(&mut brain);
+
+    /// The production deletion search: first sub-question known at the ceiling.
+    fn known_prefix(brain: &mut Brain, qb: &[u8]) -> Option<(usize, String)> {
+        let n = qb.len();
+        for k in 1..n {
+            for t in 0..=1usize.min(n - k) {
+                if t > 0 && n - t == k {
+                    continue;
+                }
+                let mut sub = Vec::with_capacity(k + t);
+                sub.extend_from_slice(&qb[..k]);
+                sub.extend_from_slice(&qb[n - t..]);
+                let (score, answer) = ask(brain, &String::from_utf8_lossy(&sub));
+                if score >= 1.0 {
+                    if let Some(answer) = answer {
+                        return Some((k, answer));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    // family -> (first-wins right, vote right, total)
+    let mut tally: BTreeMap<&str, (usize, usize, usize)> = BTreeMap::new();
+    let mut votes_cost = 0usize;
+    let mut first_cost = 0usize;
+    for (family, q, want) in integration_probes() {
+        let slot = tally.entry(family).or_insert((0, 0, 0));
+        slot.2 += 1;
+        let qb = q.as_bytes().to_vec();
+        let Some((k, spliced)) = known_prefix(&mut brain, &qb) else { continue };
+        let mut first: Option<String> = None;
+        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        for j in 0..=k {
+            let mut rw = Vec::with_capacity(qb.len());
+            rw.extend_from_slice(&qb[..j]);
+            rw.extend_from_slice(spliced.as_bytes());
+            rw.extend_from_slice(&qb[k..]);
+            if rw == qb || rw.is_empty() {
+                continue;
+            }
+            let (score, answer) = ask(&mut brain, &String::from_utf8_lossy(&rw));
+            votes_cost += 1;
+            if score < 1.0 {
+                continue;
+            }
+            let Some(answer) = answer else { continue };
+            if first.is_none() {
+                first = Some(answer.clone());
+                first_cost = votes_cost;
+            }
+            *counts.entry(answer).or_insert(0) += 1;
+        }
+        // The vote: most common answer, ties broken by the one the production
+        // order would have taken, so the vote can never be arbitrary.
+        let winner = counts
+            .iter()
+            .max_by_key(|(a, n)| (**n, Some(a.as_str()) == first.as_deref()))
+            .map(|(a, _)| a.clone());
+        if first.as_deref() == Some(want.as_str()) {
+            slot.0 += 1;
+        }
+        if winner.as_deref() == Some(want.as_str()) {
+            slot.1 += 1;
+        }
+    }
+    let mut f_tot = 0usize;
+    let mut v_tot = 0usize;
+    let mut n_tot = 0usize;
+    for (family, (f, v, n)) in &tally {
+        println!("{family:>17} first-wins {f}/{n} -> vote {v}/{n}");
+        f_tot += f;
+        v_tot += v;
+        n_tot += n;
+    }
+    println!(
+        "ALL FAMILIES first-wins {f_tot}/{n_tot} ({:.1}%) -> vote {v_tot}/{n_tot} ({:.1}%)",
+        100.0 * f_tot as f32 / n_tot as f32,
+        100.0 * v_tot as f32 / n_tot as f32
+    );
+    let _ = first_cost;
+
+    let mut recalled = 0usize;
+    for (q, a) in &facts {
+        if ask(&mut brain, q).1.as_deref() == Some(a.as_str()) {
+            recalled += 1;
+        }
+    }
+    println!("recall after the vote {recalled}/{}", facts.len());
+    assert_eq!(recalled, facts.len(), "recall must still be 100%");
+
+    // The contract is per family, not on the aggregate: `synonym_span_derivation.rs`
+    // measured a change that raised the aggregate while dropping `next_color`,
+    // and recorded that as the reason the aggregate is not the thing to gate on.
+    for (family, (f, v, n)) in &tally {
+        assert!(v >= f, "{family} fell under the vote: {f}/{n} -> {v}/{n}");
+    }
+    assert!(v_tot > f_tot, "the vote must move something: {f_tot} -> {v_tot}");
+}
+
 /// All four families, with the transfer wired the way it would actually ship:
 /// as a FALLBACK after `derive_by_substitution_profiled` returns nothing. That
 /// composition is the only one that cannot cost a family, and "cannot cost a
