@@ -8021,10 +8021,38 @@ async fn brain_ask(
         let legacy = brain.integrate(qp, tp);
         let authoritative = brain.decode_best_trained_binding(qp, tp);
         let answer = authoritative.or(legacy.answer);
-        (answer,
-         legacy.grounding.outside_grounding,
-         legacy.grounding.integrated_confidence,
-         format!("{:?}", legacy.confidence_tier))
+        // Nothing recalled: compose an answer out of questions the brain WAS
+        // taught, which is the only route here that answers a question it was
+        // never asked. It cannot run before the two arms above -- it is the
+        // only one that costs probes -- and it cannot cost OOV honesty,
+        // because it re-reads the same 0.70 binding precision floor
+        // `integrate_autonomous` hardcodes and derives nothing for a prompt
+        // this brain cannot bind.
+        //
+        // It takes the question BYTES rather than going through
+        // `integrate_autonomous`'s own derivation arm, and that is the point:
+        // that arm recovers its question from `recent_frames`, written only
+        // inside `Brain::observe`, and this route deliberately uses
+        // `observe_fabric_read_only` above -- so the arm returns before
+        // probing. `Brain::probe_question` observes each candidate itself
+        // read-only, so no learning moment and no emergence ledger entry.
+        let derived = if answer.as_ref().is_none_or(|a| a.is_empty())
+            || legacy.grounding.outside_grounding
+        {
+            crate::brain_api::derived_by_substitution_reply(&mut brain, qp, tp, &req.text, &[])
+        } else {
+            None
+        };
+        match derived {
+            // Composition, not retrieval: grounded by the questions it was
+            // assembled from, so `outside_grounding` is false or the route
+            // would report a non-empty answer as ungrounded.
+            Some(d) => (Some(d.into_bytes()), false, legacy.grounding.integrated_confidence, "Speculative".to_string()),
+            None => (answer,
+             legacy.grounding.outside_grounding,
+             legacy.grounding.integrated_confidence,
+             format!("{:?}", legacy.confidence_tier)),
+        }
     };
 
     if !outside_grounding && answer_bytes.is_some() {

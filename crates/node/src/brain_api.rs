@@ -3576,6 +3576,75 @@ fn prompt_derived_feature_artifact_compatible(
         || prompt_programming_response_compatible(labels, prompt, bytes)
 }
 
+/// Answer a chat prompt the brain was never trained on, by composing
+/// questions it WAS -- the PRODUCT half of the derivation the scorecard
+/// measures through `Brain::integrate_autonomous`.
+///
+/// # Why this route needed its own arm rather than the one on `integrate_autonomous`
+///
+/// `h_brain_chat` already calls `integrate_autonomous`, whose derivation
+/// fallback cannot fire here, and the reason is not a threshold. Measured
+/// 2026-10-01 off the code:
+///
+/// * The derivation recovers its question from `Brain::fresh_observed_frame`,
+///   which reads `recent_frames`. `recent_frames` is written in exactly one
+///   place -- inside `Brain::observe`. This route establishes its firing set
+///   with `activate_for_indexed_prediction` (`brain_api.rs:4207`), which fires
+///   the shape and writes no frame record, so `fresh_observed_frame` returns
+///   `None` and the fallback returns before probing. Swapping in a mutating
+///   `observe` is not the repair: that is the emergence-ledger growth
+///   `observe_read_only` exists to stop (+518 MB at scale 16, see that
+///   method's doc).
+/// * Even when a derivation DID arrive, the reply chain below required
+///   `!speculation_flag`, and `integrate_autonomous` sets that flag on exactly
+///   the derived branch. A correct derivation was computed and discarded.
+///
+/// Both are avoided by passing the prompt BYTES, which this route holds.
+/// `Brain::probe_question` observes each candidate itself with
+/// `observe_fabric_read_only` -- no learning moment, no emergence ledger, no
+/// `recent_frames` -- so `derive_by_substitution` is self-sufficient given the
+/// question, and it restores the caller's query activation before returning so
+/// the provenance read below is unaffected.
+///
+/// # Why this cannot cost OOV honesty
+///
+/// Three gates, none of them new. The caller runs this only after
+/// `directly_underspecified`/`unseen_atomic_prompt` abstention and after every
+/// grounded arm has failed; this function re-reads the same 0.70 binding
+/// precision floor `integrate_autonomous` hardcodes, on the firing set the
+/// route already established; and the answer passes the same
+/// `prompt_derived_feature_artifact_compatible` filter the autonomous reply
+/// does. A prompt the brain cannot bind derives nothing and returns `None`,
+/// which is the honest answer rather than a guess.
+///
+/// `query_pool` is a parameter rather than `POOL_TEXT` because `/brain/ask`
+/// (`api.rs`) takes it from the request, and a derivation run against the
+/// wrong pool would read a firing set the caller never established.
+pub(crate) fn derived_by_substitution_reply(
+    brain: &mut w1z4rd_brain::Brain,
+    query_pool: PoolId,
+    action_pool: PoolId,
+    prompt: &str,
+    labels: &[String],
+) -> Option<String> {
+    let budget = brain.derivation_probe_budget();
+    if budget == 0 || prompt.is_empty() || action_pool == query_pool {
+        return None;
+    }
+    // Same gate, same floor, same single source of truth as
+    // `integrate_autonomous`: the binding match owns "is this prompt
+    // grounded" and nothing downstream re-decides it.
+    if brain.best_binding_match_v2(query_pool).precision < 0.70 {
+        return None;
+    }
+    let derived =
+        brain.derive_by_substitution(query_pool, action_pool, prompt.as_bytes(), 3, budget)?;
+    if derived.is_empty() || !prompt_derived_feature_artifact_compatible(labels, prompt, &derived) {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&derived).into_owned())
+}
+
 fn compatible_integrated_reply(
     labels: &[String],
     answer: Option<&[u8]>,
@@ -5178,6 +5247,12 @@ async fn h_brain_chat(
         }
     });
 
+    // Set by the derivation arm below. The route's grounding and decoder
+    // fields are computed from `trained_decode` and `xpool`, and a derived
+    // answer is neither: without this flag a correct derivation would be
+    // reported as `outside_grounding` while a non-empty reply was returned,
+    // which is a contradiction rather than a conservative default.
+    let mut derived_substitution = false;
     let reply = if directly_underspecified || unseen_atomic_prompt {
         // Explicit missing-information evidence inhibits every generative
         // route, including raw-character fuzzy recall. An unobserved atomic
@@ -5196,19 +5271,38 @@ async fn h_brain_chat(
         // learned pathways. This activation is transient; it is not a new
         // binding until an external outcome later confirms it.
         xpool_reply.clone().unwrap_or_default()
+    } else if let Some(derived) = derived_by_substitution_reply(
+        &mut brain,
+        POOL_TEXT,
+        action_pool,
+        prompt,
+        &diagnostic_intent_labels,
+    ) {
+        // Last grounded route, and the only one that answers a question the
+        // brain was never asked: every arm above had its chance, and this one
+        // composes the answer out of questions the brain WAS taught. It runs
+        // last because it is the only arm that costs probes.
+        derived_substitution = true;
+        derived
     } else {
         // A single weak path is not sufficient evidence: remain OOV-honest.
         String::new()
     };
 
     let outside_grounding = reply.is_empty()
-        || (trained_decode.is_none()
+        || (!derived_substitution
+            && trained_decode.is_none()
             && xpool
                 .as_ref()
                 .is_none_or(|result| result.grounding.outside_grounding));
 
     let decoder = if trained_decode.as_ref().is_some_and(|s| !s.is_empty()) {
         "trained_binding"
+    } else if derived_substitution {
+        // Named distinctly from `multi_pool`: this answer was composed by
+        // substitution, not propagated, and a reader of the diagnostics must
+        // be able to tell integration from retrieval.
+        "derived_substitution"
     } else if xpool_reply.as_deref().is_some_and(|a| !a.is_empty()) {
         let result = xpool
             .as_ref()
@@ -6431,6 +6525,87 @@ class Model:
         assert!(
             ledger_entries(&brain) > trained,
             "the training path no longer grows the ledger, so the check above is vacuous"
+        );
+    }
+
+    /// The PRODUCT answers a question it was never trained on, through the
+    /// node's own five-pool topology.
+    ///
+    /// The brain crate proves the mechanism (`tests/derive_by_substitution.rs`);
+    /// this proves the chat route can reach it, which it could not before:
+    /// `integrate_autonomous`'s derivation recovers its question from
+    /// `recent_frames`, written only by `Brain::observe`, and `h_brain_chat`
+    /// establishes its firing set with `activate_for_indexed_prediction`, which
+    /// writes no frame record.
+    ///
+    /// The world is two hops and the asked question is never taught, so a
+    /// mechanism that only retrieves scores zero here.
+    #[test]
+    fn the_chat_route_derives_an_answer_it_was_never_trained_on() {
+        let mut brain = build_default_brain().unwrap();
+        // "r000 lamp on? -> desk" and "r000 desk material? -> oak", so
+        // "r000 lamp on material?" is oak and is never taught.
+        for room in 0..8 {
+            let material = if room % 2 == 0 { "oak" } else { "steel" };
+            brain.pretrain_binding_episode(&[
+                (POOL_TEXT, format!("r{room:03} lamp on?").into_bytes()),
+                (POOL_ACTION, b"desk".to_vec()),
+            ]);
+            brain.pretrain_binding_episode(&[
+                (POOL_TEXT, format!("r{room:03} desk material?").into_bytes()),
+                (POOL_ACTION, material.as_bytes().to_vec()),
+            ]);
+        }
+
+        let mut derived = 0usize;
+        for room in 0..8 {
+            let question = format!("r{room:03} lamp on material?");
+            let want = if room % 2 == 0 { "oak" } else { "steel" };
+            // Exactly what `h_brain_chat` does before the reply chain.
+            brain.activate_for_indexed_prediction(POOL_TEXT, question.as_bytes());
+            if derived_by_substitution_reply(&mut brain, POOL_TEXT, POOL_ACTION, &question, &[])
+                .as_deref()
+                == Some(want)
+            {
+                derived += 1;
+            }
+        }
+        assert!(
+            derived > 0,
+            "the chat route derived 0 of 8 never-trained two-hop answers, \
+             so integration is not real in the product"
+        );
+
+        // OOV honesty: a prompt this brain cannot bind must derive nothing.
+        // Without this the assertion above is satisfiable by a route that
+        // answers everything.
+        brain.activate_for_indexed_prediction(POOL_TEXT, b"quasarithmetic zxqv");
+        assert_eq!(
+            derived_by_substitution_reply(
+                &mut brain,
+                POOL_TEXT,
+                POOL_ACTION,
+                "quasarithmetic zxqv",
+                &[]
+            ),
+            None,
+            "the derivation answered an ungrounded prompt"
+        );
+
+        // And the budget is what disables it, so a node that sets 0 gets the
+        // old behaviour rather than a route that ignores the setting.
+        brain.set_derivation_probe_budget(0);
+        brain.activate_for_indexed_prediction(POOL_TEXT, b"r000 lamp on material?");
+        assert_eq!(
+            derived_by_substitution_reply(
+                &mut brain,
+                POOL_TEXT,
+                POOL_ACTION,
+                "r000 lamp on material?",
+                &[]
+            ),
+            None,
+            "a zero probe budget did not disable the derivation",
         );
     }
 
