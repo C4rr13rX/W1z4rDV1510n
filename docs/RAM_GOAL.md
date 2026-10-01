@@ -248,6 +248,38 @@ single run is all there is.
   `next?`, and `beside?` is itself trained on one room in four. Filed as
   backlog item `da572da1`.
 
+  **The ANSWER ROUTE is not the fault, measured 2026-10-01.** The obvious
+  suspect was that `/brain/ask` answers with the legacy `brain.integrate` while
+  only `/chat` reaches `integrate_autonomous_tuned` and therefore
+  `Eem::chain_explore`, so production simply threw the derived answers away.
+  It does not. `cargo test -p w1z4rd-brain --release --test
+  ask_route_integrate_parity -- --nocapture` trains one brain, takes one probe
+  family, and answers it twice:
+
+  | | `brain.integrate` (`/brain/ask`) | `integrate_autonomous_tuned` (`/chat`) |
+  |---|---|---|
+  | trained questions | 0/16 | 0/16 |
+  | integration probes | 0/16 | 0/16 |
+
+  Route difference zero, and `decode_best_trained_binding` recalls 16/16 on the
+  same brain in the same test (asserted, so the zeros are not an empty brain).
+  Two consequences worth keeping. First, the scorecard's INFER path passes
+  `fabric_confidence_threshold` **100.0** (`examples/scorecard.rs:313`), which
+  makes `integrate_autonomous_tuned`'s legacy-accept arm unreachable by
+  construction — the scorecard's integration number ALWAYS reaches
+  `chain_explore`, so nothing upstream of the walk can be the cause. Second,
+  the trained row is a defect of its own: `brain.integrate` answers nothing even
+  when the brain demonstrably knows the answer, and
+  `crates/node/src/brain_api.rs:6093` (the idle thinking loop) has it as its ONLY
+  source with no `decode_best_trained_binding` fallback, so that loop publishes
+  `None` to `state.thinking.last_answer` every ~250 ms for the node's whole
+  uptime. Filed as `6fc89254`; `93a90bef` is rejected with these counts.
+
+  Recall, by contrast, is already at production parity and now has a measurement
+  behind it: the scorecard recalls with `decode_best_trained_binding().or(legacy.answer)`
+  (`examples/scorecard.rs:300-301`) and `/brain/ask` is the identical pair at
+  `crates/node/src/api.rs:8021-8022`.
+
 ## How to work
 
 - **Measure first.** Find which structure holds the RAM (counts × sizes, or a

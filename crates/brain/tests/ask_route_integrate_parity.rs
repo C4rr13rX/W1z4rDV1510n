@@ -104,13 +104,23 @@ fn ask_route_and_chat_route_answer_the_same_probe_family() {
     // answer, which is what production parity (M2) actually turns on.
     let mut trained_legacy = Tally::default();
     let mut trained_autonomous = Tally::default();
+    // Which of `integrate`'s own steps drops a trained answer? Reported rather
+    // than inferred, per the standing rule that an if/else answer branch must
+    // be READ. These are the fields `AnswerWithGrounding` already carries, so
+    // naming the arm costs no new diagnostic.
+    let mut legacy_outside_grounding = 0u32;
+    let mut legacy_fabric_confidence = 0.0f32;
+    let mut legacy_jaccard = 0.0f32;
     for room in 0..ROOMS {
         let question = format!("r{room:03} lamp on");
         brain.observe_read_only(QUERY_POOL, question.as_bytes());
-        trained_legacy.record(
-            brain.integrate(QUERY_POOL, ANSWER_POOL).answer.as_deref(),
-            b"desk",
-        );
+        let legacy = brain.integrate(QUERY_POOL, ANSWER_POOL);
+        if legacy.grounding.outside_grounding {
+            legacy_outside_grounding += 1;
+        }
+        legacy_fabric_confidence += legacy.grounding.fabric_confidence;
+        legacy_jaccard += legacy.grounding.strongest_match_jaccard;
+        trained_legacy.record(legacy.answer.as_deref(), b"desk");
         brain.observe_read_only(QUERY_POOL, question.as_bytes());
         trained_autonomous.record(
             brain
@@ -165,6 +175,12 @@ fn ask_route_and_chat_route_answer_the_same_probe_family() {
     eprintln!(
         "    integrate_autonomous_tuned (/chat)       answered {}/{ROOMS}  correct {}",
         trained_autonomous.answered, trained_autonomous.correct
+    );
+    eprintln!(
+        "    brain.integrate on a TRAINED question: outside_grounding {}/{ROOMS}  mean fabric_confidence {:.3}  mean strongest_match_jaccard {:.3}",
+        legacy_outside_grounding,
+        legacy_fabric_confidence / ROOMS as f32,
+        legacy_jaccard / ROOMS as f32
     );
     eprintln!("  INTEGRATION probes (never trained)");
     eprintln!(
