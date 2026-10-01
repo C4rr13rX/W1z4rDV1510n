@@ -8243,10 +8243,27 @@ async fn hypothesis_research_loop(
     // Per-attempt bounds.  Reduced from 6/64 — same coverage spread
     // across more attempts, but each lock-hold drops from seconds to
     // tens of ms on a fat brain.
+    // `chain_depth` takes `w1z4rd_brain::answer_path`'s value, which is the 3
+    // this site already defaulted to -- same number, now from the one place
+    // every answer site reads it.
+    //
+    // `chain_visit` deliberately does NOT, and that is a declared divergence
+    // rather than the drift the module exists to stop. The comment above
+    // records a MEASUREMENT behind the small value ("each lock-hold drops from
+    // seconds to tens of ms on a fat brain"), this loop holds the brain mutex
+    // while it walks, and goal (4) is inference in ~1 ms flat whatever was
+    // trained. Raising it to the scorecard's 200 to make the configurations
+    // match would have traded a latency number somebody measured for a
+    // tidiness nobody asked for, on the one site whose output is a QUEUED
+    // HYPOTHESIS rather than an answer to the owner.
     let chain_depth = std::env::var("W1Z4RD_HQ_CHAIN_DEPTH")
-        .ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(3);
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(w1z4rd_brain::ANSWER_CHAIN_MAX_DEPTH);
     let chain_visit = std::env::var("W1Z4RD_HQ_CHAIN_VISIT")
-        .ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(16);
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(w1z4rd_brain::RESEARCH_LOOP_CHAIN_MAX_VISIT);
 
     loop {
         tokio::time::sleep(Duration::from_secs(30)).await;
@@ -8284,12 +8301,20 @@ async fn hypothesis_research_loop(
             // here grows the emergence ledger once per queued hypothesis for
             // as long as the node is up.
             b.observe_fabric_read_only(query_pool, question.as_bytes());
+            // Every parameter comes from `w1z4rd_brain::answer_path`. TWO of
+            // them are this loop's declared divergences from the gated
+            // configuration -- the fabric gate and the visit budget -- and
+            // that module carries the reason for each: this site queues a
+            // hypothesis for later confirmation behind its own 0.5 floor
+            // rather than answering the owner, and it holds the brain mutex
+            // for the whole walk.
             let res = b.integrate_autonomous_tuned(
-                query_pool, POOL_ACTION_ID,
-                0.10,        // fabric_confidence_threshold — anything > random
-                chain_depth, // chain_max_depth (env: W1Z4RD_HQ_CHAIN_DEPTH, default 3)
-                chain_visit, // chain_max_visit (env: W1Z4RD_HQ_CHAIN_VISIT, default 16)
-                0.70,        // binding_match_threshold (OOV gate)
+                query_pool,
+                POOL_ACTION_ID,
+                w1z4rd_brain::RESEARCH_LOOP_FABRIC_CONFIDENCE_THRESHOLD,
+                chain_depth, // env: W1Z4RD_HQ_CHAIN_DEPTH, default ANSWER_CHAIN_MAX_DEPTH
+                chain_visit, // env: W1Z4RD_HQ_CHAIN_VISIT, default RESEARCH_LOOP_CHAIN_MAX_VISIT
+                w1z4rd_brain::ANSWER_BINDING_MATCH_THRESHOLD,
             );
             let answer = res.answer.as_ref().and_then(|b|
                 String::from_utf8(b.clone()).ok()

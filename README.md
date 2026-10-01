@@ -385,6 +385,27 @@ A third candidate is dead the same way. `Brain::derive_by_substitution` marked a
 
 So five candidate causes have now been refuted with numbers, every one of them proposed without measuring the arm it blamed. `DerivationStats` therefore carries `cut_hint_probes` and `cut_hint_hits`, published per family in the scorecard JSON with a hit rate: a cut hint costs exactly one question per matching entry and replaces a scan of ~2k, so the hit rate is the quantity that separates "the cache stopped helping" from "the scan is expensive". Read it before proposing a sixth. Tracked as backlog item `823bb127`.
 
+### The scorecard and the node now ask the same question the same way (2026-10-01)
+
+A gain in the table above counts only if the node answers through the path the scorecard measures. Four call sites reached `Brain::integrate_autonomous`, with three different parameter triples. Read off the source by walking each call's paren-balanced argument list:
+
+| call site | `fabric_confidence_threshold` | `chain_max_depth` | `chain_max_visit` |
+|---|---|---|---|
+| `crates/brain/examples/scorecard.rs` — **the gated number** | 100.0 | 3 | 200 |
+| `crates/node/src/brain_api.rs` — `/brain/chat` | 0.0 | 4 | 200 |
+| `crates/node/src/bin/brain_server.rs` — `/chat` | 0.0 | 4 | 200 |
+| `crates/node/src/api.rs` — hypothesis-research loop | 0.10 | 3 | 16 |
+
+`fabric_confidence_threshold` is compared against a 0..1 confidence — `GroundingReport::fabric_confidence` initialises to `0.0`, sits beside `input_atom_coverage` documented as a *fraction*, and the only consumer of a confidence in `crates/brain/src/grounding.rs` splits on `c >= 0.5`. So `100.0` is **unreachable**: the scorecard measured integration with the fabric-confidence arm switched off, while both deployed chat routes ran it wide open at `0.0`. The `wrong % = 0.0` column above was therefore a true statement about a brain strictly more abstemious than the one the node shipped, and the gate could not see a wrong answer the fabric arm invented in production.
+
+`crates/brain/src/answer_path.rs` holds those parameters as the single source of truth and every call site takes them from it. Both chat routes now run the scorecard's values; tightening a gate can only move an answer from wrong to silent, which is the standard this project holds itself to.
+
+**Two sites still differ, and they differ by name in that module rather than in an argument list.** The unattended hypothesis-research loop keeps its permissive `0.10` fabric gate, because its output is a hypothesis queued for later confirmation behind its own 0.5 floor and not an answer returned to the owner; and it keeps `chain_max_visit = 16` rather than 200, because `crates/node/src/api.rs` records the measurement that set it — the bounds were "reduced from 6/64 … each lock-hold drops from seconds to tens of ms on a fat brain" — and that loop holds the brain mutex for the whole walk, so its budget is `/brain/observe`'s tail latency. Raising it for consistency would have traded a measured latency number for an unmeasured one. The rule the module states: a site may differ when a *measurement* says it should, and then it differs by name beside the value it differs from; what is forbidden is a site differing in its own argument list, where nothing compares it to anything.
+
+`crates/brain/tests/answer_path_parameters_are_shared.rs` is a source scan that fails if any site passes a numeric literal again, and asserts it found at least one call in each of the four files so it cannot pass vacuously — `cargo test -p w1z4rd-brain --test answer_path_parameters_are_shared` is 4 passed / 0 failed.
+
+**What the alignment cost, measured rather than argued.** `crates/brain/tests/answer_path_alignment_cost.rs` answers one trained world's 24 held-out two-hop probes at both configurations and prints both: old node (fabric 0.0, depth 4, visit 200) **24 correct / 0 wrong / 0 silent**, shared (fabric 100.0, depth 3, visit 200) **24 correct / 0 wrong / 0 silent** — delta zero on all three. So the alignment is free here, and the honest limit of that reading is that **no probe in this world exercised the difference**: the trained-binding and derivation arms answered every probe, so the fabric-confidence arm never got to speak under either threshold. The structural argument stands — `100.0` is unreachable and `0.0` is not, so the two configurations *can* differ — but this file does not demonstrate a case where they do. What it does prove is that closing the gap costs nothing to close.
+
 ### Brain crate (`crates/brain`, port 8095) — Stage 16 (2026-05-21)
 
 | Task | Score | Notes |

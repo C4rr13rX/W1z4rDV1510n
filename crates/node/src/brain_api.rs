@@ -5218,12 +5218,19 @@ async fn h_brain_chat(
         if trained_decode.as_ref().is_some_and(|s| !s.is_empty()) || !has_compositional_evidence {
             None
         } else {
+            // Parameters come from `w1z4rd_brain::answer_path` so this route
+            // searches exactly as far, and gates the fabric arm exactly as
+            // hard, as the configuration `tools/scorecard.py` publishes. This
+            // site passed `0.0 / 4 / 200` against the scorecard's
+            // `100.0 / 3 / 200`: a fabric-confidence arm that could answer here
+            // and provably could not there, which made every `wrong = 0` in the
+            // baseline a statement about a brain the node does not run.
             Some(brain.integrate_autonomous(
                 POOL_TEXT,
                 action_pool,
-                /*fabric_threshold*/ 0.0,
-                /*chain_max_depth*/ 4,
-                /*chain_max_visit*/ 200,
+                w1z4rd_brain::ANSWER_FABRIC_CONFIDENCE_THRESHOLD,
+                w1z4rd_brain::ANSWER_CHAIN_MAX_DEPTH,
+                w1z4rd_brain::ANSWER_CHAIN_MAX_VISIT,
             ))
         };
     let xpool_reply: Option<String> = xpool.as_ref().and_then(|result| {
@@ -6432,17 +6439,32 @@ mod read_only_window_parity {
     //! violations. That is this repository's most expensive recurring mistake:
     //! a guard keyed on evidence the source can no longer produce.
 
-    /// `src/api.rs` is deliberately ABSENT, and that is a claim boundary and
-    /// not an exemption: Cove claimed it for this same item at 09:14 and added
-    /// the same two closes there (`brain_ask`, the hypothesis loop), in their
-    /// own worktree. Scanning it from here would make this test red in a tree
-    /// where api.rs is unmodified and green only after the merge, which is a
-    /// red gate for everybody in between. Add the one line
-    /// `("api.rs", include_str!("api.rs")),` once both branches are on main --
-    /// the scan is a list for exactly that reason.
-    const ANSWER_ROUTE_SOURCES: [(&str, &str); 2] = [
+    /// `src/api.rs` WAS deliberately absent, as a claim boundary rather than an
+    /// exemption: the two closes there (`brain_ask_answer`, the hypothesis
+    /// loop) were added on a different branch, and scanning it before that
+    /// branch landed would have been red for everybody in between.
+    ///
+    /// Both branches are on main, so it is in the list now. Measured before
+    /// adding it, because a list entry that cannot pass is the same defect as
+    /// one that cannot fail:
+    ///
+    /// ```text
+    /// grep -c 'observe_read_only(\|observe_fabric_read_only(' crates/node/src/api.rs -> 2
+    /// grep -c finish_read_only_inference                      crates/node/src/api.rs -> 5
+    /// openers: api.rs:8037 (brain_ask_answer), api.rs:8286 (hypothesis loop)
+    /// closes:  api.rs:8104, api.rs:8337
+    /// ```
+    ///
+    /// A coverage list one entry short of its own stated intent is this
+    /// repository's cheapest version of its most expensive recurring mistake:
+    /// the next answer route added to `api.rs` would open the window, never
+    /// close it, and this test would still print `ok`. Three of three files
+    /// now, and `assert!(opened_here > 0)` below is what keeps any of them
+    /// from going quietly vacuous.
+    const ANSWER_ROUTE_SOURCES: [(&str, &str); 3] = [
         ("brain_api.rs", include_str!("brain_api.rs")),
         ("bin/brain_server.rs", include_str!("bin/brain_server.rs")),
+        ("api.rs", include_str!("api.rs")),
     ];
 
     /// Top-level function bodies, keyed by the `fn` line. Items at column 0
