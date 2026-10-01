@@ -407,7 +407,13 @@ impl Subject {
         self.lit = self.brain.observe_read_only(QUERY_POOL, query.as_bytes()).len();
         let answer = self
             .brain
-            .integrate_autonomous(QUERY_POOL, ANSWER_POOL, 100.0, 3, 200)
+            .integrate_autonomous(
+                QUERY_POOL,
+                ANSWER_POOL,
+                w1z4rd_brain::ANSWER_FABRIC_CONFIDENCE_THRESHOLD,
+                w1z4rd_brain::ANSWER_CHAIN_MAX_DEPTH,
+                w1z4rd_brain::ANSWER_CHAIN_MAX_VISIT,
+            )
             .answer;
         self.discarded += self.brain.finish_read_only_inference().unwrap_or(0);
         answer.unwrap_or_default()

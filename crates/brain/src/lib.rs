@@ -28,6 +28,7 @@
 //! - No `MultiPoolFabric.cross` map.  Cross-pool wiring is per-neuron.
 //! - No `paired_text` / `session_id` semantics in observe.
 
+pub mod answer_path;
 pub mod neuron;
 pub mod pool;
 pub mod fabric;
@@ -45,6 +46,11 @@ pub mod workspace;
 pub mod crystallizer;
 pub mod code_repair;
 
+pub use answer_path::{
+    ANSWER_BINDING_MATCH_THRESHOLD, ANSWER_CHAIN_MAX_DEPTH, ANSWER_CHAIN_MAX_VISIT,
+    ANSWER_FABRIC_CONFIDENCE_THRESHOLD, RESEARCH_LOOP_CHAIN_MAX_VISIT,
+    RESEARCH_LOOP_FABRIC_CONFIDENCE_THRESHOLD,
+};
 pub use neuron::{Neuron, NeuronId, NeuronKind, NeuronRef, PoolId, Terminal};
 pub use pool::{AtomEncoding, BytePassthroughEncoding, CodeStructureEncoding, InstructionIntentEncoding, ControlMode, ControlSignal, ControlState, Pool, PoolConfig, PretrainFrameProfile, PretrainReport};
 pub use fabric::{Fabric, FabricConfig, Moment, SettleResult, TickProfile, TickProfileSnapshot};

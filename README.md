@@ -368,6 +368,25 @@ The previous measurement, for contrast, was integration 53.7 / 50.0 / 44.3 / 20.
 
 **Known limits, stated rather than averaged away.** `beside_next` is 0 of 6 / 24 / 96 / 384: no sub-question of `"r001 beside?"` is known, and the relation word dominates the subject 9:1 on shared bytes, so the top match is the *wrong room* at 0.90 while the question holding the answer sits at rank 44. The 3-hop family is the weakest that works at all — 2/8, 8/32, 22/128, 23/512 — and at scale 64 it is slightly *below* its pre-fix count of 29/512, the one family where honesty cost coverage. Integration decays with scale (74.1 → 38.5). And `Brain::trained_frames` is not persisted, so a brain restored from a snapshot derives nothing until it is retrained — the node is affected, and it is tracked as backlog item `9ee0e10c`.
 
+### The scorecard and the node now ask the same question the same way (2026-10-01)
+
+A gain in the table above counts only if the node answers through the path the scorecard measures. Four call sites reached `Brain::integrate_autonomous`, with three different parameter triples. Read off the source by walking each call's paren-balanced argument list:
+
+| call site | `fabric_confidence_threshold` | `chain_max_depth` | `chain_max_visit` |
+|---|---|---|---|
+| `crates/brain/examples/scorecard.rs` — **the gated number** | 100.0 | 3 | 200 |
+| `crates/node/src/brain_api.rs` — `/brain/chat` | 0.0 | 4 | 200 |
+| `crates/node/src/bin/brain_server.rs` — `/chat` | 0.0 | 4 | 200 |
+| `crates/node/src/api.rs` — hypothesis-research loop | 0.10 | 3 | 16 |
+
+`fabric_confidence_threshold` is compared against a 0..1 confidence — `GroundingReport::fabric_confidence` initialises to `0.0`, sits beside `input_atom_coverage` documented as a *fraction*, and the only consumer of a confidence in `crates/brain/src/grounding.rs` splits on `c >= 0.5`. So `100.0` is **unreachable**: the scorecard measured integration with the fabric-confidence arm switched off, while both deployed chat routes ran it wide open at `0.0`. The `wrong % = 0.0` column above was therefore a true statement about a brain strictly more abstemious than the one the node shipped, and the gate could not see a wrong answer the fabric arm invented in production.
+
+`crates/brain/src/answer_path.rs` holds those parameters as the single source of truth and every call site takes them from it. Both chat routes now run the scorecard's values; tightening a gate can only move an answer from wrong to silent, which is the standard this project holds itself to.
+
+**Two sites still differ, and they differ by name in that module rather than in an argument list.** The unattended hypothesis-research loop keeps its permissive `0.10` fabric gate, because its output is a hypothesis queued for later confirmation behind its own 0.5 floor and not an answer returned to the owner; and it keeps `chain_max_visit = 16` rather than 200, because `crates/node/src/api.rs` records the measurement that set it — the bounds were "reduced from 6/64 … each lock-hold drops from seconds to tens of ms on a fat brain" — and that loop holds the brain mutex for the whole walk, so its budget is `/brain/observe`'s tail latency. Raising it for consistency would have traded a measured latency number for an unmeasured one. The rule the module states: a site may differ when a *measurement* says it should, and then it differs by name beside the value it differs from; what is forbidden is a site differing in its own argument list, where nothing compares it to anything.
+
+`crates/brain/tests/answer_path_parameters_are_shared.rs` is a source scan that fails if any site passes a numeric literal again, and asserts it found at least one call in each of the four files so it cannot pass vacuously — `cargo test -p w1z4rd-brain --test answer_path_parameters_are_shared` is 4 passed / 0 failed.
+
 ### Brain crate (`crates/brain`, port 8095) — Stage 16 (2026-05-21)
 
 | Task | Score | Notes |

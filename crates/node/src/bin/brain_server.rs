@@ -2395,12 +2395,16 @@ async fn chat(State(s): State<AppState>, Json(req): Json<ChatRequest>) -> Json<C
     // SECONDARY: autonomous critical-thinking integrate.  Used as
     // fallback when no trained binding matches — and STILL the
     // source of the OOV honesty gate (outside_grounding=true).
+    // Parameters from `w1z4rd_brain::answer_path`, so `/chat` asks the way the
+    // gated scorecard asks. See that module for the measured drift this
+    // replaced: this site ran the fabric-confidence arm at 0.0 where the
+    // scorecard runs it at an unreachable 100.0.
     let xpool = brain.integrate_autonomous(
         POOL_TEXT,
         POOL_ACTION,
-        /*fabric_threshold*/ 0.0,
-        /*chain_max_depth*/ 4,
-        /*chain_max_visit*/ 200,
+        w1z4rd_brain::ANSWER_FABRIC_CONFIDENCE_THRESHOLD,
+        w1z4rd_brain::ANSWER_CHAIN_MAX_DEPTH,
+        w1z4rd_brain::ANSWER_CHAIN_MAX_VISIT,
     );
     let xpool_reply: Option<String> = if xpool.grounding.outside_grounding {
         None
