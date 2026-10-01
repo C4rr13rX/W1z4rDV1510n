@@ -15,6 +15,10 @@ killed at --cap-mb instead of paging the machine to a standstill.
 FAILS (exit 1) when, against docs/scorecard-baseline.json:
   - recall_pct drops at any scale              (it must know what it was taught)
   - integration_pct drops at any scale         (it must not get worse at deriving)
+  - integration_wrong_pct is not strictly BELOW integration_pct at any scale
+                                               (invention is worse than silence)
+  - integration_wrong_pct rises more than 2 points over the baseline at any scale
+                                               (precision may not be bought by inventing more)
   - peak_mb exceeds --budget-mb at any scale   (the RAM promise: 2 GB, whatever the corpus)
   - peak_mb rises more than 15% over the baseline at any scale
   - a run crashed, hit the cap or timed out
@@ -275,8 +279,46 @@ class Scorecard:
             for k in ("recall_pct",) if (b and "integration_wrong_pct" in b) else ("recall_pct", "integration_pct"):
                 if b and k in b and r[k] < b[k]:
                     problems.append(f"scale {s}: {k} fell {b[k]:.1f} -> {r[k]:.1f}")
+            problems += self.invention_problems(r, b)
             problems += self.store_problems(r)
         return problems
+
+    # How far integration_wrong_pct may rise over the baseline before the gate
+    # reds. Two points, not zero: integration_pct itself is not reproducible run
+    # to run (item 8accd975 -- two same-parameter draws measured 0.13 apart at
+    # scale 64), so a zero-tolerance rule would red innocent passes on noise.
+    WRONG_RISE_ALLOWED = 2.0
+
+    def invention_problems(self, r: dict, b: dict | None) -> list[str]:
+        """Invention is worse than silence, so it is gated in its own right.
+
+        `integration_wrong_pct` counts non-empty integration answers that are
+        NOT true in the world, over the same probe count as `integration_pct`.
+        Two rules, and they do different jobs:
+
+        * The ABSOLUTE rule. A derivation that is wrong more often than right is
+          not a mechanism, it is a guess with a score attached, and no
+          baseline-relative rule can see that -- measured 2026-10-01 at scale 64,
+          20.5 % correct against 31.9 % wrong, with every gate rule green.
+        * The RELATIVE rule. Precision must come from rejecting wrong
+          derivations and never from deriving less, so `integration_pct` already
+          may not fall. Its mirror is that the wrong count may not RISE: without
+          it a change can buy integration by inventing more, which is the
+          direction this scorecard was blind to for five passes.
+        """
+        bad = []
+        w = r.get("integration_wrong_pct")
+        if w is None:
+            return bad
+        s, i = r["scale"], r.get("integration_pct", 0.0)
+        if w >= i:
+            bad.append(f"scale {s}: integration_wrong_pct {w:.1f} is not below "
+                       f"integration_pct {i:.1f} -- the derivation invents more than it derives")
+        if b and (bw := b.get("integration_wrong_pct")) is not None:
+            if w > bw + self.WRONG_RISE_ALLOWED:
+                bad.append(f"scale {s}: integration_wrong_pct rose {bw:.1f} -> {w:.1f} "
+                           f"(+{self.WRONG_RISE_ALLOWED:.0f} allowed) -- invention may not grow")
+        return bad
 
     def store_problems(self, r: dict) -> list[str]:
         """What a store-attached run must hold, checked against the no-store run
