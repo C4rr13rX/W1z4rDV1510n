@@ -226,12 +226,29 @@ fn the_eem_graph_population_census() {
         .filter(|&&nid| !brain.eem().facts_involving(QUERY_POOL, nid).is_empty())
         .count();
 
+    // The DOWNSTREAM number, so the next change localises its own failure
+    // instead of re-deriving where the answer is lost. With the graph empty
+    // these are all 0 by construction; once something populates it they say
+    // whether the walk reaches the answer pool at all, and the gap between
+    // `reached_in_answer_pool` and an actual answer is then the decode and
+    // ranking stages (`integrate_autonomous_tuned` steps 4-6), not the walk.
+    let seed_pairs: Vec<(u32, u32)> = seeds.iter().map(|&n| (QUERY_POOL, n)).collect();
+    let chain = brain.eem().chain_explore(&seed_pairs, 3, 16);
+    let reached_in_answer_pool = chain
+        .reached_members
+        .iter()
+        .filter(|((p, _), _)| *p == ANSWER_POOL)
+        .count();
+
     eprintln!("EEM graph population census");
     eprintln!("  grounded facts before training      {facts_before}");
     eprintln!("  grounded facts after {ROOMS} rooms x 2 {facts_after}");
     eprintln!("  equations {} variables {} motifs {}", brain.eem().equation_count(), brain.eem().variable_count(), brain.eem().motif_count());
     eprintln!("  probe firing seeds                  {}", seeds.len());
     eprintln!("  of those, seeds with >=1 fact       {seeds_with_facts}");
+    eprintln!("  chain_explore visited facts         {}", chain.visited_facts.len());
+    eprintln!("  chain_explore reached members       {}", chain.reached_members.len());
+    eprintln!("  of those, in the ANSWER pool        {reached_in_answer_pool}");
 
     // The invariants. Training cannot REMOVE facts, and a seed set must exist
     // at all -- an empty seed set is its own arm (`seed.is_empty()` returns
