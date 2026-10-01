@@ -537,6 +537,43 @@ fn beside_next_is_unreachable_and_on_material_is_ambiguous() {
         trained_concept, 0,
         "a trained question now matches at concept tier -- re-run the tier          discriminator in the experiment below, it was measured inert against          0 of 184 perfect splices while this was 0"
     );
+    // WHICH of the two causes it is, because they need opposite repairs: either
+    // no concept neuron EXISTS to match against, or concepts exist and the
+    // match's coverage gate never admits them. `total_concepts` separates them
+    // in one line, and the number is meaningless without it -- a tier of zero
+    // beside a concept count of zero is an emergence problem; beside a non-zero
+    // count it is a matcher problem.
+    let st = brain.stats();
+    println!(
+        "fabric: total_neurons {} total_concepts {} total_binding {} total_terminals {}",
+        st.total_neurons, st.total_concepts, st.total_binding, st.total_terminals
+    );
+    // IT IS AN EMERGENCE PROBLEM, AND THE ARITHMETIC IS THE WHOLE ARGUMENT.
+    // `total_concepts` equals `total_binding` equals the number of taught facts,
+    // and `total_neurons` exceeds it by only the count of DISTINCT BYTES. So
+    // every concept neuron in this fabric is a binding -- one per taught fact --
+    // and NOT ONE non-binding concept has emerged, with
+    // `concept_emergence_threshold = 2` set and two epochs of byte-identical
+    // sequences to collapse.
+    //
+    // Confirmed in the product's own artifact, not just here. From
+    // `docs/scorecard-baseline.json`, concepts == facts at EVERY scale:
+    // 186/186 (241 neurons), 744/744 (803), 2976/2976 (3035), 11904/11904
+    // (11963) -- an atom count pinned near 59 while facts grow 64x.
+    //
+    // That is why a tie-break cannot be built: `atoms -> morphemes -> words ->
+    // phrases` produces nothing here, so there is no ordered symbol anywhere in
+    // the fabric and every match -- recall included -- is an unordered set of
+    // distinct bytes.
+    assert_eq!(
+        st.total_concepts, st.total_binding,
+        "every concept is a binding: not one non-binding concept has emerged.          When this fails, concepts ARE emerging and the tier discriminator          asserted above is worth re-measuring"
+    );
+    assert_eq!(
+        st.total_concepts,
+        facts.len(),
+        "one binding per taught fact, so neurons grow linearly with the corpus"
+    );
 
     // ---- beside_next: the empty family -------------------------------------
     //
