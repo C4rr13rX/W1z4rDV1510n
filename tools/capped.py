@@ -14,16 +14,34 @@ below-normal priority so the desktop stays responsive.
 Prints one JSON line on stderr when the command ends:
     {"exit": 0, "peak_mb": 312.4, "cap_mb": 2500, "secs": 41.2, "hit_cap": false, "timed_out": false}
 Exit status is the command's own, or 137 when the cap or --timeout killed it.
+
+CARGO gets two more guards, automatically:
+  - ONE BUILD AT A TIME, machine-wide. Several agents in several worktrees
+    each building with -j 2 is several rustc processes at ~1.5 GB apiece; a
+    cargo command waits for the build slot instead of stacking on top.
+  - A STABLE TARGET DIR per agent. ContinuousRefinement cuts a fresh worktree
+    (data/trees-<loop>/p<N>-<agent>) every pass, and a fresh target/ meant a
+    ~9 minute cold build per agent per pass. Inside such a worktree
+    CARGO_TARGET_DIR becomes <drive>:/cargo-targets/<loop>-<agent>, reused
+    pass after pass. Use target_dir() to find the binaries.
 """
 from __future__ import annotations
 
 import argparse
 import ctypes
 import json
+import msvcrt
+import os
+import re
 import subprocess
+import tempfile
 import sys
 import time
+from contextlib import nullcontext
 from ctypes import wintypes
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
 
 JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
 JOB_OBJECT_LIMIT_PRIORITY_CLASS = 0x20
@@ -95,6 +113,41 @@ class MemoryCappedJob:
         return info.PeakJobMemoryUsed / (1024 * 1024)
 
 
+def target_dir(root: Path) -> Path:
+    """Where cargo builds for this checkout (see the module docstring)."""
+    if os.environ.get("CARGO_TARGET_DIR"):
+        return Path(os.environ["CARGO_TARGET_DIR"])
+    m = re.fullmatch(r"p\d+-([a-z0-9_-]+)", root.name)
+    if m:
+        return Path(root.anchor) / "cargo-targets" / f"{root.parent.name.removeprefix('trees-')}-{m.group(1)}"
+    return root / "target"
+
+
+class BuildSlot:
+    """The machine-wide right to run cargo, held for the life of the command."""
+
+    PATH = Path(tempfile.gettempdir()) / "w1z4rd-cargo-build.lock"
+
+    def __enter__(self):
+        self._f = open(self.PATH, "a+b")
+        waited = time.time()
+        while True:
+            try:
+                msvcrt.locking(self._f.fileno(), msvcrt.LK_NBLCK, 1)
+                break
+            except OSError:
+                time.sleep(2)
+        if time.time() - waited > 5:
+            print(f"capped: waited {time.time() - waited:.0f}s for the build slot", file=sys.stderr)
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            msvcrt.locking(self._f.fileno(), msvcrt.LK_UNLCK, 1)
+        finally:
+            self._f.close()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--mb", type=int, default=2048, help="committed-memory cap for the whole tree")
@@ -105,16 +158,20 @@ def main() -> int:
     cmd = args.cmd[1:] if args.cmd[:1] == ["--"] else args.cmd
     if not cmd:
         ap.error("no command given")
+    is_cargo = Path(cmd[0]).stem.lower() == "cargo"
+    if is_cargo:
+        os.environ["CARGO_TARGET_DIR"] = str(target_dir(ROOT))
     job = MemoryCappedJob(args.mb)
-    t0 = time.time()
-    proc = subprocess.Popen(cmd)
-    timed_out = False
-    try:
-        code = proc.wait(timeout=args.timeout or None)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
-        code = proc.wait()
+    with BuildSlot() if is_cargo else nullcontext():
+        t0 = time.time()
+        proc = subprocess.Popen(cmd)
+        timed_out = False
+        try:
+            code = proc.wait(timeout=args.timeout or None)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
+            code = proc.wait()
     peak = job.peak_mb()
     hit_cap = peak >= args.mb * 0.97 and code != 0
     result = {"exit": code, "peak_mb": round(peak, 1), "cap_mb": args.mb,

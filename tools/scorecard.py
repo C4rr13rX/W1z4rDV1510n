@@ -39,7 +39,10 @@ ROOT = Path(__file__).resolve().parents[1]
 BASELINE = ROOT / "docs" / "scorecard-baseline.json"
 LATEST = ROOT / "logs" / "scorecard-latest.json"      # last --stress run: what --metrics reports
 GATE_RUN = ROOT / "logs" / "scorecard-gate.json"      # last plain run (the gate's)
-EXE = ROOT / "target" / "release" / "examples" / "scorecard.exe"
+sys.path.insert(0, str(ROOT / "tools"))
+from capped import target_dir  # noqa: E402
+
+EXE = target_dir(ROOT) / "release" / "examples" / "scorecard.exe"
 BUILD_CAP_MB = 6000
 
 
