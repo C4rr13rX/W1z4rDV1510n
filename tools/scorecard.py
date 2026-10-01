@@ -110,7 +110,12 @@ class Scorecard:
                 f"{f['name']}({f['hops']}h) {f['hits']}/{f['probes']} {f['pct']:.1f}%"
                 + ("[" + ",".join(f"{k}:{v}" for k, v in (f.get("miss_kinds") or {}).items()) + "]"
                    if f.get("miss_kinds") else "")
+                + (f" lit {f['lit_mean']:.1f}/{f['lit_zero']}z" if "lit_mean" in f else "")
                 for f in fams))
+            if isinstance(r.get("trained_lit_mean"), float):
+                line += (f"\n{r.get('scale', '-'):>5}   query-pool neurons lit per question: "
+                         f"trained {r['trained_lit_mean']:.1f} ({r.get('trained_lit_zero')} of "
+                         f"{r.get('facts')} lit nothing)")
         return line
 
     def verdict(self, rows: list[dict], base: list[dict] | None) -> list[str]:

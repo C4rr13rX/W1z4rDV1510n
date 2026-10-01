@@ -239,6 +239,11 @@ impl SceneWorld {
 /// The brain under test, built the way examples/lab.rs builds it.
 struct Subject {
     brain: Brain,
+    /// Query-pool neurons the last `observe_read_only` lit. Every integration
+    /// miss is `empty`, so the question is whether the untrained PHRASING
+    /// reaches the fabric at all or dies before the first hop; this is the one
+    /// number that separates those, and `observe_read_only` already returns it.
+    lit: usize,
 }
 
 impl Subject {
@@ -256,7 +261,7 @@ impl Subject {
             pc.prune_floor = 0.005;
             brain.create_pool(pc, Box::new(BytePassthroughEncoding { prefix }) as Box<dyn AtomEncoding>);
         }
-        Self { brain }
+        Self { brain, lit: 0 }
     }
 
     /// Trains the way the node's /brain/pretrain route does: one binding
@@ -276,7 +281,7 @@ impl Subject {
     /// (crates/node/src/brain_api.rs): the trained binding first, integrate()
     /// as the fallback, then release whatever the query paged in.
     fn recall(&mut self, query: &str) -> Vec<u8> {
-        self.brain.observe_read_only(QUERY_POOL, query.as_bytes());
+        self.lit = self.brain.observe_read_only(QUERY_POOL, query.as_bytes()).len();
         let legacy = self.brain.integrate(QUERY_POOL, ANSWER_POOL);
         let answer = self.brain.decode_best_trained_binding(QUERY_POOL, ANSWER_POOL).or(legacy.answer);
         let _ = self.brain.finish_read_only_inference();
@@ -287,7 +292,7 @@ impl Subject {
     /// did not, so every integration probe leaked its working set -- and
     /// integration is the phase whose probe count this change multiplied.
     fn infer(&mut self, query: &str) -> Vec<u8> {
-        self.brain.observe_read_only(QUERY_POOL, query.as_bytes());
+        self.lit = self.brain.observe_read_only(QUERY_POOL, query.as_bytes()).len();
         let answer = self
             .brain
             .integrate_autonomous(QUERY_POOL, ANSWER_POOL, 100.0, 3, 200)
@@ -522,8 +527,18 @@ fn main() {
     let (mut recall_pct, mut recall_ms) = (f64::NAN, f64::NAN);
     let (mut integration_pct, mut infer_ms) = (f64::NAN, f64::NAN);
     let mut family_rows: Vec<serde_json::Value> = Vec::new();
+    // Query-pool neurons lit per question, trained against untrained. 144 of 144
+    // integration misses return `empty`, so the only thing that separates "the
+    // phrasing never reached the fabric" from "it reached it and no hop fired"
+    // is whether an untrained phrasing lights anything at all.
+    let (mut trained_lit, mut trained_lit_zero) = (0usize, 0usize);
     if phase != "train" {
-        (recall_pct, recall_ms) = score(&world.facts, |q| subject.recall(q));
+        (recall_pct, recall_ms) = score(&world.facts, |q| {
+            let a = subject.recall(q);
+            trained_lit += subject.lit;
+            trained_lit_zero += usize::from(subject.lit == 0);
+            a
+        });
     }
     if phase != "train" && phase != "recall" {
         // Per family, then the overall figure as a hit-weighted total. A single
@@ -541,8 +556,11 @@ fn main() {
             // (the `near?` distractor exists so that case is reachable), and
             // `room` is an adjacency hop that never continued.
             let mut kinds = std::collections::BTreeMap::<&str, usize>::new();
+            let (mut lit, mut lit_zero) = (0usize, 0usize);
             for p in &fam.probes {
                 let got = subject.infer(&p.query);
+                lit += subject.lit;
+                lit_zero += usize::from(subject.lit == 0);
                 if got == p.answer.as_bytes() {
                     h += 1;
                     continue;
@@ -559,6 +577,8 @@ fn main() {
                 "hits": h,
                 "pct": 100.0 * h as f64 / fam.probes.len().max(1) as f64,
                 "miss_kinds": kinds,
+                "lit_mean": lit as f64 / fam.probes.len().max(1) as f64,
+                "lit_zero": lit_zero,
             }));
         }
         integration_pct = 100.0 * hits as f64 / probes.max(1) as f64;
@@ -589,6 +609,8 @@ fn main() {
             "recall_pct": recall_pct,
             "integration_pct": integration_pct,
             "integration_families": family_rows,
+            "trained_lit_mean": trained_lit as f64 / world.facts.len().max(1) as f64,
+            "trained_lit_zero": trained_lit_zero,
             "train_s": train_s,
             "recall_ms": recall_ms,
             "infer_ms": infer_ms,
