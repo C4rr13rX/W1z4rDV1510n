@@ -8,6 +8,16 @@ description = "Brain construction kit — the substrate per ARCHITECTURE.md. Rep
 name = "w1z4rd_brain"
 path = "src/lib.rs"
 
+# The scene world the scorecard trains and probes lives in the example, not the
+# library -- nothing in crates/brain may know a probe exists. `test = true` is
+# what lets `cargo test -p w1z4rd-brain` run the world's own honesty assertions
+# (examples/scorecard.rs, `mod honesty`) so the gate covers them; without it
+# cargo builds the example and runs none of its tests.
+[[example]]
+name = "scorecard"
+path = "examples/scorecard.rs"
+test = true
+
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"        # ControlMode env-var parsing (dynamical-GA wiring)

@@ -100,6 +100,14 @@ class Scorecard:
             line += "  TIMED OUT"
         if r.get("error"):
             line += "  ERROR " + " | ".join(r["error"])
+        # Per-family integration, indented so it prints under its scale's row
+        # (and so gate.py's digit-leading filter still shows it). The total alone
+        # cannot distinguish four families at 22% from one at 90% and three at 0,
+        # which is the whole difficulty of M3.
+        fams = r.get("integration_families") or []
+        if fams:
+            line += (f"\n{r.get('scale', '-'):>5}   integration by family: " + "  ".join(
+                f"{f['name']}({f['hops']}h) {f['hits']}/{f['probes']} {f['pct']:.1f}%" for f in fams))
         return line
 
     def verdict(self, rows: list[dict], base: list[dict] | None) -> list[str]:
