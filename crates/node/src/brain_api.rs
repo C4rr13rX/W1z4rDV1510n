@@ -6407,6 +6407,121 @@ fn brain_phase_routes_impl(state: BrainApiState, include_core_routes: bool) -> R
 }
 
 #[cfg(test)]
+mod read_only_window_parity {
+    //! M2 parity: a node route that OPENS the read-only inference window must
+    //! CLOSE it in the same function.
+    //!
+    //! `Brain::observe_read_only` and `Brain::observe_fabric_read_only` open
+    //! the window as of this commit, so every body a question pages in is
+    //! recorded; `Brain::finish_read_only_inference` is what writes those
+    //! bodies back and drops them. A route that opens and never closes holds
+    //! the union of every question it has ever answered, which is the state
+    //! `tools/scorecard.py --stress --with-store` measured on 2026-10-01:
+    //! page_ins equal to page_outs at all four scales, 0 neurons evicted, and
+    //! peak RAM HIGHER with the store attached than without it.
+    //!
+    //! Three routes were missing the close -- `brain_ask` and the hypothesis
+    //! resolution loop in `api.rs`, and `/chat` in `bin/brain_server.rs`. This
+    //! is a source scan rather than a behavioural test because the fault is
+    //! structural (a call that is absent), and the absence is per-route: a
+    //! behavioural test of one route says nothing about the other two.
+    //!
+    //! It cannot pass vacuously. The scan asserts it FOUND opening functions
+    //! in every file it was pointed at, so a path that stops matching -- a
+    //! renamed file, a moved route -- fails here rather than reporting zero
+    //! violations. That is this repository's most expensive recurring mistake:
+    //! a guard keyed on evidence the source can no longer produce.
+
+    /// `src/api.rs` is deliberately ABSENT, and that is a claim boundary and
+    /// not an exemption: Cove claimed it for this same item at 09:14 and added
+    /// the same two closes there (`brain_ask`, the hypothesis loop), in their
+    /// own worktree. Scanning it from here would make this test red in a tree
+    /// where api.rs is unmodified and green only after the merge, which is a
+    /// red gate for everybody in between. Add the one line
+    /// `("api.rs", include_str!("api.rs")),` once both branches are on main --
+    /// the scan is a list for exactly that reason.
+    const ANSWER_ROUTE_SOURCES: [(&str, &str); 2] = [
+        ("brain_api.rs", include_str!("brain_api.rs")),
+        ("bin/brain_server.rs", include_str!("bin/brain_server.rs")),
+    ];
+
+    /// Top-level function bodies, keyed by the `fn` line. Items at column 0
+    /// are the whole unit of interest: every route named above is one.
+    ///
+    /// A chunk ENDS at the next column-0 `}`, which matters: without that the
+    /// trailing `#[cfg(test)] mod` -- including this scan's own
+    /// `body.contains("observe_read_only(")` literals -- would be appended to
+    /// the last real function and counted as a route.
+    fn top_level_functions(source: &str) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = Vec::new();
+        let mut open = false;
+        for line in source.lines() {
+            let is_item_start = (line.starts_with("fn ")
+                || line.starts_with("async fn ")
+                || line.starts_with("pub fn ")
+                || line.starts_with("pub async fn ")
+                || line.starts_with("pub(crate) fn ")
+                || line.starts_with("pub(crate) async fn "))
+                && line.contains('(');
+            if is_item_start {
+                out.push((line.trim_end().to_string(), String::new()));
+                open = true;
+            }
+            if open {
+                if let Some(last) = out.last_mut() {
+                    last.1.push_str(line);
+                    last.1.push('\n');
+                }
+                if line == "}" {
+                    open = false;
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_route_that_opens_the_read_only_window_also_closes_it() {
+        let mut opened_total = 0usize;
+        let mut violations: Vec<String> = Vec::new();
+        for (name, source) in ANSWER_ROUTE_SOURCES {
+            let mut opened_here = 0usize;
+            for (signature, body) in top_level_functions(source) {
+                let opens = body.contains("observe_read_only(")
+                    || body.contains("observe_fabric_read_only(");
+                if !opens {
+                    continue;
+                }
+                opened_here += 1;
+                if !body.contains("finish_read_only_inference") {
+                    violations.push(format!("{}: {}", name, signature));
+                }
+            }
+            assert!(
+                opened_here > 0,
+                "{} contains no function that opens the read-only window, so \
+                 this scan proves nothing about it -- the route moved or the \
+                 file was renamed",
+                name
+            );
+            opened_total += opened_here;
+        }
+        assert!(
+            opened_total >= 2,
+            "found only {} opening routes across {} files; the two in this \
+             crate's own files are the idle thinking loop and /chat",
+            opened_total,
+            ANSWER_ROUTE_SOURCES.len()
+        );
+        assert!(
+            violations.is_empty(),
+            "these node routes page bodies in and never release them: {:?}",
+            violations
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     #[test]
     fn python_source_is_not_evidence_of_typescript() {

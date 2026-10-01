@@ -2515,6 +2515,16 @@ async fn chat(State(s): State<AppState>, Json(req): Json<ChatRequest>) -> Json<C
         })
         .collect();
 
+    // Close the read-only window the two `observe_read_only` calls above
+    // opened, and give every body this prompt paged in back to the container.
+    // One close for both: `Pool::begin_read_only_inference` is idempotent and
+    // nested activations deliberately share ONE scope, so the cross-modal
+    // re-observe joins the same set rather than starting a second one.
+    // Without this /chat holds the union of every prompt it has ever answered.
+    if let Err(error) = brain.finish_read_only_inference() {
+        tracing::warn!("/chat inference cleanup failed: {}", error);
+    }
+
     Json(ChatResponse {
         reply: reply.clone(),
         answer: reply,
