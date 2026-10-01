@@ -256,7 +256,23 @@ class Scorecard:
             # saved below 100% must not make a miss look acceptable.
             if r.get("recall_pct", 0) < 100.0:
                 problems.append(f"scale {s}: recall {r.get('recall_pct', 0):.2f}% -- trained material must recall 100%")
-            for k in ("recall_pct", "integration_pct"):
+            # Owner, 2026-10-01: the brain must never hallucinate -- with no
+            # grounded answer it says nothing. So wrong answers are a RATCHET
+            # toward zero: they may never rise, and once a scale reaches 0 it
+            # must stay at 0. (Measured that day: 32-44% wrong -- a fuzzy
+            # match accepted as exact.)
+            if b and "integration_wrong_pct" in b and r.get("integration_wrong_pct", 0) > b["integration_wrong_pct"] + 1e-9:
+                problems.append(f"scale {s}: wrong answers rose {b['integration_wrong_pct']:.2f}% -> "
+                                f"{r.get('integration_wrong_pct', 0):.2f}% -- the brain must abstain, never invent")
+            # Integration is gated NET of wrong answers (correct - wrong), not
+            # on correct alone: turning a wrong answer into silence must always
+            # pass, even when an abstention also costs a correct one.
+            if b and "integration_wrong_pct" in b and "integration_wrong_pct" in r:
+                net_b = b["integration_pct"] - b["integration_wrong_pct"]
+                net_r = r["integration_pct"] - r["integration_wrong_pct"]
+                if net_r < net_b - 1e-9:
+                    problems.append(f"scale {s}: net integration (correct - wrong) fell {net_b:.2f} -> {net_r:.2f}")
+            for k in ("recall_pct",) if (b and "integration_wrong_pct" in b) else ("recall_pct", "integration_pct"):
                 if b and k in b and r[k] < b[k]:
                     problems.append(f"scale {s}: {k} fell {b[k]:.1f} -> {r[k]:.1f}")
             problems += self.store_problems(r)
