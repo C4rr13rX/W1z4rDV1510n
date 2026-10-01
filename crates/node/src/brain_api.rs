@@ -3616,24 +3616,29 @@ fn prompt_derived_feature_artifact_compatible(
 /// `prompt_derived_feature_artifact_compatible` filter the autonomous reply
 /// does. A prompt the brain cannot bind derives nothing and returns `None`,
 /// which is the honest answer rather than a guess.
-fn derived_by_substitution_reply(
+///
+/// `query_pool` is a parameter rather than `POOL_TEXT` because `/brain/ask`
+/// (`api.rs`) takes it from the request, and a derivation run against the
+/// wrong pool would read a firing set the caller never established.
+pub(crate) fn derived_by_substitution_reply(
     brain: &mut w1z4rd_brain::Brain,
+    query_pool: PoolId,
     action_pool: PoolId,
     prompt: &str,
     labels: &[String],
 ) -> Option<String> {
     let budget = brain.derivation_probe_budget();
-    if budget == 0 || prompt.is_empty() || action_pool == POOL_TEXT {
+    if budget == 0 || prompt.is_empty() || action_pool == query_pool {
         return None;
     }
     // Same gate, same floor, same single source of truth as
     // `integrate_autonomous`: the binding match owns "is this prompt
     // grounded" and nothing downstream re-decides it.
-    if brain.best_binding_match_v2(POOL_TEXT).precision < 0.70 {
+    if brain.best_binding_match_v2(query_pool).precision < 0.70 {
         return None;
     }
     let derived =
-        brain.derive_by_substitution(POOL_TEXT, action_pool, prompt.as_bytes(), 3, budget)?;
+        brain.derive_by_substitution(query_pool, action_pool, prompt.as_bytes(), 3, budget)?;
     if derived.is_empty() || !prompt_derived_feature_artifact_compatible(labels, prompt, &derived) {
         return None;
     }
@@ -5268,6 +5273,7 @@ async fn h_brain_chat(
         xpool_reply.clone().unwrap_or_default()
     } else if let Some(derived) = derived_by_substitution_reply(
         &mut brain,
+        POOL_TEXT,
         action_pool,
         prompt,
         &diagnostic_intent_labels,
@@ -6557,7 +6563,7 @@ class Model:
             let want = if room % 2 == 0 { "oak" } else { "steel" };
             // Exactly what `h_brain_chat` does before the reply chain.
             brain.activate_for_indexed_prediction(POOL_TEXT, question.as_bytes());
-            if derived_by_substitution_reply(&mut brain, POOL_ACTION, &question, &[])
+            if derived_by_substitution_reply(&mut brain, POOL_TEXT, POOL_ACTION, &question, &[])
                 .as_deref()
                 == Some(want)
             {
@@ -6575,7 +6581,13 @@ class Model:
         // answers everything.
         brain.activate_for_indexed_prediction(POOL_TEXT, b"quasarithmetic zxqv");
         assert_eq!(
-            derived_by_substitution_reply(&mut brain, POOL_ACTION, "quasarithmetic zxqv", &[]),
+            derived_by_substitution_reply(
+                &mut brain,
+                POOL_TEXT,
+                POOL_ACTION,
+                "quasarithmetic zxqv",
+                &[]
+            ),
             None,
             "the derivation answered an ungrounded prompt"
         );
@@ -6585,7 +6597,13 @@ class Model:
         brain.set_derivation_probe_budget(0);
         brain.activate_for_indexed_prediction(POOL_TEXT, b"r000 lamp on material?");
         assert_eq!(
-            derived_by_substitution_reply(&mut brain, POOL_ACTION, "r000 lamp on material?", &[]),
+            derived_by_substitution_reply(
+                &mut brain,
+                POOL_TEXT,
+                POOL_ACTION,
+                "r000 lamp on material?",
+                &[]
+            ),
             None,
             "a zero probe budget did not disable the derivation",
         );
