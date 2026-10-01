@@ -87,12 +87,16 @@ pub struct EemSnapshot {
     pub composition_rules: Vec<crate::workspace::CompositionRule>,
     #[serde(default)]
     pub crystallizer: crate::crystallizer::SemanticCrystallizer,
-    /// Strings this brain has been taught to ANSWER — the vocabulary
-    /// `Eem::induce_from_episode` decomposes questions with. `serde(default)`
-    /// so a `brain.bin` written before the induced feed existed still loads,
-    /// with an empty vocabulary that refills as training continues.
-    #[serde(default)]
-    pub induced_symbols: Vec<Vec<u8>>,
+    // The induced vocabulary is deliberately NOT a field here, and the reason
+    // is worth the comment because `#[serde(default)]` above makes it look
+    // safe. A `brain.bin` is BINCODE, which is not self-describing: fields are
+    // read positionally, so a reader with one extra field runs off the end of
+    // an older record and fails with `Io(Kind(UnexpectedEof))` -- `default`
+    // only ever helps a self-describing format. Adding `induced_symbols` here
+    // broke `tests/binding_posting_generation_compat.rs` on the COMMITTED
+    // fixture, and the test that was supposed to cover it round-tripped through
+    // JSON, so it passed. `Eem::from_snapshot` rebuilds the vocabulary from the
+    // relations instead; any new field here needs a version tag or a migration.
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

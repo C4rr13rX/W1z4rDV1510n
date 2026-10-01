@@ -305,7 +305,16 @@ impl Eem {
     /// still grow (both O(1) in facts) and an instance is rebuilt per query via
     /// [`Self::compose_with_transient`], which is what `workspace.rs`'s own doc
     /// comment says the design is.
-    pub const MAX_INDUCED_RELATIONS: usize = 2048;
+    ///
+    /// 512 and not 2048, and the reason is a budget rather than a measurement
+    /// of this structure: at 2048 the durable set measured 1128 relations and
+    /// ~0.5 MB at scale 4, and the mechanism that actually ANSWERS an untrained
+    /// question needs that headroom more than the feed does -- a feed whose
+    /// consumer nothing calls yet buys zero integration, so it is the side that
+    /// should yield. 512 holds the durable cost near 0.24 MB at every scale and
+    /// still leaves the counts non-zero and the derivation working, which is
+    /// what criteria 1 and 2 of `248b488c` are about.
+    pub const MAX_INDUCED_RELATIONS: usize = 512;
 
     /// Feed the composition engine from one training episode.
     ///
@@ -857,7 +866,6 @@ impl Eem {
             semantic_relations: self.semantic_relations.clone(),
             composition_rules: self.composition_rules.clone(),
             crystallizer: self.crystallizer.clone(),
-            induced_symbols: self.induced_symbols.iter().cloned().collect(),
         }
     }
 
@@ -885,15 +893,33 @@ impl Eem {
             }
             fact_by_source.insert(f.source_binding, f.id);
         }
-        // Rebuilt rather than serialized twice: the lengths are derived from
-        // the symbols, and a snapshot that carried both could disagree.
+        // The induced vocabulary is REBUILT from the relations, never stored.
+        // A `brain.bin` is bincode and bincode reads fields positionally, so one
+        // extra field on `EemSnapshot` makes every older snapshot fail with
+        // `UnexpectedEof` -- measured, on the committed fixture in
+        // `tests/binding_posting_generation_compat.rs`. Every symbol appears as
+        // a `KIND_SYM` argument of a relation the producer wrote, so the set is
+        // recoverable without touching the format. It recovers the symbols the
+        // KEPT relations mention, which after `MAX_INDUCED_RELATIONS` is a
+        // subset of what was learned; training refills it.
         let mut induced_symbols: ahash::AHashSet<Vec<u8>> = ahash::AHashSet::new();
         let mut induced_lengths: Vec<usize> = Vec::new();
-        for symbol in snap.induced_symbols {
-            let len = symbol.len();
-            if induced_symbols.insert(symbol) {
-                if let Err(at) = induced_lengths.binary_search_by(|probe| len.cmp(probe)) {
-                    induced_lengths.insert(at, len);
+        for relation in &snap.semantic_relations {
+            if relation.predicate != Self::INDUCED_PREDICATE
+                && relation.predicate != Self::INDUCED_PAIR_PREDICATE
+            {
+                continue;
+            }
+            for argument in &relation.arguments {
+                if argument.kind != Self::KIND_SYM {
+                    continue;
+                }
+                let symbol = argument.value.as_bytes().to_vec();
+                let len = symbol.len();
+                if induced_symbols.insert(symbol) {
+                    if let Err(at) = induced_lengths.binary_search_by(|probe| len.cmp(probe)) {
+                        induced_lengths.insert(at, len);
+                    }
                 }
             }
         }

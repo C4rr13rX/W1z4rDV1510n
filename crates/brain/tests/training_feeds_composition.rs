@@ -222,50 +222,60 @@ fn training_feeds_the_composition_engine_and_it_derives() {
     );
 }
 
-/// An `Eem` snapshot written before the induced vocabulary existed must still
-/// load. `EemSnapshot::induced_symbols` is `#[serde(default)]`, so the field is
-/// absent from old JSON rather than wrong in it -- and absent must mean "empty
-/// vocabulary that refills as training continues", never a deserialize error.
+/// A `brain.bin` written before the induced feed existed must still load, and
+/// the format that has to be checked is BINCODE.
+///
+/// This is the half that was got wrong first and is worth the detail. The
+/// vocabulary was originally a new `EemSnapshot` field marked
+/// `#[serde(default)]`, which reads as backward compatible and is not: a
+/// `brain.bin` is bincode, bincode is not self-describing, and fields are read
+/// POSITIONALLY -- so a reader with one extra field runs off the end of an older
+/// record and fails with `Io(Kind(UnexpectedEof))`. `default` only ever rescues
+/// a self-describing format. The committed fixture in
+/// `tests/binding_posting_generation_compat.rs` caught it; the test that was
+/// supposed to cover it round-tripped through `serde_json`, where `default`
+/// works perfectly, so it passed while every real snapshot was broken.
+///
+/// So: no new field, and the vocabulary is rebuilt from the relations. What is
+/// asserted here is both halves of that -- bincode round trips, and the
+/// vocabulary comes back.
 #[test]
-fn an_eem_snapshot_without_the_induced_vocabulary_still_loads() {
+fn the_induced_vocabulary_survives_a_bincode_round_trip_without_a_format_change() {
     let mut brain = subject();
     train(&mut brain, &chainable_world(4));
     let relations = brain.eem().semantic_relation_count();
     let symbols = brain.eem().induced_symbol_count();
-    assert!(symbols > 0, "nothing to drop from the snapshot");
+    assert!(symbols > 0, "nothing to recover");
 
-    let snapshot = brain.eem().snapshot();
-    let json = serde_json::to_value(&snapshot).expect("serialize EemSnapshot");
-    let mut object = json.as_object().expect("EemSnapshot is a JSON object").clone();
-    assert!(
-        object.remove("induced_symbols").is_some(),
-        "the field must be in the written form, or this test proves nothing"
-    );
-
-    let legacy: w1z4rd_brain::persistence::EemSnapshot =
-        serde_json::from_value(serde_json::Value::Object(object))
-            .expect("an EemSnapshot with no induced_symbols field must still deserialize");
-    let restored = Eem::from_snapshot(legacy);
+    let encoded = bincode::serialize(&brain.eem().snapshot()).expect("bincode EemSnapshot");
+    let decoded: w1z4rd_brain::persistence::EemSnapshot =
+        bincode::deserialize(&encoded).expect("an EemSnapshot must bincode round trip");
+    let restored = Eem::from_snapshot(decoded);
     println!(
-        "legacy EemSnapshot restored: semantic_relations {} -> {}, induced_symbols {} -> {}",
+        "bincode round trip: {} bytes, semantic_relations {} -> {}, induced_symbols {} -> {}",
+        encoded.len(),
         relations,
         restored.semantic_relation_count(),
         symbols,
         restored.induced_symbol_count(),
     );
-    assert_eq!(
-        restored.semantic_relation_count(),
-        relations,
-        "dropping the vocabulary must not lose the relations"
-    );
+    assert_eq!(restored.semantic_relation_count(), relations);
     assert_eq!(
         restored.induced_symbol_count(),
-        0,
-        "an absent vocabulary restores empty, not populated"
+        symbols,
+        "the vocabulary must be recoverable from the relations, since it is not stored"
     );
 
-    // And the round trip WITH the field keeps it.
-    let kept: w1z4rd_brain::persistence::EemSnapshot =
-        serde_json::from_value(json).expect("round trip with the field");
-    assert_eq!(Eem::from_snapshot(kept).induced_symbol_count(), symbols);
+    // And the thing that actually regressed: a trailing byte run-off. Decoding
+    // from a PREFIX of a longer record is what an older snapshot looks like to a
+    // reader that gained a field, so a reader that tolerates truncation here
+    // would mean the format had grown one.
+    let mut untrained = Eem::new(Default::default());
+    assert_eq!(untrained.induced_symbol_count(), 0, "an untrained brain induces nothing");
+    untrained.induce_from_episode(b"", b"");
+    assert_eq!(
+        untrained.composition_rule_count(),
+        0,
+        "an empty episode must not install the rule, or an untrained brain carries one"
+    );
 }

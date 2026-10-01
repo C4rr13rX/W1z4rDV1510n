@@ -6108,7 +6108,26 @@ pub async fn run_thinking_loop(state: BrainApiState) {
             // the node's whole uptime, so it is the one answer path whose
             // ledger growth is unbounded in time rather than in traffic.
             brain.observe_fabric_read_only(qp, &seed);
-            brain.integrate(qp, tp).answer
+            // The same pair every other answer route in this binary uses --
+            // api.rs:8021, brain_api.rs:1029 and :1074, bin/brain_server.rs:867
+            // -- the authoritative decoder FIRST and the legacy integrate only
+            // as a fallback. This loop had `integrate` as its ONLY source, and
+            // `brain.integrate` answers 0 of 16 questions it WAS TRAINED ON on a
+            // scorecard-shaped brain while `decode_best_trained_binding` answers
+            // 16 of 16 on the same brain in the same test
+            // (crates/brain/tests/ask_route_integrate_parity.rs). So this
+            // published `None` to `state.thinking.last_answer` every ~250 ms for
+            // the node's whole uptime, on every seed, trained or not.
+            let legacy = brain.integrate(qp, tp).answer;
+            let answer = brain.decode_best_trained_binding(qp, tp).or(legacy);
+            // And give back what the probe paged in. Every other route calls
+            // this; a loop that runs forever and never does is the one place
+            // where a missed release is unbounded in TIME rather than in
+            // traffic.
+            if let Err(error) = brain.finish_read_only_inference() {
+                tracing::warn!("idle thinking inference cleanup failed: {}", error);
+            }
+            answer
         };
 
         *state.thinking.last_seed.lock().unwrap() = Some(seed);

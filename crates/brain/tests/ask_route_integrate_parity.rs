@@ -216,3 +216,67 @@ fn ask_route_and_chat_route_answer_the_same_probe_family() {
         "a correct answer that was not counted as answered means the tally is wrong"
     );
 }
+
+/// WHICH of `integrate`'s own steps drops a trained answer, and what the node's
+/// idle thinking loop publishes once it stops using `integrate` as its only
+/// source.
+///
+/// The counts in the test above say `integrate` answers nothing; they do not say
+/// where it stopped. `AnswerWithGrounding` carries that already, so naming the
+/// arm needs no new diagnostic -- only for someone to print it. Backlog item
+/// `6fc89254`.
+#[test]
+fn integrate_drops_a_trained_answer_and_the_loop_must_not_depend_on_it() {
+    const ROOMS: u32 = 16;
+    let mut brain = subject();
+    train_chainable_world(&mut brain, ROOMS);
+
+    let mut legacy_answered = 0;
+    let mut pair_answered = 0;
+    let mut named = Vec::new();
+    for room in 0..ROOMS {
+        // A question the brain WAS trained on, asked the way the idle loop asks.
+        let seed = format!("r{room:03} lamp on");
+        brain.observe_fabric_read_only(QUERY_POOL, seed.as_bytes());
+        let grounded = brain.integrate(QUERY_POOL, ANSWER_POOL);
+        let legacy = grounded.answer.clone();
+        if legacy.is_some() {
+            legacy_answered += 1;
+        }
+        // Exactly the expression brain_api.rs's idle loop now publishes.
+        let published = brain.decode_best_trained_binding(QUERY_POOL, ANSWER_POOL).or(legacy);
+        if published.is_some() {
+            pair_answered += 1;
+        }
+        if room == 0 {
+            named.push(format!(
+                "confidence_tier {:?}, outside_grounding {}, fabric_confidence {:.4},                  strongest_match_jaccard {:.4}, speculation_flag {}",
+                grounded.confidence_tier,
+                grounded.grounding.outside_grounding,
+                grounded.grounding.fabric_confidence,
+                grounded.grounding.strongest_match_jaccard,
+                grounded.grounding.speculation_flag,
+            ));
+        }
+    }
+    eprintln!("TRAINED questions on a scorecard-shaped brain, {ROOMS} of them:");
+    eprintln!("  brain.integrate alone                    answered {legacy_answered}/{ROOMS}");
+    eprintln!("  decode_best_trained_binding.or(integrate) answered {pair_answered}/{ROOMS}");
+    for line in &named {
+        eprintln!("  integrate's own arm, room 0: {line}");
+    }
+
+    // The decision this test exists to force: whichever arm `integrate` takes,
+    // the idle loop must publish an answer for a question the brain was taught.
+    // Asserting on the PAIR and not on `integrate` is deliberate -- it stays
+    // true if someone later repairs `integrate`, and it is exactly what the node
+    // publishes to `state.thinking.last_answer`.
+    assert_eq!(
+        pair_answered, ROOMS,
+        "the expression the idle thinking loop publishes answered {pair_answered}/{ROOMS}          TRAINED questions, so that loop can still publish None forever"
+    );
+    assert!(
+        legacy_answered <= pair_answered,
+        "the pair must never answer less often than integrate alone"
+    );
+}
