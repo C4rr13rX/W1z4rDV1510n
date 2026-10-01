@@ -124,18 +124,45 @@ fn a_three_hop_derivation_fits_the_shipped_probe_budget() {
     // partway through, and one of its questions pays a full scan at a length
     // nothing had asked yet. A scale-64 run is in this state after its first
     // few questions, not after its first.
-    let mut warm: Vec<usize> = Vec::new();
+    // Split by whether the question DERIVED, because the two costs are
+    // different facts with different consequences. Measured 2026-10-01 on this
+    // world: 14 of 16 derive, each in ~16 questions, and the 2 that derive
+    // NOTHING pay 414 -- a full span scan at every cut, which is what
+    // exhausting the search costs and is ~n^2/2 for a 29-byte question by
+    // construction. A single `max` over both reported 414 and read as "the
+    // family cannot finish in the product", which is false: the budget
+    // truncates a search that was going to return `None`, and an abstention
+    // reached at probe 32 instead of probe 414 is the same abstention. The
+    // claim that matters is that the cap never turns an ANSWER into a
+    // silence, and `capped_right == uncapped_right` below tests exactly that,
+    // empirically, on the shipped budget -- so the bound here is over the
+    // questions that answer.
+    let mut warm_answered: Vec<usize> = Vec::new();
+    let mut warm_silent: Vec<usize> = Vec::new();
     for (q, _) in &asked {
-        let (_, probes) =
+        let (answer, probes) =
             brain.derive_by_substitution_profiled(QUERY_POOL, ANSWER_POOL, q.as_bytes(), 3, 4096);
-        warm.push(probes);
+        if answer.is_some() {
+            warm_answered.push(probes);
+        } else {
+            warm_silent.push(probes);
+        }
     }
-    let warm_mean = warm.iter().sum::<usize>() as f64 / warm.len() as f64;
-    let warm_max = warm.iter().max().copied().unwrap_or(0);
+    assert!(
+        !warm_answered.is_empty(),
+        "no question derived on the warm pass, so no cost number below means anything"
+    );
+    let warm_mean =
+        warm_answered.iter().sum::<usize>() as f64 / warm_answered.len() as f64;
+    let warm_max = warm_answered.iter().max().copied().unwrap_or(0);
+    let silent_max = warm_silent.iter().max().copied().unwrap_or(0);
     eprintln!(
         "3-hop, uncapped: right {uncapped_right} of {}; questions asked -- \
-         cold (cache empty) {cold}, warm mean {warm_mean:.0} max {warm_max}",
-        asked.len()
+         cold (cache empty) {cold}, warm answered ({}) mean {warm_mean:.0} max {warm_max}, \
+         warm silent ({}) max {silent_max}",
+        asked.len(),
+        warm_answered.len(),
+        warm_silent.len()
     );
     eprintln!("cut hints learned: {:?}", brain.derivation_cut_hints());
 
@@ -150,8 +177,8 @@ fn a_three_hop_derivation_fits_the_shipped_probe_budget() {
     );
     assert!(
         warm_max <= budget,
-        "a warm 3-hop derivation costs up to {warm_max} questions against a shipped \
-         budget of {budget}, so the family cannot finish in the product"
+        "a warm 3-hop derivation that ANSWERS costs up to {warm_max} questions against a \
+         shipped budget of {budget}, so the family cannot finish in the product"
     );
     assert!(
         cold > warm_max,
@@ -182,22 +209,34 @@ fn a_three_hop_derivation_fits_the_shipped_probe_budget() {
     // is no longer the blocker" means, and it is a claim that survives the
     // chain getting more accurate later.
     //
-    // It is deliberately NOT `== asked.len()`. The chain is right 3 of 16 here
-    // and the 13 misses all answer `m000`, whatever the room asked about, for a
-    // reason that has nothing to do with cost: at the splice point `j = 2` the
+    // It is deliberately NOT `== asked.len()`, and the reason it is not has
+    // CHANGED. It used to be right 3 of 16, with the 13 misses all answering
+    // `m000` whatever room was asked, because at the splice point `j = 2` the
     // rewrite `"r0desk material?"` carries the same SET of byte atoms as the
-    // taught `"r000 desk material?"`, so it scores a perfect 1.0, breaks the
-    // splice search, and wins before `j = 5` can build the correct
-    // `"r001 desk material?"`. Garbage text that set-matches a taught question
-    // is accepted as that question. That is backlog item [0935d42d] — "the
-    // derivation invents four wrong answers for every right one" — and it is
-    // measured here rather than described, because a repair for it must turn
-    // this number up without any of the three cost assertions above moving.
+    // taught `"r000 desk material?"`, scored a perfect 1.0, and won before
+    // `j = 5` could build the correct `"r001 desk material?"`. Garbage text
+    // that set-matched a taught question was accepted as that question.
+    //
+    // That is closed. `Brain::is_trained_frame` now gates every answer on the
+    // rewrite being a question the brain was ACTUALLY taught, which no anagram
+    // of one can satisfy, and this world measures the result: right 14 of 16,
+    // WRONG 0, and the 2 remaining misses return `None`. The chain abstains
+    // instead of inventing, which is the standard the brain is held to. The
+    // residue is silence, not error, so `capped_wrong` is reported and must
+    // stay at 0 rather than merely stay below the right count.
     assert_eq!(
         capped_right, uncapped_right,
         "the shipped budget of {budget} costs {} correct answers against an unlimited one \
          ({capped_right} capped, {uncapped_right} uncapped, {capped_wrong} wrong)",
         uncapped_right as i64 - capped_right as i64
+    );
+    // PRIORITY ZERO: the brain never invents. A 3-hop chain that cannot reach a
+    // taught question returns nothing, and this is the ratchet -- it may never
+    // rise off 0, whatever happens to the right count.
+    assert_eq!(
+        capped_wrong, 0,
+        "the 3-hop chain invented {capped_wrong} answers at the shipped budget; an \
+         unreachable chain must abstain, not guess"
     );
 
     // Recall survives every one of those rewrites.

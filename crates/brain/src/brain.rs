@@ -2946,6 +2946,35 @@ impl Brain {
         // its top-down terminals above, and `binding_sequence_index` /
         // `binding_feature_atom_index` already address a binding from its
         // members by lookup, so the cap removes fan-out and not reachability.
+        //
+        // THE BOUND STAYS FIRST-COME HERE, AND THAT IS MEASURED RATHER THAN
+        // INHERITED. `Neuron::reinforce_terminal_bounded` keeps the same bound
+        // and displaces the weakest resident instead, which is the obviously
+        // better rule and is wrong at THIS call site. Wired here 2026-10-01 it
+        // turned `tests/empty_integration_is_budget_starvation.rs` red: the
+        // taught cut `"r000 lamp on?"` scored 1.0000 at 8 and 128 rooms and
+        // 0.9091 at 512, below the deletion search's `>= 1.0` acceptance, and
+        // the derivation that depends on it answered NOTHING at 512 rooms.
+        //
+        // The arithmetic says why, and it generalises past this one test. Every
+        // atom→binding terminal is created at the same `delta = 0.5` and
+        // `Neuron::effective_weight` applies no tick decay of its own, so
+        // "strongest resident" degenerates to "most recently trained" as soon
+        // as decay has moved an older weight below 0.5. Displacement therefore
+        // evicts the EARLIEST facts -- and 8 and 128 rooms are unaffected only
+        // because 24 and 384 facts sit under the 512 cap, while 512 rooms is
+        // 1,536. Refusing the newest terminal and evicting the oldest are both
+        // arbitrary halves of the same corpus; the second one additionally
+        // breaks the facts a probe is most likely to be about, and it silently
+        // degrades `probe_question_score` below the exact-match acceptance the
+        // whole derivation is gated on.
+        //
+        // So the pathology this bound has -- an atom that fills on the opening
+        // facts acquires nothing afterwards -- is NOT fixed by re-selecting
+        // under it. It needs the terminals kept and paged (the SSD zoom), which
+        // is the only version that does not trade one half of the corpus for
+        // the other. `reinforce_terminal_bounded` stays wired at the concept
+        // site, where the member count bounds fan-out anyway.
         let binding_ref = NeuronRef::new(self.binding_pool_id, id);
         for m in &terminal_members {
             if let Some(p) = self.fabric.pool(m.pool) {
