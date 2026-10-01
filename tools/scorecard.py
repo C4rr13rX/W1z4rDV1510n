@@ -73,6 +73,12 @@ ROOT = Path(__file__).resolve().parents[1]
 BASELINE = ROOT / "docs" / "scorecard-baseline.json"
 LATEST = ROOT / "logs" / "scorecard-latest.json"      # last --stress run: what --metrics reports
 GATE_RUN = ROOT / "logs" / "scorecard-gate.json"      # last plain run (the gate's)
+# A --with-store run writes HERE as well, because a store run costs ~10x the
+# wall time of its no-store twin and the next plain gate run would otherwise
+# destroy it: measured 2026-10-01, the gate's `--stress` overwrote
+# scorecard-latest.json and the four-scale store twins were gone minutes after
+# they were measured, leaving the table only in terminal scrollback.
+STORE_RUN = ROOT / "logs" / "scorecard-store.json"
 sys.path.insert(0, str(ROOT / "tools"))
 from capped import target_dir  # noqa: E402
 
@@ -316,6 +322,9 @@ def main() -> int:
     out = LATEST if args.stress else GATE_RUN
     out.parent.mkdir(exist_ok=True)
     out.write_text(json.dumps(rows, indent=1))
+    if args.with_store:
+        STORE_RUN.write_text(json.dumps(rows, indent=1))
+        print(f"store run saved: {STORE_RUN.relative_to(ROOT)}")
     # Only COMPLETED store runs. A run killed at the cap or the timeout still
     # carries the peak it had reached, and folding that in printed "RAM growth
     # with the store attached x2.12" off a scale-64 run that timed out at 300 s
