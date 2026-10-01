@@ -48,7 +48,9 @@
 //! than only from an ANSWER, which is exactly the span `beside_next` needs and
 //! which no reordering or wider budget can supply.
 
-use w1z4rd_brain::{AtomEncoding, Brain, BrainConfig, BytePassthroughEncoding, PoolConfig};
+use w1z4rd_brain::{
+    AtomEncoding, Brain, BrainConfig, BytePassthroughEncoding, MatchTier, PoolConfig,
+};
 
 const QUERY_POOL: u32 = 1;
 const ANSWER_POOL: u32 = 2;
@@ -1242,4 +1244,189 @@ fn as_a_fallback_the_transfer_cannot_cost_a_family() {
         "beside_next must be answered by the production call or by the fallback: {bn:?}"
     );
     assert!(r1 >= r0, "the fallback must not lower the aggregate: {r0} -> {r1}");
+}
+
+/// A pool at `PoolConfig::defaults`'s own `max_concept_member_count` of 8,
+/// which is the value the harness overrides to 64 and the one the ledger
+/// pricing says is affordable.
+fn subject_m8() -> Brain {
+    let mut cfg = BrainConfig::default();
+    cfg.binding_emergence_threshold = 3;
+    cfg.moment_history_window = 256;
+    let mut brain = Brain::new(cfg);
+    for (name, id, prefix) in [("query", QUERY_POOL, "q"), ("answer", ANSWER_POOL, "a")] {
+        let mut pc = PoolConfig::defaults(name, id);
+        pc.recent_atoms_window = 2048;
+        pc.concept_emergence_threshold = 2;
+        pc.decay_rate = 0.0001;
+        pc.prune_floor = 0.005;
+        // deliberately NOT overridden: PoolConfig::defaults sets 8.
+        brain.create_pool(pc, Box::new(BytePassthroughEncoding { prefix }) as Box<dyn AtomEncoding>);
+    }
+    brain
+}
+
+fn ask_tiered(brain: &mut Brain, question: &str) -> (f32, MatchTier, Option<String>) {
+    brain.observe_fabric_read_only(QUERY_POOL, question.as_bytes());
+    let m = brain.best_binding_match_v2(QUERY_POOL);
+    let answer = brain
+        .decode_best_trained_binding(QUERY_POOL, ANSWER_POOL)
+        .filter(|a| !a.is_empty())
+        .map(|a| String::from_utf8_lossy(&a).to_string());
+    (m.score(), m.tier, answer)
+}
+
+/// THE ONE FACT THAT DECIDES WHETHER A SPLIT CEILING CAN EVER BE JUDGED.
+///
+/// Every signal a split ceiling could be decided on is measured flat: the score
+/// is exactly 1.0 for each member by construction, j-position is right for one
+/// family and wrong for the other, a byte-weighted vote is largest-j in
+/// disguise, and the reverse-decode membership test accepts nothing (tp 0, fp 0,
+/// fn 24, tn 160). The only order-sensitive signal the matcher has is
+/// `MatchTier::Concept`, because a concept neuron emerges from a recurring byte
+/// SEQUENCE -- and it was 0 of 186 on trained questions, because emergence had
+/// no live caller on the train path.
+///
+/// This measures whether the tier separates a TAUGHT ceiling rewrite from its
+/// byte-set twin. The complement was live and cheap to state: concepts may
+/// emerge and still not be admitted by the match's coverage gate, in which case
+/// the tier stays 0 and the change has no derivation value. `total_concepts`
+/// against `total_binding` separates those two, so both are printed.
+///
+/// # MEASURED BOTH WAYS, AND IT IS THE COMPLEMENT: A MATCHER PROBLEM
+///
+/// At HEAD this prints `total_concepts 186 == total_binding 186`,
+/// `total_neurons 242`, `total_terminals 5638`, concept tier 0/186, and the 2x2
+/// `tp 0 fp 0 fn 24 tn 160`. Emergence has no live caller on the train path:
+/// `Pool::ensure_frame_atoms_for_pretrain_profiled` (pool.rs:3300) was nothing
+/// but `ensure_atom` per label, and answering is deliberately forbidden to
+/// emerge (`emergence_suppressed`).
+///
+/// Running it again with six lines added to that method -- `push_recent` plus
+/// `check_concept_emergence` over the frame's sequence, with
+/// `max_concept_member_count` left at `PoolConfig::defaults`'s own 8 -- gives:
+///
+/// ```text
+///   total_neurons 5473  total_concepts 5417  total_binding 186  total_terminals 49243
+///   recall 186/186 ; trained questions at concept tier 0/186
+///   CONCEPT TIER over 184 ceiling rewrites: tp 0  fp 0  fn 24  tn 160
+/// ```
+///
+/// So **5,231 non-binding concepts emerge where there had never been one,
+/// recall is untouched, and the matcher admits exactly zero of them.** That
+/// settles the branch `synonym_span_derivation.rs` wrote its assertion for -- a
+/// tier of zero beside a concept count of zero is an emergence problem, beside
+/// a non-zero count it is a MATCHER problem -- and it is a matcher problem.
+///
+/// Three consequences, because they are what the next change depends on:
+///
+/// * No split-ceiling discriminator is reachable from the splice loop at any
+///   vote threshold. `MatchTier::Concept` is the only order-sensitive signal the
+///   matcher has and it stays unreached with 5,417 concepts in the pool.
+/// * The next change is `best_binding_match_v2`'s coverage gate, not emergence
+///   and not the derivation.
+/// * Emergence on the train path is cheap and safe AT THE RIGHT BOUND, which
+///   reverses this suite's earlier claim that it was unshippable. The ledger
+///   keys are byte RUNS, so their count is bounded by the alphabet: 62,421 keys
+///   / 5.0 MB at scale 64 growing 24x for 64x the facts at the defaults value
+///   of 8, against 11,009,761 keys / 3347 MB growing 65x at the harness value
+///   of 64.
+///
+/// The pool.rs change is NOT in the tree. It takes neurons 242 -> 5473 and
+/// terminals 5638 -> 49243 for a derivation gain of zero today, so "RAM never
+/// rises and nothing fell" is not satisfied until the coverage gate moves. It
+/// belongs in the same commit as that gate change. This test is valid at HEAD
+/// and prints the HEAD reading, so the comparison costs no rebuild.
+#[test]
+fn does_the_concept_tier_separate_a_taught_rewrite_from_its_byte_set_twin() {
+    let mut brain = subject_m8();
+    let facts = teach_world(&mut brain);
+
+    let st = brain.stats();
+    println!(
+        "fabric at max_concept_member_count 8: total_neurons {} total_concepts {}          total_binding {} total_terminals {}",
+        st.total_neurons, st.total_concepts, st.total_binding, st.total_terminals
+    );
+    let mut recalled = 0usize;
+    let mut trained_concept = 0usize;
+    for (q, a) in &facts {
+        let (_, tier, got) = ask_tiered(&mut brain, q);
+        if got.as_deref() == Some(a.as_str()) {
+            recalled += 1;
+        }
+        if tier == MatchTier::Concept {
+            trained_concept += 1;
+        }
+    }
+    println!(
+        "recall {recalled}/{} ; trained questions at concept tier {trained_concept}/{}",
+        facts.len(),
+        facts.len()
+    );
+    // RECALL IS THE GATE ON EVERYTHING. An emergence change that costs recall is
+    // not a discriminator, it is a regression.
+    assert_eq!(recalled, facts.len(), "recall must stay 100% with emergence on the train path");
+
+    // Now the 2x2 over `on_material`'s ceiling rewrites, exactly as the dead
+    // reverse-decode detector was measured.
+    let (mut tp, mut fp, mut fn_, mut tn) = (0usize, 0usize, 0usize, 0usize);
+    let mut perfect_total = 0usize;
+    for r in 0..ROOMS {
+        for (obj, base) in RESTS_ON {
+            let q = format!("{} {obj} on material?", room(r));
+            let qb = q.as_bytes().to_vec();
+            let n = qb.len();
+            let mut prefix: Option<(usize, String)> = None;
+            'del: for k in 1..n {
+                for t in 0..=1usize.min(n - k) {
+                    if t > 0 && n - t == k {
+                        continue;
+                    }
+                    let mut sub = Vec::with_capacity(k + t);
+                    sub.extend_from_slice(&qb[..k]);
+                    sub.extend_from_slice(&qb[n - t..]);
+                    let (score, _, answer) = ask_tiered(&mut brain, &String::from_utf8_lossy(&sub));
+                    if score >= 1.0 {
+                        if let Some(answer) = answer {
+                            prefix = Some((k, answer));
+                            break 'del;
+                        }
+                    }
+                }
+            }
+            let Some((k, spliced)) = prefix else { continue };
+            for j in 0..=k {
+                let mut rw = Vec::with_capacity(n);
+                rw.extend_from_slice(&qb[..j]);
+                rw.extend_from_slice(spliced.as_bytes());
+                rw.extend_from_slice(&qb[k..]);
+                if rw == qb || rw.is_empty() {
+                    continue;
+                }
+                let text = String::from_utf8_lossy(&rw).to_string();
+                let (score, tier, answer) = ask_tiered(&mut brain, &text);
+                if score < 1.0 || answer.is_none() {
+                    continue;
+                }
+                perfect_total += 1;
+                let taught = facts.iter().any(|(fq, _)| *fq == text);
+                match (tier == MatchTier::Concept, taught) {
+                    (true, true) => tp += 1,
+                    (true, false) => fp += 1,
+                    (false, true) => fn_ += 1,
+                    (false, false) => tn += 1,
+                }
+            }
+        }
+    }
+    println!(
+        "CONCEPT TIER as a taught-detector over {perfect_total} ceiling rewrites:          true-pos {tp} false-pos {fp} false-neg {fn_} true-neg {tn}"
+    );
+    assert!(perfect_total > 0, "there must be ceiling rewrites to census, or this is vacuous");
+    // Printed, not asserted either way. The number IS the finding and the two
+    // outcomes need opposite follow-ups: tp > 0 with fp == 0 means the
+    // discriminator exists and the derivation should prefer concept-tier
+    // rewrites; tp == 0 means emergence changed the fabric without changing
+    // what the matcher admits, and the next change is the coverage gate rather
+    // than the splice loop.
 }
