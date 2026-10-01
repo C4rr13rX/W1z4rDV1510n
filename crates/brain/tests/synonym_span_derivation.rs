@@ -22,6 +22,40 @@
 //!
 //! Nothing here is a tuning target. The assertions are the two structural
 //! claims; the distributions are printed.
+//!
+//! # Where this bottoms out: emergence has NO live caller
+//!
+//! The assertions below measure that `total_concepts == total_binding ==` the
+//! number of taught facts at every scale, so not one non-binding concept has
+//! ever emerged. Read off the code, the reason is that the two paths which could
+//! create one are each closed, for different and individually sound reasons:
+//!
+//! * TRAINING does not try. `Brain::pretrain_binding_episode` (brain.rs:1925)
+//!   routes each frame to `Pool::ensure_frame_atoms_for_pretrain_profiled`
+//!   (pool.rs:3300), whose whole body is `.map(|label| self.ensure_atom(label,
+//!   tick))`. It never calls `push_recent`, never calls
+//!   `collapse_tail_to_concept`, never calls `check_concept_emergence`.
+//! * ANSWERING is forbidden to. `Pool::emergence_suppressed` (pool.rs:1690) is
+//!   set for the whole read-only scope, deliberately and with a measurement
+//!   behind it: at scale 16 the trained brain peaks at 28.3 MB and answering
+//!   2,432 questions took the process to 546.7 MB, all of it an emergence ledger
+//!   that is never reclaimed.
+//!
+//! Only the fire path (pool.rs:4124-4151) feeds emergence, and nothing in this
+//! world takes it. So the fabric contains byte atoms and bindings and no ordered
+//! symbol of any kind -- which is the representation that makes the ambiguity
+//! below unfixable by any tie-break, since `"r0desk material?"` and
+//! `"r000 desk material?"` have the identical set of distinct bytes.
+//!
+//! The naive repair -- run emergence on the training path -- is NOT shippable as
+//! it stands, and the arithmetic is the suppression comment's own: ~1,071
+//! permanent ledger entries per observed frame, which at scale 64's 11,904 facts
+//! is ~12.7 M entries. That is the same RAM failure the suppression was added to
+//! stop, merely moved from "grows with questions asked" to "grows with facts
+//! taught". Putting emergence back on the train path therefore needs the ledger
+//! bounded first -- a shorter maximum run length, or discarding runs that never
+//! reach the promotion threshold -- and the cost of that bound measured before
+//! the emergence is re-enabled.
 
 use w1z4rd_brain::{
     AtomEncoding, Brain, BrainConfig, BytePassthroughEncoding, MatchTier, PoolConfig,
