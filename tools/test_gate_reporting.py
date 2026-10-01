@@ -96,6 +96,32 @@ def test_no_fail_fast_is_idempotent_and_safe_on_one_separator(g) -> None:
     assert out[: len(check)] == check, "appending must not reorder the command"
 
 
+def test_this_file_is_a_gate_step_and_costs_no_build_lock(g) -> None:
+    # A test nothing runs is prose. It must be IN the gate...
+    step = dict(g.STEPS).get("gate reporting")
+    assert step is not None, [n for n, _ in g.STEPS]
+    assert step[-1].endswith("test_gate_reporting.py"), step
+    # ...and must NOT go through capped.py, or the one step that needs no cargo
+    # would queue on the machine-wide build lock behind every other agent's
+    # build. Measured 2026-10-01: one waiter sat in that lock's acquire loop for
+    # 9 minutes.
+    assert not any("capped.py" in a for a in step), step
+    # It runs before the expensive steps, so a broken report is known in 0.1s
+    # rather than after 962s of cargo.
+    assert [n for n, _ in g.STEPS][0] == "gate reporting", [n for n, _ in g.STEPS]
+
+
+def test_this_files_own_output_is_parseable_by_the_gate(g) -> None:
+    # If this step fails, gate.py names it with the SAME parser it uses on cargo.
+    # Printing "FAIL  name" instead would make this the one step whose failures
+    # the gate cannot name -- the defect [5183439d] exists for, reintroduced by
+    # the test that pins it.
+    src = Path(__file__).read_text(encoding="utf-8")
+    body = src[src.index("def main("):]
+    assert 'f"test {t.__name__} ... FAILED"' in body, "failure lines must match cargo's shape"
+    assert g.failing_tests("test some_check ... FAILED") == ["some_check"]
+
+
 def test_the_fail_path_prints_names_before_the_tail(g) -> None:
     # Properties of the source, because the alternative is running a red gate:
     # the verdict and everything after it must be flushed, or a killed gate
@@ -109,17 +135,27 @@ def test_the_fail_path_prints_names_before_the_tail(g) -> None:
 
 
 def main() -> int:
+    """Output is deliberately in CARGO'S FORMAT, and that is not cosmetic.
+
+    gate.py's own `failing_tests()` parses lines that start with "test " and end
+    with "FAILED". Printing "FAIL  name" instead would make this the one step in
+    the gate whose failures the gate cannot name -- the exact defect [5183439d]
+    was filed for, reintroduced by the test that pins it.
+    """
     g = load_gate()
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = []
     for t in tests:
         try:
             t(g)
-            print(f"ok    {t.__name__}")
+            print(f"test {t.__name__} ... ok", flush=True)
         except AssertionError as e:
             failed.append(t.__name__)
-            print(f"FAIL  {t.__name__}: {e}")
-    print(f"\n{len(tests) - len(failed)} passed; {len(failed)} failed")
+            print(f"test {t.__name__} ... FAILED", flush=True)
+            print(f"      {e}", flush=True)
+    result = "ok" if not failed else "FAILED"
+    print(f"\ntest result: {result}. {len(tests) - len(failed)} passed; {len(failed)} failed",
+          flush=True)
     return 1 if failed else 0
 
 

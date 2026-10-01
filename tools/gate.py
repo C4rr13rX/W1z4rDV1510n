@@ -29,6 +29,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CAPPED = [sys.executable, str(ROOT / "tools" / "capped.py"), "--mb", "8000", "--timeout", "2400", "--"]
 STEPS = [
+    # First, and NOT through capped.py: no cargo, no brain, ~0.1s, so it cannot
+    # take the machine-wide build lock or the memory this cap exists to bound.
+    # It guards the gate's own failure REPORT, which is the thing a red gate is
+    # read through -- [5183439d] cost one agent a 316s re-run to learn a test's
+    # name, and two more passes logged a single unattributable line because the
+    # tail was unflushed. A test nothing runs is prose, so it runs here.
+    ("gate reporting", [sys.executable, str(ROOT / "tools" / "test_gate_reporting.py")]),
     ("brain tests", CAPPED + ["cargo", "test", "-p", "w1z4rd-brain", "--release", "-j", "2", "--",
                               "--test-threads=2"]),
     ("node compiles", CAPPED + ["cargo", "check", "-p", "w1z4rdv1510n-node", "--release", "-j", "2",
