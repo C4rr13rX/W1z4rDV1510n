@@ -4,6 +4,12 @@ Set by the owner on 2026-10-01. All four are pursued **at the same time**, and
 no change may buy one by giving back another. Each goal has a measured number,
 and the gate (`tools/gate.py`) holds every number at least where it is.
 
+**One absolute rule sits under all four: recall of trained material is always
+perfect.** Anything the brain was taught, it answers exactly, 100% of the time,
+at every scale and in every benchmark (text, symbol, audio + visual). That is
+not "no worse than before". A run below 100% fails the gate, whatever the
+baseline says.
+
 ## 1. Train to any size, with tightly controlled RAM
 
 - **The rule.** SSD may grow without limit. RAM stays as small as possible:

@@ -251,6 +251,11 @@ class Scorecard:
             b = by_scale.get(s)
             if b and b.get("peak_mb") and (r.get("peak_mb") or 0) > b["peak_mb"] * 1.15:
                 problems.append(f"scale {s}: peak {r['peak_mb']:.0f} MB, baseline {b['peak_mb']:.0f} MB (+15% allowed)")
+            # Owner, 2026-10-01: recall of trained material is ALWAYS perfect.
+            # An absolute rule, not "no worse than the baseline" -- a baseline
+            # saved below 100% must not make a miss look acceptable.
+            if r.get("recall_pct", 0) < 100.0:
+                problems.append(f"scale {s}: recall {r.get('recall_pct', 0):.2f}% -- trained material must recall 100%")
             for k in ("recall_pct", "integration_pct"):
                 if b and k in b and r[k] < b[k]:
                     problems.append(f"scale {s}: {k} fell {b[k]:.1f} -> {r[k]:.1f}")
