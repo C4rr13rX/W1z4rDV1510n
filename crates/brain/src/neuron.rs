@@ -446,6 +446,84 @@ impl Neuron {
     /// slots and ~28 hash buckets for the rest of its life.  Measured at
     /// scale 64: 254,736 Vec slots for 24,975 live terminals and 297,178
     /// map entries, 11.2 MB between them on a 15.3 MB body total.
+    /// Reinforce a terminal under a hard fan-out bound, displacing the
+    /// weakest resident terminal when the newcomer is stronger.
+    ///
+    /// `PoolConfig::max_atom_fanout` bounded a hub atom's fan-out FIRST-COME:
+    /// `terminals.len() >= cap` refused every later terminal outright, so an
+    /// atom that filled on the opening facts of a corpus acquired nothing for
+    /// the rest of it. Measured 2026-10-01 on the scorecard's scene world at
+    /// scale 16, with the cap lifted entirely (`max_atom_fanout = 0`):
+    /// integration 44.3 -> 50.8 % and, at scale 64, 20.5 -> 32.5 %, recall
+    /// 100.0 throughout -- so the terminals the cap refused were carrying
+    /// answers. The price was peak 24.9 -> 28.0 MB at scale 16 (+12.4 %) and
+    /// 40.1 -> 51.9 MB at scale 64 (+29.4 %, against a gate that allows 15 %),
+    /// with hub fan-out reaching 11,904, one terminal per fact.
+    ///
+    /// So the bound is kept and the SELECTION RULE is replaced. The resident
+    /// set is the strongest `cap` terminals rather than the earliest: a new
+    /// terminal displaces the weakest resident one when it is strictly
+    /// stronger on [`Terminal::effective_weight`], and is refused otherwise.
+    /// Three properties this has to hold onto:
+    ///
+    /// - A `CONSOLIDATION_LOCK` terminal is never displaced. That is the same
+    ///   exemption `apply_pending_decay` uses, and it is the 100 %-recall
+    ///   anchor; a fresh 0.5 terminal must not be able to evict a fact the
+    ///   brain was taught three times.
+    /// - Fan-out never changes, so a caller keeping an O(1) `total_terminals`
+    ///   counter stays exact: this returns `true` only when a terminal was
+    ///   genuinely ADDED, never on a displacement, which is net zero.
+    /// - The replacement writes in place at `idx`, so the terminal index only
+    ///   needs the evicted target removed and the new one pointed at the same
+    ///   slot. No `rebuild_terminal_idx` -- that also shrinks the Vec, and
+    ///   shrinking a Vec that is still exactly at its bound is pure churn.
+    ///
+    /// `cap == 0` means unbounded and delegates straight to
+    /// [`Self::reinforce_terminal`], as does any neuron below its bound or any
+    /// target that already has a terminal.
+    pub fn reinforce_terminal_bounded(
+        &mut self,
+        target:     NeuronRef,
+        delta:      f32,
+        tick:       u64,
+        max_weight: f32,
+        cap:        usize,
+    ) -> bool {
+        if cap == 0 || self.terminals.len() < cap || self.find_terminal(&target).is_some() {
+            return self.reinforce_terminal(target, delta, tick, max_weight);
+        }
+        // Saturated, and this target is new. Find the weakest displaceable
+        // resident terminal. Ties keep the EARLIER index so the choice is a
+        // function of the fabric's contents and not of iteration order.
+        let newcomer = delta.min(max_weight);
+        let mut weakest: Option<(usize, f32)> = None;
+        for (i, t) in self.terminals.iter().enumerate() {
+            if t.consolidation >= Self::CONSOLIDATION_LOCK {
+                continue;
+            }
+            let w = t.effective_weight();
+            match weakest {
+                Some((_, best)) if w >= best => {}
+                _ => weakest = Some((i, w)),
+            }
+        }
+        let Some((idx, weakest_weight)) = weakest else {
+            // Every resident terminal is consolidation-locked. Refuse rather
+            // than evict a locked one -- recall outranks derivation.
+            return false;
+        };
+        if newcomer <= weakest_weight {
+            return false;
+        }
+        let evicted = self.terminals[idx].target;
+        self.terminals[idx] = Terminal::new(target, newcomer, tick);
+        if let Some(m) = self.terminal_idx.as_mut() {
+            m.remove(&evicted);
+            m.insert(target, idx);
+        }
+        false
+    }
+
     pub fn rebuild_terminal_idx(&mut self) {
         if self.terminals.len() < Self::TERMINAL_INDEX_THRESHOLD {
             // Below the threshold the Vec is the index. Drop the map

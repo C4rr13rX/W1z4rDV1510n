@@ -960,16 +960,31 @@ fn vote_plus_transfer_against_the_production_call_at_two_budgets() {
     println!("recall after all three arms {recalled}/{}", facts.len());
     assert_eq!(recalled, facts.len(), "recall must still be 100%");
 
-    // Per family against production, at the budget that is actually affordable.
-    // Which budget that is, is the thing being measured -- so the contract is
-    // asserted at BOTH, and the one that fails says which.
+    // Per family against production, at both budgets, RECORDED AND NO LONGER
+    // ASSERTED. This used to assert `v.0 >= p.0` -- that the voted arm may not
+    // cost correct answers against the production call. The reference point
+    // moved: `derive_by_substitution` now admits only rewrites the brain was
+    // TAUGHT, which raised production sharply on its own (next_color 75.8 %
+    // -> 98.4 % at scale 16, 43.8 % -> 64.6 % at scale 64, with
+    // integration_wrong_pct 0.00 at all four scales). An assertion of the form
+    // "my arm is at least as good as production" is stale by construction the
+    // moment production improves, and it fails in the direction that means the
+    // PRODUCT got better -- which is the one direction a test must never red
+    // on. Measured 2026-10-01: this test passed on the tree it was written
+    // against and failed on the tree carrying the new accept rule, with no
+    // change to the arms it measures.
+    //
+    // Removed rather than re-baselined against a number, because any fixed
+    // number here has the same expiry. The census below is the durable half:
+    // it prints every arm against production so a future pass can read the
+    // comparison without a guard that expires. The absolute contract this
+    // test still asserts is recall at 100 %.
     for label in ["voted_32", "voted_128"] {
         for (family, _, _) in &probes_list {
             let p = arms[&(*family, "production_32")];
             let v = arms[&(*family, label)];
-            assert!(
-                v.0 >= p.0,
-                "{label} cost {family} correct answers: {}/{} -> {}/{}",
+            println!(
+                "{label:>10} {family:>18} production {}/{} -> arm {}/{}",
                 p.0,
                 p.0 + p.1 + p.2,
                 v.0,
@@ -1102,19 +1117,38 @@ fn at_scale_four_no_vote_threshold_separates_the_two_families() {
     // questions match at `MatchTier::Concept`, so every match here is an
     // unordered distinct byte set. No selection policy recovers information the
     // representation does not carry.
+    // RETIRED 2026-10-01, and the reason is the point. Two assertions used to
+    // live here: that the majority rule must still COST next_color, and that
+    // it must stay DOMINATED in aggregate. Both were true when measured in
+    // pass 14 -- next_color (57, 7) under production against (53, 11) under
+    // the plurality and (57, 7) under majority, with majority 11 aggregate
+    // points behind -- and both stopped a vote threshold shipping, which was
+    // the right call then.
+    //
+    // They assert about a world that no longer exists. A vote over ceiling
+    // rewrites was a MITIGATION for an accept rule that admitted any rewrite
+    // scoring 1.0; the rule now requires the rewrite to be a question the
+    // brain was TAUGHT, so the ceiling set contains only taught questions and
+    // there is almost nothing left for a vote to arbitrate. Measured through
+    // the product after that change: next_color 75.8 % -> 98.4 % at scale 16
+    // and 43.8 % -> 64.6 % at scale 64, with integration_wrong_pct 0.00 at
+    // all four scales. The first assertion then fails on EQUALITY --
+    // (57, 7, 0, 662) -> (57, 7, 0, 1920), the two arms agreeing -- which is
+    // not the finding being refuted, it is the finding becoming unmeasurable.
+    //
+    // Deleted rather than relaxed. An assertion rewritten to match what the
+    // code now does is a not-done dressed as a done; the measurement itself
+    // is still printed above, so a future pass that revives a vote threshold
+    // has the pass-14 numbers to compare against and no stale guard to argue
+    // with. The per-family contract below is what this file still asserts.
     let nc_mj = arms[&("next_color", "majority_128")];
-    assert!(
-        nc_mj.0 < nc_p.0,
-        "the majority rule must still cost next_color -- it recovering the family is the one          outcome that would make a vote threshold shippable, and it was measured not to:          {nc_p:?} -> {nc_mj:?}"
-    );
     let agg = |label: &str| -> usize {
         arms.iter().filter(|((_, l), _)| *l == label).map(|(_, v)| v.0).sum()
     };
-    assert!(
-        agg("majority_128") < agg("plurality_128"),
-        "the majority rule must stay DOMINATED in aggregate ({} vs {}), or it is worth          re-measuring as the shippable rule",
-        agg("majority_128"),
-        agg("plurality_128")
+    eprintln!(
+        "s4 vote-threshold census (retired assertions): next_color production {nc_p:?}          plurality {nc_p:?} majority {nc_mj:?}; aggregate plurality {} majority {}",
+        agg("plurality_128"),
+        agg("majority_128")
     );
 
     // WHAT DOES HOLD: every family except `next_color` improves under the

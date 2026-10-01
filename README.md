@@ -234,6 +234,82 @@ This is the in-fabric feedback loop described in the code comment: *"concept neu
 
 ---
 
+### Atom fan-out is bounded, and what that bound costs (measured 2026-10-01)
+
+A byte that occurs in every question would otherwise acquire one terminal per
+trained fact. `PoolConfig::max_atom_fanout` (512) bounds that, and the bound is
+enforced FIRST-COME: once an atom reaches the cap it refuses every later
+terminal, so an atom that filled on the opening facts of a corpus holds no link
+to any later one.
+
+What the bound costs was measured by lifting it entirely (`max_atom_fanout = 0`)
+and changing nothing else, `python tools/scorecard.py --scales 16,64`:
+
+| scale | integration % | wrong % | peak MB | hub fan-out | terminals | wall s |
+|---|---|---|---|---|---|---|
+| 16 | 44.3 → 50.8 | 35.8 → 34.1 | 24.9 → 28.0 | 512 → 2,976 | 68,943 → 94,370 | 29.9 → 52.2 |
+| 64 | 20.5 → 32.5 | 31.9 → 35.2 | 40.1 → 51.9 | 512 → 11,904 | 26,827 → 189,436 | 121.8 → 335.0 |
+
+Recall stayed 100.0 % throughout. So the terminals the bound refuses are
+carrying answers — and unbounded fan-out is one terminal per fact by
+construction, costs +29.4 % peak RAM at scale 64 against a gate that allows
+15 %, and runs 2.75× slower. It is not shipped. (These two rows were taken
+before the derivation's accept rule was tightened the same day, so the `wrong %`
+column describes that older derivation and not the current one.)
+
+`Neuron::reinforce_terminal_bounded` is the third option: the same bound with
+the selection rule replaced, so the resident set is the strongest `cap`
+terminals rather than the earliest. A newcomer displaces the weakest resident
+terminal when it is strictly stronger on `effective_weight()`, never displaces a
+`CONSOLIDATION_LOCK` terminal (the same exemption `apply_pending_decay` uses,
+which is the 100 %-recall anchor), and never changes fan-out, so the O(1)
+`total_terminals` counter stays exact. **It has no live caller.** It was wired
+into concept emergence, measured as a no-move at the gated scales (integration
+53.7 / 50.0 / 44.3 → 53.7 / 50.0 / 44.8, peak flat, recall 100.0), and reverted
+when the gate reddened; the hub is wired in `Brain::promote_binding_concept`
+rather than at concept emergence, which is where the call belongs. Tests:
+`crates/brain/tests/atom_fanout_is_strength_ranked.rs`.
+
+**What no bound or selection rule can fix.** At scale 64 a resident terminal
+costs a measured 72.6 bytes (11.8 MB across the 162,609-terminal difference
+between the two rows above). The gate ceiling is 46.11 MB, so the headroom above
+the bounded brain buys ~82,900 terminals, ~109,700 in total — against the
+~178,600 that 11,904 facts at ~15 members each imply. **About 61 % of the wiring
+a scale-64 corpus implies can be resident inside the RAM budget**, and the
+deficit grows with the corpus while the budget does not. A selection rule
+decides *which* terminals are resident, never how many. Paging the weakest
+terminals to SSD instead of deleting them is therefore the remaining lever, not
+a refinement.
+
+### One-shot taught terminals are deleted past 7,822 ticks
+
+Terminals are born at weight 0.5. `apply_pending_decay` multiplies by
+`(1 − decay_rate)^elapsed` on access and deletes a terminal below `prune_floor`,
+with pool defaults `decay_rate = 0.0005` and `prune_floor = 0.01`. So a terminal
+that is not re-accessed survives exactly
+`ln(0.01 / 0.5) / ln(1 − 0.0005) = 7,822.1` ticks.
+
+The scorecard observes once per fact, which makes `elapsed` a proxy for corpus
+size rather than for time-without-use: scale 16 is 2,976 ticks and the weight
+lands at 0.1129 (survives), scale 64 is 11,904 ticks and it lands at 0.0013
+(deleted). That is the only account of the scorecard's terminals falling in
+absolute terms between those scales — 68,943 → 26,827 with `evicted_neurons` 0
+and `page_outs` 0, so nothing was paged out and the wiring was deleted. An
+uncapped scale-64 run reached 189,436 terminals against the ~357,000 the corpus
+implies, so roughly half is decayed away even with no bound at all.
+
+`CONSOLIDATION_LOCK` is 3 and `consolidation` increments once per *distinct
+tick*, so a fact taught once reaches 1, never locks, and is never exempt. The
+terminals decay spares are the ones taught three or more times; the ones it
+deletes are the few-shot ones `docs/TEACHING_BENCHMARK.md` is about. This is a
+known defect, pinned by
+`a_one_shot_terminal_is_deleted_once_the_corpus_exceeds_the_decay_horizon`, and
+not yet fixed: extending the horizon by lowering `prune_floor` to 1e-4 covers
+scale 64 and lands the peak at the ~51 MB the unbounded row shows, which trades
+the RAM goal for the integration goal rather than satisfying both.
+
+---
+
 ### Structural comparison
 
 | | Tokenization (BPE / WordPiece) | Neurogenesis (this system) |
