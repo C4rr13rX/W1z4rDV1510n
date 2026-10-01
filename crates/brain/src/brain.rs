@@ -1129,6 +1129,54 @@ pub struct Brain {
     /// deliberately NOT persisted: it is a cache of the current question
     /// distribution, and a restored brain re-earns it in one question.
     derivation_cut_hints: Vec<(usize, usize, usize)>,
+    /// What the derivation has SPENT, cumulative over this brain's life.
+    derivation_stats: DerivationStats,
+}
+
+/// What [`Brain::derive_by_substitution_profiled`] cost, cumulative.
+///
+/// # Why a counter and not a formula
+///
+/// The cost per derived answer is the number that decides whether this
+/// mechanism can run on an answer path at corpus scale, and it has been
+/// quoted from three different formulas in this file (`n(n+1)/2`, `~2k`,
+/// `k + (k+1)`) each of which is right for one regime and wrong for the
+/// others. `derive_by_substitution_profiled` already returns the true count
+/// per call and every caller threw it away: `integrate_autonomous` put it in
+/// a `tracing::debug!` nothing reads and `derived_by_substitution_reply`
+/// never asked for it. So the scorecard published `integration_pct` with no
+/// way to tell a mechanism that ran out of budget from one that ran and found
+/// nothing — the same vacuous-zero trap `derivation_probe_budget` was added
+/// to the row to close one layer up.
+///
+/// `budget_exhausted` is the one that distinguishes them: it counts calls
+/// that hit `probes >= max_probes` with no answer, which is starvation, as
+/// against `attempts - answered - budget_exhausted`, which is the mechanism
+/// honestly declining.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DerivationStats {
+    /// Calls that got past the empty/same-pool/zero-depth guard.
+    pub attempts: usize,
+    /// Calls that returned a non-empty answer.
+    pub answered: usize,
+    /// Questions asked of the fabric, summed over every call.
+    pub probes: usize,
+    /// Calls that spent the whole budget and returned nothing.
+    pub budget_exhausted: usize,
+}
+
+impl DerivationStats {
+    /// Questions asked per call, or `None` when nothing was attempted — a
+    /// zero would read as "free" where the truth is "never ran".
+    pub fn probes_per_attempt(&self) -> Option<f64> {
+        (self.attempts > 0).then(|| self.probes as f64 / self.attempts as f64)
+    }
+
+    /// Questions asked per answer DELIVERED, which is the figure a caller
+    /// sizing a budget needs: a declined call still spent probes.
+    pub fn probes_per_answer(&self) -> Option<f64> {
+        (self.answered > 0).then(|| self.probes as f64 / self.answered as f64)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1472,6 +1520,7 @@ impl Brain {
             feedback_events_emitted: 0,
             derivation_probe_budget: DEFAULT_DERIVATION_PROBE_BUDGET,
             derivation_cut_hints: Vec::new(),
+            derivation_stats: DerivationStats::default(),
         }
     }
 
@@ -6925,6 +6974,7 @@ impl Brain {
         if query.is_empty() || query_pool == target_pool || max_depth == 0 {
             return (None, 0);
         }
+        self.derivation_stats.attempts += 1;
         let mut probes = 0usize;
         let mut current = query.to_vec();
         let mut derived: Option<Vec<u8>> = None;
@@ -7108,7 +7158,23 @@ impl Brain {
         }
 
         self.observe_fabric_read_only(query_pool, query);
+        self.derivation_stats.probes += probes;
+        match derived.as_ref().filter(|a| !a.is_empty()) {
+            Some(_) => self.derivation_stats.answered += 1,
+            // Starvation, not refusal: the loop stopped because the budget
+            // ran out rather than because no rewrite was better known. These
+            // are the calls a larger budget would convert, and they are the
+            // only reason to raise one.
+            None if probes >= max_probes => self.derivation_stats.budget_exhausted += 1,
+            None => {}
+        }
         (derived, probes)
+    }
+
+    /// What the derivation has cost this brain so far. See [`DerivationStats`]
+    /// for why this is counted rather than computed from the question length.
+    pub fn derivation_stats(&self) -> DerivationStats {
+        self.derivation_stats
     }
 
     /// Default-threshold version of [`Self::integrate_autonomous_tuned`],
@@ -9907,6 +9973,7 @@ impl Brain {
             feedback_events_emitted: 0,
             derivation_probe_budget: DEFAULT_DERIVATION_PROBE_BUDGET,
             derivation_cut_hints: Vec::new(),
+            derivation_stats: DerivationStats::default(),
         };
         brain.rebuild_binding_sequence_index();
         (brain, missing)
@@ -10093,6 +10160,7 @@ impl Brain {
             feedback_events_emitted: 0,
             derivation_probe_budget: DEFAULT_DERIVATION_PROBE_BUDGET,
             derivation_cut_hints: Vec::new(),
+            derivation_stats: DerivationStats::default(),
         };
         if let Some(count) = brain.disk_scalar(FINGERPRINT_TENTATIVE_COUNT_KEY) {
             brain.tentative_binding_count_total = count as usize;

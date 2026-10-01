@@ -749,6 +749,15 @@ fn main() {
         // invention cannot read as a gain.
         let mut wrong = 0usize;
         for fam in &world.families {
+            // The derivation's cost, per FAMILY, so the probe count is
+            // reported against the hop count it was spent on. Criterion 2 of
+            // [a7fb084f] asks for "probes asked per derivation at 2 and 3
+            // hops", and a single whole-run total cannot answer that: the
+            // families are 1, 2, 2 and 3 hops and they share one budget.
+            // Snapshot and subtract, because `Brain::derivation_stats` is
+            // cumulative over the brain's life and the recall phase above has
+            // already spent some of it.
+            let cost_before = subject.brain.derivation_stats();
             let t0 = Instant::now();
             let mut h = 0usize;
             // A bare 0% says nothing about what to fix. Classifying the MISS by
@@ -771,6 +780,11 @@ fn main() {
                 *kinds.entry(classify(&got)).or_default() += 1;
             }
             secs += t0.elapsed().as_secs_f64();
+            let cost = subject.brain.derivation_stats();
+            let derivation_attempts = cost.attempts - cost_before.attempts;
+            let derivation_answered = cost.answered - cost_before.answered;
+            let derivation_probes = cost.probes - cost_before.probes;
+            let derivation_starved = cost.budget_exhausted - cost_before.budget_exhausted;
             hits += h;
             probes += fam.probes.len();
             let fam_wrong = fam.probes.len() - h - kinds.get("empty").copied().unwrap_or(0);
@@ -785,6 +799,24 @@ fn main() {
                 "miss_kinds": kinds,
                 "lit_mean": lit as f64 / fam.probes.len().max(1) as f64,
                 "lit_zero": lit_zero,
+                // How many of this family's probes even REACHED the
+                // derivation. Fewer than `probes` means the gate in front of
+                // it (the 0.70 binding floor, or a direct answer) took the
+                // call, and a family at 0 % with 0 attempts is a routing
+                // defect rather than a derivation one.
+                "derivation_attempts": derivation_attempts,
+                "derivation_answered": derivation_answered,
+                "derivation_probes": derivation_probes,
+                // Attempts that spent the whole budget and returned nothing.
+                // This is the ONLY count that says a larger budget would
+                // convert misses: the remainder
+                // (attempts - answered - starved) declined with budget left,
+                // so raising the ceiling cannot reach them.
+                "derivation_starved": derivation_starved,
+                "probes_per_attempt": (derivation_attempts > 0)
+                    .then(|| derivation_probes as f64 / derivation_attempts as f64),
+                "probes_per_answer": (derivation_answered > 0)
+                    .then(|| derivation_probes as f64 / derivation_answered as f64),
             }));
         }
         integration_pct = 100.0 * hits as f64 / probes.max(1) as f64;
@@ -838,6 +870,16 @@ fn main() {
             // of 0 from a path with no opportunity to execute is not evidence
             // about the path. Publish the budget beside the score.
             "derivation_probe_budget": subject.brain.derivation_probe_budget(),
+            // And what it SPENT, which the budget does not say: the budget is
+            // a ceiling per call and this is the measured draw. Whole-run,
+            // cumulative; the per-family deltas are in
+            // `integration_families[*].derivation_*`.
+            "derivation_attempts": subject.brain.derivation_stats().attempts,
+            "derivation_answered": subject.brain.derivation_stats().answered,
+            "derivation_probes": subject.brain.derivation_stats().probes,
+            "derivation_starved": subject.brain.derivation_stats().budget_exhausted,
+            "derivation_probes_per_attempt": subject.brain.derivation_stats().probes_per_attempt(),
+            "derivation_probes_per_answer": subject.brain.derivation_stats().probes_per_answer(),
             "trained_lit_mean": trained_lit as f64 / world.facts.len().max(1) as f64,
             "trained_lit_zero": trained_lit_zero,
             "train_s": train_s,
