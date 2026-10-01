@@ -6676,6 +6676,237 @@ impl Brain {
     /// has < this precision against the firing query atoms, the
     /// prompt is treated as out-of-vocabulary regardless of what
     /// fabric returns (prevents "Hello → color" hallucinations).
+    /// Ask one question of the trained bindings without learning anything
+    /// from it: how well the brain knows this question, and what it answers.
+    ///
+    /// [`Self::observe_fabric_read_only`] rather than
+    /// [`Self::observe_read_only`] because this runs hundreds of times per
+    /// derivation. `Brain::observe` also inserts a `recent_frames` entry and
+    /// captures a QA pair, and a QA pair harvested from a question the brain
+    /// invented for itself is training nobody asked for — the exact class of
+    /// growth `observe_read_only` was added to stop.
+    fn probe_question(
+        &mut self,
+        query_pool: PoolId,
+        target_pool: PoolId,
+        question: &[u8],
+    ) -> (f32, Option<Vec<u8>>) {
+        self.observe_fabric_read_only(query_pool, question);
+        let score = self.best_binding_match_v2(query_pool).score();
+        let answer = self
+            .decode_best_trained_binding(query_pool, target_pool)
+            .filter(|a| !a.is_empty());
+        (score, answer)
+    }
+
+    /// Derive an answer to a question the brain was NEVER trained on, by
+    /// composing questions it WAS.
+    ///
+    /// # Why this is not the EEM chain walk
+    ///
+    /// The design on paper is that integration comes from
+    /// [`Eem::chain_explore`] over grounded facts. Measured
+    /// (`crates/brain/tests/eem_chain_bridge.rs`), that cannot work as built,
+    /// and the reason is a type error in what a fact's members are:
+    ///
+    /// * Ordinary training registers **0** facts — `register_fact` has one
+    ///   production caller, inside the Tier-2 consolidated arm of
+    ///   [`Self::register_fingerprint`], and `pretrain_binding_episode` never
+    ///   reaches it.
+    /// * Populating the graph by hand the way that arm would does not help.
+    ///   32 facts over a 16-room two-hop world share only **30 distinct
+    ///   members**, 7 of which appear in *every* fact, because an atom is a
+    ///   BYTE: every fact shares a space and a digit with every other, so the
+    ///   fact graph is a complete graph rather than a chain.
+    /// * The walk therefore returns everything at one confidence. Measured on
+    ///   a never-trained probe: 25 reached members, 4 in the answer pool, and
+    ///   **one** distinct confidence among them (`1.0000`), because confidence
+    ///   is a product of fact confidences and every fact is 1.0. The refs of
+    ///   the CORRECT answer were reached 1 of 3; the refs of the DISTRACTOR
+    ///   were reached 4 of 4. The wrong answer is reached more completely than
+    ///   the right one.
+    ///
+    /// So registering facts on the pretrain path — the obvious repair, and one
+    /// a previous pass measured at 5.3 MB for 0 integration — is inert by
+    /// construction, not by accident.
+    ///
+    /// # What this does instead
+    ///
+    /// Composition over the questions themselves, verified by recall. The
+    /// brain already answers a trained question perfectly (recall is 100 %),
+    /// so recall is the one reliable primitive available, and integration is
+    /// that primitive applied to its own output:
+    ///
+    /// 1. Ask the untrained question. The best trained binding answers the
+    ///    sub-question it *does* cover — for `"r03 lamp on material"` that is
+    ///    `"r03 lamp on"`, answering `"desk"`.
+    /// 2. Substitute that answer for each contiguous span of the question and
+    ///    ask every rewrite. One of them, `"r03 desk material"`, is a question
+    ///    the brain was actually taught.
+    /// 3. Keep the rewrite the brain knows strictly BETTER than the original,
+    ///    by [`BindingMatch::score`] (precision × recall). That is the whole
+    ///    acceptance test, and it needs no new threshold: the original scores
+    ///    below 1 precisely because part of it is unexplained, and a rewrite
+    ///    that explains all of it scores above. Its answer is the derivation.
+    /// 4. Recurse, so an `n`-hop question costs `n` substitutions.
+    ///
+    /// Nothing here reads the wording. There is no separator, no token, no
+    /// substitution table and no per-family rule; the operation is "the answer
+    /// to a sub-question replaces that sub-question's text in place, and the
+    /// result is the next question", and the brain's own trained knowledge is
+    /// the only thing that decides which rewrite is valid. A question that
+    /// yields no better-known rewrite derives nothing and returns `None`,
+    /// which is the honest answer rather than a guess.
+    ///
+    /// `max_probes` bounds total work exactly as `chain_max_visit` bounds the
+    /// walk, so the caller sizes the budget and never discovers the cost at
+    /// runtime. The cost itself has two regimes: when the taught sub-question
+    /// is a PREFIX of the asked one it is found by its score alone (a question
+    /// scoring 1.0 is one the brain was taught) and only the splice point
+    /// varies, which is `~2k` questions; otherwise the full span search runs at
+    /// `n(n+1)/2`. Read the count off `derive_by_substitution_profiled` rather
+    /// than off either formula.
+    ///
+    /// The caller's query activation is restored before returning, because
+    /// every later stage of the answer path reads the firing state and this
+    /// method has overwritten it hundreds of times.
+    pub fn derive_by_substitution(
+        &mut self,
+        query_pool: PoolId,
+        target_pool: PoolId,
+        query: &[u8],
+        max_depth: usize,
+        max_probes: usize,
+    ) -> Option<Vec<u8>> {
+        self.derive_by_substitution_profiled(query_pool, target_pool, query, max_depth, max_probes)
+            .0
+    }
+
+    /// [`Self::derive_by_substitution`], also reporting how many questions it
+    /// had to ask. The cost is the thing that decides whether this can run on
+    /// the answer path at corpus scale, so it is measurable rather than
+    /// inferred from `n(n+1)/2`.
+    pub fn derive_by_substitution_profiled(
+        &mut self,
+        query_pool: PoolId,
+        target_pool: PoolId,
+        query: &[u8],
+        max_depth: usize,
+        max_probes: usize,
+    ) -> (Option<Vec<u8>>, usize) {
+        if query.is_empty() || query_pool == target_pool || max_depth == 0 {
+            return (None, 0);
+        }
+        let mut probes = 0usize;
+        let mut current = query.to_vec();
+        let mut derived: Option<Vec<u8>> = None;
+
+        for _hop in 0..max_depth {
+            if probes >= max_probes {
+                break;
+            }
+            probes += 1;
+            let (base_score, base_answer) =
+                self.probe_question(query_pool, target_pool, &current);
+            let Some(base_answer) = base_answer else { break };
+            // A question the brain already knows PERFECTLY cannot be improved
+            // on, because the acceptance test is "strictly better known than
+            // this one" and 1.0 is the ceiling. Stopping here is what makes the
+            // LAST hop free: without it the terminal hop of every derivation
+            // ran a full span search that could not win by construction, which
+            // measured as 161 questions per 2-hop derivation against the 26 the
+            // productive hop actually needs.
+            if base_score >= 1.0 {
+                break;
+            }
+
+            let n = current.len();
+
+            // Which spans are worth rewriting?
+            //
+            // The general answer is "all of them", which is n(n+1)/2 questions
+            // and measured at 353 per 2-hop derivation — far too many to run on
+            // an answer path that already asks 3,456 integration questions at
+            // scale 64.
+            //
+            // The cheap answer uses a property of the score. A question scores
+            // 1.0 only when precision AND recall are 1 — the matched binding's
+            // query atoms are exactly the question's, nothing unexplained
+            // either way — so a prefix that scores 1.0 IS a question the brain
+            // was taught. The SHORTEST such prefix is the taught sub-question,
+            // and then the only freedom left is where its answer is spliced in:
+            // k is known, so only j varies. That is `k + (k+1)` questions
+            // instead of `n(n+1)/2`.
+            //
+            // The full span search stays as the fallback, so a world whose
+            // sub-questions are not prefix-shaped still derives; it just costs
+            // what it always did.
+            let mut known_prefix: Option<(usize, Vec<u8>)> = None;
+            for k in 1..n {
+                if probes >= max_probes {
+                    break;
+                }
+                probes += 1;
+                let (score, answer) = self.probe_question(query_pool, target_pool, &current[..k]);
+                if score >= 1.0 {
+                    if let Some(answer) = answer {
+                        known_prefix = Some((k, answer));
+                    }
+                    break;
+                }
+            }
+
+            let mut spans: Vec<(usize, usize)> = Vec::new();
+            let splice_answer = match &known_prefix {
+                Some((k, answer)) => {
+                    for j in 0..=*k {
+                        spans.push((j, *k));
+                    }
+                    answer.clone()
+                }
+                None => {
+                    for j in 0..n {
+                        for k in (j + 1)..=n {
+                            spans.push((j, k));
+                        }
+                    }
+                    base_answer.clone()
+                }
+            };
+
+            // score, rewritten question, its answer
+            let mut best: Option<(f32, Vec<u8>, Vec<u8>)> = None;
+            for (j, k) in spans {
+                if probes >= max_probes {
+                    break;
+                }
+                let mut rewrite = Vec::with_capacity(n + splice_answer.len());
+                rewrite.extend_from_slice(&current[..j]);
+                rewrite.extend_from_slice(&splice_answer);
+                rewrite.extend_from_slice(&current[k..]);
+                if rewrite == current || rewrite.is_empty() {
+                    continue;
+                }
+                probes += 1;
+                let (score, answer) = self.probe_question(query_pool, target_pool, &rewrite);
+                let Some(answer) = answer else { continue };
+                // Strictly better-known than the question we started from, and
+                // the best such rewrite found.
+                if score > base_score
+                    && best.as_ref().map_or(true, |(best_score, _, _)| score > *best_score)
+                {
+                    best = Some((score, rewrite, answer));
+                }
+            }
+            let Some((_, next_question, next_answer)) = best else { break };
+            derived = Some(next_answer);
+            current = next_question;
+        }
+
+        self.observe_fabric_read_only(query_pool, query);
+        (derived, probes)
+    }
+
     /// Default-threshold version of [`Self::integrate_autonomous_tuned`].
     /// Uses 0.70 as the binding-match precision floor — sufficient to
     /// reject out-of-vocabulary prompts (like "Hello" against a
