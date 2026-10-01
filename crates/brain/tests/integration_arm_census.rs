@@ -182,14 +182,28 @@ fn the_integration_probe_arm_census() {
 /// `chain_explore` walks `Eem` grounded facts from the firing query-pool
 /// seeds. Two existing suites prove the machinery: `critical_thinking.rs`
 /// walks `chain_explore` to a target-pool ref and `multi_fact.rs` asserts
-/// `composition_used.len() >= 2` for a composed answer. BOTH register their
-/// facts by hand with `Eem::register_fact` in small purpose-made pools. So the
-/// untested link is whether a world built the way the scorecard builds one --
-/// `pretrain_binding_episode` and nothing else -- populates the graph at all.
+/// `composition_used.len() >= 2` for a composed answer.
 ///
-/// If it does not, every fix aimed at the arms is inert by construction, which
-/// is the single most expensive recurring mistake in this repository: a guard
-/// keyed on evidence the system cannot produce.
+/// Neither registers a fact by hand -- `grep -rn register_fact crates/` finds
+/// exactly three hits: the definition in `eem.rs`, ONE production caller in
+/// `brain.rs`, and this comment. Those suites populate the graph by
+/// `observe` + `advance_tick` repeated (`multi_fact.rs:39-41`, `:70-75`), and
+/// the production caller sits inside `Brain::register_fingerprint`, reached
+/// only when a binding fingerprint crosses `consolidated_thr`. So **EEM facts
+/// come exclusively from binding consolidation during `advance_tick`**, and
+/// `pretrain_binding_episode` never goes through `register_fingerprint`.
+///
+/// That is the same bypass `docs/RAM_GOAL.md` point 1 already records for a
+/// different consequence -- "the ledger is empty after training:
+/// `pretrain_binding_episode` does not go through emergence at all" -- and it
+/// is why the scorecard's shape is recall exactly 100% beside integration
+/// exactly 0.0: the two come from different paths and the fast bulk path only
+/// exercises one. The two suites above pass BECAUSE they take the slow
+/// learning path, which is how 378 green tests never caught this.
+///
+/// Every fix aimed at the answer-branch arms would therefore have been inert,
+/// which is the single most expensive recurring mistake in this repository: a
+/// guard keyed on evidence the system cannot produce.
 #[test]
 fn the_eem_graph_population_census() {
     const ROOMS: u32 = 16;
