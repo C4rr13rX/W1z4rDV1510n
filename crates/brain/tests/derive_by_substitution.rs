@@ -199,6 +199,68 @@ fn derivation_answers_untrained_questions_and_leaves_recall_at_100_percent() {
     );
 }
 
+/// Does the mechanism work when the taught sub-question is NOT a prefix?
+///
+/// Both families above are prefix-shaped, so they exercise only the fast path
+/// (shortest prefix scoring 1.0). The full span search is the fallback for
+/// every other shape, and an untested fallback is how "32 of 32" turns out to
+/// mean "32 of 32 of the one shape I happened to write". Here the taught
+/// sub-question is a SUFFIX of the asked one, so the prefix scan cannot find it.
+#[test]
+fn derivation_works_when_the_subquestion_is_not_a_prefix() {
+    const SHELVES: u32 = 8;
+    let mut brain = subject();
+    for s in 0..SHELVES {
+        teach(&mut brain, &format!("holds shelf b{s:02}"), "atlas");
+        teach(&mut brain, &format!("weight of atlas b{s:02}"), "heavy");
+    }
+
+    let mut correct = 0u32;
+    let mut wrong = 0u32;
+    let mut silent = 0u32;
+    let mut cost: Vec<usize> = Vec::new();
+    for s in 0..SHELVES {
+        let probe = format!("weight of holds shelf b{s:02}");
+        let (answer, probes) = brain.derive_by_substitution_profiled(
+            QUERY_POOL,
+            ANSWER_POOL,
+            probe.as_bytes(),
+            2,
+            MAX_PROBES,
+        );
+        cost.push(probes);
+        match answer.as_deref() {
+            Some(a) if a == b"heavy" => correct += 1,
+            Some(_) => wrong += 1,
+            None => silent += 1,
+        }
+    }
+    eprintln!(
+        "non-prefix (suffix sub-question, 2 hops): correct {correct}/{SHELVES} wrong {wrong} silent {silent}  questions asked mean {:.0}",
+        cost.iter().sum::<usize>() as f64 / cost.len() as f64
+    );
+    // Recall must survive the fallback path too.
+    let mut hits = 0u32;
+    for s in 0..SHELVES {
+        if recall(&mut brain, &format!("holds shelf b{s:02}")).as_deref() == Some(&b"atlas"[..]) {
+            hits += 1;
+        }
+        if recall(&mut brain, &format!("weight of atlas b{s:02}")).as_deref() == Some(&b"heavy"[..]) {
+            hits += 1;
+        }
+    }
+    eprintln!("  recall after the fallback path: {hits} of {}", SHELVES * 2);
+    assert_eq!(
+        hits,
+        SHELVES * 2,
+        "the fallback span search damaged recall: {hits} of {}",
+        SHELVES * 2
+    );
+    // Printed, not asserted on a count: this measures COVERAGE of the fallback,
+    // and asserting a number here would turn a coverage probe into a target.
+    assert_eq!(wrong, 0, "the fallback derived a WRONG answer {wrong} times, which is worse than silence");
+}
+
 /// A taught question must not be ANSWERED by this path. Derivation exists for
 /// questions recall cannot reach; if it also fires on taught ones it would mask
 /// a recall regression behind a derived answer that happened to agree.
