@@ -171,3 +171,64 @@ fn the_integration_probe_arm_census() {
          so arm 0 is not the only grounding decision"
     );
 }
+
+/// Does ordinary training put anything in the graph the chain explorer walks?
+///
+/// Measured by the census above: composite probes clear the OOV gate at
+/// precision EXACTLY 1.000 (16 of 16), the legacy accept does not fire, and
+/// zero probes come back with any answer. So the probes fall past both arms
+/// and the question becomes what `chain_explore` had to work with.
+///
+/// `chain_explore` walks `Eem` grounded facts from the firing query-pool
+/// seeds. Two existing suites prove the machinery: `critical_thinking.rs`
+/// walks `chain_explore` to a target-pool ref and `multi_fact.rs` asserts
+/// `composition_used.len() >= 2` for a composed answer. BOTH register their
+/// facts by hand with `Eem::register_fact` in small purpose-made pools. So the
+/// untested link is whether a world built the way the scorecard builds one --
+/// `pretrain_binding_episode` and nothing else -- populates the graph at all.
+///
+/// If it does not, every fix aimed at the arms is inert by construction, which
+/// is the single most expensive recurring mistake in this repository: a guard
+/// keyed on evidence the system cannot produce.
+#[test]
+fn the_eem_graph_population_census() {
+    const ROOMS: u32 = 16;
+    let mut brain = subject();
+
+    let facts_before = brain.eem().fact_count();
+    train_chainable_world(&mut brain, ROOMS);
+    let facts_after = brain.eem().fact_count();
+
+    // How many of a probe's own firing seeds have ANY fact attached? That is
+    // precisely the input `chain_explore` receives.
+    brain.observe_read_only(QUERY_POOL, b"r000 lamp on material");
+    let seeds: Vec<u32> = brain
+        .fabric()
+        .pool(QUERY_POOL)
+        .map(|p| p.read().currently_firing().into_iter().collect())
+        .unwrap_or_default();
+    let seeds_with_facts = seeds
+        .iter()
+        .filter(|&&nid| !brain.eem().facts_involving(QUERY_POOL, nid).is_empty())
+        .count();
+
+    eprintln!("EEM graph population census");
+    eprintln!("  grounded facts before training      {facts_before}");
+    eprintln!("  grounded facts after {ROOMS} rooms x 2 {facts_after}");
+    eprintln!("  equations {} variables {} motifs {}", brain.eem().equation_count(), brain.eem().variable_count(), brain.eem().motif_count());
+    eprintln!("  probe firing seeds                  {}", seeds.len());
+    eprintln!("  of those, seeds with >=1 fact       {seeds_with_facts}");
+
+    // The invariants. Training cannot REMOVE facts, and a seed set must exist
+    // at all -- an empty seed set is its own arm (`seed.is_empty()` returns
+    // before `chain_explore`) and would make the census above unreadable.
+    assert!(
+        facts_after >= facts_before,
+        "training removed grounded facts: {facts_before} -> {facts_after}"
+    );
+    assert!(
+        !seeds.is_empty(),
+        "nothing was firing after observing the probe, so the empty-seed arm \
+         returns before chain_explore and no chaining conclusion is available"
+    );
+}
