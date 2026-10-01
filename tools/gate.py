@@ -10,7 +10,10 @@ The gate every automated pass on the brain must keep green.
    broken on main 2026-09-30 and is left out)
 3. The scorecard against its baseline (tools/scorecard.py --stress, so scale
    64 is compared too): recall and
-   integration never drop, RAM stays under 2 GB and never regresses.
+   integration never drop, RAM stays under 2 GB and never regresses, and
+   integration_wrong_pct stays strictly BELOW integration_pct and never rises
+   more than 2 points over the baseline -- so a pass cannot buy integration by
+   inventing more answers, which is what every rule above was blind to.
 
 Everything runs inside tools/capped.py with 2 build jobs, so no step can take
 the machine's memory. Nothing here starts the node, touches
