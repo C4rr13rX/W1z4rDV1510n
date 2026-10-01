@@ -4811,12 +4811,31 @@ impl Pool {
                 // top-down terminal below is always wired, so the pair is only
                 // ever missing in the bottom-up direction that the label and
                 // sequence indexes already cover.
-                let saturated = atom_cap > 0
-                    && member_neuron.is_atom()
-                    && member_neuron.terminals.len() >= atom_cap;
-                if !saturated
-                    && member_neuron.reinforce_terminal(target, 0.5, tick, self.config.max_weight)
-                {
+                //
+                // The bound is FIRST-COME here, and that is measurably costly:
+                // lifting it entirely (`max_atom_fanout = 0`), nothing else
+                // changed, moved scale-16 integration 44.3 -> 50.8 % and
+                // scale-64 integration 20.5 -> 32.5 % with recall at 100.0 --
+                // so the terminals it refuses are carrying answers. Lifting it
+                // is still wrong: +29.4 % peak and x2.75 wall at scale 64.
+                // `Neuron::reinforce_terminal_bounded` keeps the bound and
+                // displaces the weakest resident terminal instead.
+                //
+                // Measured as a NO-MOVE at this call site -- integration
+                // 53.7 / 50.0 / 44.3 -> 53.7 / 50.0 / 44.8, peak and recall
+                // flat -- because the hub is built by
+                // `Brain::promote_binding_concept` and not by concept
+                // emergence. It is wired here anyway: the rule is correct, it
+                // costs nothing, and this is the site that matters as soon as
+                // training forms concepts.
+                let cap = if member_neuron.is_atom() { atom_cap } else { 0 };
+                if member_neuron.reinforce_terminal_bounded(
+                    target,
+                    0.5,
+                    tick,
+                    self.config.max_weight,
+                    cap,
+                ) {
                     added_terminals += 1;
                 }
             }
