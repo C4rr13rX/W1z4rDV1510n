@@ -36,6 +36,29 @@ WITH THE STORE ATTACHED -- had never been measured by the thing that gates it.
 A store-attached run must keep recall_pct at the no-store level (paging to SSD
 may not lose a taught fact) and must actually evict, or it is measuring the same
 resident brain twice.
+
+First measurement, 2026-10-01, `--stress --with-store` (scale 64 needed
+--store-timeout; it times out at the shared 300 s):
+
+  scale  no-store peak  store peak        recall  slept/page_outs/page_ins  container
+      1       16.4 MB    23.1 MB (x1.41)   100.0       241 /    241 /   241    0.6 MB
+      4       18.8 MB    24.5 MB (x1.30)   100.0       803 /    803 /   803    2.4 MB
+     16       24.9 MB    31.0 MB (x1.24)   100.0      3035 /   3035 /  3035    8.9 MB
+     64       40.5 MB    45.8 MB (x1.13)   100.0      5496 /  11963 / 11963   29.8 MB
+
+Two things that reading settles. Recall is 100.0 at every scale with the store
+attached, so paging to SSD loses no taught fact. And peak RAM is HIGHER with the
+store, not lower, at every scale -- because page_ins equals page_outs exactly:
+the answer phases pull every body back, and the run ends with 0 neurons evicted
+and every terminal resident (129,639 of them at scale 64). M4's "peak RAM
+independent of the corpus" is therefore not merely unachieved, it is not yet
+approached; nothing bounds the working set, and the container is pure overhead
+on top of a fully resident brain. The zoom -- paging in only what the goal needs
+-- is the missing mechanism, and this mode is how it gets measured.
+
+`cold_offsets` and `evicted_set` read 0 at all four scales. That is the normal
+reading for a `.wbrain` brain, not an absence: see `classify_zero_buckets` in
+crates/brain/examples/scorecard.rs.
 """
 from __future__ import annotations
 
