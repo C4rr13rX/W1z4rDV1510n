@@ -407,10 +407,12 @@ Passing the target pool through to the score half, changing nothing else (`pytho
 
 | scale | integration % | wrong % | recall % | empty (on_material) | peak MB | wall s |
 |---|---|---|---|---|---|---|
-| 1 | 74.07 → 74.07 | 0.0 → 0.0 | 100.0 | 2 → 2 | 16.8 → 16.9 | 0.3 → 12.1 |
-| 4 | 76.85 → 76.85 | 0.0 → 0.0 | 100.0 | 2 → 2 | 19.1 → 19.4 | 10.5 → 3.0 |
-| 16 | 64.47 → 65.62 | 0.0 → 0.0 | 100.0 | 101 → 93 | 25.1 → 25.7 | 33.1 → 19.4 |
-| 64 | 38.54 → 39.00 | 0.0 → 0.0 | 100.0 | 889 → 881 | 40.7 → 39.3 | 113.8 → 104.7 |
+| 1 | 74.07 → 74.07 | 0.0 → 0.0 | 100.0 | 2 → 2 | 16.5 → 16.9 | 12.1 |
+| 4 | 76.85 → 76.85 | 0.0 → 0.0 | 100.0 | 2 → 2 | 19.1 → 19.4 | 3.0 |
+| 16 | 64.47 → 65.62 | 0.0 → 0.0 | 100.0 | 101 → 93 | 25.2 → 25.7 | 19.4 |
+| 64 | 38.54 → 39.00 | 0.0 → 0.0 | 100.0 | 889 → 881 | 40.4 → 39.3 | 104.7 |
+
+Both columns of that table are read back out of `docs/scorecard-baseline.json` and `logs/scorecard-latest.json` with `json.load`, and the first version of it was wrong in a way worth recording: the "before" peaks were copied from a status block printed by a different run (16.8 / 25.1 / 40.7) instead of from the baseline file (16.5 / 25.2 / 40.4). The command that produced the screen figures had been named, so naming the command is not the check — reading the committed artifact is.
 
 Scales 1 and 4 are digit-identical, which is the control: nothing saturates at scale 1, so a reach fix must not move it. The gain is small at scale 64 for a reason the same artifact names — `rank_bounded_binding_evidence` sorts candidates by vote count and truncates to 512, and a binding hidden from every feature posting arrives with exactly one vote, so exact identity can still be outvoted out of the candidate set by fuzzy per-byte evidence. Nothing in this change is a ranking change: the acceptance test is still `score >= 1.0` AND `is_trained_frame`, an exact digest of the taught bytes, which is why wrong stays 0.0 at every scale.
 
