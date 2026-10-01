@@ -222,9 +222,31 @@ single run is all there is.
   path. The census is unchanged by the fan-out cap, as expected, since a cap
   removes terminals and not fingerprints.
 - **Integration is still 0%** at every scale, and that is the second goal.
-  The scene world's integration probes chain two trained facts: "r03 lamp on"
-  gives "desk" and "r03 desk material" gives "oak", so "r03 lamp on material?"
-  should give "oak". Nothing this pass touched it in either direction.
+  It is now 0% across FOUR families, not one shape: `on_material` (2 hops, on?
+  then material?), `next_color` (2 hops over room adjacency, no rests-on),
+  `next_on_material` (3 hops), and `beside_next` (1 hop, a phrasing held out
+  per room). One family could be satisfied by a mechanism that chained rests-on
+  and derived nothing general, which is why M3's 90% was not measurable before.
+  Each family reports its own count and percentage.
+
+  Two measurements narrow what to fix, both at HEAD 8b4454a from
+  `tools/scorecard.py --scales 1,4,16`:
+  - **Every miss is `empty`.** 1,134 of 1,134 misses across scales 1, 4 and 16
+    (54 + 216 + 864 probes, every one of them a miss)
+    returned nothing — not one wrong chain, not one short chain, not one wrong
+    relation, even though the world trains a `near?` distractor precisely so a
+    wrong relation comes back as a wrong trained STRING rather than as nothing.
+  - **Every probe reaches the fabric.** Query-pool neurons lit per question:
+    trained 16.9, on_material 23.0, next_color 21.6, next_on_material 28.0,
+    beside_next 12.0, and **0 of 864 probes lit nothing**.
+
+  So this is not chaining depth, relation selection, or query atomization.
+  `integrate_autonomous(.., 100.0, 3, 200)` reaches the query pool every time
+  and the answer pool never: the fault is the cross-pool hop or the answer
+  decode. The sharpest single case is `beside_next` — one hop, the same answer
+  as a fact that IS trained for that room, differing only in `beside?` for
+  `next?`, and `beside?` is itself trained on one room in four. Filed as
+  backlog item `da572da1`.
 
 ## How to work
 

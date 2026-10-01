@@ -4,13 +4,28 @@
 //! trained at a given scale, then probed three ways:
 //!
 //! - recall:      trained facts ("r03 lamp color?" -> "red"). Must stay 100%.
-//! - integration: facts never trained but true in the world, derivable by
-//!                chaining two trained ones ("r03 lamp on" -> "desk", "r03
-//!                desk material" -> "oak", so "r03 lamp on material?" ->
-//!                "oak"). Must never drop.
+//! - integration: facts never trained but true in the world, derivable only by
+//!                composing trained ones. FOUR families, each scored and
+//!                reported on its own, because one family cannot measure
+//!                integration -- a mechanism that chained rests-on and nothing
+//!                else used to score 100% of it:
+//!                  on_material       2 hops  on? then material?
+//!                  next_color        2 hops  next? then color?  (not rests-on)
+//!                  next_on_material  3 hops  next? on? material?
+//!                  beside_next       1 hop   next? under a held-out phrasing
+//!                Every miss is classified by the vocabulary of what came back
+//!                (empty / color / material / object / room), and every question
+//!                reports the query-pool neurons it lit, so a 0% says WHICH
+//!                repair it needs. Must never drop.
 //! - footprint:   neurons, terminals, the largest fan-out on any one neuron
 //!                (the hub that cannot leave RAM), and an estimate of
 //!                resident bytes. Must stay flat as the world grows.
+//!
+//! `mod honesty` asserts over the GENERATED world that every probe answer is a
+//! composition of trained facts, that no probe query is trained, and that the
+//! most similar trained question answers something ELSE -- under longest common
+//! prefix and bigram Dice, over the whole argmax set. Nothing in crates/brain
+//! knows a probe exists, and nothing here may special-case one.
 //!
 //! Prints ONE JSON line. Peak process memory is measured from outside by
 //! tools/capped.py, which also enforces the cap -- see tools/scorecard.py.
