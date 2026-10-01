@@ -387,6 +387,8 @@ A gain in the table above counts only if the node answers through the path the s
 
 `crates/brain/tests/answer_path_parameters_are_shared.rs` is a source scan that fails if any site passes a numeric literal again, and asserts it found at least one call in each of the four files so it cannot pass vacuously — `cargo test -p w1z4rd-brain --test answer_path_parameters_are_shared` is 4 passed / 0 failed.
 
+**What the alignment cost, measured rather than argued.** `crates/brain/tests/answer_path_alignment_cost.rs` answers one trained world's 24 held-out two-hop probes at both configurations and prints both: old node (fabric 0.0, depth 4, visit 200) **24 correct / 0 wrong / 0 silent**, shared (fabric 100.0, depth 3, visit 200) **24 correct / 0 wrong / 0 silent** — delta zero on all three. So the alignment is free here, and the honest limit of that reading is that **no probe in this world exercised the difference**: the trained-binding and derivation arms answered every probe, so the fabric-confidence arm never got to speak under either threshold. The structural argument stands — `100.0` is unreachable and `0.0` is not, so the two configurations *can* differ — but this file does not demonstrate a case where they do. What it does prove is that closing the gap costs nothing to close.
+
 ### Brain crate (`crates/brain`, port 8095) — Stage 16 (2026-05-21)
 
 | Task | Score | Notes |
