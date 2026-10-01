@@ -102,10 +102,16 @@ What is left, measured at scale 64 with
   1.57 → 0.61 MB. The remainder is still per-fact and still the same shape:
   `fingerprint_keys` 2.79 MB over 9,728 (287 B per fact, now just
   `ordered_per_pool` plus the struct — the census counts Vec CAPACITY here
-  now, which is 29 % more than the `len` it counted before), `binding_sequence_index` 1.30 MB over
-  9,742 (134 B — the query's atom sequence, a THIRD copy of what the
-  fingerprint already holds), `binding_feature_atom_index` 0.64 MB and
-  `binding_motif_index` 0.37 MB. Deduplicating the sequence index against the
+  now, which is 29 % more than the `len` it counted before), `binding_sequence_index` 1.963 MB over
+  9,742 (211 B — the query's atom sequence, a THIRD copy of what the
+  fingerprint already holds), `binding_feature_atom_index` 0.851 MB over 48
+  and `binding_motif_index` 0.444 MB over 825; `total_bytes` 6.457 MB, and
+  `pool.label_index` 0.844 MB. Those four figures are re-measured at 88d5821
+  and replace `1.30 / 0.64 / 0.37`, which this paragraph carried against a
+  census that had since started counting Vec capacity — the same prose-versus-
+  artifact gap the paragraph below names for `peak_mb`. The drop criterion
+  1 of `c7d8aaba` asks for is therefore 2.0x, not 1.3x. Deduplicating the
+  sequence index against the
   fingerprint is the next one of these, and it is worth less than the neuron
   bodies below.
 Two more changes, both the same defect: a cache that a MINORITY of neurons
