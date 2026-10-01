@@ -2287,6 +2287,39 @@ impl Pool {
         Ok(discarded)
     }
 
+    /// Release the bodies paged in by the current read-only request, writing
+    /// each one back to the container FIRST.
+    ///
+    /// This is the sibling of [`Self::discard_wbrain_residents_read_only`] for
+    /// the case that one cannot serve: a request that paged a body in and then
+    /// mutated it. `Brain::observe_read_only` wraps `Brain::observe`, which
+    /// performs Hebbian terminal updates on whatever the question lights, so
+    /// dropping those slots would delete learning rather than return memory.
+    /// `evict_neuron` is exactly "persist then sleep" and is already the
+    /// policy-free explicit path (`serialize_all_neurons_for_idle` uses it per
+    /// neuron), so the answer path reuses it instead of widening the discard.
+    ///
+    /// The cost is one body append per neuron the question touched, which is
+    /// disk; the alternative is one resident body per neuron the question has
+    /// EVER touched, which is the RAM the goal bounds.
+    pub(crate) fn evict_wbrain_residents_read_only(&mut self) -> std::io::Result<usize> {
+        if self.wbrain_store.is_none() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "read-only resident eviction requires a .wbrain store",
+            ));
+        }
+        let ids = std::mem::take(&mut self.read_only_inference_residents);
+        self.read_only_inference_active = false;
+        let mut released = 0;
+        for id in ids {
+            if self.evict_neuron(id)? {
+                released += 1;
+            }
+        }
+        Ok(released)
+    }
+
     /// Read only the shape needed by index maintenance, then immediately
     /// release the paged body. Concept children are returned as stable refs;
     /// atom bytes are decoded while the label is resident.

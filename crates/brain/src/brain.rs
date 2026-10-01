@@ -724,6 +724,13 @@ pub struct BrainStats {
     pub evicted_neurons: usize,
     /// Bodies written to the `.wbrain` store by eviction.
     pub page_outs: u64,
+    /// Bodies read back OUT of the `.wbrain` store on demand. The half that
+    /// says whether a question went to disk at all. It was computable only by
+    /// summing `Pool::wbrain_page_ins` over the pools, which is what
+    /// `examples/scorecard.rs` did -- so no test could state the fact the
+    /// 2026-10-01 store run turned up, that `page_ins` equalled `page_outs`
+    /// exactly at all four scales because nothing released a page-in.
+    pub page_ins: u64,
     /// Evictions that wrote NOTHING because the durable body was already
     /// byte-identical. Report beside `page_outs`: the ratio is the only direct
     /// readout of how much of this append-only store's growth is learning and
@@ -2068,7 +2075,22 @@ impl Brain {
     /// trains on a miss still crystallises normally -- which is the design:
     /// the brain learns when it is taught or when it misses, not every time
     /// it is asked something it already knows.
+    /// It also OPENS the read-only inference window, so every body the
+    /// question and its decoder traversal page in is recorded and released by
+    /// [`Self::finish_read_only_inference`]. Measured 2026-10-01 with
+    /// `tools/scorecard.py --stress --with-store`: nothing opened the window on
+    /// any answer path, so `page_ins` equalled `page_outs` exactly at all four
+    /// scales (241/241, 803/803, 3035/3035, 11963/11963), a store-attached run
+    /// ended with 0 neurons evicted and 129,639 terminals resident at scale 64,
+    /// and peak RAM was HIGHER with the store attached (45.8 MB) than without
+    /// it (40.5). The page-OUT half was working; the window was never opened.
+    ///
+    /// This is safe here only because the drain PERSISTS -- see
+    /// [`Pool::evict_wbrain_residents_read_only`]. This wraps [`Self::observe`],
+    /// which does Hebbian terminal updates, so the plain discard would have
+    /// dropped mutated bodies.
     pub fn observe_read_only(&mut self, pool_id: PoolId, frame: &[u8]) -> Vec<NeuronId> {
+        self.begin_read_only_inference();
         self.set_emergence_suppressed(true);
         let fired = self.observe(pool_id, frame);
         self.set_emergence_suppressed(false);
@@ -2101,7 +2123,12 @@ impl Brain {
     /// Nor does it join the current learning moment — see
     /// [`Fabric::observe_without_moment`] for why that is both a correctness
     /// fix and the only unbounded allocation a read-only probe was making.
+    /// Opens the read-only inference window for the same reason
+    /// [`Self::observe_read_only`] does, and is safe for the same reason: the
+    /// drain persists. `Fabric::observe_without_moment` still calls
+    /// `Pool::observe_frame`, so this path mutates terminals too.
     pub fn observe_fabric_read_only(&mut self, pool_id: PoolId, frame: &[u8]) -> Vec<NeuronId> {
+        self.begin_read_only_inference();
         self.set_emergence_suppressed(true);
         let fired = self.fabric.observe_without_moment(pool_id, frame);
         self.set_emergence_suppressed(false);
@@ -2136,24 +2163,32 @@ impl Brain {
     ///
     /// Prediction is deliberately non-learning: query activation, decoder
     /// traversal, and diagnostics must not make the request's working set
-    /// permanently resident. Unlike [`Self::serialize_all_neurons_for_idle`],
-    /// this performs no body rewrite or manifest commit. Callers must use it
-    /// only after operations that cannot make durable neuron changes.
+    /// permanently resident. Unlike [`Self::serialize_all_neurons_for_idle`]
+    /// this walks only the request's own page-ins rather than every logical
+    /// slot.
+    ///
+    /// It DOES write a body back before dropping it, because the two answer
+    /// entry points that open the window -- [`Self::observe_read_only`] and
+    /// [`Self::observe_fabric_read_only`] -- both reach `Pool::observe_frame`
+    /// and so mutate terminals. A caller that is certain nothing was mutated
+    /// gains nothing from a cheaper drain: `Store::persist_sleeping` is what
+    /// makes the release safe for every caller, and a release that is only
+    /// sometimes safe is how a window stays shut.
     pub fn finish_read_only_inference(&mut self) -> std::io::Result<usize> {
         self.clear_prediction_activation();
         if self.wbrain_file.is_none() {
             return Ok(0);
         }
-        let mut discarded = 0;
+        let mut released = 0;
         for pool_id in self.fabric.pool_ids() {
             if let Some(pool) = self.fabric.pool(pool_id) {
                 let mut pool = pool.write();
                 if pool.has_wbrain_store() {
-                    discarded += pool.discard_wbrain_residents_read_only()?;
+                    released += pool.evict_wbrain_residents_read_only()?;
                 }
             }
         }
-        Ok(discarded)
+        Ok(released)
     }
 
     /// Close the current tick.  Performs:
@@ -10143,6 +10178,7 @@ impl Brain {
             resident_terminals: 0,
             evicted_neurons: 0,
             page_outs: 0,
+            page_ins: 0,
             clean_skips: 0,
             binding_pool_id: self.binding_pool_id,
             fingerprints_window: self.moment_history.len(),
@@ -10168,6 +10204,7 @@ impl Brain {
                 let (page_outs, clean_skips) = pool.store_page_out_counters();
                 stats.page_outs += page_outs;
                 stats.clean_skips += clean_skips;
+                stats.page_ins += pool.wbrain_page_ins();
                 if pid == self.binding_pool_id {
                     stats.total_binding += cc;
                 }
