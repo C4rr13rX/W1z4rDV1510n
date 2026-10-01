@@ -81,8 +81,20 @@ def runset(s):
             if r in concepts: out.add(r)
     return out
 def byteset(s): return set(s.encode()[i:i+1] for i in range(len(s)))
+# Memoised, because the naive form recomputed every trained question's set for
+# every candidate rewrite and that made ROOMS=32 exceed a two-minute budget --
+# 744 facts x ~20 rewrites x 24 probes rebuilding the same 744 sets each time.
+# The sets are a pure function of the string, so one dict removes the whole
+# factor and nothing about the numbers changes.
+_SETS={}
+def _setof(s,f):
+    key=(id(f),s)
+    v=_SETS.get(key)
+    if v is None:
+        v=f(s); _SETS[key]=v
+    return v
 def score(q,t,f):
-    a,b=f(q),f(t); n=len(a&b)
+    a,b=_setof(q,f),_setof(t,f); n=len(a&b)
     return (n/len(b))*(n/len(a))
 print("trained %d ; recurring runs (concepts) %d"%(len(facts),len(concepts)))
 tq=[q for q,_ in facts]
