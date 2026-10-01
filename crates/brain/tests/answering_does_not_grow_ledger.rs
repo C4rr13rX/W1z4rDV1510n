@@ -93,6 +93,99 @@ fn suppression_does_not_leak_past_one_observe() {
     );
 }
 
+/// The node's answer routes reach past `Brain` into the fabric, so the
+/// suppression needs a fabric-level entry point too.
+///
+/// Measured 2026-09-30 read-only: `crates/node/src/api.rs:8016` (`/brain/ask`),
+/// `:8146` (the hypothesis research loop) and
+/// `crates/node/src/brain_api.rs:6089` (the idle thinking loop, every ~250 ms)
+/// all called `brain.fabric_mut().observe(..)`, which never touches
+/// `Brain::observe` and so could not be fixed by `observe_read_only`. Zero
+/// callers of `observe_read_only` existed anywhere in `crates/node/src`
+/// against 17 call sites of the mutating `observe`, while the node's own pool
+/// config sets `text.max_concept_member_count = 32` (`brain_api.rs:148`,
+/// `brain_server.rs:284`) -- so emergence was on.
+///
+/// The cost is exact, not sampled. `check_concept_emergence` (`pool.rs`) runs
+/// once per observed ATOM and inserts one key per run length
+/// `2..=min(max_concept_member_count, buf_len)`; `recent_atoms` is a ROLLING
+/// window (65536 in the node, 2048 here), so after the first question
+/// `buf_len` always exceeds the cap and the cap IS the per-atom count. Entries
+/// per observe = `(cap - 1) * frame_len`, which is LINEAR in both. At
+/// `cap = 64, len = 17` that is 1,071 -- exactly the figure
+/// `docs/RAM_GOAL.md` measured independently at those parameters, which is the
+/// cross-check that makes the formula trustworthy.
+///
+/// So the node's cap of 32 costs HALF per byte, not more: 527 entries for a
+/// 17-byte question. `/chat` observes the prompt twice
+/// (`brain_server.rs:2382` and `:2449`), so ~1,054 permanent keys per turn.
+/// Half the per-question constant, and still unbounded in questions asked --
+/// which is the part that matters, since nothing reclaims them.
+///
+/// Paired on purpose, as above: the fabric path must still grow the ledger, or
+/// the read-only assertion passes for a brain whose emergence has died.
+#[test]
+fn the_fabric_level_answer_path_does_not_grow_the_emergence_ledger() {
+    let mut brain = subject();
+    for room in 0..8 {
+        brain.pretrain_binding_episode(&[
+            (QUERY_POOL, format!("r{room:03} lamp color?").into_bytes()),
+            (ANSWER_POOL, b"red".to_vec()),
+        ]);
+    }
+    let trained = ledger_entries(&brain);
+
+    for room in 200..232 {
+        brain.observe_fabric_read_only(QUERY_POOL, format!("r{room:03} lamp color?").as_bytes());
+    }
+    assert_eq!(
+        ledger_entries(&brain),
+        trained,
+        "answering 32 questions through the fabric-level path grew the emergence ledger"
+    );
+
+    for room in 200..232 {
+        brain
+            .fabric_mut()
+            .observe(QUERY_POOL, format!("r{room:03} lamp color?").as_bytes());
+    }
+    assert!(
+        ledger_entries(&brain) > trained,
+        "fabric_mut().observe no longer grows the ledger, so the check above is vacuous"
+    );
+}
+
+/// The fabric-level path is deliberately NOT `Brain::observe` with suppression
+/// bolted on: it performs no QA capture and writes no `recent_frames` entry.
+///
+/// That is the whole reason it exists rather than the answer routes being
+/// pointed at `observe_read_only`. A QA pair harvested from a question being
+/// ANSWERED is training those routes never asked for, and the node's idle
+/// thinking loop seeds itself FROM `qa_db`, so letting it write back would
+/// have it feed on its own output.
+#[test]
+fn the_fabric_level_answer_path_captures_no_qa_pair() {
+    let mut brain = subject();
+    // Two frames in different pools within 2 ticks is exactly the shape
+    // `Brain::observe` captures as a QA pair.
+    brain.observe_fabric_read_only(QUERY_POOL, b"r001 lamp color?");
+    brain.observe_fabric_read_only(ANSWER_POOL, b"red");
+    assert_eq!(
+        brain.qa_db().len(),
+        0,
+        "the fabric-level answer path captured a QA pair, so it is routing through Brain::observe"
+    );
+
+    // And the Brain-level path still does capture one, so the assertion above
+    // is not passing because QA capture has stopped working.
+    brain.observe(QUERY_POOL, b"r002 lamp color?");
+    brain.observe(ANSWER_POOL, b"red");
+    assert!(
+        brain.qa_db().len() > 0,
+        "Brain::observe no longer captures QA pairs, so the check above is vacuous"
+    );
+}
+
 /// A byte must not acquire one terminal per fact.
 ///
 /// Measured 2026-09-30 at scale 16 of the scorecard, the three largest neurons

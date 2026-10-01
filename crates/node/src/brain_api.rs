@@ -6086,7 +6086,10 @@ pub async fn run_thinking_loop(state: BrainApiState) {
 
         let answer = {
             let mut brain = state.brain.lock().await;
-            brain.fabric_mut().observe(qp, &seed);
+            // Read-only: this loop re-seeds and integrates every ~250 ms for
+            // the node's whole uptime, so it is the one answer path whose
+            // ledger growth is unbounded in time rather than in traffic.
+            brain.observe_fabric_read_only(qp, &seed);
             brain.integrate(qp, tp).answer
         };
 
@@ -6329,6 +6332,69 @@ class Model:
             "compute arithmetic mean",
             false,
         ));
+    }
+
+    /// Answering through the node's OWN brain topology must not grow the
+    /// per-pool concept-emergence ledger.
+    ///
+    /// The brain-crate test `answering_does_not_grow_ledger.rs` proves the
+    /// mechanism; this one proves the PRODUCT uses it, on the five-pool
+    /// topology `build_default_brain` gives every answer route, whose text
+    /// pool carries `max_concept_member_count = 32`.
+    ///
+    /// Measured 2026-09-30 before the fix: zero callers of
+    /// `observe_read_only` anywhere in `crates/node/src`, against 17 call
+    /// sites of the mutating `observe` -- four of them on answer paths
+    /// (`api.rs:8016`, `api.rs:8146`, this file's idle thinking loop, and
+    /// `brain_server.rs:2379`/`:2446`).
+    #[test]
+    fn answering_through_a_node_answer_route_does_not_grow_the_emergence_ledger() {
+        fn ledger_entries(brain: &Brain) -> usize {
+            brain
+                .fabric()
+                .pool_ids()
+                .into_iter()
+                .filter_map(|id| brain.fabric().pool(id))
+                .map(|pool| pool.read().sequence_ledger_entries())
+                .sum()
+        }
+
+        let mut brain = build_default_brain().unwrap();
+        for room in 0..8 {
+            brain.pretrain_binding_episode(&[
+                (POOL_TEXT, format!("r{room:03} lamp color?").into_bytes()),
+                (POOL_ACTION, b"red".to_vec()),
+            ]);
+        }
+        let trained = ledger_entries(&brain);
+
+        // Exactly the sequence `/brain/ask` (api.rs) and the idle thinking
+        // loop below run per question: observe the query, then integrate.
+        for room in 100..132 {
+            brain.observe_fabric_read_only(POOL_TEXT, format!("r{room:03} lamp color?").as_bytes());
+            let _ = brain.integrate(POOL_TEXT, POOL_ACTION);
+        }
+        // ...and the sequence `/chat` (brain_server.rs) runs.
+        for room in 100..132 {
+            brain.observe_read_only(POOL_TEXT, format!("r{room:03} lamp color?").as_bytes());
+            let _ = brain.decode_best_trained_binding(POOL_TEXT, POOL_ACTION);
+        }
+        assert_eq!(
+            ledger_entries(&brain),
+            trained,
+            "answering 64 questions through the node's answer routes grew the emergence ledger"
+        );
+
+        // The learning routes (`/brain/observe`, `/brain/train`) are
+        // deliberately untouched, and they still grow it -- so the assertion
+        // above cannot pass for a brain whose emergence has died.
+        for room in 100..132 {
+            brain.observe(POOL_TEXT, format!("r{room:03} lamp color?").as_bytes());
+        }
+        assert!(
+            ledger_entries(&brain) > trained,
+            "the training path no longer grows the ledger, so the check above is vacuous"
+        );
     }
 
     #[test]
