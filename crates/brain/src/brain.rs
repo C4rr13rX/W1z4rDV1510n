@@ -1083,6 +1083,45 @@ pub struct Brain {
     /// [`Fabric::observe_without_moment`], so a probe allocates nothing that
     /// outlives it, and the budget's remaining cost is wall time alone.
     derivation_probe_budget: usize,
+    /// Where the taught sub-question has been found before, as
+    /// `(question length, cut point, tail length kept)`.
+    ///
+    /// The deletion search in [`Self::derive_by_substitution_profiled`] scans
+    /// `k = 1..n` with the tail interleaved, so it costs `~2k` questions to
+    /// find a cut at `k`, and `k` is large: the scorecard's
+    /// `"r000 lamp on material?"` cuts at `k = 12` of `n = 22`, which is 24
+    /// questions of a budget of 32 spent locating a cut the brain has already
+    /// located 1,535 times this scale.
+    ///
+    /// The cut is a property of the question's SHAPE, not of the question, and
+    /// the shape repeats: every `on_material` probe of the same length cuts at
+    /// the same point and keeps a 1-byte tail. So the cuts that worked are
+    /// remembered and tried first, at one question each. Nothing here reads a
+    /// byte or knows what a word is — it is a memory of where rewriting has
+    /// worked, and a miss falls straight through to the same full scan.
+    ///
+    /// # Why it is keyed on the question's LENGTH, and holds the shortest cut
+    ///
+    /// The first version keyed on the offset from the END and accepted any
+    /// remembered offset. That is a cache whose hit can differ from what the
+    /// scan would have returned — the scan takes the SHORTEST `k` that scores
+    /// 1.0, a remembered offset need not be shortest, and a longer cut is a
+    /// different sub-question with a different answer to splice. Measured in
+    /// `tools/gate.py`: scale-1 integration rose 40.7 → 44.4 and scale-16 FELL
+    /// 33.6 → 30.6, all of it `next_color` (90.6 % → 73.8 %, and 49.2 % → 36.7 %
+    /// at scale 64), because at scale 64 the object names differ in length and
+    /// one family's remembered offset lands mid-question in another's.
+    ///
+    /// Keyed on `n` and holding the smallest `k` ever seen at that `n`, a hit
+    /// is the scan's own answer for every question whose cut the cache learned
+    /// at that length, so the cache can change the COST and not the result.
+    /// Two different shapes that happen to share a length can still disagree;
+    /// that is bounded by one wrong-cut probe, and the scan runs after it.
+    ///
+    /// Bounded at [`DERIVATION_CUT_HINTS`], most-recently-useful first, and
+    /// deliberately NOT persisted: it is a cache of the current question
+    /// distribution, and a restored brain re-earns it in one question.
+    derivation_cut_hints: Vec<(usize, usize, usize)>,
 }
 
 #[derive(Debug, Clone)]
@@ -1360,6 +1399,16 @@ const DEFAULT_OVERLAY_FLUSH_ENTRY_LIMIT: usize = 250_000;
 /// either behaviour.
 pub const DEFAULT_DERIVATION_PROBE_BUDGET: usize = 32;
 
+/// How many cut shapes [`Brain::derive_by_substitution`] remembers.
+///
+/// A remembered cut is keyed on the question's length, and an entry whose
+/// length does not match is skipped without asking anything — so a miss costs
+/// zero questions and there is at most ONE hint probe per hop whatever this
+/// is. It therefore buys hit rate almost free, and is sized for the number of
+/// distinct question lengths a world has rather than for a probe budget:
+/// 64 entries is 64 lengths at three `usize` each.
+pub const DERIVATION_CUT_HINTS: usize = 64;
+
 impl Brain {
     /// Construct a fresh brain with no sensor pools yet.  The binding
     /// pool is auto-created at pool_id = `binding_pool_config.id`.
@@ -1415,6 +1464,7 @@ impl Brain {
             delayed_feedback: Vec::new(),
             feedback_events_emitted: 0,
             derivation_probe_budget: DEFAULT_DERIVATION_PROBE_BUDGET,
+            derivation_cut_hints: Vec::new(),
         }
     }
 
@@ -6910,26 +6960,56 @@ impl Brain {
             // 32 with ~13 left for the splice.
             const MAX_DELETION_TAIL: usize = 1;
             let mut known_prefix: Option<(usize, Vec<u8>)> = None;
-            'deletion: for k in 1..n {
-                for t in 0..=MAX_DELETION_TAIL.min(n - k) {
-                    if probes >= max_probes {
-                        break 'deletion;
+            // The cuts that have worked before, at one question each. See
+            // `derivation_cut_hints`: this can only REORDER the search, never
+            // widen it, because the acceptance test below is the same `>= 1.0`
+            // the full scan uses.
+            let mut sub_question_settled = false;
+            for (hint_n, k, t) in self.derivation_cut_hints.clone() {
+                if probes >= max_probes {
+                    break;
+                }
+                if hint_n != n {
+                    continue;
+                }
+                let mut sub = Vec::with_capacity(k + t);
+                sub.extend_from_slice(&current[..k]);
+                sub.extend_from_slice(&current[n - t..]);
+                probes += 1;
+                let (score, answer) = self.probe_question(query_pool, target_pool, &sub);
+                if score >= 1.0 {
+                    if let Some(answer) = answer {
+                        known_prefix = Some((k, answer));
+                        self.note_derivation_cut(n, k, t);
                     }
-                    // `n - t == k` deletes nothing, so the probe would re-ask
-                    // `current`, whose score is already `base_score`.
-                    if t > 0 && n - t == k {
-                        continue;
-                    }
-                    let mut sub = Vec::with_capacity(k + t);
-                    sub.extend_from_slice(&current[..k]);
-                    sub.extend_from_slice(&current[n - t..]);
-                    probes += 1;
-                    let (score, answer) = self.probe_question(query_pool, target_pool, &sub);
-                    if score >= 1.0 {
-                        if let Some(answer) = answer {
-                            known_prefix = Some((k, answer));
+                    sub_question_settled = true;
+                    break;
+                }
+            }
+            if !sub_question_settled {
+                'deletion: for k in 1..n {
+                    for t in 0..=MAX_DELETION_TAIL.min(n - k) {
+                        if probes >= max_probes {
+                            break 'deletion;
                         }
-                        break 'deletion;
+                        // `n - t == k` deletes nothing, so the probe would
+                        // re-ask `current`, whose score is already
+                        // `base_score`.
+                        if t > 0 && n - t == k {
+                            continue;
+                        }
+                        let mut sub = Vec::with_capacity(k + t);
+                        sub.extend_from_slice(&current[..k]);
+                        sub.extend_from_slice(&current[n - t..]);
+                        probes += 1;
+                        let (score, answer) = self.probe_question(query_pool, target_pool, &sub);
+                        if score >= 1.0 {
+                            if let Some(answer) = answer {
+                                known_prefix = Some((k, answer));
+                                self.note_derivation_cut(n, k, t);
+                            }
+                            break 'deletion;
+                        }
                     }
                 }
             }
@@ -7112,6 +7192,33 @@ impl Brain {
     ///
     /// `0` disables the derivation, which is the default -- see
     /// `derivation_probe_budget` for the table of what each setting costs.
+    /// Remember a cut that located a taught sub-question, most-recently-useful
+    /// first. See [`Self::derivation_cut_hints`] for why the offset is measured
+    /// from the END of the question.
+    fn note_derivation_cut(&mut self, n: usize, k: usize, tail: usize) {
+        if let Some(pos) = self.derivation_cut_hints.iter().position(|(hn, _, _)| *hn == n) {
+            let mut hit = self.derivation_cut_hints.remove(pos);
+            // Keep the SHORTEST cut seen at this length, because that is the
+            // one the scan returns, and move it to the front as the most
+            // recently useful.
+            if k < hit.1 {
+                hit = (n, k, tail);
+            }
+            self.derivation_cut_hints.insert(0, hit);
+            return;
+        }
+        self.derivation_cut_hints.insert(0, (n, k, tail));
+        self.derivation_cut_hints.truncate(DERIVATION_CUT_HINTS);
+    }
+
+    /// The cuts [`Self::derive_by_substitution`] will try first, most recently
+    /// useful first. Exposed so a test can assert the cache is a CACHE — that
+    /// it is bounded and that it learned the shape — rather than inferring it
+    /// from a probe count.
+    pub fn derivation_cut_hints(&self) -> &[(usize, usize, usize)] {
+        &self.derivation_cut_hints
+    }
+
     pub fn set_derivation_probe_budget(&mut self, probes: usize) {
         self.derivation_probe_budget = probes;
     }
@@ -9764,6 +9871,7 @@ impl Brain {
             delayed_feedback: Vec::new(),
             feedback_events_emitted: 0,
             derivation_probe_budget: DEFAULT_DERIVATION_PROBE_BUDGET,
+            derivation_cut_hints: Vec::new(),
         };
         brain.rebuild_binding_sequence_index();
         (brain, missing)
@@ -9949,6 +10057,7 @@ impl Brain {
             delayed_feedback: Vec::new(),
             feedback_events_emitted: 0,
             derivation_probe_budget: DEFAULT_DERIVATION_PROBE_BUDGET,
+            derivation_cut_hints: Vec::new(),
         };
         if let Some(count) = brain.disk_scalar(FINGERPRINT_TENTATIVE_COUNT_KEY) {
             brain.tentative_binding_count_total = count as usize;

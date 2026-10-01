@@ -55,7 +55,7 @@ pub use brain::{
     Brain, BrainConfig, BrainStats, BindingMatch, MatchTier, PretrainEpisodeProfile,
     FeatureRoutePressure, RankedFeatureBinding,
     DecodedConcept, EvictionParams, EvictionStats, PoolExtrusion, ResonantExtrusion,
-    DEFAULT_DERIVATION_PROBE_BUDGET,
+    DEFAULT_DERIVATION_PROBE_BUDGET, DERIVATION_CUT_HINTS,
 };
 pub use action::{ActionEvent, ActionId, ActionRouter, NullRouter, RouteResult};
 pub use eem::{
