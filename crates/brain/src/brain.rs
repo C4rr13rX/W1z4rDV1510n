@@ -6884,18 +6884,53 @@ impl Brain {
             // The full span search stays as the fallback, so a world whose
             // sub-questions are not prefix-shaped still derives; it just costs
             // what it always did.
+            // A PREFIX is the wrong shape, and that was measured rather than
+            // reasoned. Scoring every prefix of `"r000 lamp on material?"`
+            // against a world whose trained questions all end in `?` gives
+            // 1:0.12 … 11:0.80 12:0.90 13:0.90 14:0.90 15:0.90 16:0.81 …
+            // 21:0.76 — the peak is 0.90 and NOTHING reaches 1.0, because the
+            // taught sub-question is `"r000 lamp on?"` and every prefix either
+            // lacks the terminator or carries text past it. So all `n-1` probes
+            // were spent to find nothing, which is why `on_material` (1,536 of
+            // 3,456 probes at scale 64) sat at 0 under any budget.
+            //
+            // The general shape is a DELETION, not a prefix: the taught
+            // sub-question is this question with a contiguous middle span
+            // removed, `current[..k] ++ current[n-t..]`, and `t == 0` is the
+            // prefix case. Searching every deletion is `n(n+1)/2`. `t <= 1` is
+            // a BUDGET, not a grammar — it reaches a one-byte terminator and no
+            // more, and a longer one needs `t <= 2` at `3(n-1)` probes, which
+            // does not fit 32 at `n = 22`. Nothing here reads the byte: a
+            // terminator is not recognised, it is whatever the tail turns out
+            // to be.
+            //
+            // `k` outer and `t` inner, because the order decides whether this
+            // fits. Scanning all of `t = 0` and then all of `t = 1` finds the
+            // hit at probe 33; interleaved it lands at 25, inside a ceiling of
+            // 32 with ~13 left for the splice.
+            const MAX_DELETION_TAIL: usize = 1;
             let mut known_prefix: Option<(usize, Vec<u8>)> = None;
-            for k in 1..n {
-                if probes >= max_probes {
-                    break;
-                }
-                probes += 1;
-                let (score, answer) = self.probe_question(query_pool, target_pool, &current[..k]);
-                if score >= 1.0 {
-                    if let Some(answer) = answer {
-                        known_prefix = Some((k, answer));
+            'deletion: for k in 1..n {
+                for t in 0..=MAX_DELETION_TAIL.min(n - k) {
+                    if probes >= max_probes {
+                        break 'deletion;
                     }
-                    break;
+                    // `n - t == k` deletes nothing, so the probe would re-ask
+                    // `current`, whose score is already `base_score`.
+                    if t > 0 && n - t == k {
+                        continue;
+                    }
+                    let mut sub = Vec::with_capacity(k + t);
+                    sub.extend_from_slice(&current[..k]);
+                    sub.extend_from_slice(&current[n - t..]);
+                    probes += 1;
+                    let (score, answer) = self.probe_question(query_pool, target_pool, &sub);
+                    if score >= 1.0 {
+                        if let Some(answer) = answer {
+                            known_prefix = Some((k, answer));
+                        }
+                        break 'deletion;
+                    }
                 }
             }
 
