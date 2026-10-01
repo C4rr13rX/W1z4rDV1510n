@@ -40,7 +40,8 @@ use evalexpr::{ContextWithMutableVariables, HashMapContext, Value, eval_with_con
 use serde::{Deserialize, Serialize};
 
 use crate::neuron::{NeuronId, PoolId};
-use crate::workspace::{CompositionRule, GroundedRelation, TransientWorkspace};
+use crate::workspace::{CompositionRule, GroundedRelation, PatternValue, RelationPattern,
+    TransientWorkspace, TypedValue};
 use crate::crystallizer::{SemanticCrystallizer, SemanticFrame};
 
 pub type EquationId = u32;
@@ -202,6 +203,16 @@ pub struct Eem {
     semantic_relations: Vec<GroundedRelation>,
     composition_rules: Vec<CompositionRule>,
     crystallizer: SemanticCrystallizer,
+    /// The brain's induced vocabulary: every distinct string it has been
+    /// taught as an ANSWER. Nothing here is a word list — a symbol enters
+    /// only by having been the answer to a trained question, so the set is
+    /// whatever the corpus taught and is empty on an untrained brain.
+    induced_symbols: ahash::AHashSet<Vec<u8>>,
+    /// Distinct lengths present in `induced_symbols`, descending. Searching a
+    /// query for symbols by LENGTH is what keeps the producer O(query bytes)
+    /// instead of O(vocabulary): iterating the set per episode measured as the
+    /// only superlinear term, 526 symbols x 23,808 episodes at scale 64.
+    induced_lengths: Vec<usize>,
 }
 
 impl Eem {
@@ -223,6 +234,8 @@ impl Eem {
             semantic_relations: Vec::new(),
             composition_rules: Vec::new(),
             crystallizer: SemanticCrystallizer::default(),
+            induced_symbols: ahash::AHashSet::new(),
+            induced_lengths: Vec::new(),
         }
     }
 
@@ -249,6 +262,213 @@ impl Eem {
         } else {
             self.semantic_relations.push(relation);
         }
+    }
+
+    pub fn induced_symbol_count(&self) -> usize { self.induced_symbols.len() }
+
+    /// Predicate of every relation the training path induces, and of the
+    /// premises of [`Self::INDUCED_CHAIN_RULE`].
+    pub const INDUCED_PREDICATE: &'static str = "episode";
+    /// Name of the one composition rule training installs.
+    pub const INDUCED_CHAIN_RULE: &'static str = "episode_chain";
+    /// Predicate of what that rule concludes. Distinct from the premise
+    /// predicate on purpose: a conclusion that could re-match a premise makes
+    /// `resolve` iterate its own output, which is `facts^2` per round for no
+    /// new derivation at depth 2.
+    pub const INDUCED_CHAIN_PREDICATE: &'static str = "episode_chain";
+    /// Predicate of a question decomposed at TWO symbol occurrences at once.
+    ///
+    /// One symbol slot is not enough, and the first version of this shipped
+    /// unsound because of it. With premises `episode(_, room, tail, link)` and
+    /// `episode(free, link, tail2, answer)` the second premise's context is a
+    /// FREE variable, so `"r001 lamp on?" -> "desk"` joined
+    /// `"r003 desk material?"` and concluded r003's material for r001's lamp --
+    /// a well-formed derivation of a false fact, measured as
+    /// `["", "r001", " lamp on?", " material?", "cloth"]` sourced from
+    /// `r001 lamp on?` and `r003 desk material?`. A two-symbol decomposition
+    /// gives the rule a slot for the shared anchor, so the join pins BOTH the
+    /// link and the thing it belongs to.
+    pub const INDUCED_PAIR_PREDICATE: &'static str = "episode_pair";
+    /// `ctx` is unmatchable context — the part of a question that is not a
+    /// symbol. `sym` is a member of the induced vocabulary. Both an answer and
+    /// an in-query occurrence carry `sym`, because they are the same type: a
+    /// symbol is a string the brain was taught to produce. `unify` rejects a
+    /// binding across differing kinds, so without that the join cannot be
+    /// stated at all.
+    const KIND_CTX: &'static str = "ctx";
+    const KIND_SYM: &'static str = "sym";
+    /// Ceiling on DURABLE induced relations. The instances are per-fact and the
+    /// goal is RAM flat in corpus size, so they cannot all be kept: one 4-arity
+    /// `GroundedRelation` measured ~460 B, which at 11,904 facts is 5.5 MB —
+    /// 14 % of a 39.5 MB scale-64 peak, and a previous pass already spent
+    /// 5.3 MB here for 0 integration. Past the cap the vocabulary and the rule
+    /// still grow (both O(1) in facts) and an instance is rebuilt per query via
+    /// [`Self::compose_with_transient`], which is what `workspace.rs`'s own doc
+    /// comment says the design is.
+    pub const MAX_INDUCED_RELATIONS: usize = 2048;
+
+    /// Feed the composition engine from one training episode.
+    ///
+    /// # Why a question has to be taken apart first
+    ///
+    /// `TransientWorkspace` joins by binding a typed variable to a whole
+    /// argument and comparing with `==` (`workspace.rs::unify`). The join
+    /// integration needs over a string world is not that: `"r003 lamp on?"
+    /// -> "desk"` meets `"r003 desk material?" -> "oak"` at the string
+    /// `desk`, which is the ANSWER of the first and sits INSIDE the QUERY of
+    /// the second. Registered as `(query, answer)` pairs those two relations
+    /// share no argument, so `compose_transient` derives nothing from them
+    /// under any rule — which is exactly what
+    /// `tests/composition_inputs_census.rs` asserts.
+    ///
+    /// So the query is split at every occurrence of an induced symbol into
+    /// `(before, symbol, after, answer)`, putting the join key in its own slot.
+    /// The vocabulary is learned: a symbol is a string this brain was taught to
+    /// ANSWER. There is no delimiter, no token list and no segmentation rule,
+    /// and on a brain taught nothing the producer emits nothing.
+    ///
+    /// Returns how many relations this episode added.
+    pub fn induce_from_episode(&mut self, query: &[u8], answer: &[u8]) -> usize {
+        if answer.is_empty() {
+            return 0;
+        }
+        self.install_induced_chain_rule();
+        // The answer joins the vocabulary FIRST, so a corpus that teaches the
+        // same string as an answer and then uses it inside a later question is
+        // decomposed on the second episode rather than never.
+        if self.induced_symbols.insert(answer.to_vec()) {
+            let len = answer.len();
+            if let Err(at) = self.induced_lengths.binary_search_by(|probe| len.cmp(probe)) {
+                self.induced_lengths.insert(at, len);
+            }
+        }
+        if self.semantic_relations.len() >= Self::MAX_INDUCED_RELATIONS {
+            return 0;
+        }
+        let provenance = String::from_utf8_lossy(query).into_owned();
+        let answer_value = TypedValue::new(Self::KIND_SYM, String::from_utf8_lossy(answer));
+        let text = |range: std::ops::Range<usize>| {
+            TypedValue::new(Self::KIND_CTX, String::from_utf8_lossy(&query[range]))
+        };
+        let symbol = |range: std::ops::Range<usize>| {
+            TypedValue::new(Self::KIND_SYM, String::from_utf8_lossy(&query[range]))
+        };
+        let occurrences = self.induced_occurrences(query);
+        let mut added = 0;
+        let mut relations = Vec::with_capacity(occurrences.len() * 2);
+        for &(start, len) in &occurrences {
+            relations.push((
+                Self::INDUCED_PREDICATE,
+                vec![
+                    text(0..start),
+                    symbol(start..start + len),
+                    text(start + len..query.len()),
+                    answer_value.clone(),
+                ],
+            ));
+        }
+        // Every ordered pair of NON-OVERLAPPING occurrences. The anchor is the
+        // earlier one and the link the later one; which is which is decided by
+        // position, never by what either string means.
+        for &(first, first_len) in &occurrences {
+            for &(second, second_len) in &occurrences {
+                if second < first + first_len {
+                    continue;
+                }
+                relations.push((
+                    Self::INDUCED_PAIR_PREDICATE,
+                    vec![
+                        text(0..first),
+                        symbol(first..first + first_len),
+                        text(first + first_len..second),
+                        symbol(second..second + second_len),
+                        text(second + second_len..query.len()),
+                        answer_value.clone(),
+                    ],
+                ));
+            }
+        }
+        for (predicate, arguments) in relations {
+            if self.semantic_relations.len() >= Self::MAX_INDUCED_RELATIONS {
+                break;
+            }
+            let before_count = self.semantic_relations.len();
+            self.register_semantic_relation(GroundedRelation::new(
+                predicate,
+                arguments,
+                1.0,
+                provenance.clone(),
+            ));
+            if self.semantic_relations.len() > before_count {
+                added += 1;
+            }
+        }
+        added
+    }
+
+    /// Every `(start, len)` at which an induced symbol occurs in `query`,
+    /// longest first, skipping an occurrence that IS the whole query (a
+    /// relation whose context is empty on both sides joins nothing and only
+    /// spends the cap).
+    fn induced_occurrences(&self, query: &[u8]) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        for &len in &self.induced_lengths {
+            if len == 0 || len > query.len() || len == query.len() {
+                continue;
+            }
+            for start in 0..=(query.len() - len) {
+                if self.induced_symbols.contains(&query[start..start + len]) {
+                    out.push((start, len));
+                }
+            }
+        }
+        out
+    }
+
+    /// The one rule training installs: chain two episodes through a symbol
+    /// that one of them ANSWERS and the other CONTAINS. Idempotent, and O(1) in
+    /// corpus size — there is exactly one of these however much is taught.
+    fn install_induced_chain_rule(&mut self) {
+        if self.composition_rules.iter().any(|rule| rule.name == Self::INDUCED_CHAIN_RULE) {
+            return;
+        }
+        let ctx = |name: &str| PatternValue::var(name, Self::KIND_CTX);
+        let sym = |name: &str| PatternValue::var(name, Self::KIND_SYM);
+        self.composition_rules.push(CompositionRule {
+            name: Self::INDUCED_CHAIN_RULE.to_string(),
+            premises: vec![
+                // A question about `anchor` whose answer is `link`.
+                RelationPattern::new(
+                    Self::INDUCED_PREDICATE,
+                    vec![ctx("before"), sym("anchor"), ctx("after"), sym("link")],
+                ),
+                // A question about the SAME anchor that also mentions `link`.
+                // Both variables are bound by the first premise, so the join
+                // pins the link AND the thing it belongs to -- which is what
+                // makes the conclusion true rather than merely well formed.
+                RelationPattern::new(
+                    Self::INDUCED_PAIR_PREDICATE,
+                    vec![
+                        ctx("link_before"),
+                        sym("anchor"),
+                        ctx("link_middle"),
+                        sym("link"),
+                        ctx("link_after"),
+                        sym("conclusion"),
+                    ],
+                ),
+            ],
+            conclusion: RelationPattern::new(
+                Self::INDUCED_CHAIN_PREDICATE,
+                vec![
+                    ctx("before"),
+                    sym("anchor"),
+                    ctx("after"),
+                    ctx("link_after"),
+                    sym("conclusion"),
+                ],
+            ),
+        });
     }
 
     pub fn register_composition_rule(&mut self, rule: CompositionRule) {
@@ -637,6 +857,7 @@ impl Eem {
             semantic_relations: self.semantic_relations.clone(),
             composition_rules: self.composition_rules.clone(),
             crystallizer: self.crystallizer.clone(),
+            induced_symbols: self.induced_symbols.iter().cloned().collect(),
         }
     }
 
@@ -664,6 +885,18 @@ impl Eem {
             }
             fact_by_source.insert(f.source_binding, f.id);
         }
+        // Rebuilt rather than serialized twice: the lengths are derived from
+        // the symbols, and a snapshot that carried both could disagree.
+        let mut induced_symbols: ahash::AHashSet<Vec<u8>> = ahash::AHashSet::new();
+        let mut induced_lengths: Vec<usize> = Vec::new();
+        for symbol in snap.induced_symbols {
+            let len = symbol.len();
+            if induced_symbols.insert(symbol) {
+                if let Err(at) = induced_lengths.binary_search_by(|probe| len.cmp(probe)) {
+                    induced_lengths.insert(at, len);
+                }
+            }
+        }
         Self {
             config:         snap.config,
             equations:      snap.equations,
@@ -681,6 +914,8 @@ impl Eem {
             motif_links,
             fact_by_member,
             fact_by_source,
+            induced_symbols,
+            induced_lengths,
         }
     }
 }

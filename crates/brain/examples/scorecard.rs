@@ -360,7 +360,16 @@ impl Subject {
     }
 
     /// Trains the way the node's /brain/pretrain route does: one binding
-    /// episode per fact, shuffled each epoch.
+    /// episode per fact, shuffled each epoch, and then the same episode into
+    /// the symbolic layer via `Eem::induce_from_episode` -- which is the call
+    /// `h_brain_pretrain_binding` makes beside its own
+    /// `pretrain_binding_episode`, so training here is training there.
+    ///
+    /// Until 2026-10-01 only the fabric half ran, so a trained brain reached
+    /// inference with `composition_rule_count()` and `semantic_relation_count()`
+    /// both 0 and `compose_transient` resolving over empty sets. The counts are
+    /// on the row below, because that was asserted from a grep for four passes
+    /// and a grep is not a measurement.
     fn train(&mut self, facts: &[Probe]) {
         for epoch in 0..EPOCHS {
             for i in shuffled(facts.len(), epoch) {
@@ -368,6 +377,9 @@ impl Subject {
                     (QUERY_POOL, facts[i].query.as_bytes().to_vec()),
                     (ANSWER_POOL, facts[i].answer.as_bytes().to_vec()),
                 ]);
+                self.brain
+                    .eem_mut()
+                    .induce_from_episode(facts[i].query.as_bytes(), facts[i].answer.as_bytes());
             }
         }
     }
@@ -781,6 +793,14 @@ fn main() {
             "recall_pct": recall_pct,
             "integration_pct": integration_pct,
             "integration_families": family_rows,
+            // What TRAINING put into the composition engine. Read off the row
+            // rather than inferred: these were 0/0 at every scale and the
+            // chainer in workspace.rs breaks out of its round loop the moment a
+            // round derives nothing, so with no rule it derives nothing
+            // whatever the relations are.
+            "composition_rules": subject.brain.eem().composition_rule_count(),
+            "semantic_relations": subject.brain.eem().semantic_relation_count(),
+            "induced_symbols": subject.brain.eem().induced_symbol_count(),
             "trained_lit_mean": trained_lit as f64 / world.facts.len().max(1) as f64,
             "trained_lit_zero": trained_lit_zero,
             "train_s": train_s,

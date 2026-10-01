@@ -1718,6 +1718,21 @@ async fn h_pretrain_binding(
     }
     let mut brain = s.brain.lock().await;
     let binding_id = brain.pretrain_binding_episode(&frames);
+    // Production parity with the scorecard's `train`: the fabric half and the
+    // symbolic half of one episode. Without this the node trains a brain whose
+    // `Eem::semantic_relations` and `composition_rules` are empty, so
+    // `compose_transient` on the answer path resolves over nothing -- measured
+    // 0/0 at every scale before 2026-10-01.
+    //
+    // Two frames only, and deliberately: `induce_from_episode` takes ONE
+    // question and ONE answer, and which of three-plus frames is the answer is
+    // the caller's semantics, not something to guess here.
+    let induced_relations = if frames.len() == 2 {
+        let (query, answer) = (frames[0].1.clone(), frames[1].1.clone());
+        brain.eem_mut().induce_from_episode(&query, &answer)
+    } else {
+        0
+    };
     if binding_id.is_some() {
         if let Err(error) = brain.store_clone().flush() {
             return Json(json!({"error": format!("WAL flush failed: {}", error)}));
@@ -1728,6 +1743,9 @@ async fn h_pretrain_binding(
         "binding_id": binding_id,
         "tick_now": brain.fabric().current_tick(),
         "frame_count": frames.len(),
+        "induced_relations": induced_relations,
+        "composition_rules": brain.eem().composition_rule_count(),
+        "semantic_relations": brain.eem().semantic_relation_count(),
     }))
 }
 

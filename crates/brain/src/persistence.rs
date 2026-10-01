@@ -87,6 +87,12 @@ pub struct EemSnapshot {
     pub composition_rules: Vec<crate::workspace::CompositionRule>,
     #[serde(default)]
     pub crystallizer: crate::crystallizer::SemanticCrystallizer,
+    /// Strings this brain has been taught to ANSWER — the vocabulary
+    /// `Eem::induce_from_episode` decomposes questions with. `serde(default)`
+    /// so a `brain.bin` written before the induced feed existed still loads,
+    /// with an empty vocabulary that refills as training continues.
+    #[serde(default)]
+    pub induced_symbols: Vec<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
