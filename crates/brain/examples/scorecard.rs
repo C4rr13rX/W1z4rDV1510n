@@ -801,6 +801,16 @@ fn main() {
             "composition_rules": subject.brain.eem().composition_rule_count(),
             "semantic_relations": subject.brain.eem().semantic_relation_count(),
             "induced_symbols": subject.brain.eem().induced_symbol_count(),
+            // Was the derivation even SWITCHED ON for the integration phase?
+            // `Brain::integrate_autonomous` returns at its
+            // `derivation_probe_budget == 0` guard before asking the fabric
+            // anything, and the default is 0 -- so for four passes this row
+            // published `integration_pct 0.0` for a mechanism that never ran,
+            // and the row said nothing to tell that apart from a mechanism that
+            // ran and found nothing. That is the vacuous-zero trap, and a score
+            // of 0 from a path with no opportunity to execute is not evidence
+            // about the path. Publish the budget beside the score.
+            "derivation_probe_budget": subject.brain.derivation_probe_budget(),
             "trained_lit_mean": trained_lit as f64 / world.facts.len().max(1) as f64,
             "trained_lit_zero": trained_lit_zero,
             "train_s": train_s,
