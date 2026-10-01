@@ -4934,13 +4934,33 @@ impl Brain {
                         .collect();
                     let frame = query.decode_concept_members(&refs);
                     let motifs = normalized_char_motifs(&frame);
-                    let mut postings: Vec<Vec<NeuronId>> = motifs
+                    // Sorted on `(len, motif)` and NOT on `len` alone. The
+                    // motif set is an `ahash::AHashSet`, ahash is declared with
+                    // default features (so `RandomState` uses runtime-rng), and
+                    // its iteration order is therefore per PROCESS. Feeding
+                    // that order into a length-only UNSTABLE sort and then
+                    // cutting at 8 makes which postings become evidence depend
+                    // on the hash seed -- the cause of item 8accd975, measured
+                    // as integration_pct 35.19 then 35.0 at scale 16 on one
+                    // build. Keeping the motif beside its list makes the order
+                    // TOTAL (a motif is `[u8; 3]`, which is `Ord`, and motifs
+                    // are distinct because they came from a set), so the chosen
+                    // 8 are the same in every process. This is the idiom the
+                    // neighbouring sites already use -- see the
+                    // `(ids.len(), *atom)` sort above and the
+                    // `(ids.len(), *motif)` sort in
+                    // `rank_bounded_binding_evidence`'s caller.
+                    //
+                    // Scale 1 was already reproducible because it has fewer
+                    // than NINE non-empty postings, so the cut never bites and
+                    // the tie order is never observed.
+                    let mut postings: Vec<([u8; 3], Vec<NeuronId>)> = motifs
                         .iter()
-                        .map(|motif| self.binding_motif_postings(query_pool, *motif))
-                        .filter(|ids| !ids.is_empty())
+                        .map(|motif| (*motif, self.binding_motif_postings(query_pool, *motif)))
+                        .filter(|(_, ids)| !ids.is_empty())
                         .collect();
-                    postings.sort_unstable_by_key(|ids| ids.len());
-                    for ids in postings.into_iter().take(8) {
+                    postings.sort_unstable_by_key(|(motif, ids)| (ids.len(), *motif));
+                    for (_, ids) in postings.into_iter().take(8) {
                         add_binding_evidence(&mut candidate_evidence, ids);
                     }
                 }
@@ -5516,13 +5536,17 @@ impl Brain {
                 .collect();
             let frame = pool.decode_concept_members(&refs);
             let motifs = normalized_char_motifs(&frame);
-            let mut postings: Vec<Vec<NeuronId>> = motifs
+            // Total order on `(len, motif)`, not on `len` alone. Same reason as
+            // the sort in `routed_binding_candidates` above: the motif set's
+            // iteration order is per process, so a length-only unstable sort
+            // cut at 8 picks a seed-dependent evidence set. Item 8accd975.
+            let mut postings: Vec<([u8; 3], Vec<NeuronId>)> = motifs
                 .iter()
-                .map(|motif| self.binding_motif_postings(*pool_id, *motif))
-                .filter(|ids| !ids.is_empty())
+                .map(|motif| (*motif, self.binding_motif_postings(*pool_id, *motif)))
+                .filter(|(_, ids)| !ids.is_empty())
                 .collect();
-            postings.sort_unstable_by_key(|ids| ids.len());
-            for ids in postings.into_iter().take(8) {
+            postings.sort_unstable_by_key(|(motif, ids)| (ids.len(), *motif));
+            for (_, ids) in postings.into_iter().take(8) {
                 add_binding_evidence(&mut binding_evidence, ids);
             }
         }
