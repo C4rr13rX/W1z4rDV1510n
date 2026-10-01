@@ -58,6 +58,59 @@ separately:** an invented answer is worse than "I don't know".
 | T7 | **Takes correction.** Teach a wrong fact, then the right fact once, then ask. | The correction wins. |
 | T8 | **Rapid sequence.** Feed 100 frames as a stream and act on each. | Milliseconds per inference, and the share of frames answered correctly. |
 
+## T9: crossing disciplines (the owner's definition of generalization)
+
+Generalization is **not** a search procedure over questions, and **not**
+connections made for a particular number or subject. It is what happens when
+disciplines that were trained **separately** cross paths in the Hebbian fabric
+and the relationship between them forms by itself.
+
+The owner's example:
+
+- Teach the brain to **return lists**, on a few categories.
+- Teach it **some** lists that involve spots, but not the full list of
+  animals with spots.
+- Teach it **many single facts** about animals with spots.
+
+Then "list all animals with spots" returns the list, although that list was
+never taught.
+
+**The crossing world.** It comes in two forms. The symbol form exists first,
+because it is fast. The audio + visual form follows, with spoken words and
+shown animals. Each discipline is taught in its **own** episodes and never
+combined in training:
+
+| Discipline | Example |
+|---|---|
+| Lists | "list · red · fruit" gives "apple · cherry · strawberry". Several categories × properties, which teaches the skill of answering with a list. |
+| Zoology | "leopard · has · spots", "zebra · has · stripes" and so on. Many single facts. |
+| Kinds | "leopard · is · animal", "mushroom · is · fungus", "dice · is · object". Distractors carry spots but are not animals. |
+
+**Probes.** Every probe is a (category, property) list that was never taught
+as a list, such as "list · animal · spots". Score each probe by:
+
+- precision against the true set
+- recall against the true set
+- **wrong items**: listed things that don't belong, for example the mushroom
+
+Report the mean F1 per scale. Scales add more entities, so a list grows from
+a handful of members to hundreds.
+
+**It must come from the fabric.** Two checks prove it:
+
+1. **No parser.** Nothing parses the question or special-cases "list".
+2. **The ablation check.** Re-run T9 with Hebbian propagation disabled, or
+   with the cross-discipline terminals shuffled. T9 must collapse toward 0.
+
+If T9 still scores without the fabric, the score came from a lookup or a
+search, not from generalization, and it does not count.
+
+**Speed.** Answering a T9 probe must stay within 3× the time of a plain recall.
+"List everything with spots" is where the zoom earns its keep: the "spots"
+symbol may hold more connections than RAM keeps, and the goal pages in the
+rest from SSD. **A cap that drops connections, or keeps only the first ones
+learned, fails T9 by construction.**
+
 ## Footprint (same rules as RAM_GOAL.md)
 
 - Peak RAM per scale, measured from outside by `tools/capped.py`.
