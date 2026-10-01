@@ -104,8 +104,23 @@ fn suppression_does_not_leak_past_one_observe() {
 /// callers of `observe_read_only` existed anywhere in `crates/node/src`
 /// against 17 call sites of the mutating `observe`, while the node's own pool
 /// config sets `text.max_concept_member_count = 32` (`brain_api.rs:148`,
-/// `brain_server.rs:284`) -- so emergence was on, at a member cap HIGHER than
-/// the one the 1,071-entries-per-question measurement was taken at.
+/// `brain_server.rs:284`) -- so emergence was on.
+///
+/// The cost is exact, not sampled. `check_concept_emergence` (`pool.rs`) runs
+/// once per observed ATOM and inserts one key per run length
+/// `2..=min(max_concept_member_count, buf_len)`; `recent_atoms` is a ROLLING
+/// window (65536 in the node, 2048 here), so after the first question
+/// `buf_len` always exceeds the cap and the cap IS the per-atom count. Entries
+/// per observe = `(cap - 1) * frame_len`, which is LINEAR in both. At
+/// `cap = 64, len = 17` that is 1,071 -- exactly the figure
+/// `docs/RAM_GOAL.md` measured independently at those parameters, which is the
+/// cross-check that makes the formula trustworthy.
+///
+/// So the node's cap of 32 costs HALF per byte, not more: 527 entries for a
+/// 17-byte question. `/chat` observes the prompt twice
+/// (`brain_server.rs:2382` and `:2449`), so ~1,054 permanent keys per turn.
+/// Half the per-question constant, and still unbounded in questions asked --
+/// which is the part that matters, since nothing reclaims them.
 ///
 /// Paired on purpose, as above: the fabric path must still grow the ledger, or
 /// the read-only assertion passes for a brain whose emergence has died.
