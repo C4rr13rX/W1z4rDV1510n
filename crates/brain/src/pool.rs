@@ -1518,6 +1518,29 @@ pub(crate) struct StreamedPoolMetadata {
     pub total_terminals: usize,
 }
 
+/// What [`Pool::reinforce_atom_terminal_keeping_overflow`] did with one
+/// offered terminal. The caller needs the four cases apart because only
+/// `Added` changes resident fan-out, and a census that cannot tell `Spilled`
+/// from `Added` is exactly the blindness the first-come bound had: it reported
+/// a refusal and a success identically, as a `bool`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtomFanoutOutcome {
+    /// A resident terminal was created. `Pool::total_terminals` has already
+    /// been incremented, so the caller must not increment it again.
+    Added,
+    /// The target already had a resident terminal and was Hebbian-strengthened.
+    /// Fan-out unchanged.
+    Reinforced,
+    /// The atom is at [`PoolConfig::max_atom_fanout`] and this target is new,
+    /// so it was KEPT in the overflow instead of being refused. Resident
+    /// fan-out and `total_terminals` unchanged.
+    Spilled,
+    /// The target was already in this atom's overflow. Nothing changed.
+    AlreadySpilled,
+    /// No neuron with that id in this pool.
+    Missing,
+}
+
 pub struct Pool {
     pub config: PoolConfig,
     encoding: Box<dyn AtomEncoding>,
@@ -1721,6 +1744,45 @@ pub struct Pool {
     /// produced).  Used as a ControlSignal so decode-time floor
     /// adapters can read it.
     pub decode_precision_ema: f32,
+
+    /// Fan-out a SATURATED ATOM could not keep resident, KEPT rather than
+    /// refused. Key is the atom's id in this pool; the Vec holds the targets
+    /// in the order they were offered, which is training order.
+    ///
+    /// Why this field exists rather than a better selection rule under
+    /// [`PoolConfig::max_atom_fanout`]: both selection rules are measured
+    /// dead. First-come refusal means an atom that fills on the opening facts
+    /// of a corpus acquires nothing for the rest of it. Strongest-resident
+    /// displacement ([`Neuron::reinforce_terminal_bounded`]) was wired at the
+    /// hub-building site on 2026-10-01 and turned
+    /// `tests/empty_integration_is_budget_starvation.rs` red, because every
+    /// atom→binding terminal is created at the same `delta = 0.5` and
+    /// `Terminal::effective_weight` applies no tick decay of its own, so
+    /// "strongest" degenerates to "most recently trained" and it evicts the
+    /// EARLIEST facts instead of the latest. Refusing the newest and evicting
+    /// the oldest are two arbitrary halves of one corpus, and the full
+    /// commentary is at the call site in `Brain::promote_binding_concept`.
+    ///
+    /// What the refused terminals are worth, measured, and the reason this is
+    /// not bookkeeping for its own sake: lifting the bound entirely
+    /// (`max_atom_fanout = 0`) moved scale-16 integration 44.3 → 50.8 % and
+    /// scale-64 integration 20.5 → 32.5 % with recall 100.0 throughout. It was
+    /// rejected on RAM alone — peak 40.1 → 51.9 MB at scale 64, +29.4 % against
+    /// a gate that allows 15 %. That cost is ~72.6 B per terminal and almost
+    /// all of it is bookkeeping an overflow entry does not need: a full
+    /// [`Terminal`] (weight, consolidation, last-fired tick), an entry in the
+    /// neuron's `terminal_idx` hash map, and `Vec` capacity slack. An overflow
+    /// entry is a bare [`NeuronRef`] — 8 bytes — in a Vec grown in exact
+    /// blocks of [`Pool::ATOM_FANOUT_OVERFLOW_BLOCK`], so slack is bounded per
+    /// atom instead of doubling.
+    ///
+    /// Stored on the POOL and not on the [`Neuron`] on purpose. A
+    /// `Option<Box<Vec<..>>>` field would be 8 bytes on all 9,776 neurons of a
+    /// scale-64 fabric to serve the 48 that hold ≥128 terminals; the map pays
+    /// only for atoms that actually saturated. Transient runtime state, never
+    /// serialised — a restored pool re-derives it the next time training
+    /// offers a terminal a saturated atom cannot hold.
+    atom_fanout_overflow: AHashMap<NeuronId, Vec<NeuronRef>>,
 }
 
 /// Borrowed, wire-compatible view of [`crate::persistence::PoolSnapshot`].
@@ -1808,6 +1870,7 @@ impl Pool {
             read_only_inference_residents: AHashSet::new(),
             cold_offsets: AHashMap::new(),
             evicted: AHashSet::new(),
+            atom_fanout_overflow: AHashMap::new(),
         }
     }
 
@@ -2670,6 +2733,7 @@ impl Pool {
             cold_offsets: AHashMap::new(),
             evicted: AHashSet::new(),
             decode_precision_ema: 0.0,
+            atom_fanout_overflow: AHashMap::new(),
         })
     }
 
@@ -3716,6 +3780,120 @@ impl Pool {
     pub fn last_observed_sequence(&self) -> &[NeuronId] {
         &self.last_observed_sequence
     }
+    /// Entries the overflow Vec grows by, exactly, when it fills.
+    ///
+    /// `Vec::push` doubles, which on an atom carrying one terminal per fact is
+    /// up to 2x slack on the single largest allocation in the fabric.
+    /// `reserve_exact` per push is the other extreme: it reallocates and copies
+    /// on every entry, O(n²) bytes copied over a corpus. A fixed block caps
+    /// slack at 63 entries — 504 B — per saturated atom while keeping growth
+    /// amortised.
+    pub const ATOM_FANOUT_OVERFLOW_BLOCK: usize = 64;
+
+    /// Reinforce an atom→`target` terminal under [`PoolConfig::max_atom_fanout`]
+    /// WITHOUT EVER DROPPING ONE: a terminal a saturated atom cannot hold
+    /// resident goes to the pool's `atom_fanout_overflow` instead of being
+    /// refused.
+    ///
+    /// This is the third rule tried at this bound and the first that does not
+    /// trade one half of a corpus for the other. See the field's own
+    /// documentation for the two measured-dead predecessors and for the
+    /// integration those refused terminals were carrying (+6.5 points at scale
+    /// 16, +12.0 at scale 64, recall 100.0, rejected only on a +29.4 % peak).
+    ///
+    /// Equivalent to [`Neuron::reinforce_terminal`] for any neuron below its
+    /// bound, for any non-atom, for an unbounded pool (`cap == 0`), and for any
+    /// target that already has a resident terminal — so a caller that swaps to
+    /// this sees no change at all until an atom actually saturates.
+    pub fn reinforce_atom_terminal_keeping_overflow(
+        &mut self,
+        atom:   NeuronId,
+        target: NeuronRef,
+        delta:  f32,
+        tick:   u64,
+    ) -> AtomFanoutOutcome {
+        let cap = self.config.max_atom_fanout;
+        let max_weight = self.config.max_weight;
+        let resident = {
+            let Some(n) = self.neurons.get_mut(atom as usize) else {
+                return AtomFanoutOutcome::Missing;
+            };
+            let saturated = cap > 0 && n.is_atom() && n.terminals.len() >= cap;
+            if saturated && n.find_terminal(&target).is_none() {
+                None
+            } else if n.reinforce_terminal(target, delta, tick, max_weight) {
+                Some(AtomFanoutOutcome::Added)
+            } else {
+                Some(AtomFanoutOutcome::Reinforced)
+            }
+        };
+        if let Some(outcome) = resident {
+            if outcome == AtomFanoutOutcome::Added {
+                self.total_terminals += 1;
+            }
+            return outcome;
+        }
+        let block = Self::ATOM_FANOUT_OVERFLOW_BLOCK;
+        let entry = self.atom_fanout_overflow.entry(atom).or_default();
+        // Linear, and that is the price of the no-duplicates invariant. The
+        // hub-building caller offers one binding once, so this scan is over a
+        // list that never contains the target; a hash set per atom would cost
+        // ~5x the bytes this whole field exists to save.
+        if entry.contains(&target) {
+            return AtomFanoutOutcome::AlreadySpilled;
+        }
+        if entry.len() == entry.capacity() {
+            entry.reserve_exact(block);
+        }
+        entry.push(target);
+        AtomFanoutOutcome::Spilled
+    }
+
+    /// Targets this atom could not keep resident, in the order training
+    /// offered them. Empty for every atom that never saturated.
+    pub fn atom_fanout_overflow_targets(&self, atom: NeuronId) -> &[NeuronRef] {
+        self.atom_fanout_overflow
+            .get(&atom)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Does this atom reach `target` AT ALL — resident terminal or overflow?
+    ///
+    /// The question the bound used to answer "no" to for every fact after the
+    /// 512th, and the one a page-in has to ask before it can zoom.
+    pub fn atom_reaches(&self, atom: NeuronId, target: NeuronRef) -> bool {
+        if self
+            .neurons
+            .get(atom as usize)
+            .is_some_and(|n| n.find_terminal(&target).is_some())
+        {
+            return true;
+        }
+        self.atom_fanout_overflow_targets(atom).contains(&target)
+    }
+
+    /// `(atoms holding an overflow, total overflow entries)`.
+    pub fn atom_fanout_overflow_census(&self) -> (usize, usize) {
+        (
+            self.atom_fanout_overflow.len(),
+            self.atom_fanout_overflow.values().map(|v| v.len()).sum(),
+        )
+    }
+
+    /// Resident bytes the overflow costs: every Vec's ALLOCATED capacity plus
+    /// the map's own table, charged through [`hash_table_bytes`] exactly as the
+    /// rest of the census charges a hash map. Capacity and not length, because
+    /// the slack is what the predecessor measurement under-reported.
+    pub fn atom_fanout_overflow_bytes(&self) -> usize {
+        let vecs: usize = self
+            .atom_fanout_overflow
+            .values()
+            .map(|v| v.capacity() * std::mem::size_of::<NeuronRef>())
+            .sum();
+        vecs + hash_table_bytes::<NeuronId, Vec<NeuronRef>>(self.atom_fanout_overflow.capacity())
+    }
+
     pub fn get(&self, id: NeuronId) -> Option<&Neuron> {
         self.neurons.get(id as usize)
     }
@@ -3951,6 +4129,7 @@ impl Pool {
             read_only_inference_residents: AHashSet::new(),
             cold_offsets: snap.cold_offsets.iter().copied().collect(),
             evicted: snap.cold_offsets.iter().map(|(id, _)| *id).collect(),
+            atom_fanout_overflow: AHashMap::new(),
         };
         // Rebuild the multiset dedup index from restored concept
         // neurons.  The index isn't part of the snapshot format (it
