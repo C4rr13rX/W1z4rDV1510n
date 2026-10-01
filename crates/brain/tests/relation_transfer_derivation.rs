@@ -108,10 +108,19 @@ fn teach(brain: &mut Brain, question: &str, answer: &str) {
 }
 
 fn trained_world() -> Vec<(String, String)> {
+    trained_world_n(ROOMS)
+}
+
+/// The same world at any room count, so a mechanism proven at the scorecard's
+/// scale 1 can be re-measured at its scale 4 without a scorecard run. Scale is
+/// the one axis every integration family decays along -- `next_color` is 100 %
+/// at scale 1 and 49.8 % at scale 64 -- so a scale-1-only result is a
+/// hypothesis about scale 4, not a measurement of it.
+fn trained_world_n(rooms: usize) -> Vec<(String, String)> {
     let mut facts = Vec::new();
-    for r in 0..ROOMS {
+    for r in 0..rooms {
         let rm = room(r);
-        let next = room((r + 1) % ROOMS);
+        let next = room((r + 1) % rooms);
         for (i, obj) in OBJECTS.iter().enumerate() {
             facts.push((format!("{rm} {obj} color?"), color(r, i)));
             facts.push((format!("{rm} {obj} material?"), material(r, i)));
@@ -129,7 +138,11 @@ fn trained_world() -> Vec<(String, String)> {
 }
 
 fn teach_world(brain: &mut Brain) -> Vec<(String, String)> {
-    let facts = trained_world();
+    teach_world_n(brain, ROOMS)
+}
+
+fn teach_world_n(brain: &mut Brain, rooms: usize) -> Vec<(String, String)> {
+    let facts = trained_world_n(rooms);
     for _ in 0..2 {
         for (q, a) in &facts {
             teach(brain, q, a);
@@ -141,10 +154,14 @@ fn teach_world(brain: &mut Brain) -> Vec<(String, String)> {
 /// Every integration probe the scorecard asks at scale 1, by family, copied
 /// from `examples/scorecard.rs` so a difference here is a difference there.
 fn integration_probes() -> Vec<(&'static str, String, String)> {
+    integration_probes_n(ROOMS)
+}
+
+fn integration_probes_n(rooms: usize) -> Vec<(&'static str, String, String)> {
     let mut out = Vec::new();
-    for r in 0..ROOMS {
+    for r in 0..rooms {
         let rm = room(r);
-        let nr = (r + 1) % ROOMS;
+        let nr = (r + 1) % rooms;
         for (obj, base) in RESTS_ON {
             out.push(("on_material", format!("{rm} {obj} on material?"), material(r, idx(base))));
         }
@@ -718,6 +735,413 @@ fn a_vote_over_ceiling_rewrites_beats_the_first_one() {
     assert!(v_tot > f_tot, "the vote must move something: {f_tot} -> {v_tot}");
 }
 
+/// `derive_by_substitution_profiled`'s own loop with BOTH changes in it, so the
+/// shipped shape can be compared against the production call on one brain in
+/// one run. The deletion search, the `>= 1.0` acceptance, the `max_depth`
+/// recursion and the `max_probes` budget are the production ones; the splice
+/// winner is the vote, and an empty result falls back to the relation transfer.
+fn derive_voted(
+    brain: &mut Brain,
+    query: &str,
+    max_depth: usize,
+    max_probes: usize,
+) -> (Option<String>, usize) {
+    derive_voted_rule(brain, query, max_depth, max_probes, VoteRule::Plurality)
+}
+
+/// How a splice scan picks its winner from the rewrites that reach the ceiling.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum VoteRule {
+    /// Production: the first ceiling rewrite in `j` order.
+    FirstWins,
+    /// The most common answer, ties to the production choice. Measured
+    /// on_material 6/24 -> 18/24 at scale 1 with next_color holding 16/16 --
+    /// and measured to COST next_color 64/64 -> 53/64 at scale 4, because at
+    /// 32 rooms a truncated rewrite's unordered byte set reaches OTHER rooms'
+    /// questions at the ceiling and the truncations acquire votes.
+    Plurality,
+    /// The most common answer only when it is a strict MAJORITY of the ceiling
+    /// rewrites; otherwise the production choice. The reasoning is that a
+    /// plurality among mutually inconsistent confusions is not agreement, and
+    /// `next_color`'s correct rewrite is `j = 0` -- which first-wins already
+    /// picks. So this can only override when the rewrites genuinely agree.
+    Majority,
+}
+
+fn derive_voted_rule(
+    brain: &mut Brain,
+    query: &str,
+    max_depth: usize,
+    max_probes: usize,
+    rule: VoteRule,
+) -> (Option<String>, usize) {
+    use std::collections::BTreeMap;
+    let mut probes = 0usize;
+    let mut current = query.as_bytes().to_vec();
+    let mut derived: Option<String> = None;
+
+    for _hop in 0..max_depth {
+        if probes >= max_probes {
+            break;
+        }
+        probes += 1;
+        let (base_score, base_answer) = ask(brain, &String::from_utf8_lossy(&current));
+        let Some(base_answer) = base_answer else { break };
+        if base_score >= 1.0 {
+            break;
+        }
+        let n = current.len();
+
+        let mut known_prefix: Option<(usize, String)> = None;
+        'deletion: for k in 1..n {
+            for t in 0..=1usize.min(n - k) {
+                if probes >= max_probes {
+                    break 'deletion;
+                }
+                if t > 0 && n - t == k {
+                    continue;
+                }
+                let mut sub = Vec::with_capacity(k + t);
+                sub.extend_from_slice(&current[..k]);
+                sub.extend_from_slice(&current[n - t..]);
+                probes += 1;
+                let (score, answer) = ask(brain, &String::from_utf8_lossy(&sub));
+                if score >= 1.0 {
+                    if let Some(answer) = answer {
+                        known_prefix = Some((k, answer));
+                        break 'deletion;
+                    }
+                }
+            }
+        }
+        let Some((k, spliced)) = known_prefix else { break };
+
+        // Every ceiling rewrite, counted. `first` is the production winner and
+        // is kept as the tie-break so the vote is never arbitrary.
+        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        let mut rewrite_of: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        let mut first: Option<String> = None;
+        let mut best_subceiling: Option<(f32, Vec<u8>, String)> = None;
+        for j in 0..=k {
+            if probes >= max_probes {
+                break;
+            }
+            let mut rw = Vec::with_capacity(n + spliced.len());
+            rw.extend_from_slice(&current[..j]);
+            rw.extend_from_slice(spliced.as_bytes());
+            rw.extend_from_slice(&current[k..]);
+            if rw == current || rw.is_empty() {
+                continue;
+            }
+            probes += 1;
+            let (score, answer) = ask(brain, &String::from_utf8_lossy(&rw));
+            let Some(answer) = answer else { continue };
+            if score >= 1.0 {
+                if first.is_none() {
+                    first = Some(answer.clone());
+                }
+                *counts.entry(answer.clone()).or_insert(0) += 1;
+                rewrite_of.entry(answer).or_insert(rw);
+            } else if score > base_score
+                && best_subceiling.as_ref().map_or(true, |(b, _, _)| score > *b)
+            {
+                best_subceiling = Some((score, rw, answer));
+            }
+        }
+        let ceiling: usize = counts.values().sum();
+        let modal = counts
+            .iter()
+            .max_by_key(|(a, n)| (**n, Some(a.as_str()) == first.as_deref()))
+            .map(|(a, c)| (a.clone(), *c));
+        let winner = match (rule, &modal) {
+            (VoteRule::FirstWins, _) => first.clone(),
+            (VoteRule::Plurality, _) => modal.as_ref().map(|(a, _)| a.clone()),
+            (VoteRule::Majority, Some((a, c))) => {
+                if *c * 2 > ceiling {
+                    Some(a.clone())
+                } else {
+                    first.clone()
+                }
+            }
+            (VoteRule::Majority, None) => None,
+        };
+        let step = match winner {
+            Some(a) => match rewrite_of.remove(&a) {
+                Some(rw) => Some((rw, a)),
+                // `first` can name an answer the map no longer holds only if
+                // the maps disagree, which they cannot; kept as a fallthrough
+                // rather than a panic so a rule change cannot abort a run.
+                None => best_subceiling.take().map(|(_, rw, a)| (rw, a)),
+            },
+            // No ceiling rewrite: the production fallback, the best improvement
+            // on the base score.
+            None => best_subceiling.map(|(_, rw, a)| (rw, a)),
+        };
+        let Some((next_question, next_answer)) = step else { break };
+        derived = Some(next_answer);
+        current = next_question;
+    }
+    if derived.is_none() && probes < max_probes {
+        let (t, cost) = transfer(brain, query, max_probes - probes);
+        probes += cost;
+        if t.is_some() {
+            return (t, probes);
+        }
+    }
+    (derived, probes)
+}
+
+/// THE SHIPPED SHAPE, against the production call, on one brain, at two
+/// budgets -- because the vote probes every `j` instead of breaking on the
+/// first, and that cost is the reason to report the budget rather than pick
+/// one. Production is budgeted at 32 in the scorecard.
+#[test]
+fn vote_plus_transfer_against_the_production_call_at_two_budgets() {
+    use std::collections::BTreeMap;
+    let mut brain = subject();
+    let facts = teach_world(&mut brain);
+    let probes_list = integration_probes();
+
+    // family -> (right, wrong, empty, probes)
+    let mut arms: BTreeMap<(&str, &str), (usize, usize, usize, usize)> = BTreeMap::new();
+    for (family, q, want) in &probes_list {
+        let mut record = |label: &'static str, got: Option<&str>, cost: usize| {
+            let slot = arms.entry((*family, label)).or_insert((0, 0, 0, 0));
+            slot.3 += cost;
+            match got {
+                None => slot.2 += 1,
+                Some(a) if a == want.as_str() => slot.0 += 1,
+                Some(_) => slot.1 += 1,
+            }
+        };
+        let (got, cost) =
+            brain.derive_by_substitution_profiled(QUERY_POOL, ANSWER_POOL, q.as_bytes(), 3, 32);
+        let got = got.map(|a| String::from_utf8_lossy(&a).to_string());
+        record("production_32", got.as_deref(), cost);
+        for (label, budget) in [("voted_32", 32usize), ("voted_128", 128usize)] {
+            let (got, cost) = derive_voted(&mut brain, q, 3, budget);
+            record(label, got.as_deref(), cost);
+        }
+    }
+
+    for label in ["production_32", "voted_32", "voted_128"] {
+        let mut r = 0usize;
+        let mut n = 0usize;
+        let mut c = 0usize;
+        for ((family, l), (right, wrong, empty, cost)) in &arms {
+            if *l != label {
+                continue;
+            }
+            println!(
+                "{label:>14} {family:>17} right {right}/{} wrong {wrong} empty {empty} \
+                 probes {cost} ({:.1}/probe)",
+                right + wrong + empty,
+                *cost as f32 / (right + wrong + empty) as f32
+            );
+            r += right;
+            n += right + wrong + empty;
+            c += cost;
+        }
+        println!(
+            "{label:>14} ALL FAMILIES {r}/{n} ({:.1}%) probes {c} ({:.1}/derivation)",
+            100.0 * r as f32 / n as f32,
+            c as f32 / n as f32
+        );
+    }
+
+    let mut recalled = 0usize;
+    for (q, a) in &facts {
+        if ask(&mut brain, q).1.as_deref() == Some(a.as_str()) {
+            recalled += 1;
+        }
+    }
+    println!("recall after all three arms {recalled}/{}", facts.len());
+    assert_eq!(recalled, facts.len(), "recall must still be 100%");
+
+    // Per family against production, at the budget that is actually affordable.
+    // Which budget that is, is the thing being measured -- so the contract is
+    // asserted at BOTH, and the one that fails says which.
+    for label in ["voted_32", "voted_128"] {
+        for (family, _, _) in &probes_list {
+            let p = arms[&(*family, "production_32")];
+            let v = arms[&(*family, label)];
+            assert!(
+                v.0 >= p.0,
+                "{label} cost {family} correct answers: {}/{} -> {}/{}",
+                p.0,
+                p.0 + p.1 + p.2,
+                v.0,
+                v.0 + v.1 + v.2
+            );
+        }
+    }
+}
+
+/// AT SCALE 4, NO VOTE THRESHOLD SEPARATES THE TWO FAMILIES.
+///
+/// THE SAME COMPARISON AT THE SCORECARD'S SCALE 4 (32 rooms, 744 facts).
+///
+/// Every integration family decays along scale and they decay at different
+/// rates -- `next_color` is 100 % at scale 1 and 49.8 % at scale 64,
+/// `on_material` 25 % and 11.1 % -- so a mechanism measured only at scale 1 is
+/// a hypothesis about scale 4. The complement is real and is the reason this
+/// test exists: both changes depend on a UNIQUE best match (the transfer on
+/// `r000 beside?` being the only trained `beside?`, the vote on truncations
+/// being a minority), and 4x the rooms means 4x the trained `beside?` questions
+/// and 4x the rooms whose material could coincide. Either could invert.
+#[test]
+fn at_scale_four_no_vote_threshold_separates_the_two_families() {
+    use std::collections::BTreeMap;
+    let rooms = ROOMS * 4;
+    let mut brain = subject();
+    let facts = teach_world_n(&mut brain, rooms);
+    println!("scale 4: {rooms} rooms, {} trained facts", facts.len());
+
+    let mut arms: BTreeMap<(&str, &str), (usize, usize, usize, usize)> = BTreeMap::new();
+    for (family, q, want) in integration_probes_n(rooms) {
+        let mut record = |label: &'static str, got: Option<&str>, cost: usize| {
+            let slot = arms.entry((family, label)).or_insert((0, 0, 0, 0));
+            slot.3 += cost;
+            match got {
+                None => slot.2 += 1,
+                Some(a) if a == want.as_str() => slot.0 += 1,
+                Some(_) => slot.1 += 1,
+            }
+        };
+        let (got, cost) =
+            brain.derive_by_substitution_profiled(QUERY_POOL, ANSWER_POOL, q.as_bytes(), 3, 32);
+        record("production_32", got.map(|a| String::from_utf8_lossy(&a).to_string()).as_deref(), cost);
+        for (label, rule) in
+            [("plurality_128", VoteRule::Plurality), ("majority_128", VoteRule::Majority)]
+        {
+            let (got, cost) = derive_voted_rule(&mut brain, &q, 3, 128, rule);
+            record(label, got.as_deref(), cost);
+        }
+    }
+
+    for label in ["production_32", "plurality_128", "majority_128"] {
+        let (mut r, mut n, mut c) = (0usize, 0usize, 0usize);
+        for ((family, l), (right, wrong, empty, cost)) in &arms {
+            if *l != label {
+                continue;
+            }
+            println!(
+                "s4 {label:>14} {family:>17} right {right}/{} wrong {wrong} empty {empty} probes {cost}",
+                right + wrong + empty
+            );
+            r += right;
+            n += right + wrong + empty;
+            c += cost;
+        }
+        println!(
+            "s4 {label:>14} ALL FAMILIES {r}/{n} ({:.1}%) probes {c} ({:.1}/derivation)",
+            100.0 * r as f32 / n as f32,
+            c as f32 / n as f32
+        );
+    }
+
+    let mut recalled = 0usize;
+    for (q, a) in &facts {
+        if ask(&mut brain, q).1.as_deref() == Some(a.as_str()) {
+            recalled += 1;
+        }
+    }
+    println!("s4 recall after both arms {recalled}/{}", facts.len());
+    assert_eq!(recalled, facts.len(), "recall must be 100% at scale 4 too");
+
+    // THE REFUTATION, AND IT IS WHY THE MAJORITY ARM EXISTS. A bare plurality
+    // holds `next_color` 16/16 at scale 1 and COSTS it 64/64 -> 53/64 at scale
+    // 4. It is the vote and not the transfer: the transfer fires only on an
+    // empty production answer, and production `next_color` has empty 0 here, so
+    // it never ran for that family.
+    //
+    // The cause is the same unordered byte set as everything else in this area.
+    // `next_color`'s correct rewrite is `j = 0` -- "r000 next bed color?" ->
+    // "r001 bed color?" -- and the truncations are "rr001 bed color?",
+    // "r0r001 bed color?" and so on. At 8 rooms those reach no trained question
+    // but the right one, so the vote was unanimous and 16/16 read as safety. At
+    // 32 rooms their distinct byte set {r,0,1,sp,b,e,d,c,o,l,?} ALSO reaches
+    // "r010 bed color?" and "r011 bed color?" at the ceiling, so truncations
+    // acquire votes and can outvote `j = 0`. A vote over mutually inconsistent
+    // confusions degrades exactly as confusability grows, which is scale.
+    //
+    // Both regressions are pinned as assertions. A plurality that stops costing
+    // next_color at scale 4 means the matcher changed, and this is the line that
+    // will say so.
+    let nc_p = arms[&("next_color", "production_32")];
+    let nc_pl = arms[&("next_color", "plurality_128")];
+    assert!(
+        nc_pl.0 < nc_p.0,
+        "the plurality must still cost next_color at scale 4 -- that regression is this          test's finding, measured 64/64 -> 53/64: {nc_p:?} -> {nc_pl:?}"
+    );
+
+    // AND THE MAJORITY RULE DOES NOT RECOVER IT EITHER, WHICH IS THE RESULT.
+    //
+    // This test asserted that no family may fall under the majority rule,
+    // expecting it to pass -- the reasoning being that a ceiling set with no
+    // strict majority falls back to first-wins, which for `next_color` IS
+    // `j = 0` and IS correct, so the only way it can still lose is a WRONG
+    // answer holding a strict majority. Measured: that happens 7 times of 64.
+    // At 32 rooms the truncated rewrites stop being mutually inconsistent and
+    // AGREE on one wrong room, because "rr001 bed color?" and "r0r001 bed
+    // color?" carry the same distinct byte set and it reaches "r010 bed color?"
+    // and "r011 bed color?" at the ceiling. More scale means more agreement
+    // AMONG the confusions.
+    //
+    // So every threshold between "any plurality" and "unanimous" sits between
+    // on_material's 5-of-7 and next_color's 1-of-many, and the majority rule is
+    // DOMINATED: it recovers 4 of next_color's 11 by giving back 10 of
+    // on_material and 5 of next_on_material, for 11 points of aggregate. A
+    // guard that cannot hold the family is only a worse exchange rate.
+    //
+    // The discriminator the problem actually needs is "was this rewrite ever
+    // TAUGHT", and the matcher cannot answer it: 184 ceiling rewrites over 24
+    // on_material probes of which 24 were taught, and 0 of 186 trained
+    // questions match at `MatchTier::Concept`, so every match here is an
+    // unordered distinct byte set. No selection policy recovers information the
+    // representation does not carry.
+    let nc_mj = arms[&("next_color", "majority_128")];
+    assert!(
+        nc_mj.0 < nc_p.0,
+        "the majority rule must still cost next_color -- it recovering the family is the one          outcome that would make a vote threshold shippable, and it was measured not to:          {nc_p:?} -> {nc_mj:?}"
+    );
+    let agg = |label: &str| -> usize {
+        arms.iter().filter(|((_, l), _)| *l == label).map(|(_, v)| v.0).sum()
+    };
+    assert!(
+        agg("majority_128") < agg("plurality_128"),
+        "the majority rule must stay DOMINATED in aggregate ({} vs {}), or it is worth          re-measuring as the shippable rule",
+        agg("majority_128"),
+        agg("plurality_128")
+    );
+
+    // WHAT DOES HOLD: every family except `next_color` improves under the
+    // plurality, and that is the per-family contract this file can assert.
+    for family in ["on_material", "next_on_material", "beside_next"] {
+        let p = arms[&(family, "production_32")];
+        let v = arms[&(family, "plurality_128")];
+        assert!(
+            v.0 >= p.0,
+            "{family} fell at scale 4 under the plurality: {}/{} -> {}/{}",
+            p.0,
+            p.0 + p.1 + p.2,
+            v.0,
+            v.0 + v.1 + v.2
+        );
+    }
+    // A plain `>`, not a margin. The production call is another agent's file
+    // and the vote is landing INSIDE it, so the base arm's own number is
+    // rising under me; a margin asserted against it reds this file for the
+    // change it argues for. Measured here against a pre-vote base:
+    // 87/216 -> 167/216.
+    assert!(
+        agg("plurality_128") > agg("production_32"),
+        "the plurality must still be an aggregate gain at scale 4: {} -> {}",
+        agg("production_32"),
+        agg("plurality_128")
+    );
+}
+
 /// All four families, with the transfer wired the way it would actually ship:
 /// as a FALLBACK after `derive_by_substitution_profiled` returns nothing. That
 /// composition is the only one that cannot cost a family, and "cannot cost a
@@ -805,5 +1229,17 @@ fn as_a_fallback_the_transfer_cannot_cost_a_family() {
     }
     println!("recall after both arms {recalled}/{}", facts.len());
     assert_eq!(recalled, facts.len(), "recall must still be 100%");
-    assert!(r1 > r0, "the fallback must raise the aggregate: {r0} -> {r1}");
+    // DELIBERATELY NOT `r1 > r0`. The production call is another agent's file
+    // and the transfer is being wired INTO it, at which point the base arm
+    // already carries the gain and a strict-improvement assertion turns this
+    // file red for the change it exists to argue for. The claim that survives
+    // either way is that the family is answered by SOMETHING here, and the
+    // per-family `r1 >= r0` above is what forbids a regression.
+    let bn = with_fb["beside_next"];
+    println!("beside_next under the fallback arm: right {} of {}", bn.0, bn.0 + bn.1 + bn.2);
+    assert!(
+        bn.0 > 0,
+        "beside_next must be answered by the production call or by the fallback: {bn:?}"
+    );
+    assert!(r1 >= r0, "the fallback must not lower the aggregate: {r0} -> {r1}");
 }
