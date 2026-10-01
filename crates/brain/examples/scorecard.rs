@@ -259,10 +259,19 @@ struct Subject {
     /// reaches the fabric at all or dies before the first hop; this is the one
     /// number that separates those, and `observe_read_only` already returns it.
     lit: usize,
+    /// True when a `.wbrain` container is attached, i.e. when M4's paging path
+    /// is the one under measurement. Until 2026-10-01 the scorecard NEVER
+    /// attached one, so every RAM number it published was of a brain that
+    /// physically could not page out.
+    store: bool,
 }
 
 impl Subject {
-    fn new() -> Self {
+    /// `store_dir` attaches one neuron-addressable `.wbrain` container, the
+    /// same `Brain::attach_wbrain` the node's brain_server uses. Attaching
+    /// AFTER `create_pool` is deliberate: `attach_wbrain` walks the registered
+    /// pools, so this covers the binding pool as well as query and answer.
+    fn new(store_dir: Option<&std::path::Path>) -> Self {
         let mut cfg = BrainConfig::default();
         cfg.binding_emergence_threshold = 3;
         cfg.moment_history_window = 256;
@@ -276,7 +285,70 @@ impl Subject {
             pc.prune_floor = 0.005;
             brain.create_pool(pc, Box::new(BytePassthroughEncoding { prefix }) as Box<dyn AtomEncoding>);
         }
-        Self { brain, lit: 0 }
+        let mut store = false;
+        if let Some(dir) = store_dir {
+            std::fs::create_dir_all(dir).expect("--store dir");
+            let attached = brain
+                .attach_wbrain(dir.join("brain.wbrain"))
+                .expect("attach_wbrain");
+            // 3 pools: binding (auto, id 0) + query + answer. A partial attach
+            // would page some pools and not others, which is a measurement of
+            // nothing, so fail loudly rather than report a mixed brain.
+            assert_eq!(attached, 3, "expected 3 pools to attach a .wbrain store");
+            store = true;
+        }
+        Self { brain, lit: 0, store }
+    }
+
+    /// The node's `/brain/sleep`: serialize every neuron into the container and
+    /// drop its RAM body. Without this the store is attached but nothing is
+    /// ever paged out, which is the state the scorecard was measuring by
+    /// accident. Returns the number of neurons written.
+    fn sleep_to_store(&mut self) -> usize {
+        if !self.store {
+            return 0;
+        }
+        self.brain
+            .serialize_all_neurons_for_idle()
+            .expect("serialize_all_neurons_for_idle")
+    }
+
+    /// The zero-bucket classification alone, without `census`'s walk over every
+    /// neuron body. It goes on EVERY row, and `census` clones a label per neuron
+    /// to rank fan-out, so calling the full census a third time per run would
+    /// add a transient spike to the one number the gate checks.
+    fn zero_buckets(&self) -> std::collections::BTreeMap<&'static str, &'static str> {
+        let mut side = std::collections::BTreeMap::<&'static str, usize>::new();
+        for pid in self.brain.fabric().pool_ids() {
+            let Some(pool) = self.brain.fabric().pool(pid) else { continue };
+            let s = pool.read().side_structure_bytes();
+            for (k, v) in [
+                ("concept_sequence_index", s.concept_sequence_index),
+                ("concept_multiset_index", s.concept_multiset_index),
+                ("label_index", s.label_index),
+                ("sequence_ledger", s.sequence_ledger),
+                ("evicted_set", s.evicted_set),
+                ("cold_offsets", s.cold_offsets),
+                ("neuron_slot_table", s.neuron_slot_table),
+                ("transient_firing", s.transient_firing),
+            ] {
+                *side.entry(k).or_default() += v;
+            }
+        }
+        classify_zero_buckets(&side, self.store)
+    }
+
+    /// Neurons paged back IN from the container. `BrainStats` carries page_outs
+    /// and clean_skips but not this, and it is the half that proves an answer
+    /// phase actually went to disk rather than finding everything resident.
+    fn page_ins(&self) -> u64 {
+        self.brain
+            .fabric()
+            .pool_ids()
+            .into_iter()
+            .filter_map(|pid| self.brain.fabric().pool(pid))
+            .map(|p| p.read().wbrain_page_ins())
+            .sum()
     }
 
     /// Trains the way the node's /brain/pretrain route does: one binding
@@ -397,8 +469,35 @@ impl Subject {
                 *fanout_terms.entry(bucket).or_default() += f;
             }
         }
+        let zero_buckets = classify_zero_buckets(&side, self.store);
+        // The paging readout. Every number here is 0 or absent when no store is
+        // attached, which is exactly how M4 went unmeasured.
+        let (mut slots, mut resident, mut evicted, mut page_ins, mut page_outs, mut clean) =
+            (0usize, 0usize, 0usize, 0u64, 0u64, 0u64);
+        for pid in self.brain.fabric().pool_ids() {
+            let Some(pool) = self.brain.fabric().pool(pid) else { continue };
+            let pool = pool.read();
+            slots += pool.neuron_count();
+            resident += pool.live_count();
+            evicted += pool.evicted_count();
+            page_ins += pool.wbrain_page_ins();
+            page_outs += pool.wbrain_page_outs();
+            let (_, skips) = pool.store_page_out_counters();
+            clean += skips;
+        }
         serde_json::json!({
             "global": self.brain.global_index_sizes(),
+            "paging": {
+                "store_attached": self.store,
+                "neuron_slots": slots,
+                "resident_neurons": resident,
+                "evicted_neurons": evicted,
+                "resident_terminals": self.brain.stats().resident_terminals,
+                "page_ins": page_ins,
+                "page_outs": page_outs,
+                "clean_skips": clean,
+            },
+            "zero_buckets": zero_buckets,
             "pool_side_bytes": side,
             "pool_side_total_bytes": side.values().sum::<usize>(),
             "neuron_body_bytes": body,
@@ -456,6 +555,32 @@ impl Subject {
         }
         (hub, bytes)
     }
+}
+
+/// Which side-structure buckets read zero, and WHY -- the difference between a
+/// structure that was never allocated and one this storage mode does not use at
+/// all. `cold_offsets` and `evicted_set` are the trap this exists for: both are
+/// written only on the legacy `ColdTier` path (crates/brain/src/pool.rs:1974
+/// inserts the offset, pool.rs:2001 inserts the id, each guarded on
+/// `wbrain_store.is_none()`), so with a `.wbrain` container attached they stay 0
+/// however much is paged out -- the wbrain path nulls the dense slot instead and
+/// reports eviction structurally (`is_evicted` at pool.rs:1879 is "the slot is
+/// None"). A zero there is therefore NOT evidence that nothing paged, which is
+/// exactly the inference the backlog item behind this change had drawn from it.
+fn classify_zero_buckets(
+    side: &std::collections::BTreeMap<&'static str, usize>,
+    store: bool,
+) -> std::collections::BTreeMap<&'static str, &'static str> {
+    side.iter()
+        .filter(|(_, v)| **v == 0)
+        .map(|(k, _)| {
+            let why = match *k {
+                "cold_offsets" | "evicted_set" if store => "unused_when_wbrain_attached",
+                _ => "never_allocated",
+            };
+            (*k, why)
+        })
+        .collect()
 }
 
 fn shuffled(n: usize, epoch: usize) -> Vec<usize> {
@@ -519,12 +644,22 @@ fn main() {
         .unwrap_or("all")
         .to_string();
     let census_wanted = args.iter().any(|a| a == "--census");
+    // `--store <dir>` attaches a .wbrain container in <dir> and sleeps the whole
+    // brain into it after training, so recall and inference run against a brain
+    // that must page its neurons back from disk. M4's criterion is peak RAM
+    // independent of the corpus WITH THE STORE ATTACHED; without this flag the
+    // scorecard measured a brain that had no store at all.
+    let store_dir = args
+        .iter()
+        .position(|a| a == "--store")
+        .and_then(|i| args.get(i + 1))
+        .map(std::path::PathBuf::from);
 
     let world = SceneWorld::new(scale);
     // The probe set is built before the brain, so this mark separates heap the
     // BRAIN allocates from heap the harness allocates for its own questions.
     let (live_world, _) = heap_mb();
-    let mut subject = Subject::new();
+    let mut subject = Subject::new(store_dir.as_deref());
     // A brain with two empty pools. Whatever this holds is fixed construction
     // cost -- the EEM's equation tables, the annealer, the fabric -- and is NOT
     // part of any per-fact residual, however large it looks at small scale.
@@ -532,6 +667,20 @@ fn main() {
     let t0 = Instant::now();
     subject.train(&world.facts);
     let train_s = t0.elapsed().as_secs_f64();
+    // The page-out, before any measurement of recall. In store mode every
+    // neuron body now lives in the container and the answer phases must page
+    // what they need back; in no-store mode this is a no-op returning 0.
+    let sleep_serialized = subject.sleep_to_store();
+    // Eviction measured AT THE SLEEP BOUNDARY, not at the end of the run. The
+    // first version of this checked the end state and read `evicted 0/241` on a
+    // brain that had demonstrably written all 241 bodies to the container
+    // (page_outs 241) -- because the answer phases paged every one of them back
+    // in (page_ins 241). Both moments are facts and they are different facts:
+    // the first says the store works, the second says the working set is still
+    // the whole corpus, which is precisely what M4 forbids.
+    let slept_stats = subject.brain.stats();
+    let (evicted_after_sleep, resident_terminals_after_sleep) =
+        (slept_stats.evicted_neurons, slept_stats.resident_terminals);
 
     let census_after_train = census_wanted.then(|| subject.census());
     // Marks taken at each phase boundary. Training is the phase that allocates
@@ -632,6 +781,21 @@ fn main() {
             "neurons": s.total_neurons,
             "concepts": s.total_concepts,
             "terminals": s.total_terminals,
+            // M4's paging readout, on every row so the two modes compare in one
+            // table. `store_attached: false` is the old reading, kept rather
+            // than replaced.
+            "store_attached": store_dir.is_some(),
+            "sleep_serialized": sleep_serialized,
+            "evicted_after_sleep": evicted_after_sleep,
+            "resident_terminals_after_sleep": resident_terminals_after_sleep,
+            "evicted_neurons": s.evicted_neurons,
+            "resident_terminals": s.resident_terminals,
+            "page_outs": s.page_outs,
+            "page_ins": subject.page_ins(),
+            "clean_skips": s.clean_skips,
+            // Named on the row, not only under --census, so the table itself
+            // says which buckets this storage mode cannot populate.
+            "zero_buckets": subject.zero_buckets(),
             "hub_fanout": hub,
             "est_resident_mb": bytes as f64 / 1_048_576.0,
             // The allocator's own books. `heap_peak_mb` is every byte this
