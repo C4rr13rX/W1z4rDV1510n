@@ -72,13 +72,26 @@ def main() -> int:
         print(f"{'PASS' if ok else 'FAIL'}  {name:14} {time.time() - t0:6.1f}s", flush=True)
         if not ok:
             failed.append(name)
+            # The NAMES first, flushed, and on their own line. The verdict above
+            # says a step failed; without this nobody can say WHICH suite, and a
+            # gate whose failure cannot be attributed cannot be compared against
+            # a baseline. Measured twice: on 2026-09-30 and again on 2026-10-01
+            # a killed gate's log held exactly one line -- "FAIL brain tests
+            # 789.0s", then "FAIL brain tests 962.3s" -- because the verdict
+            # print carries flush=True and every print after it did not, so the
+            # tail sat in a 8 KB buffer that only a clean exit would drain. Both
+            # runs had the list; both lost it.
+            names = failing_tests(proc.stdout)
+            print(f"      FAILED: {', '.join(names) if names else '(no test named -- compile error or harness failure)'}",
+                  flush=True)
             tail = [l for l in (proc.stdout + proc.stderr).splitlines()
                     if l.strip() and not l.startswith(("warning", "  |", "   |", "  =", " -->"))]
-            print("\n".join("      " + l for l in tail[-20:]))
+            print("\n".join("      " + l for l in tail[-20:]), flush=True)
         elif name == "scorecard":
             print("\n".join("      " + l for l in proc.stdout.splitlines()
-                            if l.lstrip()[:1].isdigit() or l.startswith(("scale", "RAM growth"))))
-    print(f"\ngate: {'FAILED -- ' + ', '.join(failed) if failed else 'OK'}")
+                            if l.lstrip()[:1].isdigit() or l.startswith(("scale", "RAM growth"))),
+                  flush=True)
+    print(f"\ngate: {'FAILED -- ' + ', '.join(failed) if failed else 'OK'}", flush=True)
     return 1 if failed else 0
 
 
