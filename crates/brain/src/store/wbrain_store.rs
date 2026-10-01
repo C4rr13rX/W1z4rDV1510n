@@ -2473,7 +2473,7 @@ mod tests {
     }
 
     #[test]
-    fn read_only_inference_boundary_discards_every_pool_without_rewriting() {
+    fn read_only_inference_boundary_releases_every_pool_without_rewriting_the_store() {
         let path = tmpfile("read-only-inference-boundary");
         let binding_pool_id;
         {
@@ -2522,7 +2522,32 @@ mod tests {
         let stats = restored.stats();
         assert_eq!(stats.resident_terminals, 0);
         assert_eq!(stats.evicted_neurons, stats.total_neurons);
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), before);
+        // The release now PERSISTS before it drops. This assertion used to read
+        // `assert_eq!(len, before)` and the change is deliberate, not a
+        // weakening: `Brain::observe_read_only` and
+        // `observe_fabric_read_only` -- the only two entry points any answer
+        // path actually takes -- open the window and both reach
+        // `Pool::observe_frame`, so the released body may carry Hebbian
+        // terminal updates and dropping it would delete learning. The old
+        // contract was safe only for `activate_for_prediction`, which is why
+        // the window stayed shut everywhere else.
+        //
+        // The bound is what is still worth asserting: a release must not
+        // rewrite the WHOLE container. Measured here, 14,113 -> 14,230 bytes
+        // for one neuron, and at scorecard scale 1 with a store attached
+        // `clean_skips` was 54,306 of 57,445 page-outs -- 94.5% of releases
+        // write nothing at all, because `append_record` compares an FNV digest
+        // against the bytes already at the slot's offset. The residue is the
+        // first release of each neuron after a reopen, since that digest map is
+        // deliberately in-memory.
+        let after = std::fs::metadata(&path).unwrap().len();
+        assert!(
+            after >= before && after < before * 2,
+            "a read-only release wrote {} bytes over a {}-byte container; it \
+             must append at most the bodies it touched, not rewrite the store",
+            after - before,
+            before
+        );
         std::fs::remove_file(path).ok();
     }
 
