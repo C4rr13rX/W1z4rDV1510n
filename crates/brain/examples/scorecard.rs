@@ -264,6 +264,14 @@ struct Subject {
     /// attached one, so every RAM number it published was of a brain that
     /// physically could not page out.
     store: bool,
+    /// Neurons `finish_read_only_inference` actually RELEASED, summed over
+    /// every question asked. Both answer paths threw this return value away,
+    /// so a release of zero was invisible -- and a release of zero is what the
+    /// first store-attached measurement implies, since page_ins came back equal
+    /// to page_outs at all four scales. Reported beside page_ins: their ratio
+    /// is the direct readout of whether answering a question gives its working
+    /// set back.
+    discarded: usize,
 }
 
 impl Subject {
@@ -297,7 +305,7 @@ impl Subject {
             assert_eq!(attached, 3, "expected 3 pools to attach a .wbrain store");
             store = true;
         }
-        Self { brain, lit: 0, store }
+        Self { brain, lit: 0, store, discarded: 0 }
     }
 
     /// The node's `/brain/sleep`: serialize every neuron into the container and
@@ -371,7 +379,7 @@ impl Subject {
         self.lit = self.brain.observe_read_only(QUERY_POOL, query.as_bytes()).len();
         let legacy = self.brain.integrate(QUERY_POOL, ANSWER_POOL);
         let answer = self.brain.decode_best_trained_binding(QUERY_POOL, ANSWER_POOL).or(legacy.answer);
-        let _ = self.brain.finish_read_only_inference();
+        self.discarded += self.brain.finish_read_only_inference().unwrap_or(0);
         answer.unwrap_or_default()
     }
 
@@ -384,7 +392,7 @@ impl Subject {
             .brain
             .integrate_autonomous(QUERY_POOL, ANSWER_POOL, 100.0, 3, 200)
             .answer;
-        let _ = self.brain.finish_read_only_inference();
+        self.discarded += self.brain.finish_read_only_inference().unwrap_or(0);
         answer.unwrap_or_default()
     }
 
@@ -792,6 +800,7 @@ fn main() {
             "resident_terminals": s.resident_terminals,
             "page_outs": s.page_outs,
             "page_ins": subject.page_ins(),
+            "read_only_discarded": subject.discarded,
             "clean_skips": s.clean_skips,
             // Named on the row, not only under --census, so the table itself
             // says which buckets this storage mode cannot populate.
