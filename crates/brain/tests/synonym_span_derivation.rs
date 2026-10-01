@@ -23,7 +23,9 @@
 //! Nothing here is a tuning target. The assertions are the two structural
 //! claims; the distributions are printed.
 
-use w1z4rd_brain::{AtomEncoding, Brain, BrainConfig, BytePassthroughEncoding, PoolConfig};
+use w1z4rd_brain::{
+    AtomEncoding, Brain, BrainConfig, BytePassthroughEncoding, MatchTier, PoolConfig,
+};
 
 const QUERY_POOL: u32 = 1;
 const ANSWER_POOL: u32 = 2;
@@ -124,13 +126,22 @@ fn teach_world(brain: &mut Brain) -> Vec<(String, String)> {
 /// `Brain::probe_question` makes. That private helper is what the derivation
 /// uses, so reproducing it here measures the derivation's own view.
 fn probe(brain: &mut Brain, question: &str) -> (f32, Option<String>) {
+    let (score, _, answer) = probe_tiered(brain, question);
+    (score, answer)
+}
+
+/// `probe`, also reporting the TIER the match was found at. Concepts emerge from
+/// recurring byte SEQUENCES, so `MatchTier::Concept` is the one signal in this
+/// scorer that is order-sensitive -- which is exactly what the score itself is
+/// not.
+fn probe_tiered(brain: &mut Brain, question: &str) -> (f32, MatchTier, Option<String>) {
     brain.observe_fabric_read_only(QUERY_POOL, question.as_bytes());
-    let score = brain.best_binding_match_v2(QUERY_POOL).score();
+    let m = brain.best_binding_match_v2(QUERY_POOL);
     let answer = brain
         .decode_best_trained_binding(QUERY_POOL, ANSWER_POOL)
         .filter(|a| !a.is_empty())
         .map(|a| String::from_utf8_lossy(&a).to_string());
-    (score, answer)
+    (m.score(), m.tier, answer)
 }
 
 /// Every sub-question the deletion search can reach that the brain knows
@@ -164,7 +175,12 @@ fn perfect_deletions(brain: &mut Brain, q: &str) -> Vec<(usize, usize, String, S
 /// question the brain knows PERFECTLY. The derivation accepts the FIRST of
 /// these in its own span order, so a list of length > 1 is an ambiguity and
 /// the order decides the answer.
-fn perfect_splices(brain: &mut Brain, q: &str, k: usize, insert: &str) -> Vec<(usize, String, String)> {
+fn perfect_splices(
+    brain: &mut Brain,
+    q: &str,
+    k: usize,
+    insert: &str,
+) -> Vec<(usize, String, String, MatchTier)> {
     let bytes = q.as_bytes().to_vec();
     let mut hits = Vec::new();
     for j in 0..=k {
@@ -176,10 +192,10 @@ fn perfect_splices(brain: &mut Brain, q: &str, k: usize, insert: &str) -> Vec<(u
             continue;
         }
         let text = String::from_utf8_lossy(&rewrite).to_string();
-        let (score, answer) = probe(brain, &text);
+        let (score, tier, answer) = probe_tiered(brain, &text);
         if score >= 1.0 {
             if let Some(answer) = answer {
-                hits.push((j, text, answer));
+                hits.push((j, text, answer, tier));
             }
         }
     }
@@ -195,6 +211,14 @@ enum SpliceOrder {
     /// `for j in (0..=k).rev()` -- the rewrite that discards the least of what
     /// was asked.
     LargestFirst,
+    /// Production `j` order, but the ceiling score alone no longer wins the
+    /// tie: the rewrite must ALSO have matched at `MatchTier::Concept`. A
+    /// concept neuron emerges from a recurring byte SEQUENCE, so it is the one
+    /// signal here that an unordered byte set cannot fake, and a rewrite with a
+    /// truncated subject cannot fire the concept that covers the intact one.
+    /// Falls back to the production choice when no rewrite in the range reaches
+    /// the ceiling at concept tier, so it can never derive LESS.
+    ConceptTierFirst,
 }
 
 /// `Brain::derive_by_substitution_profiled`'s known-prefix branch, with the
@@ -278,10 +302,23 @@ fn derive_with_order(
                 continue;
             }
             probes += 1;
-            let (score, answer) = probe(brain, &String::from_utf8_lossy(&rewrite));
+            let (score, tier, answer) = probe_tiered(brain, &String::from_utf8_lossy(&rewrite));
             let Some(answer) = answer else { continue };
+            let perfect = score >= 1.0;
+            if order == SpliceOrder::ConceptTierFirst {
+                // A concept-tier ceiling match ends the search; anything else is
+                // only kept as the fallback the production order would have
+                // taken, so this variant is a strict superset of it.
+                if perfect && tier == MatchTier::Concept {
+                    best = Some((score, rewrite, answer));
+                    break;
+                }
+                if score > base_score && best.as_ref().map_or(true, |(b, _, _)| score > *b) {
+                    best = Some((score, rewrite, answer));
+                }
+                continue;
+            }
             if score > base_score && best.as_ref().map_or(true, |(b, _, _)| score > *b) {
-                let perfect = score >= 1.0;
                 best = Some((score, rewrite, answer));
                 if perfect {
                     break;
@@ -355,6 +392,7 @@ fn largest_j_splice_beats_smallest_j_on_every_family() {
         for (label, order) in [
             ("smallest_j", SpliceOrder::SmallestFirst),
             ("largest_j", SpliceOrder::LargestFirst),
+            ("concept_tier", SpliceOrder::ConceptTierFirst),
         ] {
             let (got, cost) = derive_with_order(&mut brain, q, order, 3, MAX_PROBES);
             let slot = tally.entry((*family, label)).or_insert((0, 0, 0, 0));
@@ -458,14 +496,47 @@ fn beside_next_is_unreachable_and_on_material_is_ambiguous() {
     // RECALL FIRST: every number below is meaningless if the taught half
     // regressed, and the probes here observe the fabric thousands of times.
     let mut recalled = 0usize;
+    let mut trained_concept = 0usize;
     for (q, a) in &facts {
-        let (_, got) = probe(&mut brain, q);
+        let (_, tier, got) = probe_tiered(&mut brain, q);
         if got.as_deref() == Some(a.as_str()) {
             recalled += 1;
         }
+        if tier == MatchTier::Concept {
+            trained_concept += 1;
+        }
     }
-    println!("recall {recalled}/{} trained questions", facts.len());
+    println!(
+        "recall {recalled}/{} trained questions; matched at concept tier {trained_concept}",
+        facts.len()
+    );
     assert_eq!(recalled, facts.len(), "recall must be 100% before anything else is read");
+    // THE TIER IS ABSENT, NOT MERELY UNHELPFUL. `MatchTier::Concept` is the one
+    // order-sensitive signal the matcher has -- a concept neuron emerges from a
+    // recurring byte SEQUENCE -- and it is the only thing that could tell
+    // `"r0desk material?"` from `"r000 desk material?"`, whose DISTINCT BYTE
+    // SETS are identical. Measured: 0 of 184 perfect splices reach concept tier,
+    // and this number says whether the TRAINED questions reach it either. If
+    // they do not, no tie-break policy can ever discriminate, because every
+    // match in this world is decided on an unordered byte set.
+    println!(
+        "concept tier on trained questions: {trained_concept}/{} ({:.1}%)",
+        facts.len(),
+        100.0 * trained_concept as f32 / facts.len() as f32
+    );
+    // MEASURED 0 of 186. Not one TRAINED question reaches concept tier either,
+    // so the absence is not about the derivation's rewrites -- the whole world
+    // is matched on unordered byte sets, and `recall` is 100 % on that alone.
+    // That is why no tie-break among ceiling-scoring rewrites can be correct
+    // here: the signal a tie-break would need does not exist yet.
+    //
+    // Pinned as an assertion rather than a print, because the day concepts DO
+    // emerge in the query pool is the day the tier discriminator is worth
+    // re-measuring, and this is the line that will say so.
+    assert_eq!(
+        trained_concept, 0,
+        "a trained question now matches at concept tier -- re-run the tier          discriminator in the experiment below, it was measured inert against          0 of 184 perfect splices while this was 0"
+    );
 
     // ---- beside_next: the empty family -------------------------------------
     //
@@ -534,6 +605,9 @@ fn beside_next_is_unreachable_and_on_material_is_ambiguous() {
     let mut om_empty = 0usize;
     let mut ambiguous = 0usize;
     let mut total = 0usize;
+    let mut tier_concept = 0usize;
+    let mut tier_total = 0usize;
+    let mut tier_correct_concept = 0usize;
     for r in 0..ROOMS {
         for (obj, base) in RESTS_ON {
             let q = format!("{} {obj} on material?", room(r));
@@ -562,6 +636,22 @@ fn beside_next_is_unreachable_and_on_material_is_ambiguous() {
             if splices.len() > 1 {
                 ambiguous += 1;
             }
+            // TIER REACHABILITY, with NO budget involved. The `concept_tier`
+            // variant in the experiment below measured identical to the
+            // production order with its probe budget EXHAUSTED -- 32.0 of 32 per
+            // derivation -- which is the "a counter of zero from a path that
+            // never had the opportunity to run" shape. Counting the tiers
+            // directly is the only thing that separates "the tier cannot break
+            // this tie" from "the tier never got asked".
+            let concept_hits =
+                splices.iter().filter(|(_, _, _, t)| *t == MatchTier::Concept).count();
+            let correct_at_concept = splices
+                .iter()
+                .filter(|(_, _, a, t)| *t == MatchTier::Concept && a.as_str() == want.as_str())
+                .count();
+            tier_concept += concept_hits;
+            tier_total += splices.len();
+            tier_correct_concept += correct_at_concept;
             println!(
                 "on_material {q:>26} want {want} got {got:?} probes {probes} \
                  deletions {} first {:?} perfect-splices {splices:?}",
@@ -574,6 +664,10 @@ fn beside_next_is_unreachable_and_on_material_is_ambiguous() {
         "on_material right {om_right} wrong {om_wrong} empty {om_empty} of {total}; \
          probes with >1 perfect splice: {ambiguous}"
     );
+    println!(
+        "on_material TIER CENSUS of perfect splices: {tier_concept} concept of {tier_total};          {tier_correct_concept} concept hits carry the CORRECT answer"
+    );
+    assert!(tier_total > 0, "there must be perfect splices to census, or the census is vacuous");
 
     // The on_material claim is the opposite of beside_next's: the search space
     // is NOT empty, so this family is a selection problem and not a
