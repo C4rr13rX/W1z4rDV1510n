@@ -4072,17 +4072,49 @@ impl Brain {
                 self.binding_feature_postings(query_pool, neuron_id),
             );
         }
-        if let Some(target_pool) = target_pool.filter(|_| !sequence.is_empty()) {
-            add_binding_evidence(
-                &mut candidates,
-                self.binding_sequence_postings(query_pool, target_pool, &sequence),
-            );
-        }
+        let exact = match target_pool.filter(|_| !sequence.is_empty()) {
+            Some(target_pool) => {
+                self.binding_sequence_postings(query_pool, target_pool, &sequence)
+            }
+            None => Vec::new(),
+        };
+        add_binding_evidence(&mut candidates, exact.iter().copied());
 
         let mut ids = rank_bounded_binding_evidence(
             candidates,
             MAX_ROUTED_BINDING_CANDIDATES,
         );
+        // Exact ordered sensory identity is authoritative, so it may not be
+        // OUTVOTED out of the candidate set by fuzzy per-byte evidence.
+        //
+        // `rank_bounded_binding_evidence` sorts on how many firing atoms voted
+        // for a binding and truncates to the cap, breaking ties by id
+        // descending -- newest first. A binding that every feature posting has
+        // dropped arrives here with exactly one vote, from this route, and
+        // loses both the sort and the tie-break. Measured off
+        // `logs/scorecard-latest.json` 2026-10-01: at scale 64 every one of
+        // 1,095,061 feature lookups came back FULL, so one vote is the normal
+        // case there rather than the exception, and merely CONSULTING the
+        // exact route moved scale-64 integration only 38.54 -> 39.00.
+        //
+        // The bound is preserved: the output is still at most
+        // `MAX_ROUTED_BINDING_CANDIDATES`, so this buys reach without buying
+        // latency or resident candidate bodies. It cannot invent an answer
+        // either -- an exact-sequence posting is the binding whose query atoms
+        // were observed in THIS order, and the scoring below is unchanged.
+        if !exact.is_empty() {
+            let present: ahash::AHashSet<NeuronId> = ids.iter().copied().collect();
+            let missing: Vec<NeuronId> = exact
+                .iter()
+                .copied()
+                .filter(|id| !present.contains(id))
+                .take(MAX_ROUTED_BINDING_CANDIDATES)
+                .collect();
+            if !missing.is_empty() {
+                ids.truncate(MAX_ROUTED_BINDING_CANDIDATES - missing.len());
+                ids.extend(missing);
+            }
+        }
         if let Some(binding_handle) = self.fabric.pool(self.binding_pool_id) {
             let mut bindings = binding_handle.write();
             ids.retain(|binding_id| match bindings.ensure_loaded(*binding_id) {
