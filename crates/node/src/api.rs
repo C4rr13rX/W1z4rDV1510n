@@ -8013,7 +8013,11 @@ async fn brain_ask(
 
     let (answer_bytes, outside_grounding, conf, tier) = {
         let mut brain = state.brain.lock().await;
-        brain.fabric_mut().observe(qp, req.text.as_bytes());
+        // ANSWER path, not training: the question seeds the firing state the
+        // integrator reads and must not enter the per-pool emergence ledger.
+        // Measured 2026-09-30 at scorecard scale 16, answering 2,432 questions
+        // through the mutating observe took the process 28.3 -> 546.7 MB.
+        brain.observe_fabric_read_only(qp, req.text.as_bytes());
         let legacy = brain.integrate(qp, tp);
         let authoritative = brain.decode_best_trained_binding(qp, tp);
         let answer = authoritative.or(legacy.answer);
@@ -8143,7 +8147,10 @@ async fn hypothesis_research_loop(
             // Observe the question into the query pool so the
             // currently_firing set seeds the autonomous integrator.
             let mut b = brain.lock().await;
-            b.fabric_mut().observe(query_pool, question.as_bytes());
+            // Read-only: this loop runs unattended, so a mutating observe
+            // here grows the emergence ledger once per queued hypothesis for
+            // as long as the node is up.
+            b.observe_fabric_read_only(query_pool, question.as_bytes());
             let res = b.integrate_autonomous_tuned(
                 query_pool, POOL_ACTION_ID,
                 0.10,        // fabric_confidence_threshold — anything > random

@@ -1985,6 +1985,36 @@ impl Brain {
         fired
     }
 
+    /// Observe a frame into the FABRIC while a question is being answered:
+    /// emergence suppressed, and none of the Brain-level bookkeeping that
+    /// [`Self::observe`] performs.
+    ///
+    /// This exists because the node's answer routes reach past `Brain` --
+    /// `brain.fabric_mut().observe(..)` at `crates/node/src/api.rs:8016`
+    /// (`/brain/ask`), `:8146` (the hypothesis research loop) and
+    /// `crates/node/src/brain_api.rs:6089` (the idle thinking loop, every
+    /// 200 ms) -- so [`Self::observe_read_only`] is not a drop-in for them.
+    /// It wraps [`Self::observe`], which also captures a QA pair and inserts
+    /// a `recent_frames` entry; a QA pair harvested from a question being
+    /// ANSWERED is training those routes never asked for. The suppression is
+    /// what they need and the bookkeeping is not, so the suppression gets
+    /// its own fabric-level entry point rather than the callers acquiring a
+    /// behaviour change they did not ask for.
+    ///
+    /// The three routes that DO go through [`Self::observe`] --
+    /// `crates/node/src/bin/brain_server.rs:2379` and `:2446` on `/chat` --
+    /// use [`Self::observe_read_only`] instead, where it IS a drop-in.
+    ///
+    /// Suppression is scoped to this one call, exactly as in
+    /// [`Self::observe_read_only`]: a route that later trains on a miss
+    /// still crystallises normally.
+    pub fn observe_fabric_read_only(&mut self, pool_id: PoolId, frame: &[u8]) -> Vec<NeuronId> {
+        self.set_emergence_suppressed(true);
+        let fired = self.fabric.observe(pool_id, frame);
+        self.set_emergence_suppressed(false);
+        fired
+    }
+
     fn set_emergence_suppressed(&mut self, suppressed: bool) {
         for pool_id in self.fabric.pool_ids() {
             if let Some(pool) = self.fabric.pool(pool_id) {

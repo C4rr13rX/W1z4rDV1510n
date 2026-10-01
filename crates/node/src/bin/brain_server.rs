@@ -2375,8 +2375,11 @@ async fn chat(State(s): State<AppState>, Json(req): Json<ChatRequest>) -> Json<C
 
     let prompt = unwrap_wizard_prompt(&req.text);
 
-    // Observe the prompt into the text pool.
-    brain.observe(POOL_TEXT, prompt.as_bytes());
+    // Observe the prompt into the text pool. Read-only: /chat answers, it
+    // does not teach, so the prompt must not enter the emergence ledger.
+    // `observe_read_only` IS a drop-in here -- it wraps this same
+    // `Brain::observe`, so QA capture and `recent_frames` are unchanged.
+    brain.observe_read_only(POOL_TEXT, prompt.as_bytes());
 
     // PRIMARY: trained-binding decode.  Per ARCHITECTURE.md §4.D.1,
     // when the substrate has a binding that matches the firing
@@ -2443,7 +2446,7 @@ async fn chat(State(s): State<AppState>, Json(req): Json<ChatRequest>) -> Json<C
     // Cross-modal predictions: re-observe prompt and read the firing
     // state in image and audio pools (cross-pool propagation does the
     // work automatically; we just snapshot what's active).
-    brain.observe(POOL_TEXT, prompt.as_bytes());
+    brain.observe_read_only(POOL_TEXT, prompt.as_bytes());
     let mut predictions: HashMap<String, Vec<String>> = HashMap::new();
     // Stage 12 diagnostic: include POOL_ACTION so we can see which
     // action-pool concepts the integrate selection was choosing
