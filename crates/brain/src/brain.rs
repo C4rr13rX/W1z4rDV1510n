@@ -1129,6 +1129,29 @@ pub struct Brain {
     /// deliberately NOT persisted: it is a cache of the current question
     /// distribution, and a restored brain re-earns it in one question.
     derivation_cut_hints: Vec<(usize, usize, usize)>,
+    /// Where the taught sub-question's answer has been spliced in before, as
+    /// `(question length, cut point, splice offset)`.
+    ///
+    /// [`Self::derivation_cut_hints`] made LOCATING the taught sub-question
+    /// one question instead of `~2k`. It left the other half of the search
+    /// untouched: once the cut `k` is known the answer still has to be tried
+    /// at every `j` in `0..=k`, which at the scorecard's `k = 12` is 13 more
+    /// questions of a budget of 32 — so a 2-hop derivation cost ~16 and a
+    /// 3-hop one could not fit at all.
+    ///
+    /// The splice point is a property of the same SHAPE the cut is, and it
+    /// repeats for the same reason, so it is remembered the same way: keyed
+    /// on `(n, k)`, bounded at [`DERIVATION_SPLICE_HINTS`], and not persisted.
+    ///
+    /// It holds the SET of `j` that reached the ceiling, not the first one,
+    /// and that is not a refinement — it is what makes the cache compatible
+    /// with the vote the splice scan now takes. A cache of the first `j`
+    /// replays exactly the rewrite the vote exists to outvote, so it would
+    /// have made Cove's measured `on_material` 6/24 -> 18/24 unreachable on
+    /// every repeat of a shape. A replay that produces no ceiling falls
+    /// through to the full scan, so a stale hint costs its own probes and
+    /// changes no answer.
+    derivation_splice_hints: Vec<(usize, usize, Vec<usize>)>,
     /// What the derivation has SPENT, cumulative over this brain's life.
     derivation_stats: DerivationStats,
 }
@@ -1464,6 +1487,15 @@ pub const DEFAULT_DERIVATION_PROBE_BUDGET: usize = 32;
 /// 64 entries is 64 lengths at three `usize` each.
 pub const DERIVATION_CUT_HINTS: usize = 64;
 
+/// How many splice shapes [`Brain::derive_by_substitution`] remembers.
+///
+/// Keyed on `(n, k)` rather than `n` alone, so it needs more room than
+/// [`DERIVATION_CUT_HINTS`]: a world with 64 question lengths and a handful of
+/// cuts at each still fits in 256 entries at three `usize` apiece (6 KB), and
+/// a miss costs zero questions because a non-matching entry is skipped
+/// without asking anything.
+pub const DERIVATION_SPLICE_HINTS: usize = 256;
+
 impl Brain {
     /// Construct a fresh brain with no sensor pools yet.  The binding
     /// pool is auto-created at pool_id = `binding_pool_config.id`.
@@ -1520,6 +1552,7 @@ impl Brain {
             feedback_events_emitted: 0,
             derivation_probe_budget: DEFAULT_DERIVATION_PROBE_BUDGET,
             derivation_cut_hints: Vec::new(),
+            derivation_splice_hints: Vec::new(),
             derivation_stats: DerivationStats::default(),
         }
     }
@@ -6868,12 +6901,32 @@ impl Brain {
         target_pool: PoolId,
         question: &[u8],
     ) -> (f32, Option<Vec<u8>>) {
+        let score = self.probe_question_score(query_pool, question);
+        (score, self.probe_answer(query_pool, target_pool))
+    }
+
+    /// The score half of [`Self::probe_question`], without decoding an answer.
+    ///
+    /// Both searches inside `derive_by_substitution_profiled` test the SCORE
+    /// first and read the answer only for the probe that wins, so decoding
+    /// every probe is work whose result is thrown away. Measured by counting
+    /// the calls rather than by reasoning about them: a 2-hop derivation at
+    /// scale 16 ran ~16 probes per hop and used the answer of 1 of them, so
+    /// the decode ran 15 times for nothing. Splitting the two halves changes
+    /// no result — [`Self::probe_answer`] decodes from the activation this
+    /// method leaves behind, which is exactly the state the combined version
+    /// decoded from.
+    fn probe_question_score(&mut self, query_pool: PoolId, question: &[u8]) -> f32 {
         self.observe_fabric_read_only(query_pool, question);
-        let score = self.best_binding_match_v2(query_pool).score();
-        let answer = self
-            .decode_best_trained_binding(query_pool, target_pool)
-            .filter(|a| !a.is_empty());
-        (score, answer)
+        self.best_binding_match_v2(query_pool).score()
+    }
+
+    /// Decode the answer for whatever question was last probed into
+    /// `query_pool`. Must follow a [`Self::probe_question_score`] on the same
+    /// pool: it reads the firing state that call installed.
+    fn probe_answer(&mut self, query_pool: PoolId, target_pool: PoolId) -> Option<Vec<u8>> {
+        self.decode_best_trained_binding(query_pool, target_pool)
+            .filter(|a| !a.is_empty())
     }
 
     /// Derive an answer to a question the brain was NEVER trained on, by
@@ -7061,9 +7114,11 @@ impl Brain {
                 sub.extend_from_slice(&current[..k]);
                 sub.extend_from_slice(&current[n - t..]);
                 probes += 1;
-                let (score, answer) = self.probe_question(query_pool, target_pool, &sub);
+                // Score first: the answer is read only by the `>= 1.0` arm, so
+                // decoding every miss is work nothing consumes.
+                let score = self.probe_question_score(query_pool, &sub);
                 if score >= 1.0 {
-                    if let Some(answer) = answer {
+                    if let Some(answer) = self.probe_answer(query_pool, target_pool) {
                         known_prefix = Some((k, answer));
                         self.note_derivation_cut(n, k, t);
                     }
@@ -7087,9 +7142,9 @@ impl Brain {
                         sub.extend_from_slice(&current[..k]);
                         sub.extend_from_slice(&current[n - t..]);
                         probes += 1;
-                        let (score, answer) = self.probe_question(query_pool, target_pool, &sub);
+                        let score = self.probe_question_score(query_pool, &sub);
                         if score >= 1.0 {
-                            if let Some(answer) = answer {
+                            if let Some(answer) = self.probe_answer(query_pool, target_pool) {
                                 known_prefix = Some((k, answer));
                                 self.note_derivation_cut(n, k, t);
                             }
@@ -7099,58 +7154,161 @@ impl Brain {
                 }
             }
 
-            let mut spans: Vec<(usize, usize)> = Vec::new();
+            // WHICH ceiling rewrite, and why this is a vote rather than the
+            // first one.
+            //
+            // The accept rule this method was built on -- "a question scoring
+            // 1.0 IS a question the brain was taught" -- is FALSE, and the
+            // measurement is Cove's, in `tests/relation_transfer_derivation.rs`:
+            // 184 rewrites reached the ceiling over 24 `on_material` probes and
+            // 24 of them were actually taught. An atom is a BYTE, so a
+            // truncation that drops one byte of the room id still explains
+            // every atom it kept and still scores 1.0 -- `"r0desk material?"`
+            // from `"r001 lamp on material?"` reaches the ceiling and answers
+            // r000's material. Taking the FIRST such rewrite takes that one.
+            //
+            // The ceiling answers are not evenly wrong, though: five of the
+            // seven kept the room id and said `steel`, two lost a byte and said
+            // `oak`. So the MODAL answer over every ceiling rewrite is the one
+            // the truncations cannot outvote, and that is the whole rule -- no
+            // byte is read, no span is preferred, and nothing here knows what a
+            // room id is. Measured by Cove at scale 1: `on_material` 6/24 ->
+            // 18/24, `next_color` 16/16 unchanged (its correct rewrite is
+            // `j = 0`, the MOST truncated one, so a rule that preferred long
+            // spans would have cost it), all families 22/54 -> 34/54.
+            //
+            // Ties break on the smallest `j`, so the result is deterministic
+            // and a tie reduces to the old first-wins behaviour.
+            let cut_k = known_prefix.as_ref().map(|(k, _)| *k);
             let splice_answer = match &known_prefix {
-                Some((k, answer)) => {
-                    for j in 0..=*k {
-                        spans.push((j, *k));
-                    }
-                    answer.clone()
-                }
-                None => {
-                    for j in 0..n {
-                        for k in (j + 1)..=n {
-                            spans.push((j, k));
-                        }
-                    }
-                    base_answer.clone()
-                }
+                Some((_, answer)) => answer.clone(),
+                None => base_answer.clone(),
             };
 
-            // score, rewritten question, its answer
-            let mut best: Option<(f32, Vec<u8>, Vec<u8>)> = None;
-            for (j, k) in spans {
-                if probes >= max_probes {
-                    break;
-                }
-                let mut rewrite = Vec::with_capacity(n + splice_answer.len());
-                rewrite.extend_from_slice(&current[..j]);
-                rewrite.extend_from_slice(&splice_answer);
-                rewrite.extend_from_slice(&current[k..]);
-                if rewrite == current || rewrite.is_empty() {
-                    continue;
-                }
-                probes += 1;
-                let (score, answer) = self.probe_question(query_pool, target_pool, &rewrite);
-                let Some(answer) = answer else { continue };
-                // Strictly better-known than the question we started from, and
-                // the best such rewrite found.
-                if score > base_score
-                    && best.as_ref().map_or(true, |(best_score, _, _)| score > *best_score)
-                {
-                    let perfect = score >= 1.0;
-                    best = Some((score, rewrite, answer));
-                    // 1.0 is the ceiling of precision x recall, and a rewrite
-                    // that reaches it IS a question the brain was taught, so no
-                    // later span can beat it. Same early exit as the base-score
-                    // break above, applied to the splice search: the correct
-                    // splice point is wherever the taught sub-question's
-                    // variable part begins, so without this the loop always ran
-                    // to k+1 regardless of where it had already won.
-                    if perfect {
-                        break;
+            // The ceiling set remembered for this shape is replayed FIRST, and
+            // the rest of the scan runs only if it produced no ceiling. A hint
+            // therefore collapses a repeat from `k + 1` questions to the size
+            // of the set while still handing the vote every ceiling answer --
+            // caching only the first `j`, which is what this cache did before
+            // the vote existed, would have made 18/24 unreachable.
+            let mut rounds: Vec<Vec<(usize, usize)>> = Vec::new();
+            match cut_k {
+                Some(k) => {
+                    let hint = self.derivation_splice_hint(n, k);
+                    if hint.is_empty() {
+                        rounds.push((0..=k).map(|j| (j, k)).collect());
+                    } else {
+                        rounds.push(hint.iter().map(|j| (*j, k)).collect());
+                        rounds
+                            .push((0..=k).filter(|j| !hint.contains(j)).map(|j| (j, k)).collect());
                     }
                 }
+                None => {
+                    let mut all = Vec::new();
+                    for j in 0..n {
+                        for k in (j + 1)..=n {
+                            all.push((j, k));
+                        }
+                    }
+                    rounds.push(all);
+                }
+            }
+
+            // Every rewrite that reached the ceiling, as `(j, k, answer)`.
+            let mut ceiling: Vec<(usize, usize, Vec<u8>)> = Vec::new();
+            // The best SUB-ceiling rewrite, which is what answers when nothing
+            // reaches 1.0 -- unchanged behaviour for that case.
+            let mut best: Option<(f32, Vec<u8>, Vec<u8>)> = None;
+            for (round_idx, spans) in rounds.into_iter().enumerate() {
+                // The hint round answered, so the rest of the scan is work
+                // whose result the vote already has.
+                if round_idx > 0 && !ceiling.is_empty() {
+                    break;
+                }
+                for (j, k) in spans {
+                    if probes >= max_probes {
+                        break;
+                    }
+                    let mut rewrite = Vec::with_capacity(n + splice_answer.len());
+                    rewrite.extend_from_slice(&current[..j]);
+                    rewrite.extend_from_slice(&splice_answer);
+                    rewrite.extend_from_slice(&current[k..]);
+                    if rewrite == current || rewrite.is_empty() {
+                        continue;
+                    }
+                    probes += 1;
+                    let score = self.probe_question_score(query_pool, &rewrite);
+                    // `base_score < 1.0` is guaranteed by the break above, so a
+                    // ceiling rewrite is always strictly better known than the
+                    // question it came from.
+                    if score >= 1.0 {
+                        if let Some(answer) = self.probe_answer(query_pool, target_pool) {
+                            ceiling.push((j, k, answer));
+                        }
+                        // NO break: the vote needs every ceiling answer, and
+                        // this line is what the 6/24 -> 18/24 is bought with.
+                        continue;
+                    }
+                    // Strictly better-known than the question we started from,
+                    // and the best such rewrite found. Tested BEFORE the
+                    // decode, because a rewrite that is not the new best has
+                    // its answer discarded.
+                    if score > base_score
+                        && best.as_ref().map_or(true, |(best_score, _, _)| score > *best_score)
+                    {
+                        let Some(answer) = self.probe_answer(query_pool, target_pool) else {
+                            continue;
+                        };
+                        best = Some((score, rewrite, answer));
+                    }
+                }
+            }
+
+            if !ceiling.is_empty() {
+                // Modal answer; ties on the smallest `j`.
+                let mut tally: Vec<(&[u8], usize, usize, usize)> = Vec::new();
+                for (j, k, answer) in &ceiling {
+                    match tally.iter_mut().find(|(a, _, _, _)| *a == answer.as_slice()) {
+                        Some(entry) => entry.1 += 1,
+                        None => tally.push((answer.as_slice(), 1, *j, *k)),
+                    }
+                }
+                tally.sort_by(|a, b| b.1.cmp(&a.1).then(a.2.cmp(&b.2)));
+                // A PLURALITY is not enough, and that was measured rather
+                // than reasoned. The plain modal rule took scale-16
+                // `on_material` 71/384 -> 169/384 and `next_on_material`
+                // 6/128 -> 20/128, and it took `next_color` 231/256 ->
+                // 182/256 -- a family whose correct rewrite is `j = 0`, the
+                // most truncated one, so its right answer is routinely a
+                // minority among ceiling rewrites that each keep a different
+                // slice of the original question. Requiring a STRICT MAJORITY
+                // of the ceiling set keeps the on_material gain, where the
+                // right answer was 5 of 7, and leaves a family whose ceiling
+                // set merely disagrees on the old first-wins answer, which is
+                // the smallest `j`. Nothing here reads a byte or knows which
+                // family it is in: it is "the ceiling agrees" against "the
+                // ceiling is split".
+                let majority = tally[0].1 * 2 > ceiling.len();
+                let (winner, _, win_j, win_k) = if majority {
+                    tally[0]
+                } else {
+                    *tally
+                        .iter()
+                        .min_by_key(|(_, _, j, _)| *j)
+                        .expect("ceiling is non-empty")
+                };
+                let winner = winner.to_vec();
+                let mut rewrite = Vec::with_capacity(n + splice_answer.len());
+                rewrite.extend_from_slice(&current[..win_j]);
+                rewrite.extend_from_slice(&splice_answer);
+                rewrite.extend_from_slice(&current[win_k..]);
+                if let Some(k) = cut_k {
+                    let mut js: Vec<usize> = ceiling.iter().map(|(j, _, _)| *j).collect();
+                    js.sort_unstable();
+                    js.dedup();
+                    self.note_derivation_splice(n, k, js);
+                }
+                best = Some((1.0, rewrite, winner));
             }
             let Some((_, next_question, next_answer)) = best else { break };
             derived = Some(next_answer);
@@ -7318,6 +7476,48 @@ impl Brain {
     /// from a probe count.
     pub fn derivation_cut_hints(&self) -> &[(usize, usize, usize)] {
         &self.derivation_cut_hints
+    }
+
+    /// Remember the SET of splice points that reached the ceiling for a
+    /// shape. See [`Self::derivation_splice_hints`] for why it is the set and
+    /// not the first one.
+    fn note_derivation_splice(&mut self, n: usize, k: usize, js: Vec<usize>) {
+        if js.is_empty() {
+            return;
+        }
+        if let Some(pos) = self
+            .derivation_splice_hints
+            .iter()
+            .position(|(hn, hk, _)| *hn == n && *hk == k)
+        {
+            let hit = self.derivation_splice_hints.remove(pos);
+            // The WIDER set wins. A replay that found fewer ceiling rewrites
+            // than a full scan did is a replay of a set that was already too
+            // narrow, and narrowing it again is how a cache converges on the
+            // first-wins behaviour the vote exists to replace.
+            let keep = if js.len() > hit.2.len() { (n, k, js) } else { hit };
+            self.derivation_splice_hints.insert(0, keep);
+            return;
+        }
+        self.derivation_splice_hints.insert(0, (n, k, js));
+        self.derivation_splice_hints.truncate(DERIVATION_SPLICE_HINTS);
+    }
+
+    /// The splice points to replay for a question of length `n` cut at `k`,
+    /// empty when the shape has not been seen.
+    fn derivation_splice_hint(&self, n: usize, k: usize) -> Vec<usize> {
+        self.derivation_splice_hints
+            .iter()
+            .find(|(hn, hk, _)| *hn == n && *hk == k)
+            .map(|(_, _, js)| js.clone())
+            .unwrap_or_default()
+    }
+
+    /// The splice points [`Self::derive_by_substitution`] will try first.
+    /// Exposed so a test can assert the cache is bounded and that it learned
+    /// the shape, rather than inferring either from a probe count.
+    pub fn derivation_splice_hints(&self) -> &[(usize, usize, Vec<usize>)] {
+        &self.derivation_splice_hints
     }
 
     pub fn set_derivation_probe_budget(&mut self, probes: usize) {
@@ -9973,6 +10173,7 @@ impl Brain {
             feedback_events_emitted: 0,
             derivation_probe_budget: DEFAULT_DERIVATION_PROBE_BUDGET,
             derivation_cut_hints: Vec::new(),
+            derivation_splice_hints: Vec::new(),
             derivation_stats: DerivationStats::default(),
         };
         brain.rebuild_binding_sequence_index();
@@ -10160,6 +10361,7 @@ impl Brain {
             feedback_events_emitted: 0,
             derivation_probe_budget: DEFAULT_DERIVATION_PROBE_BUDGET,
             derivation_cut_hints: Vec::new(),
+            derivation_splice_hints: Vec::new(),
             derivation_stats: DerivationStats::default(),
         };
         if let Some(count) = brain.disk_scalar(FINGERPRINT_TENTATIVE_COUNT_KEY) {
