@@ -1061,6 +1061,25 @@ pub struct Brain {
     feedback_loops: Vec<RuntimeFeedbackLoop>,
     delayed_feedback: Vec<ScheduledFeedback>,
     feedback_events_emitted: u64,
+    /// Questions [`Self::integrate_autonomous`] may ask the fabric when the
+    /// trained bindings answered nothing, before giving up.
+    ///
+    /// **Zero by default, which disables the derivation**, and that default is
+    /// a measurement rather than caution. Wired on, the mechanism works --
+    /// `integration_pct` goes 0.0 -> 4.1 at scale 64 with recall still 100.0 at
+    /// every scale -- and it costs RAM and wall time the gate refuses:
+    ///
+    /// | budget | scale-64 peak | baseline | scale-64 wall |
+    /// |--------|---------------|----------|---------------|
+    /// | 0      | 39.5 MB       | 39.2 MB  | 39 s          |
+    /// | 32     | 49.1 MB       | 39.2 MB  | 234 s         |
+    /// | 256    | did not complete (300 s timeout at scales 16 and 64)    |
+    ///
+    /// So the derivation is committed, tested and OFF, and turning it on is
+    /// gated on the per-probe cost rather than on a decision. The cost is in
+    /// the probes: each one is a full `observe_fabric_read_only` over the whole
+    /// query pool, so 32 probes is 32 observes per unanswered question.
+    derivation_probe_budget: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -1375,6 +1394,7 @@ impl Brain {
             feedback_loops: Vec::new(),
             delayed_feedback: Vec::new(),
             feedback_events_emitted: 0,
+            derivation_probe_budget: 0,
         }
     }
 
@@ -6907,27 +6927,141 @@ impl Brain {
         (derived, probes)
     }
 
-    /// Default-threshold version of [`Self::integrate_autonomous_tuned`].
+    /// Default-threshold version of [`Self::integrate_autonomous_tuned`],
+    /// plus the derivation fallback that makes it answer questions it was
+    /// never trained on.
+    ///
     /// Uses 0.70 as the binding-match precision floor — sufficient to
     /// reject out-of-vocabulary prompts (like "Hello" against a
     /// toddler-category brain) while still accepting partial-match
     /// prompts ("doggy" → animal, "blue!" → color).
+    ///
+    /// # Why the derivation hangs off THIS method and takes no question
+    ///
+    /// [`Self::derive_by_substitution`] measured 32 of 32 on never-trained
+    /// probes and had **zero callers** outside its own test: the answer path
+    /// arrives here with two pool ids and no question, because the question
+    /// was consumed by an earlier `observe_read_only`. It cannot be recovered
+    /// from the firing set — an atom is a BYTE, the firing set is an unordered
+    /// set of distinct bytes, and `"r03 lamp on material"` fires exactly what
+    /// an anagram of it fires.
+    ///
+    /// [`Self::observe`] already keeps the frame in `recent_frames` keyed by
+    /// pool, with the tick it arrived on, for QA capture. That is the question,
+    /// already stored, so the derivation needs no new state and no new
+    /// argument — it needs the bytes this brain already has. The 2-tick
+    /// freshness window is the one `observe`'s own QA capture uses, so a
+    /// caller that asks without observing derives nothing rather than deriving
+    /// an answer to a stale question.
+    ///
+    /// # Why this cannot cost OOV honesty
+    ///
+    /// The derivation runs only when `integrate_autonomous_tuned` produced no
+    /// answer AND the step-0 binding gate accepts the prompt at the same 0.70
+    /// precision floor that gate uses.
+    ///
+    /// The gate is re-read here rather than inferred from the returned
+    /// `confidence_tier`, and that is not defensive duplication — measured, the
+    /// tier cannot carry it. `Ungrounded` comes back for prompts the gate
+    /// ACCEPTED: with `fabric_confidence_threshold` at 100.0 the fabric arm is
+    /// never taken and the chain walk reaches nothing, so the method returns
+    /// the legacy `integrate()` report, whose `fabric_confidence` is 0.0 and
+    /// whose tier is therefore `Ungrounded`. A first version of this fallback
+    /// read that tier and was inert for exactly that reason: 0 of 32 TRAINED
+    /// questions answered through this entry point while
+    /// `best_binding_match_v2` scored every one of them at precision 1.0000,
+    /// recall 1.0000, tier `Atom`. The gate is the only thing that owns "is
+    /// this prompt grounded" — the audit-4 rule in
+    /// `integrate_autonomous_tuned` says so — so the gate is what is read.
     pub fn integrate_autonomous(
-        &self,
+        &mut self,
         query_pool: PoolId,
         target_pool: PoolId,
         fabric_confidence_threshold: f32,
         chain_max_depth: usize,
         chain_max_visit: usize,
     ) -> AnswerWithGrounding {
-        self.integrate_autonomous_tuned(
+        let direct = self.integrate_autonomous_tuned(
             query_pool,
             target_pool,
             fabric_confidence_threshold,
             chain_max_depth,
             chain_max_visit,
             0.70,
-        )
+        );
+        if direct.answer.as_ref().map_or(false, |a| !a.is_empty()) {
+            return direct;
+        }
+        if self.derivation_probe_budget == 0 {
+            return direct;
+        }
+        // Same gate, same floor, same single source of truth as step 0.
+        if self.best_binding_match_v2(query_pool).precision < 0.70 {
+            return direct;
+        }
+        let Some(question) = self.fresh_observed_frame(query_pool) else {
+            return direct;
+        };
+        let (derived, probes) = self.derive_by_substitution_profiled(
+            query_pool,
+            target_pool,
+            &question,
+            chain_max_depth,
+            self.derivation_probe_budget,
+        );
+        let Some(derived) = derived.filter(|a| !a.is_empty()) else {
+            return direct;
+        };
+        tracing::debug!(
+            probes,
+            question = %String::from_utf8_lossy(&question),
+            answer = %String::from_utf8_lossy(&derived),
+            "derived an answer by substitution"
+        );
+        let mut grounding = direct.grounding.clone();
+        // Composition, not retrieval: the answer was assembled from questions
+        // the brain was taught and this one was not among them.
+        grounding.speculation_flag = true;
+        grounding.outside_grounding = false;
+        AnswerWithGrounding {
+            answer: Some(derived),
+            grounding,
+            confidence_tier: ConfidenceTier::Speculative,
+            next_steps_if_ungrounded: Vec::new(),
+        }
+    }
+
+    /// Let [`Self::integrate_autonomous`] derive, and bound what it may spend.
+    ///
+    /// Deliberately NOT `chain_max_visit`: that budget bounds a walk over the
+    /// EEM fact graph, and this bounds re-asking the fabric, which is a
+    /// different resource with a different measured cost. Read the cost off
+    /// `derive_by_substitution_profiled`, which reports the probe count per
+    /// derivation, rather than inferring it from `n(n+1)/2`: measured 27 for a
+    /// two-hop prefix question, 167 for three hops, 673 when the taught
+    /// sub-question is not a prefix.
+    ///
+    /// `0` disables the derivation, which is the default -- see
+    /// `derivation_probe_budget` for the table of what each setting costs.
+    pub fn set_derivation_probe_budget(&mut self, probes: usize) {
+        self.derivation_probe_budget = probes;
+    }
+
+    /// What [`Self::set_derivation_probe_budget`] was last set to.
+    pub fn derivation_probe_budget(&self) -> usize {
+        self.derivation_probe_budget
+    }
+
+    /// The frame last observed into `pool`, if it arrived recently enough to
+    /// still be the question being answered. Reuses `recent_frames` and the
+    /// 2-tick window [`Self::observe`] already applies to QA capture.
+    fn fresh_observed_frame(&self, pool: PoolId) -> Option<Vec<u8>> {
+        let now = self.fabric.current_tick();
+        let (frame, tick) = self.recent_frames.get(&pool)?;
+        if frame.is_empty() || now.saturating_sub(*tick) > 2 {
+            return None;
+        }
+        Some(frame.clone())
     }
 
     pub fn integrate_autonomous_tuned(
@@ -9560,6 +9694,7 @@ impl Brain {
             feedback_loops: Vec::new(),
             delayed_feedback: Vec::new(),
             feedback_events_emitted: 0,
+            derivation_probe_budget: 0,
         };
         brain.rebuild_binding_sequence_index();
         (brain, missing)
@@ -9744,6 +9879,7 @@ impl Brain {
             feedback_loops: Vec::new(),
             delayed_feedback: Vec::new(),
             feedback_events_emitted: 0,
+            derivation_probe_budget: 0,
         };
         if let Some(count) = brain.disk_scalar(FINGERPRINT_TENTATIVE_COUNT_KEY) {
             brain.tentative_binding_count_total = count as usize;
