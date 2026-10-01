@@ -438,3 +438,75 @@ fn the_production_answer_path_derives_untrained_answers() {
         "the production answer path derived {hits} of {asked}: {empty} empty ({ungrounded} ungrounded), {wrong} wrong"
     );
 }
+
+/// The sub-question is a DELETION, and a `?`-terminated world is what proves it.
+///
+/// Every other world in this file is prefix-shaped, so all of them pass with a
+/// prefix-only search and none of them can tell the two mechanisms apart. The
+/// scorecard's world is not: its questions end in `?`, so the taught
+/// sub-question of `"r000 lamp on material?"` is `"r000 lamp on?"`, which is not
+/// a prefix of it. Measured on that world (Iris,
+/// `tests/question_terminator_blocks_prefix_search.rs`), the prefix ladder peaks
+/// at 0.90 and NOTHING reaches 1.0, so a prefix-only search spends all `n-1`
+/// probes and derives nothing — which is exactly what `on_material` did at every
+/// scale and under every budget.
+///
+/// This asserts the repair where it is cheap to assert: a terminated world must
+/// derive, and it must do so inside the budget the brain actually SHIPS, because
+/// a mechanism that works only at the 4096 this file uses elsewhere is a
+/// mechanism the product cannot run.
+#[test]
+fn derivation_finds_a_subquestion_that_is_not_a_prefix_of_the_question() {
+    const ROOMS: u32 = 16;
+    let mut brain = subject();
+    for room in 0..ROOMS {
+        teach(&mut brain, &format!("r{room:03} lamp on?"), "desk");
+        teach(&mut brain, &format!("r{room:03} desk material?"), "oak");
+    }
+
+    // Recall first: a derivation measured against a world the brain cannot
+    // recall measures nothing.
+    let mut recalled = 0u32;
+    for room in 0..ROOMS {
+        if recall(&mut brain, &format!("r{room:03} lamp on?")).as_deref() == Some(b"desk".as_ref()) {
+            recalled += 1;
+        }
+    }
+    assert_eq!(recalled, ROOMS, "the terminated world must be recallable first");
+
+    let budget = w1z4rd_brain::DEFAULT_DERIVATION_PROBE_BUDGET;
+    let mut derived = 0u32;
+    let mut cost: Vec<usize> = Vec::new();
+    for room in 0..ROOMS {
+        let q = format!("r{room:03} lamp on material?");
+        let (answer, probes) =
+            brain.derive_by_substitution_profiled(QUERY_POOL, ANSWER_POOL, q.as_bytes(), 2, budget);
+        cost.push(probes);
+        if answer.as_deref() == Some(b"oak".as_ref()) {
+            derived += 1;
+        }
+    }
+    let mean = cost.iter().sum::<usize>() as f64 / cost.len() as f64;
+    eprintln!(
+        "terminated world: derived {derived} of {ROOMS} inside a budget of {budget}; \
+         questions asked mean {mean:.0} max {}",
+        cost.iter().max().copied().unwrap_or(0)
+    );
+    assert!(
+        derived > 0,
+        "a `?`-terminated world derived {derived} of {ROOMS} — the sub-question search \
+         is prefix-only again, and no prefix of a terminated question scores 1.0"
+    );
+
+    // And recall is untouched afterwards, because the derivation rewrote the
+    // firing state `mean` times per question and claims to restore it.
+    let mut after = 0u32;
+    for room in 0..ROOMS {
+        if recall(&mut brain, &format!("r{room:03} desk material?")).as_deref()
+            == Some(b"oak".as_ref())
+        {
+            after += 1;
+        }
+    }
+    assert_eq!(after, ROOMS, "recall must survive every derivation");
+}
