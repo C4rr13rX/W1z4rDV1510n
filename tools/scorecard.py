@@ -189,7 +189,18 @@ class Scorecard:
 
     @staticmethod
     def header() -> str:
-        return (f"{'scale':>5} {'facts':>6} {'recall%':>8} {'integr%':>8} {'peak_mb':>8} "
+        # `wrong%` is non-empty answers that are not true in the world, over the
+        # same probe count as `integr%`. The two do not sum to 100: the rest is
+        # silence. It is here and not only in the JSON because until the
+        # derivation was switched on it was 0 by construction, every family read
+        # `[empty:N]`, and `integr%` alone was a sufficient summary. It stopped
+        # being one the first run the derivation fired: a family went from
+        # 0 correct / 0 wrong to 2 correct / 19 wrong and that reads as a pure
+        # gain in `integr%`. A brain that invents an answer is worse in the
+        # product than one that says nothing, so the cost of a gain prints
+        # beside the gain.
+        return (f"{'scale':>5} {'facts':>6} {'recall%':>8} {'integr%':>8} {'wrong%':>7} "
+                f"{'peak_mb':>8} "
                 f"{'est_mb':>7} {'hub':>8} {'terminals':>10} {'train_s':>8} {'wall_s':>7}")
 
     @staticmethod
@@ -198,7 +209,8 @@ class Scorecard:
             v = r.get(k)
             return format(v, fmt) if isinstance(v, (int, float)) else format("-", fmt.split(".")[0].rstrip("fd"))
         line = (f"{f('scale','>5d')} {f('facts','>6d')} {f('recall_pct','>8.1f')} "
-                f"{f('integration_pct','>8.1f')} {f('peak_mb','>8.1f')} {f('est_resident_mb','>7.1f')} "
+                f"{f('integration_pct','>8.1f')} {f('integration_wrong_pct','>7.1f')} "
+                f"{f('peak_mb','>8.1f')} {f('est_resident_mb','>7.1f')} "
                 f"{f('hub_fanout','>8d')} {f('terminals','>10d')} {f('train_s','>8.1f')} {f('wall_s','>7.1f')}")
         if r.get("hit_cap"):
             line += "  KILLED AT MEMORY CAP"
