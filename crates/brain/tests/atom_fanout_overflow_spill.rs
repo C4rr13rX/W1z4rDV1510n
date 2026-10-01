@@ -209,6 +209,52 @@ fn a_repeat_reinforces_and_never_duplicates() {
     );
 }
 
+/// The read half. `Brain::routed_binding_candidates` builds `terminal_routes`
+/// by iterating `neuron.terminals` and filtering on the binding pool, which is
+/// exactly the FIRST `max_atom_fanout` facts of the training order and nothing
+/// after them. `binding_routes_from` returns both halves, in a deterministic
+/// order, which is the one-line replacement for that loop.
+#[test]
+fn binding_routes_cover_the_whole_training_order() {
+    let mut pool = pool_with_cap(CAP);
+    let atom = one_atom(&mut pool);
+    for i in 0..FACTS {
+        pool.reinforce_atom_terminal_keeping_overflow(atom, binding(i), 0.5, 1);
+    }
+    // A route into a DIFFERENT pool, which the binding filter must drop.
+    pool.reinforce_atom_terminal_keeping_overflow(atom, NeuronRef::new(7, 1), 0.5, 1);
+
+    let routes = pool.binding_routes_from(atom, 9);
+    assert_eq!(
+        routes.len(),
+        FACTS,
+        "the whole training order must be routed, not just the resident {CAP}"
+    );
+    let expected: Vec<u32> = (0..FACTS as u32).collect();
+    assert_eq!(routes, expected, "resident first, then overflow in training order");
+
+    // What the shipped loop sees today, for contrast: resident terminals only.
+    let resident_only: Vec<u32> = pool
+        .get(atom)
+        .unwrap()
+        .terminals
+        .iter()
+        .filter(|t| t.target.pool == 9)
+        .map(|t| t.target.neuron)
+        .collect();
+    assert_eq!(
+        resident_only.len(),
+        CAP,
+        "the resident-only route is capped, which is the hole this closes"
+    );
+
+    // Deterministic: the same call twice on the same pool is the same Vec.
+    assert_eq!(pool.binding_routes_from(atom, 9), routes);
+    // A pool with no routes is empty, not a panic.
+    assert!(pool.binding_routes_from(atom, 123).is_empty());
+    assert!(pool.binding_routes_from(9_999_999, 9).is_empty());
+}
+
 #[test]
 fn a_missing_neuron_is_reported_and_not_spilled() {
     let mut pool = pool_with_cap(CAP);

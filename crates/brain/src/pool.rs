@@ -3873,6 +3873,51 @@ impl Pool {
         self.atom_fanout_overflow_targets(atom).contains(&target)
     }
 
+    /// Every binding this neuron routes to, resident terminals AND overflow,
+    /// in one call.
+    ///
+    /// The read half of the fan-out spill. `Brain::routed_binding_candidates`
+    /// built its `terminal_routes` by iterating `neuron.terminals` and
+    /// filtering on the binding pool, which sees only what the bound let stay
+    /// resident — the FIRST `max_atom_fanout` facts of the training order.
+    /// Everything after them is in the overflow, so a caller that wants the
+    /// whole fan-out has to ask for both halves, and asking for both in one
+    /// place is what keeps the two from drifting apart.
+    ///
+    /// ORDER IS DETERMINISTIC AND THAT IS LOAD-BEARING: resident terminals in
+    /// Vec order, then overflow in the order training offered it. No hash set
+    /// is iterated, so two runs of the same build produce the same Vec. The
+    /// scorecard has already shown integration moving 35.2 → 35.0 on one build
+    /// from per-process ordering elsewhere; this route must not add another
+    /// source of it.
+    ///
+    /// Duplicates are impossible rather than filtered: a target is resident or
+    /// overflowed, never both, which
+    /// [`Pool::reinforce_atom_terminal_keeping_overflow`] enforces by checking
+    /// residency before it ever spills.
+    pub fn binding_routes_from(&self, neuron: NeuronId, binding_pool: PoolId) -> Vec<NeuronId> {
+        let resident = self.neurons.get(neuron as usize);
+        let overflow = self.atom_fanout_overflow_targets(neuron);
+        let mut out = Vec::with_capacity(
+            resident.map_or(0, |n| n.terminals.len()) + overflow.len(),
+        );
+        if let Some(n) = resident {
+            out.extend(
+                n.terminals
+                    .iter()
+                    .filter(|t| t.target.pool == binding_pool)
+                    .map(|t| t.target.neuron),
+            );
+        }
+        out.extend(
+            overflow
+                .iter()
+                .filter(|t| t.pool == binding_pool)
+                .map(|t| t.neuron),
+        );
+        out
+    }
+
     /// `(atoms holding an overflow, total overflow entries)`.
     pub fn atom_fanout_overflow_census(&self) -> (usize, usize) {
         (

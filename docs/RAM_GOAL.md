@@ -280,6 +280,46 @@ single run is all there is.
   (`examples/scorecard.rs:300-301`) and `/brain/ask` is the identical pair at
   `crates/node/src/api.rs:8021-8022`.
 
+### What an over-bound terminal costs, measured (2026-10-01)
+
+`PoolConfig::max_atom_fanout` is the one bound on this brain whose price is
+paid in ANSWERS rather than in bytes, so it is worth knowing the exchange rate
+exactly. Lifting it entirely (`max_atom_fanout = 0`) is already measured at
+integration 44.3 → 50.8 % at scale 16 and 20.5 → 32.5 % at scale 64 with recall
+100.0 throughout, and was rejected on RAM alone: peak 40.1 → 51.9 MB at scale
+64, **+29.4 %** against a gate that allows 15.
+
+A resident terminal is what makes that expensive. It is a 24-byte `Terminal`
+(target, weight, consolidation, last-fired tick), plus `Vec` capacity slack,
+plus — once fan-out passes `TERMINAL_INDEX_THRESHOLD` (1024), which an
+UNCAPPED hub does and a capped one never does — 17 bytes of `terminal_idx`
+bucket per terminal.
+
+`Pool::reinforce_atom_terminal_keeping_overflow` keeps the bound and keeps the
+terminals: everything past the bound becomes a bare `NeuronRef` in a per-pool
+overflow, grown in exact blocks of 64 so slack is bounded per atom instead of
+doubling. Read off the pool's own census (`atom_fanout_overflow_bytes`, which
+charges `Vec` CAPACITY plus the map's buckets through `hash_table_bytes`):
+
+    cargo test -p w1z4rd-brain --test atom_fanout_overflow_spill -- --nocapture
+    overflow: 1024 entries, 8324 B, 8.13 B/entry
+
+**8.13 B per over-bound terminal.** What that buys is a PROJECTION and not a
+measurement, and it is a range rather than a number, because the count of
+saturated atoms at scale 64 has not been measured:
+
+* priced from the measured delta — 11.8 MB at ~72.6 B effective per terminal
+  is ~162,500 extra terminals, which at 8.13 B is **1.3 MB (+3.3 %)**;
+* priced from the structure — 48 indexed neurons (item 7 above) each going
+  512 → 11,904 is ~547,000 extra terminals, **4.4 MB (+11.3 %)**.
+
+Both ends sit inside the gate's +15 %, which is the decision-relevant claim,
+but the second end is not comfortable and the honest figure is "between 3 and
+12 per cent". Measure the saturated-atom count before quoting the low end.
+Nothing calls this yet: both ends of the live path are in `brain.rs`
+(`promote_binding_concept` wires the hub, `routed_binding_candidates` reads it),
+so no scorecard number has moved.
+
 ## How to work
 
 - **Measure first.** Find which structure holds the RAM (counts × sizes, or a
