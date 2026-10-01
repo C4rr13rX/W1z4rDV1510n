@@ -450,6 +450,27 @@ fn shuffled(n: usize, epoch: usize) -> Vec<usize> {
     idx
 }
 
+/// Which of the world's vocabularies a returned answer belongs to. The
+/// vocabularies are disjoint by construction, so this names the shape of a miss
+/// without the scorecard knowing anything about a particular probe.
+fn classify(got: &[u8]) -> &'static str {
+    if got.is_empty() {
+        return "empty";
+    }
+    let Ok(s) = std::str::from_utf8(got) else { return "other" };
+    if COLORS.contains(&s) {
+        "color"
+    } else if MATERIALS.contains(&s) {
+        "material"
+    } else if OBJECTS.contains(&s) {
+        "object"
+    } else if s.len() >= 4 && s.starts_with('r') && s[1..].bytes().all(|b| b.is_ascii_digit()) {
+        "room"
+    } else {
+        "other"
+    }
+}
+
 fn score(probes: &[Probe], mut ask: impl FnMut(&str) -> Vec<u8>) -> (f64, f64) {
     let t0 = Instant::now();
     let hits = probes.iter().filter(|p| ask(&p.query) == p.answer.as_bytes()).count();
@@ -511,7 +532,23 @@ fn main() {
         let (mut hits, mut probes, mut secs) = (0usize, 0usize, 0.0f64);
         for fam in &world.families {
             let t0 = Instant::now();
-            let h = fam.probes.iter().filter(|p| subject.infer(&p.query) == p.answer.as_bytes()).count();
+            let mut h = 0usize;
+            // A bare 0% says nothing about what to fix. Classifying the MISS by
+            // which of the world's vocabularies the returned string belongs to
+            // separates the three repairs: `empty` is no chain at all, `object`
+            // on a material family is a chain that stopped one hop short,
+            // `material`/`color` is a chain that followed the wrong relation
+            // (the `near?` distractor exists so that case is reachable), and
+            // `room` is an adjacency hop that never continued.
+            let mut kinds = std::collections::BTreeMap::<&str, usize>::new();
+            for p in &fam.probes {
+                let got = subject.infer(&p.query);
+                if got == p.answer.as_bytes() {
+                    h += 1;
+                    continue;
+                }
+                *kinds.entry(classify(&got)).or_default() += 1;
+            }
             secs += t0.elapsed().as_secs_f64();
             hits += h;
             probes += fam.probes.len();
@@ -521,6 +558,7 @@ fn main() {
                 "probes": fam.probes.len(),
                 "hits": h,
                 "pct": 100.0 * h as f64 / fam.probes.len().max(1) as f64,
+                "miss_kinds": kinds,
             }));
         }
         integration_pct = 100.0 * hits as f64 / probes.max(1) as f64;
@@ -844,6 +882,30 @@ mod honesty {
                 assert_eq!(seen.len(), list.len(), "{room} {prop}: {seen:?}");
             }
         }
+    }
+
+    /// `classify` is only informative if the vocabularies it separates really
+    /// are disjoint, and every answer the world can produce lands in exactly one
+    /// of them -- otherwise a miss tally points at the wrong repair.
+    #[test]
+    fn every_answer_the_world_produces_classifies_into_one_vocabulary() {
+        let w = SceneWorld::new(4);
+        for list in [COLORS, MATERIALS, OBJECTS] {
+            for v in list {
+                let mut n = 0;
+                for other in [COLORS, MATERIALS, OBJECTS] {
+                    n += usize::from(other.contains(v));
+                }
+                assert_eq!(n, 1, "{v:?} is in more than one vocabulary");
+            }
+        }
+        for p in w.facts.iter().chain(w.families.iter().flat_map(|f| f.probes.iter())) {
+            assert_ne!(classify(p.answer.as_bytes()), "other", "unclassified answer {:?}", p.answer);
+            assert_ne!(classify(p.answer.as_bytes()), "empty");
+        }
+        assert_eq!(classify(b""), "empty");
+        assert_eq!(classify(b"r007"), "room");
+        assert_eq!(classify("not a thing".as_bytes()), "other");
     }
 
     /// Scale 64 is the stress scale and the quadratic sweep is too slow there,

@@ -107,7 +107,10 @@ class Scorecard:
         fams = r.get("integration_families") or []
         if fams:
             line += (f"\n{r.get('scale', '-'):>5}   integration by family: " + "  ".join(
-                f"{f['name']}({f['hops']}h) {f['hits']}/{f['probes']} {f['pct']:.1f}%" for f in fams))
+                f"{f['name']}({f['hops']}h) {f['hits']}/{f['probes']} {f['pct']:.1f}%"
+                + ("[" + ",".join(f"{k}:{v}" for k, v in (f.get("miss_kinds") or {}).items()) + "]"
+                   if f.get("miss_kinds") else "")
+                for f in fams))
         return line
 
     def verdict(self, rows: list[dict], base: list[dict] | None) -> list[str]:
