@@ -785,6 +785,12 @@ fn main() {
             let derivation_answered = cost.answered - cost_before.answered;
             let derivation_probes = cost.probes - cost_before.probes;
             let derivation_starved = cost.budget_exhausted - cost_before.budget_exhausted;
+            // The hint hit RATE, per family. A cut hint costs one question per
+            // matching entry and replaces a deletion scan of ~2k, so this pair
+            // is what distinguishes "the cache is not helping" from "the scan
+            // is expensive" -- the fact three refuted repairs all guessed at.
+            let cut_hint_probes = cost.cut_hint_probes - cost_before.cut_hint_probes;
+            let cut_hint_hits = cost.cut_hint_hits - cost_before.cut_hint_hits;
             hits += h;
             probes += fam.probes.len();
             let fam_wrong = fam.probes.len() - h - kinds.get("empty").copied().unwrap_or(0);
@@ -813,6 +819,10 @@ fn main() {
                 // (attempts - answered - starved) declined with budget left,
                 // so raising the ceiling cannot reach them.
                 "derivation_starved": derivation_starved,
+                "cut_hint_probes": cut_hint_probes,
+                "cut_hint_hits": cut_hint_hits,
+                "cut_hint_hit_rate": (cut_hint_probes > 0)
+                    .then(|| cut_hint_hits as f64 / cut_hint_probes as f64),
                 "probes_per_attempt": (derivation_attempts > 0)
                     .then(|| derivation_probes as f64 / derivation_attempts as f64),
                 "probes_per_answer": (derivation_answered > 0)

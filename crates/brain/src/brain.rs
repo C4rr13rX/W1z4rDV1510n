@@ -1237,6 +1237,24 @@ pub struct DerivationStats {
     /// declining to guess, which is what `integration_wrong_pct` measures one
     /// layer up.
     pub rejected_untaught: usize,
+    /// Questions spent replaying remembered cut shapes, and how many of those
+    /// LOCATED the taught sub-question.
+    ///
+    /// The pair exists because the hit RATE is the one quantity that can
+    /// explain the scale dependence of starvation and nobody had measured it.
+    /// A cut hint costs exactly one question per matching entry and collapses a
+    /// repeat from `k + 1` questions to the size of the hint set, so a hint
+    /// that misses is the difference between ~2 questions and a full deletion
+    /// scan of ~2k. Measured 2026-10-01 off `docs/scorecard-baseline.json`:
+    /// `on_material` pays 5.2 probes per attempt at scale 4 and 26.2 at scale
+    /// 64, on question lengths that are IDENTICAL at every scale (a room is
+    /// `r{r:03}`, four bytes below 1,000 rooms), so the scan's size cannot be
+    /// the cause. Three candidate causes have been refuted with numbers --
+    /// score dilution, length-keyed hint collision, and a `settled` flag set
+    /// without an answer -- each of them blind. Read `cut_hint_hits` against
+    /// `cut_hint_probes` before proposing a fourth.
+    pub cut_hint_probes: usize,
+    pub cut_hint_hits: usize,
 }
 
 impl DerivationStats {
@@ -7254,10 +7272,12 @@ impl Brain {
                 sub.extend_from_slice(&current[..k]);
                 sub.extend_from_slice(&current[n - t..]);
                 probes += 1;
+                self.derivation_stats.cut_hint_probes += 1;
                 // Score first: the answer is read only by the `>= 1.0` arm, so
                 // decoding every miss is work nothing consumes.
                 let score = self.probe_question_score(query_pool, &sub);
                 if score >= 1.0 && self.is_trained_frame(query_pool, &sub) {
+                    self.derivation_stats.cut_hint_hits += 1;
                     if let Some(answer) = self.probe_answer(query_pool, target_pool) {
                         known_prefix = Some((k, answer));
                         self.note_derivation_cut(n, k, t);
