@@ -8,7 +8,8 @@ The gate every automated pass on the brain must keep green.
 2. The node still compiles against it (cargo check -p w1z4rdv1510n-node; the
    stray src/bin/brain_server_cluster.rs, a module with no main, was already
    broken on main 2026-09-30 and is left out)
-3. The scorecard against its baseline (tools/scorecard.py): recall and
+3. The scorecard against its baseline (tools/scorecard.py --stress, so scale
+   64 is compared too): recall and
    integration never drop, RAM stays under 2 GB and never regresses.
 
 Everything runs inside tools/capped.py with 2 build jobs, so no step can take
@@ -30,7 +31,13 @@ STEPS = [
     ("node compiles", CAPPED + ["cargo", "check", "-p", "w1z4rdv1510n-node", "--release", "-j", "2",
                                 "--bin", "w1z4rdv1510n-node", "--bin", "w1z4rd_brain_server",
                                 "--bin", "w1z4rd_brain_migrate"]),
-    ("scorecard", [sys.executable, str(ROOT / "tools" / "scorecard.py")]),
+    # --stress is NOT optional here. Without it the scorecard step runs scales
+    # 1, 4 and 16 only, so the gate could never see a scale-64 RAM regression --
+    # and it did not: a +5.3 MB scale-64 growth landed green on 2026-10-01 and
+    # was found by hand. Scale 64 is exempt from the 2 GB BUDGET check
+    # (report_only) but NOT from the +15%-over-baseline check, which is the one
+    # that catches a regression. Costs ~37s.
+    ("scorecard", [sys.executable, str(ROOT / "tools" / "scorecard.py"), "--stress"]),
 ]
 
 
