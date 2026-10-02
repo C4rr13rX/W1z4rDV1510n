@@ -109,6 +109,39 @@
 //! a second distinct answer settles it, because no further probe can make a
 //! non-unique chain unique. This is what makes the mechanism silent where it
 //! used to invent, and it costs the multi-hop families nothing they had.
+//!
+//! # AND UNIQUENESS IS ONLY EVIDENCE IF THE SEARCH ENDED, WHICH IS WHY THE
+//! CANDIDATE CLASS IS BOUNDED
+//!
+//! The condition above is completed by `!truncated` at the accept, and that
+//! made the whole mechanism inert for a day: the class was ~4,400 rewrites
+//! against a budget of 32-64, so every search stopped early and the accept was
+//! unreachable -- `beside_next` read 0/6 at scale 1 on the wired path where the
+//! same code had read 6/6 before the condition existed. The rule was right and
+//! the class was wrong. `candidate_rewrites` now generates `1 + |q| |T|`
+//! candidates (see its own comment for the two measurements that removed the
+//! rest) and the probe bound is that class, so `answers.len() == 1` is a
+//! measurement rather than an artefact of where the budget ran out.
+//!
+//! # THE ACCEPT RULE IS MEASURED SOUND AT TWO SCALES, AND THE COST IS THE
+//! REMAINING PROBLEM
+//!
+//! The reading this module recorded as fatal -- "s32 beside_next 4 right 3
+//! WRONG 17 empty", taken as proof that the clean one-hop result was a scale-1
+//! artefact -- is superseded. With the completeness condition live and the
+//! evidence complete, the same world at the same scale gives **4 right, 0
+//! WRONG, 20 empty** (Cove, `6b38dd4`, `tests/relation_transfer_public_api.rs`).
+//! Every correct answer kept, all three inventions converted to silence.
+//!
+//! What is left is affordability. Full evidence over the old class costs 3,311
+//! fallback probes per answer at 8 rooms and 547 per question at 32, against a
+//! 1-probe plain recall and a stated 3x ceiling. Over the bounded class it is
+//! at most `1 + |q| |T|` -- 121 for the shapes measured here -- and that buys
+//! 6/6 at 8 rooms and 0/24 at 32, where a second answer is reachable inside the
+//! bounded class and the mechanism therefore abstains. FINDING the answer and
+//! PROVING no second one exists are two jobs sharing one loop; only the proving
+//! is unaffordable, and asking the fabric for uniqueness instead of enumerating
+//! it is the next change rather than a wider budget.
 
 use crate::brain::Brain;
 use crate::neuron::PoolId;
@@ -205,30 +238,40 @@ pub fn candidate_rewrites(query: &[u8], trained: &[u8]) -> Vec<Vec<u8>> {
         }
     }
 
-    // Only then every contiguous span of `trained` over every contiguous span of
-    // the query, longest insert first. This is the exhaustive fallback, and the
-    // accept-at-ceiling rule is what makes an exhaustive search safe: a wrong
-    // span cannot win, it can only cost a probe.
-    let mut spans: Vec<(usize, usize)> = Vec::new();
-    for i in 0..tb.len() {
-        for j in (i + 1)..=tb.len() {
-            spans.push((i, j));
-        }
-    }
-    spans.sort_by_key(|(i, j)| std::cmp::Reverse(j - i));
-    for (i, j) in spans {
-        for a in 0..q.len() {
-            for b in (a + 1)..=q.len() {
-                let mut rw = Vec::with_capacity(q.len() + (j - i));
-                rw.extend_from_slice(&q[..a]);
-                rw.extend_from_slice(&tb[i..j]);
-                rw.extend_from_slice(&q[b..]);
-                if rw != q && !rw.is_empty() {
-                    candidates.push(rw);
-                }
-            }
-        }
-    }
+    // THE EXHAUSTIVE SPAN-OVER-SPAN CLASS IS GONE, AND IT WAS REMOVED BY A
+    // MEASUREMENT RATHER THAN BY TASTE. It was every contiguous span of
+    // `trained` over every contiguous span of the query, longest insert first,
+    // justified by "the accept-at-ceiling rule makes an exhaustive search safe:
+    // a wrong span cannot win, it can only cost a probe". Two numbers refute
+    // the second half.
+    //
+    // (1) IT COULD NEVER BE EXAMINED, AND IT TOOK THE VERDICT WITH IT. The
+    //     class is `O(|q|^2 |T|^2)` -- 4,290 of the 4,395 candidates for a
+    //     12-byte query, 97.6 % -- against a probe budget of 64. So the loop
+    //     below always broke on `probes >= max_probes`, and the accept rule
+    //     requires `!truncated`, because "no second answer was found" is only
+    //     evidence of uniqueness if the search could have found one. Measured:
+    //     with the class present, `beside_next` is 0/6 at scale 1 on the wired
+    //     production path -- where the same mechanism measured 6/6 before the
+    //     truncation rule existed. The gate was right and unreachable: a
+    //     candidate class that cannot be exhausted cannot produce a verdict,
+    //     which is this repository's standing "a guard keyed on evidence the
+    //     host cannot produce is inert" in its purest form.
+    //
+    // (2) IT IS THE RAM BREACH. The vector is built EAGERLY, so its length is
+    //     an allocation and not a bound: 216,225 `Vec<u8>`s for a 30-byte
+    //     three-hop question against 4,395 for a 12-byte one-hop question.
+    //     Measured as a near-constant `peak_mb` adder of +8.0/+8.1/+9.1/+5.8 MB
+    //     across the four scales -- constant because it tracks question LENGTH,
+    //     not world size -- which is +36 % at scale 16 against a +15 % gate.
+    //
+    // What remains is `1 + |q| |T|` candidates: the aligned substitution and
+    // the tail transfers. That is the class the mechanism's own argument is
+    // about (see the module doc: the aligned candidate is kept because it is
+    // cheap, and the TAIL transfer is the one that cuts at the subject/relation
+    // boundary), it is bounded by the two questions' lengths, and it is small
+    // enough to EXHAUST -- so `answers.len() == 1` becomes a measurement
+    // instead of an artefact of where the budget ran out.
     candidates
 }
 
@@ -282,7 +325,8 @@ pub fn derive_by_relation_transfer(
     // four of its correct answers -- at scale 4 `beside_next` is now 4 right,
     // 0 wrong, 20 silent, and the "s32: 4 right 3 WRONG" reading recorded in
     // `README.md` as the measurement that killed this mechanism for its own
-    // family is closed. It changes NOTHING for `on_material` or
+    // family is closed -- re-confirmed under COMPLETE evidence at the same
+    // scale as 4 right, 0 WRONG, 20 empty (`6b38dd4`). It changes NOTHING for `on_material` or
     // `next_on_material`, whose inventions therefore do NOT come through this
     // arm and are not reached by any of the four conditions in this function.
     // Those two are COMPOSITIONS, which is the hop-count limit recorded below:
@@ -318,7 +362,22 @@ pub fn derive_by_relation_transfer(
     let mut preserving: Vec<Vec<u8>> = Vec::new();
     // Did the search END, or did it merely STOP? See `TRUNCATION` at the accept.
     let mut truncated = false;
-    for rewrite in candidate_rewrites(query, &trained) {
+    // THE BOUND IS THE CANDIDATE CLASS, NOT A TUNED NUMBER, and that is a
+    // change of kind rather than a bigger budget. `derivation_probe_budget` is
+    // untouched at 64 and still decides whether this mechanism runs at all
+    // (`answer_with_relation_transfer` returns on `budget == 0`); what it may no
+    // longer do is stop the search half way, because the accept rule requires
+    // the search to have ENDED and a budget that cuts it means the mechanism
+    // can only ever abstain -- measured 0/6 at scale 1 where the same code
+    // measured 6/6 before `!truncated` existed.
+    //
+    // This is only safe because the class above is now `1 + |q| |T|` -- 121
+    // probes for a 12-byte question against a 10-byte trained one -- so the
+    // bound is a function of the two questions and cannot run away. The old
+    // class would have licensed 216,225.
+    let candidates = candidate_rewrites(query, &trained);
+    let max_probes = max_probes.max(candidates.len() + probes);
+    for rewrite in candidates {
         if probes >= max_probes {
             truncated = true;
             break;
@@ -559,6 +618,37 @@ pub fn answer_with_relation_transfer(
     if budget == 0 {
         return (None, 0);
     }
+    // THE SAME HOP GATE THE WIRED PATH APPLIES, read off the brain rather than
+    // re-derived here. `integrate_autonomous` above has just run the
+    // substitution, so `derivation_last_continuations` describes THIS question:
+    // non-zero means the search walked through an intermediate question, i.e. a
+    // COMPOSITION, and borrowing one trained relation is the wrong shape for it
+    // -- measured 1, 8 and 10 WRONG for +0, +0 and +4 correct on
+    // `next_on_material` at scales 4, 16 and 64.
+    //
+    // It is here as well as in `Brain::integrate_autonomous` because this
+    // function is the OUTER composition, and the parity test asserts that
+    // composing the transfer over a path that already contains it changes
+    // nothing. Gate in one place only and the outer call answers questions the
+    // product refuses, which is the scorecard-vs-node divergence the project
+    // forbids.
+    //
+    // `None` means the substitution did not CONCLUDE -- it never ran, or it ran
+    // out of probes -- and a hop count from a search that had no opportunity to
+    // hop is not evidence. Only `Some(0)` licenses the transfer.
+    if brain.derivation_last_continuations() != Some(0) {
+        return (None, 0);
+    }
+    // AND THE SAME DEFAULT-OFF SWITCH, for the same parity reason: the wired
+    // path answers from this mechanism only when
+    // `relation_transfer_in_answer_path` is set, so the composed entry must
+    // too, or the two disagree and the scorecard measures a route the product
+    // does not run. See that field for the four-scale measurement that makes
+    // OFF the default: +11.1 points of integration at scale 1 bought with
+    // 0.46-0.93 % invention at the larger scales, which PRIORITY ZERO refuses.
+    if !brain.relation_transfer_in_answer_path() {
+        return (None, 0);
+    }
     derive_by_relation_transfer(brain, query_pool, answer_pool, query, budget)
 }
 
@@ -640,6 +730,46 @@ mod tests {
         // The query is a prefix of the trained question: no byte of its own is
         // in dispute.
         assert!(preserves_subject(b"r001", b"r001 next?", b"r001 next?"));
+    }
+
+    /// THE CLASS MUST BE EXHAUSTIBLE, because the accept rule refuses a
+    /// truncated search and a class that cannot be finished can therefore only
+    /// ever abstain. This is the assertion the removed span-over-span class
+    /// fails: 4,395 candidates for the one-hop pair below and 216,225 for the
+    /// three-hop pair, against the `1 + |q| |T|` this now bounds them to.
+    ///
+    /// Both halves matter. The first is the VERDICT -- `beside_next` read 0/6 at
+    /// scale 1 on the wired path with the old class, where the same mechanism
+    /// read 6/6 before `!truncated` existed. The second is the RAM: the vector
+    /// is built eagerly, so its length is an allocation, and the three-hop count
+    /// is the measured near-constant +8 MB `peak_mb` adder.
+    #[test]
+    fn the_candidate_class_is_bounded_by_the_two_questions_and_can_be_exhausted() {
+        let (q, t) = (b"r001 beside?".as_slice(), b"r000 next?".as_slice());
+        let one_hop = candidate_rewrites(q, t);
+        println!("one-hop candidates {} (bound {})", one_hop.len(), 1 + q.len() * t.len());
+        assert!(
+            one_hop.len() <= 1 + q.len() * t.len(),
+            "the class must be the aligned substitution plus the tail transfers and nothing \
+             else; got {} against {}",
+            one_hop.len(),
+            1 + q.len() * t.len()
+        );
+        // A three-hop question is where the old class exploded, and it is the
+        // one the RAM measurement was taken on.
+        let (q3, t3) = (
+            b"r000 next lamp on material?".as_slice(),
+            b"r001 desk material?".as_slice(),
+        );
+        let three_hop = candidate_rewrites(q3, t3);
+        println!("three-hop candidates {} (bound {})", three_hop.len(), 1 + q3.len() * t3.len());
+        assert!(
+            three_hop.len() <= 1 + q3.len() * t3.len(),
+            "a longer question may cost linearly more candidates and not quadratically more; \
+             got {} against {}",
+            three_hop.len(),
+            1 + q3.len() * t3.len()
+        );
     }
 
     /// A candidate equal to the query itself buys nothing and costs a probe.

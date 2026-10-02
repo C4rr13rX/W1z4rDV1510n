@@ -1105,7 +1105,38 @@ pub struct Brain {
     /// Why this field rather than a return value: the method is public and has
     /// callers in `tests/` and `examples/` whose signatures would all have to
     /// change for a value exactly one caller reads.
-    derivation_last_continuations: usize,
+    derivation_last_continuations: Option<usize>,
+    /// May [`Self::integrate_autonomous`] answer from
+    /// `relation_transfer`? **Default `false`, and the default is a
+    /// measurement.**
+    ///
+    /// Measured 2026-10-02 with the arm ON, the hop gate live and the candidate
+    /// class bounded, `tools/scorecard.py --stress` against the committed
+    /// baseline:
+    ///
+    /// ```text
+    ///   scale  integr%        wrong%        peak_mb       beside_next
+    ///      1   87.04 -> 98.15  0.00 -> 0.00  16.9 -> 24.4  0/6   -> 6/6
+    ///      4   85.65 -> 87.50  0.00 -> 0.46  19.4 -> 27.5  0/24  -> 4/24
+    ///     16   85.19 -> 86.11  0.00 -> 0.93  25.6 -> 32.9  0/96  -> 8/96
+    ///     64   84.26 -> 85.42  0.00 -> 0.64  41.1 -> 46.4  0/384 -> 37/384
+    /// ```
+    ///
+    /// Recall is 100.0 at every scale and no family loses a correct answer, so
+    /// the gain is real -- and it is bought with invention, which PRIORITY ZERO
+    /// refuses at any price: `next_on_material` gains `material:1/8/10` at
+    /// scales 4/16/64 and `beside_next` gains `room:12` at 64. The `+8 MB`
+    /// `peak_mb` is a second, independent red, and it is NOT the candidate
+    /// vector -- shrinking that class by 36x left the adder unchanged, which
+    /// refutes the eager-allocation diagnosis and points at the per-probe
+    /// `observe_fabric_read_only` path (backlog `5c69d85f`, `f1bd9c76`).
+    ///
+    /// So the arm is OFF by default and the knob exists so the measurement
+    /// above can be re-taken in one command instead of by re-wiring. The hop
+    /// gate, the bounded class and the two evidence fixes are all still live:
+    /// they make the mechanism cheap and honest, and they are what the next
+    /// rule will be built on.
+    relation_transfer_in_answer_path: bool,
     /// Where the taught sub-question has been found before, as
     /// `(question length, cut point, tail length kept)`.
     ///
@@ -1771,6 +1802,8 @@ impl Brain {
             delayed_feedback: Vec::new(),
             feedback_events_emitted: 0,
             derivation_probe_budget: DEFAULT_DERIVATION_PROBE_BUDGET,
+            derivation_last_continuations: None,
+            relation_transfer_in_answer_path: false,
             derivation_cut_hints: Vec::new(),
             derivation_splice_hints: Vec::new(),
             trained_frames: ahash::AHashSet::new(),
@@ -7437,12 +7470,18 @@ impl Brain {
         max_probes: usize,
     ) -> (Option<Vec<u8>>, usize) {
         if query.is_empty() || query_pool == target_pool || max_depth == 0 {
+            self.derivation_last_continuations = None;
             return (None, 0);
         }
         self.derivation_stats.attempts += 1;
         let mut probes = 0usize;
         let mut current = query.to_vec();
         let mut derived: Option<Vec<u8>> = None;
+        // How many hops walked to a rewrite the brain was NEVER taught. See
+        // `derivation_last_continuations`: it is set from this at every return,
+        // including the early ones, so a reader can never see a count left
+        // behind by a previous call.
+        let mut continuations = 0usize;
 
         for _hop in 0..max_depth {
             if probes >= max_probes {
@@ -7780,13 +7819,38 @@ impl Brain {
                 // `continuation`. `derived` keeps whatever an earlier taught
                 // hop established, or stays `None`.
                 None => match continuation {
-                    Some((_, next_question)) => current = next_question,
+                    Some((_, next_question)) => {
+                        // A hop into a question the brain was never taught. By
+                        // the arm's own doc that is an INTERMEDIATE question,
+                        // which only a composition has, so counting these is
+                        // how a caller tells a composition from a one-hop
+                        // question without reading a byte of either.
+                        continuations += 1;
+                        current = next_question;
+                    }
                     None => break,
                 },
             }
         }
 
         self.observe_fabric_read_only(query_pool, query);
+        // PUBLISHED ONLY WHEN THE SEARCH CONCLUDED, and that is not a detail.
+        // A starved search takes no continuation hop for the same reason it
+        // finds no answer -- it ran out of probes -- so `0` from a starved call
+        // is "no opportunity", not "no intermediate question". Measured: at a
+        // 4-probe budget the hop gate read 0 for every family and let the
+        // transfer answer `next_color` WRONG, which is the starvation test's
+        // whole contract (starving may only turn answers into silence). This is
+        // the repository's standing lesson about a counter of zero from a path
+        // that never ran, reproduced inside the gate added to prevent the
+        // previous one.
+        self.derivation_last_continuations = if derived.as_ref().map_or(true, |a| a.is_empty())
+            && probes >= max_probes
+        {
+            None
+        } else {
+            Some(continuations)
+        };
         self.derivation_stats.probes += probes;
         match derived.as_ref().filter(|a| !a.is_empty()) {
             Some(_) => self.derivation_stats.answered += 1,
@@ -7871,6 +7935,14 @@ impl Brain {
         if direct.answer.as_ref().map_or(false, |a| !a.is_empty()) {
             return direct;
         }
+        // STALENESS. The counter below gates the relation-transfer arm, and
+        // every early return under this point skips the substitution that sets
+        // it -- so without this line the gate reads the PREVIOUS question's hop
+        // count. Measured: the composed entry point and this one then disagreed
+        // at scale 4 and the parity assert in
+        // `tests/integration_family_counts.rs` went red, which is the one thing
+        // that test exists to catch.
+        self.derivation_last_continuations = None;
         if self.derivation_probe_budget == 0 {
             return direct;
         }
@@ -7911,8 +7983,31 @@ impl Brain {
         // and no probe is spent on a question that is already answered. The
         // cost lands on the empty bucket alone: 544 of 3,456 probes at scale
         // 64.
+        //
+        // AND IT MAY ONLY SPEND ON A SILENCE WITH NO INTERMEDIATE QUESTION.
+        // Composed on emptiness alone it is measured to invent, and the
+        // inventions are not spread across the families: at scales 4/16/64
+        // `next_on_material` gained 1, 8 and 10 WRONG for +0, +0 and +4
+        // correct, while `beside_next` gained 6, 4, 8 and 37 correct for 0
+        // wrong at the first three scales (Cove, 2026-10-02). What separates
+        // them is HOP COUNT -- `beside_next` is a held-out SYNONYM of a trained
+        // relation, so one trained question answers it, and the other two are
+        // COMPOSITIONS no single trained question answers, so the transfer's
+        // one-question rewrite is the wrong shape for them by construction.
+        //
+        // `derivation_last_continuations` is that distinction as a counter
+        // rather than as a family name: it counts the hops the substitution
+        // just walked into a rewrite the brain was NEVER taught, which is the
+        // `continuation` arm, which exists precisely because an n-hop probe's
+        // intermediate question is untrained. A search that never took it is a
+        // question the brain tried to answer in ONE hop and could not -- which
+        // is exactly where a single borrowed relation can be right. Nothing
+        // here reads a byte of the question, names a relation or knows a
+        // family, so no probe is special-cased.
         let derived = match derived.filter(|a| !a.is_empty()) {
             Some(derived) => derived,
+            None if !self.relation_transfer_in_answer_path => return direct,
+            None if self.derivation_last_continuations != Some(0) => return direct,
             None => {
                 let (transferred, transfer_probes) =
                     crate::relation_transfer::derive_by_relation_transfer(
@@ -8041,6 +8136,35 @@ impl Brain {
     /// What [`Self::set_derivation_probe_budget`] was last set to.
     pub fn derivation_probe_budget(&self) -> usize {
         self.derivation_probe_budget
+    }
+
+    /// How many hops the last [`Self::derive_by_substitution_profiled`] walked
+    /// into a rewrite the brain was NEVER taught -- its `continuation` arm.
+    ///
+    /// `0` says the substitution tried to answer in ONE hop and could not,
+    /// which is the only case where borrowing a whole relation from one trained
+    /// question can be right. Read by [`Self::integrate_autonomous`]'s relation-
+    /// transfer arm and by `relation_transfer::answer_with_relation_transfer`,
+    /// which must gate identically or the two disagree and the parity test
+    /// `the_wired_transfer_answers_beside_next_and_composing_it_twice_changes_nothing`
+    /// fails -- that is the test's whole job.
+    ///
+    /// Reset at every return of that method, including the early one, so it is
+    /// never a count left over from a previous call.
+    pub fn derivation_last_continuations(&self) -> Option<usize> {
+        self.derivation_last_continuations
+    }
+
+    /// Let [`Self::integrate_autonomous`] answer from `relation_transfer`.
+    /// See `relation_transfer_in_answer_path` for the four-scale measurement
+    /// that makes `false` the default.
+    pub fn set_relation_transfer_in_answer_path(&mut self, on: bool) {
+        self.relation_transfer_in_answer_path = on;
+    }
+
+    /// Whether the relation-transfer arm may answer. `false` by default.
+    pub fn relation_transfer_in_answer_path(&self) -> bool {
+        self.relation_transfer_in_answer_path
     }
 
     /// The frame last observed into `pool`, if it arrived recently enough to
@@ -10719,6 +10843,8 @@ impl Brain {
             delayed_feedback: Vec::new(),
             feedback_events_emitted: 0,
             derivation_probe_budget: DEFAULT_DERIVATION_PROBE_BUDGET,
+            derivation_last_continuations: None,
+            relation_transfer_in_answer_path: false,
             derivation_cut_hints: Vec::new(),
             derivation_splice_hints: Vec::new(),
             trained_frames: ahash::AHashSet::new(),
@@ -10909,6 +11035,8 @@ impl Brain {
             delayed_feedback: Vec::new(),
             feedback_events_emitted: 0,
             derivation_probe_budget: DEFAULT_DERIVATION_PROBE_BUDGET,
+            derivation_last_continuations: None,
+            relation_transfer_in_answer_path: false,
             derivation_cut_hints: Vec::new(),
             derivation_splice_hints: Vec::new(),
             trained_frames: ahash::AHashSet::new(),

@@ -568,10 +568,13 @@ the obvious next idea:
   Uniqueness is evidence of *absence*; pruning the search destroys the evidence while
   leaving the conclusion. A narrower search makes a uniqueness test look more certain and
   be less certain. The filter was reverted and the search is deliberately left wide.
-- **"Accept only when the search completed" is sound and unreachable here.** Every
-  `beside_next` probe spends exactly 32 of its 32 probes against 4,395 candidates, so every
-  search is truncated and exhaustiveness would abstain on everything, including the family
-  that works.
+- **"Accept only when the search completed" is sound, and it was unreachable until the
+  candidate class shrank.** Every `beside_next` probe spent exactly 32 of its 32 probes
+  against 4,395 candidates, so every search truncated and the rule abstained on
+  everything, including the family that works — the mechanism measured **0/6 at scale 1 on
+  the wired path** where it had measured 6/6 before the rule existed. The rule was right;
+  the class it was asked to exhaust was not. Both halves are now measured and the second is
+  fixed below.
 
 #### The scale-32 reading, which is the one that settles it
 
@@ -589,6 +592,16 @@ With 32 rooms instead of 8 there are more trained questions reachable at the cei
 the chain stops being unique for the *same* family — and the net contribution at that scale
 is **exactly zero**: +4 right bought with +4 wrong. Recall is 100 % throughout (186/186 and
 744/744).
+
+**That reading is superseded, and it was the one that killed this mechanism twice.** With
+the completeness condition live and the evidence actually complete, the same world at the
+same scale reads **4 right, 0 WRONG, 20 empty** (Cove, `6b38dd4`,
+`tests/relation_transfer_public_api.rs`): every correct answer kept, all three inventions
+converted to silence. So the accept rule is not a scale-1 artefact and `wrong` is 0 at both
+measured scales. What is left is affordability, which is a different problem: 3,311 fallback
+probes per answer at 8 rooms and 547 per question at 32, against a **1-probe** plain recall
+and the stated 3× ceiling. Finding the answer and *proving no second one exists* are two
+jobs sharing one loop, and only the proving is unaffordable.
 
 #### Measured through the production entry, 2026-10-01, and it is still not safe
 
@@ -668,7 +681,69 @@ a held-out *synonym* of a trained relation — `r001 beside?` rewrites to the ta
 and `next_on_material` are *compositions* that no single trained question answers, so the
 same mechanism guesses and is wrong. The gate that separates them is therefore “fire only
 when the production derivation found no taught sub-question at all” — what the mechanism was
-designed for, and what `derive_by_substitution_profiled` does not report today.
+designed for.
+
+#### Wired, 2026-10-02: the hop gate and the bounded candidate class
+
+`derive_by_substitution_profiled` now reports it. It counts the hops it walks into a rewrite
+the brain was **never taught** — its `continuation` arm, which exists only because an n-hop
+probe's intermediate question is untrained by construction — and publishes the count as
+`Brain::derivation_last_continuations()`. A composition takes that arm; a one-hop question
+cannot. The transfer fires only on `Some(0)`: no byte of the question is read, no relation is
+named and no family is special-cased. `None` means the search did not *conclude* (it never
+ran, or it ran out of probes), and a hop count from a search that had no opportunity to hop
+is not evidence — a 4-probe budget read `0` for every family and let the transfer answer
+`next_color` wrong, which is what the starvation test exists to catch.
+
+`candidate_rewrites` also lost its exhaustive span-over-span class, for two measured
+reasons. It was **97.6 %** of the candidates (4,411 → 121 for a 12-byte question against a
+10-byte trained one; 72,334 → 514 for a 27/19 pair) and could not be exhausted at any budget
+this project will ship, so the completeness condition above could never be satisfied — and
+the vector is built eagerly, so its length is an allocation: that is the near-constant
+**+8.0/+8.1/+9.1/+5.8 MB** `peak_mb` adder measured across the four scales, constant because
+it tracks question *length* and not world size. What remains is the class the mechanism's own
+argument is about, bounded by `1 + |q| |T|`, and the transfer's probe bound is now that class
+so the search ends.
+
+#### What it measures with the arm ON, and why the arm is OFF
+
+`tools/scorecard.py --stress`, arm on, against the committed baseline. Recall is **100.0 at
+every scale** and no family loses a correct answer:
+
+```text
+  scale  integr%         wrong%         peak_mb        beside_next      next_on_material
+     1   87.04 -> 98.15  0.00 -> 0.00   16.9 -> 24.4   0/6   -> 6/6     7/8   unchanged
+     4   85.65 -> 87.50  0.00 -> 0.46   19.4 -> 27.5   0/24  -> 4/24    +material:1
+    16   85.19 -> 86.11  0.00 -> 0.93   25.6 -> 32.9   0/96  -> 8/96    +material:8
+    64   84.26 -> 85.42  0.00 -> 0.64   41.1 -> 46.4   0/384 -> 37/384  +material:10, room:12
+```
+
+`IRIS_SCORE_EXIT=1`: **two independent reds, and the gain is real.** +11.1 points of
+integration at scale 1 is bought with 0.46–0.93 % invention at the larger scales, which
+PRIORITY ZERO refuses at any price, and `peak_mb` breaches the +15 % allowance at three
+scales. So `Brain::relation_transfer_in_answer_path` is **`false` by default** and
+`set_relation_transfer_in_answer_path(true)` re-takes the table above in one command. The
+mechanism, the hop gate and the bounded class all ship; only the answer is withheld.
+
+Two diagnoses died in that run and both were mine:
+
+- **The `+8 MB` is not the candidate vector.** Shrinking the class 36× (4,411 → 121, and
+  72,334 → 514 for a three-hop pair) left the adder at +7.5/+8.1/+7.3/+5.3 MB against the
+  +8.0/+8.1/+9.1/+5.8 measured before it. Same number, 36× less allocation — so the cost is
+  the per-probe `observe_fabric_read_only` path, which backlog `5c69d85f` and `f1bd9c76`
+  already name, and not an eager `Vec`.
+- **The hop gate does not separate the families.** `material:1/8/10` survive it. A
+  composition whose first hop finds neither a taught rewrite nor a better untaught one
+  `break`s immediately — zero continuations, no answer, gate passes — so "no intermediate
+  question" and "gave up before finding one" read identically. It is still worth keeping:
+  it costs nothing (those families are byte-identical at budget 32 and at full exhaustion,
+  `6b38dd4`) and it is the only reading that distinguishes the two at all.
+
+The composed entry point (`answer_with_relation_transfer`) applies the identical gate and
+the identical switch, and returns the production table byte-for-byte, which is how the
+single call site is proved: the fallback lives in `Brain::integrate_autonomous`, the one
+derivation path `examples/scorecard.rs`, `crates/node/src/brain_api.rs` and
+`bin/brain_server.rs` all call.
 
 ---
 
