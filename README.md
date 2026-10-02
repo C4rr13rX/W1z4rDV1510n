@@ -250,6 +250,17 @@ and changing nothing else, `python tools/scorecard.py --scales 16,64`:
 | 16 | 44.3 → 50.8 | 35.8 → 34.1 | 24.9 → 28.0 | 512 → 2,976 | 68,943 → 94,370 | 29.9 → 52.2 |
 | 64 | 20.5 → 32.5 | 31.9 → 35.2 | 40.1 → 51.9 | 512 → 11,904 | 26,827 → 189,436 | 121.8 → 335.0 |
 
+**The left-hand column of that table no longer describes this brain, and the ablation needs
+re-running (noted 2026-10-01).** It was measured before `dea50bd`. Read off
+`docs/scorecard-baseline.json` today, scale 16 is **77.55 %** integration at **0.0 %**
+wrong and scale 64 is **77.29 %** at **0.0 %**, against the 44.3 / 35.8 and 20.5 / 31.9
+above. So what the bound costs is unknown at the current baseline: the "+6.5 and +12.0
+integration" it bought was bought against a brain answering wrong a third of the time, and
+a measurement whose starting point has moved by 57 points cannot be carried forward. The
+RAM and fan-out columns are a separate matter and are not in doubt — lifting the cap took
+peak 40.1 → 51.9 MB and hub fan-out 512 → 11,904 at scale 64, and nothing since has
+touched either.
+
 Recall stayed 100.0 % throughout. So the terminals the bound refuses are
 carrying answers — and unbounded fan-out is one terminal per fact by
 construction, costs +29.4 % peak RAM at scale 64 against a gate that allows
