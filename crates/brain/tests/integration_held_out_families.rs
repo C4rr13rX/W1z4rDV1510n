@@ -28,7 +28,15 @@ use w1z4rd_brain::{AtomEncoding, Brain, BrainConfig, BytePassthroughEncoding, Po
 
 const QUERY_POOL: u32 = 1;
 const ANSWER_POOL: u32 = 2;
-const ROOMS: u32 = 8;
+/// Two scales, and the second one exists because of a measurement Cove made on
+/// a different mechanism the same day: a transfer rule scored 6 right / 0 wrong
+/// at 8 rooms and 4 right / 3 WRONG at 32, for the same family at the same hop
+/// count. More trained questions are reachable at the ceiling, so a chain that
+/// is unique in a small world stops being unique in a larger one. A single-scale
+/// honesty table is therefore a HYPOTHESIS about the next scale, and this file's
+/// own "the distractor does not fool it" result would be exactly that if it were
+/// only measured at 8.
+const SCALES: [u32; 2] = [8, 32];
 
 fn subject() -> Brain {
     let mut cfg = BrainConfig::default();
@@ -97,21 +105,22 @@ impl Verdict {
 }
 
 /// The world the scorecard builds, in miniature: two facts per room that chain.
-fn teach_base_world(brain: &mut Brain) {
-    for room in 0..ROOMS {
+fn teach_base_world(brain: &mut Brain, rooms: u32) {
+    for room in 0..rooms {
         teach(brain, &format!("r{room:03} lamp on"), "desk");
         teach(brain, &format!("r{room:03} desk material"), "oak");
     }
 }
 
-#[test]
-fn held_out_families_never_invent_an_answer() {
+/// One scale's worth of the table. Called once per entry in `SCALES`, so an
+/// assertion that fires names the scale it fired at.
+fn one_scale(rooms: u32) {
     // Condition A -- the scorecard's own wording. The control: without it a
     // zero in B, C or D is unreadable.
     let mut a_brain = subject();
-    teach_base_world(&mut a_brain);
+    teach_base_world(&mut a_brain, rooms);
     let mut a = Verdict::default();
-    for room in 0..ROOMS {
+    for room in 0..rooms {
         let got = infer(&mut a_brain, &format!("r{room:03} lamp on material"));
         a.record(&got, "oak");
     }
@@ -122,9 +131,9 @@ fn held_out_families_never_invent_an_answer() {
     // order: exactly the case where a mechanism that fits the template and one
     // that generalises come apart.
     let mut b_brain = subject();
-    teach_base_world(&mut b_brain);
+    teach_base_world(&mut b_brain, rooms);
     let mut b = Verdict::default();
-    for room in 0..ROOMS {
+    for room in 0..rooms {
         let got = infer(&mut b_brain, &format!("material of the lamp in r{room:03}"));
         b.record(&got, "oak");
     }
@@ -134,13 +143,13 @@ fn held_out_families_never_invent_an_answer() {
     // chain, and a mechanism that composes whatever it can reach will answer
     // `wool` -- which is the hallucination PRIORITY ZERO forbids, not a miss.
     let mut c_brain = subject();
-    teach_base_world(&mut c_brain);
-    for room in 0..ROOMS {
+    teach_base_world(&mut c_brain, rooms);
+    for room in 0..rooms {
         teach(&mut c_brain, &format!("r{room:03} chair on"), "rug");
         teach(&mut c_brain, &format!("r{room:03} rug material"), "wool");
     }
     let mut c = Verdict::default();
-    for room in 0..ROOMS {
+    for room in 0..rooms {
         let got = infer(&mut c_brain, &format!("r{room:03} lamp on material"));
         c.record(&got, "oak");
     }
@@ -148,12 +157,12 @@ fn held_out_families_never_invent_an_answer() {
     // Condition D -- HELD-OUT RELATION. The same two-hop shape on a relation
     // the base world never used. Taught only as single facts, never composed.
     let mut d_brain = subject();
-    for room in 0..ROOMS {
+    for room in 0..rooms {
         teach(&mut d_brain, &format!("r{room:03} clock under"), "shelf");
         teach(&mut d_brain, &format!("r{room:03} shelf material"), "pine");
     }
     let mut d = Verdict::default();
-    for room in 0..ROOMS {
+    for room in 0..rooms {
         let got = infer(&mut d_brain, &format!("r{room:03} clock under material"));
         d.record(&got, "pine");
     }
@@ -164,7 +173,7 @@ fn held_out_families_never_invent_an_answer() {
         ("C distractor chain", &c, "held out: two chains, must choose"),
         ("D held-out relation", &d, "held out: relation never composed"),
     ];
-    eprintln!("{ROOMS} rooms, the same two-hop question asked four ways");
+    eprintln!("{rooms} rooms, the same two-hop question asked four ways");
     eprintln!("  {:<22} {:>7} {:>7} {:>7}   {}", "condition", "correct", "WRONG", "silent", "what it holds out");
     for (name, v, why) in &conditions {
         eprintln!(
@@ -187,7 +196,7 @@ fn held_out_families_never_invent_an_answer() {
         assert_eq!(
             recalled.as_deref(),
             Some(want.as_bytes()),
-            "condition {name}: the trained question {q:?} is not recalled, so no count above is \
+            "scale {rooms}, condition {name}: the trained question {q:?} is not recalled, so no count above is \
              about integration"
         );
     }
@@ -200,7 +209,7 @@ fn held_out_families_never_invent_an_answer() {
         .collect();
     assert!(
         inventing.is_empty(),
-        "condition(s) {inventing:?} returned a WRONG answer where silence was available. \
+        "scale {rooms}: condition(s) {inventing:?} returned a WRONG answer where silence was available. \
          The owner's standard is that the brain is never wrong: when it has no grounded answer \
          it has NO answer. See the table above for the counts"
     );
@@ -212,5 +221,116 @@ fn held_out_families_never_invent_an_answer() {
         "the control condition answered nothing correct ({}/{}), so this file measures nothing",
         a.correct,
         a.total()
+    );
+}
+
+/// WHICH relaxation could reach the paraphrase gap, priced before either is
+/// built.
+///
+/// `held_out_families_never_invent_an_answer` measures paraphrase at 0 of 8 and
+/// names the mechanism: the derivation substitutes over byte SPANS — a prefix
+/// plus a suffix — of the question as asked, so a rewording offers it no taught
+/// sub-question to splice. Two relaxations are the obvious candidates, and they
+/// cost very different amounts of work:
+///
+///   1. ORDERED SUBSEQUENCE. Keep order, drop contiguity: accept a taught
+///      question whose bytes appear in the paraphrase in the same order. This is
+///      a change to one matcher and keeps the ordering guarantee PRIORITY ZERO
+///      rests on.
+///   2. UNORDERED CONTAINMENT. Accept a taught question whose bytes are a subset
+///      of the paraphrase's, order ignored. This is what `BindingMatch` already
+///      scores, and `16bc51b` records what it costs: an atom is a byte, so a set
+///      represents neither order nor multiplicity and every anagram scores 1.0.
+///
+/// This lab's most expensive recurring mistake is shipping a guard keyed on
+/// evidence the host cannot produce, so the question is not which is nicer but
+/// whether either can reach a single one of the 8 failures. Both are measured
+/// here against the real taught questions and the real paraphrases, in plain
+/// code — no brain call, so nothing can be confounded by budgets or thresholds.
+///
+/// Printed, not asserted on its values: these are readings that name the next
+/// change, and freezing them would freeze the wording of this file's probes.
+/// What IS asserted is that the census is not vacuous.
+#[test]
+fn held_out_families_never_invent_an_answer() {
+    for rooms in SCALES {
+        one_scale(rooms);
+    }
+}
+
+/// Also run at both scales: the count of taught questions a paraphrase matches
+/// is exactly the quantity that grows with the world, so the ambiguity column is
+/// meaningless at one scale.
+#[test]
+fn which_relaxation_could_reach_the_paraphrase_gap() {
+    for rooms in SCALES {
+        relaxation_census(rooms);
+    }
+}
+
+fn relaxation_census(rooms: u32) {
+    /// Does `needle` appear in `hay` in order, not necessarily contiguously?
+    fn ordered_subsequence(needle: &[u8], hay: &[u8]) -> bool {
+        let mut it = hay.iter();
+        needle.iter().all(|b| it.any(|h| h == b))
+    }
+    /// Is every byte of `needle` present somewhere in `hay`? Order and
+    /// multiplicity ignored — exactly what a set-scored binding match sees.
+    fn unordered_contained(needle: &[u8], hay: &[u8]) -> bool {
+        needle.iter().all(|b| hay.contains(b))
+    }
+
+    let taught: Vec<String> = (0..rooms)
+        .flat_map(|r| [format!("r{r:03} lamp on"), format!("r{r:03} desk material")])
+        .collect();
+
+    let mut subseq_reachable = 0u32;
+    let mut contained_reachable = 0u32;
+    let mut contained_ambiguous = 0u32;
+    for room in 0..rooms {
+        let paraphrase = format!("material of the lamp in r{room:03}");
+        let p = paraphrase.as_bytes();
+        let subseq: Vec<&String> = taught
+            .iter()
+            .filter(|t| ordered_subsequence(t.as_bytes(), p))
+            .collect();
+        let contained: Vec<&String> = taught
+            .iter()
+            .filter(|t| unordered_contained(t.as_bytes(), p))
+            .collect();
+        if !subseq.is_empty() {
+            subseq_reachable += 1;
+        }
+        if !contained.is_empty() {
+            contained_reachable += 1;
+        }
+        if contained.len() > 1 {
+            contained_ambiguous += 1;
+        }
+        if room == 0 {
+            eprintln!("  paraphrase {paraphrase:?}");
+            eprintln!("    ordered-subsequence matches: {} {:?}", subseq.len(), subseq);
+            eprintln!(
+                "    unordered-containment matches: {} (first 4: {:?})",
+                contained.len(),
+                contained.iter().take(4).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    eprintln!("over {rooms} paraphrases against {} taught questions:", taught.len());
+    eprintln!("  ordered subsequence   reaches {subseq_reachable}/{rooms} paraphrases");
+    eprintln!("  unordered containment reaches {contained_reachable}/{rooms}, of which {contained_ambiguous} match MORE THAN ONE taught question");
+
+    // Non-vacuity: the paraphrases and the taught questions are the ones the
+    // test above uses, so if NOTHING matched under either rule the census would
+    // be measuring a typo rather than a mechanism. Unordered containment is
+    // guaranteed to match something here -- the paraphrase contains the room id
+    // and the word `lamp` -- so a zero in that column means the helper is wrong.
+    assert!(
+        contained_reachable > 0,
+        "unordered containment reached none of {rooms} paraphrases, which cannot be true of a \
+         paraphrase that contains the room id and the subject -- the census helper is wrong, so \
+         neither column above means anything"
     );
 }
