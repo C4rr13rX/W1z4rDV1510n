@@ -1242,12 +1242,38 @@ fn as_a_fallback_the_transfer_cannot_cost_a_family() {
     let (r0, n0, c0) = total(&base);
     let (r1, n1, c1) = total(&with_fb);
     assert_eq!(n0, n1, "both arms must be asked the same questions");
+    // THE QUANTITY THIS SUITE USED TO REPORT WAS `right` ALONE, AND THAT IS HOW
+    // A NET-ZERO MECHANISM GOT PRIORITISED AS "+12.9 POINTS".
+    //
+    // Every assertion in this file was satisfied -- both arms asked the same
+    // questions, no family lost a correct answer, recall stayed 186/186 -- while
+    // the fallback turned EVERY silence into an answer (`empty` 6 -> 0, 4 -> 0,
+    // 2 -> 0) and five of the twelve new answers were wrong. An assertion on
+    // `right` is structurally blind to a silence converted into an invention,
+    // because invention raises `right` and `wrong` together.
+    //
+    // The project gates integration on NET, correct minus wrong, precisely
+    // because invention is worse than silence. So this suite reports and gates
+    // the same quantity, and the headline percentage is net from here on.
+    let wrong_total = |m: &BTreeMap<&str, (usize, usize, usize, usize)>| -> usize {
+        m.values().map(|(_, wrong, _, _)| *wrong).sum()
+    };
+    let (w0, w1) = (wrong_total(&base), wrong_total(&with_fb));
+    let (net0, net1) = (r0 as i64 - w0 as i64, r1 as i64 - w1 as i64);
     println!(
-        "ALL FAMILIES base {r0}/{n0} ({:.1}%) probes {c0} -> fallback {r1}/{n1} ({:.1}%) probes {c1} \
+        "ALL FAMILIES base {r0}/{n0} ({:.1}%) wrong {w0} NET {net0} probes {c0} \
+         -> fallback {r1}/{n1} ({:.1}%) wrong {w1} NET {net1} probes {c1} \
          (+{:.1}% probes); families improved {moved}",
-        100.0 * r0 as f32 / n0 as f32,
-        100.0 * r1 as f32 / n1 as f32,
+        100.0 * net0 as f32 / n0 as f32,
+        100.0 * net1 as f32 / n1 as f32,
         100.0 * (c1 as f32 - c0 as f32) / c0 as f32
+    );
+    // A mechanism whose NET does not improve is not a gain however many `right`
+    // it adds. This is the assertion whose absence cost pass 18 its whole arc.
+    assert!(
+        net1 >= net0,
+        "the fallback lowered NET integration (correct - wrong): {net0} -> {net1}; \
+         right {r0} -> {r1} and wrong {w0} -> {w1}"
     );
 
     let mut recalled = 0usize;
