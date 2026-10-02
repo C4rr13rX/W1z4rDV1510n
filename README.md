@@ -544,6 +544,20 @@ answer*, is preserved.
 
 The primary measurement is `python tools/scorecard.py --stress`, which trains a synthetic world of rooms, objects and properties at four scales and then asks **held-out** questions — questions no training episode contained. Every number below is read back off `docs/scorecard-baseline.json`, which is committed — so a reader can check the table against a file in this repository rather than against a run nobody can reproduce. (Peak RSS jitters a few tenths of a MB run to run, so quoting it from a different run than the one that set the baseline is how a table like this goes quietly wrong.)
 
+**The correctness columns are bit-reproducible; the timing columns are not** (measured
+2026-10-01, eight runs of one binary: two at scale 1, three at scale 16, two at scale 64,
+plus the gate's own). `integration_pct` came back **77.546296** three times at scale 16 and
+**77.285880** twice at scale 64 — six decimal places, with `wrong %`, `recall %`, every
+per-family hit/wrong/starved count and the total `derivation_probes` (8,428 and 34,865)
+identical across every run and equal to the committed baseline. So a difference in those
+columns is a real difference and never noise. `infer_ms`, by contrast, spread 6.4 % across
+the three scale-16 runs (15.104 / 15.812 / 14.854) and **17 %** across the two at scale 64
+(14.090 / 12.052), and ran up to 23 % above the baseline's figure purely because the
+baseline was taken on an idle machine. The spread grows with scale, which is the opposite of
+what a flat-latency goal needs from its own instrument, so a latency check belongs on
+`derivation_probes_per_attempt` — bit-reproducible, and what `infer_ms` is made of — rather
+than on the clock.
+
 | scale | facts | recall % | integration % | **wrong %** | peak MB | wall s |
 |---|---|---|---|---|---|---|
 | 1 | 186 | 100.0 | 74.1 | **0.0** | 16.5 | 0.6 |

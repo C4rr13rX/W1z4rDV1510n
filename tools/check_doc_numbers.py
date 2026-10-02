@@ -114,6 +114,21 @@ CLAIMS = [
         ],
     ),
     (
+        "reproducibility: the repeated integration_pct and probe totals",
+        re.compile(
+            r"came back \*\*([\d.]+)\*\* three times at scale 16 and\n\*\*([\d.]+)\*\* twice at scale 64"
+            r"[\s\S]*?total `derivation_probes` \(([\d,]+) and ([\d,]+)\)"
+        ),
+        lambda b: [
+            (
+                round(row(b, 16)["integration_pct"], 6),
+                round(row(b, 64)["integration_pct"], 6),
+                f"{sum(f['derivation_probes'] for f in row(b, 16)['integration_families']):,}",
+                f"{sum(f['derivation_probes'] for f in row(b, 64)['integration_families']):,}",
+            )
+        ],
+    ),
+    (
         "the stale-ablation correction",
         re.compile(
             r"scale 16 is \*\*([\d.]+) %\*\* integration at \*\*([\d.]+) %\*\*\nwrong and scale 64 is \*\*([\d.]+) %\*\* at \*\*([\d.]+) %\*\*"
