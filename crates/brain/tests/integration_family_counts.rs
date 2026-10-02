@@ -418,10 +418,19 @@ fn wiring_the_transfer_into_the_answer_path_converts_silence_into_invention() {
             gained > 0,
             "s{scale}: the transfer answered nothing the production path did not, so there is          no gain left to weigh against its cost and this guard has gone stale"
         );
-        assert!(
-            invented > 0,
-            "s{scale}: the transfer invented NOTHING -- if an accept rule has fixed that, wire          it into the answer path, re-baseline the scorecard, and delete this assertion"
-        );
+        // NOT `assert!(invented > 0)`. That arm was here and it is a tripwire
+        // that fires on an IMPROVEMENT: the transfer sees only the probes
+        // production leaves silent, so anything that answers more -- a wider
+        // `DEFAULT_DERIVATION_PROBE_BUDGET`, a better accept rule, a cheaper
+        // 3-hop -- removes its inventions by removing its opportunities, and
+        // the test would have gone red on a strictly better brain. The project
+        // rule is to assert ABSOLUTE contracts and PRINT comparisons, so the
+        // zero is announced loudly instead.
+        if invented == 0 {
+            println!(
+                "  s{scale} WIRE IT: the transfer invented nothing at this scale. Measure the      remaining scales, then route examples/scorecard.rs `fn infer` and the node's      `derived_by_substitution_reply` through `answer_with_relation_transfer` in ONE      commit and re-baseline. Backlog 6eb030ab."
+            );
+        }
     }
 }
 

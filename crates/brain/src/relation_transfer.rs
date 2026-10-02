@@ -252,8 +252,43 @@ pub fn derive_by_relation_transfer(
 ) -> (Option<Vec<u8>>, usize) {
     let mut probes = 1usize;
     let (base_score, base_answer) = ask(brain, query_pool, answer_pool, query);
-    // At the ceiling this is RECALL, not integration: hand back what was taught.
-    if base_score >= CEILING {
+    // AT THE CEILING THIS IS RECALL **ONLY IF THE QUERY WAS TAUGHT**, and the
+    // score cannot establish that. `best_binding_match_v2` is precision x
+    // recall over the UNORDERED DISTINCT BYTE SET, so a held-out question
+    // sharing its distinct bytes with a trained one reaches 1.0 -- that is the
+    // premise `tests/derivation_rejects_untaught.rs` pins, where
+    // `"r0desk material?"` hits the ceiling and answers a different room.
+    //
+    // This arm returned that answer with NO accept rule applied: uniqueness,
+    // subject preservation and ordered trained-frame identity all live below
+    // it. So the shortcut is gated on the ordered identity of the QUERY
+    // itself, which is the only thing that can establish "this was taught".
+    //
+    // WHAT THAT GATE ACTUALLY BOUGHT, because the hypothesis it was built on
+    // was half wrong and the number says which half. It was added expecting
+    // the shortcut to be the source of ALL four inventions -- that would have
+    // explained why three narrowings below measured inert. Measured at scales
+    // 1 and 4 through `tests/integration_family_counts.rs`:
+    //
+    // ```text
+    //   s4 beside_next        4/24 WRONG 3 silent 17  ->  4/24 WRONG 0 silent 20
+    //   s4 next_on_material   8/32 WRONG 1            ->  8/32 WRONG 1
+    //   s1 on_material       22/24 WRONG 2            -> 22/24 WRONG 2
+    //   s1 next_on_material   2/8  WRONG 2            ->  2/8  WRONG 2
+    //   s4 invented 4 -> 1;  s1 invented 4 -> 4
+    // ```
+    //
+    // So it removes every invention in the ONE-HOP family while keeping all
+    // four of its correct answers -- at scale 4 `beside_next` is now 4 right,
+    // 0 wrong, 20 silent, and the "s32: 4 right 3 WRONG" reading recorded in
+    // `README.md` as the measurement that killed this mechanism for its own
+    // family is closed. It changes NOTHING for `on_material` or
+    // `next_on_material`, whose inventions therefore do NOT come through this
+    // arm and are not reached by any of the four conditions in this function.
+    // Those two are COMPOSITIONS, which is the hop-count limit recorded below:
+    // the remaining fix is to fire only when the production derivation found
+    // no taught sub-question at all (backlog `6eb030ab`).
+    if base_score >= CEILING && brain.is_trained_frame(query_pool, query) {
         return (base_answer, probes);
     }
     let Some(base_answer) = base_answer else { return (None, probes) };
