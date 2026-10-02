@@ -1635,17 +1635,51 @@ const DEFAULT_OVERLAY_FLUSH_ENTRY_LIMIT: usize = 250_000;
 /// each setting costs, and why the figure in that table stopped being the
 /// reason to keep this at 0.
 ///
-/// 32 rather than "enough for three hops": the measured cost of a two-hop
-/// prefix-shaped derivation is ~26 questions and the budget is a CEILING, so a
-/// cheaper question spends less. A budget of 256 covered three hops and did not
-/// complete inside the scorecard's 300 s timeout at scale 16, so the deeper
-/// families stay out of reach until the per-probe cost falls, not because the
-/// mechanism cannot reach them.
+/// 64 because that is the KNEE, measured rather than reasoned, and 32 was
+/// below the floor the search's own shape sets. The deletion scan that finds
+/// the taught sub-question is `k` outer over `1..n` and `t` inner over
+/// `0..=1`, so it costs up to `2(n-1)` questions before the splice search has
+/// asked anything at all -- 52 at `n = 27`, which is the length of the
+/// scorecard's 3-hop questions (`lit_mean` 27.9 against 23.0 and 21.6 for the
+/// 2-hop families). A ceiling of 32 therefore ran out INSIDE the sub-question
+/// search on every long question whose cut was not already cached, which is
+/// why `next_on_material` sat at 113/512 while the two short families sat at
+/// 1534/1536 and 1024/1024 spending 4.1 probes of 32.
+///
+/// Measured 2026-10-01 (Iris, pass 19), scale 64, one binary, the budget set
+/// per run through the scorecard's `--derivation-budget`:
+///
+/// | budget | integration | wrong | recall | on_material | next_on_material | beside_next | probes/attempt | wall | peak |
+/// |--------|-------------|-------|--------|-------------|------------------|-------------|----------------|-------|------|
+/// |     32 |      77.286 |   0.0 |  100.0 |   1534/1536 |          113/512 |       0/384 |          10.09 |  77 s | 39.8 MB |
+/// |     64 |      84.259 |   0.0 |  100.0 |   1536/1536 |          352/512 |       0/384 |          14.88 | 116 s | 39.7 MB |
+/// |    128 |      84.259 |   0.0 |  100.0 |   1536/1536 |          352/512 |       0/384 |          21.49 | 121 s | 40.5 MB |
+///
+/// 64 and 128 agree to the last printed digit, so everything a probe ceiling
+/// can buy is bought at 64, and 128 is 1.4x the probes for no answers and the
+/// only peak in the three that rose. The wall and peak figures are read back
+/// off `tools/capped.py`'s own JSON line for each run, not off the screen.
+/// Budget 64's peak of 39.7 MB against 32's 39.8 MB is the load-bearing one:
+/// the probes are `observe_fabric_read_only` calls on a read-only path, so
+/// they cost wall and not residency, and the +25 % RAM attributed to probes in
+/// the backlog is not reproduced here.
+///
+/// What the rise does NOT buy: `beside_next` stays 0/384 at every budget while
+/// its starvation falls 332 -> 332 -> 121, so it is starving on a search that
+/// cannot win rather than on a search that ran out. It is a 1-hop family and
+/// needs relation transfer, which no ceiling reaches. The 160 `next_on_material`
+/// misses that survive budget 128 are in the `n(n+1)/2` full-span fallback
+/// (378 rewrites at `n = 27`) taken when no cut is found at all.
+///
+/// The old note here said a budget of 256 "did not complete inside the
+/// scorecard's 300 s timeout at scale 16". Scale 64 -- four times that corpus
+/// -- at budget 128 completes in 121 s, so whatever that reading measured, it
+/// is not a reason to stay at 32.
 ///
 /// Applied on the restore paths as well as on `new`: a brain reloaded from a
 /// snapshot that answers differently from a fresh one is a worse defect than
 /// either behaviour.
-pub const DEFAULT_DERIVATION_PROBE_BUDGET: usize = 32;
+pub const DEFAULT_DERIVATION_PROBE_BUDGET: usize = 64;
 
 /// How many cut shapes [`Brain::derive_by_substitution`] remembers.
 ///

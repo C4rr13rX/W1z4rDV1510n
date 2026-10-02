@@ -685,12 +685,28 @@ fn main() {
         .position(|a| a == "--store")
         .and_then(|i| args.get(i + 1))
         .map(std::path::PathBuf::from);
+    // `--derivation-budget N` overrides `DEFAULT_DERIVATION_PROBE_BUDGET` for
+    // this run and nothing else; the reported `derivation_probe_budget` is read
+    // off the brain, so a run always says which budget produced its numbers.
+    //
+    // It exists because re-pricing the budget otherwise costs one full rebuild
+    // per value: pass 18 queued a 4 -> 32 comparison four times and never once
+    // got a number out of it, each attempt dying behind the shared build lock.
+    // One build now prices every budget.
+    let derivation_budget = args
+        .iter()
+        .position(|a| a == "--derivation-budget")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|v| v.parse::<usize>().ok());
 
     let world = SceneWorld::new(scale);
     // The probe set is built before the brain, so this mark separates heap the
     // BRAIN allocates from heap the harness allocates for its own questions.
     let (live_world, _) = heap_mb();
     let mut subject = Subject::new(store_dir.as_deref());
+    if let Some(budget) = derivation_budget {
+        subject.brain.set_derivation_probe_budget(budget);
+    }
     // A brain with two empty pools. Whatever this holds is fixed construction
     // cost -- the EEM's equation tables, the annealer, the fabric -- and is NOT
     // part of any per-fact residual, however large it looks at small scale.
