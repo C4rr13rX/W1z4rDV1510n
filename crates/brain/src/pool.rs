@@ -642,6 +642,24 @@ pub struct PoolConfig {
     /// millions of terminals" the goal asks for.
     #[serde(default = "default_max_atom_fanout")]
     pub max_atom_fanout: usize,
+    /// Maximum run length emergence considers ON THE TRAINING PATH, where it
+    /// is frame-local. 0 or 1 disables it, which is how every brain behaved
+    /// before this field existed and what a snapshot without it restores to.
+    ///
+    /// `max_concept_member_count` is the bound for the FIRE path, whose buffer
+    /// is `recent_atoms` and whose cost is "one ledger key per run length per
+    /// atom observed" -- measured at ~1,071 permanent keys per observed frame
+    /// with that bound at 64, which is what `emergence_suppressed` exists to
+    /// keep off the answer path. The training path needs its own, much smaller
+    /// bound for the reason the fire path's size hid: a run of 2 or 3 bytes
+    /// RECURS across a corpus, so its ledger key is shared and the ledger
+    /// saturates, while a run of 64 bytes is very nearly unique to the frame
+    /// that produced it, so the ledger grows with the corpus and never
+    /// saturates. Short runs are also what the emergence hierarchy wants
+    /// (atoms -> morphemes -> words), and a 64-byte concept memorises one
+    /// phrase verbatim.
+    #[serde(default = "default_pretrain_emergence_max_run")]
+    pub pretrain_emergence_max_run: usize,
     pub concept_emergence_threshold: u32,
     pub max_weight: f32,
     pub decay_rate: f32,
@@ -1385,6 +1403,15 @@ fn default_max_atom_fanout() -> usize {
     512
 }
 
+/// 3: bigrams and trigrams. Chosen from the ledger census in
+/// `crates/brain/tests/synonym_span_derivation.rs`
+/// (`emergence_ledger_cost_by_run_length`), which measures entries and bytes
+/// against this bound over the scorecard's own corpus -- not from the
+/// 1,071-keys-per-frame figure, which is one observation at one frame length.
+fn default_pretrain_emergence_max_run() -> usize {
+    3
+}
+
 fn default_predict_gate_mode() -> ControlMode {
     ControlMode::Constant(0.0)
 }
@@ -1398,6 +1425,7 @@ impl PoolConfig {
             recent_atoms_window: 32,
             max_concept_member_count: 8,
             max_atom_fanout: default_max_atom_fanout(),
+            pretrain_emergence_max_run: default_pretrain_emergence_max_run(),
             concept_emergence_threshold: 3,
             max_weight: 4.0,
             decay_rate: 0.0005,
@@ -3385,7 +3413,66 @@ impl Pool {
         }
         self.last_observed_sequence = sequence.clone();
         profile.touch_atoms_ns = stage.elapsed().as_nanos() as u64;
+        let stage = std::time::Instant::now();
+        self.emerge_concepts_from_pretrain_frame(&sequence, tick);
+        profile.sequence_recurrence_ns = stage.elapsed().as_nanos() as u64;
         (sequence, profile)
+    }
+
+    /// Frame-local, run-length-bounded concept emergence on the TRAINING path.
+    ///
+    /// Before this existed, `pretrain_binding_episode` was the only path any
+    /// batched corpus took and its entire body was
+    /// `.map(|label| self.ensure_atom(label, tick))` -- no `push_recent`, no
+    /// `check_concept_emergence` -- while `emergence_suppressed` correctly
+    /// disables emergence for the whole read-only answer scope. So the only
+    /// path that could promote a recurring run was the fire path, nothing in
+    /// the scorecard's world took it, and the fabric held no ordered symbol at
+    /// all: measured concepts == total_binding == facts at every scale
+    /// (186/186, 744/744, 2976/2976, 11904/11904), i.e. every concept neuron
+    /// was a binding and not one emergent concept had ever formed.
+    ///
+    /// Two differences from `check_concept_emergence`, and both are the reason
+    /// this is a separate function rather than a call to it:
+    ///
+    /// 1. The window is the FRAME, not `recent_atoms`. `recent_atoms` is a
+    ///    `VecDeque` that `push_recent` pops from the front at
+    ///    `recent_atoms_window` (2048 in every copy of the scorecard's setup),
+    ///    and scale 1 alone pushes ~6,288 atoms, so it wraps almost at once
+    ///    and a frame's own region cannot be recovered from it afterwards. A
+    ///    frame-local pass needs no buffer, cannot straddle two facts, and is
+    ///    deterministic run to run -- which the gated numbers require.
+    /// 2. The bound is `pretrain_emergence_max_run`, not
+    ///    `max_concept_member_count` (64 here). The cost is one ledger key per
+    ///    DISTINCT run, so the bound decides whether the ledger saturates or
+    ///    grows with the corpus.
+    ///
+    /// Promotion is gated on `emergence_suppressed` for exactly the reason the
+    /// fire path is: answering is not learning.
+    fn emerge_concepts_from_pretrain_frame(&mut self, sequence: &[NeuronId], tick: u64) {
+        let bound = self.config.pretrain_emergence_max_run;
+        if self.emergence_suppressed || bound < 2 || sequence.len() < 2 {
+            return;
+        }
+        let max_len = bound.min(sequence.len());
+        let threshold = self.config.concept_emergence_threshold;
+        let mut to_promote: Vec<SequenceFingerprint> = Vec::new();
+        for len in 2..=max_len {
+            for window in sequence.windows(len) {
+                let run: SequenceFingerprint = window.to_vec();
+                match self.increment_sequence_recurrence(&run) {
+                    Ok(count) if count == threshold => to_promote.push(run),
+                    Ok(_) => {}
+                    Err(error) => eprintln!(
+                        "refusing pretrain concept emergence because cold recurrence lookup failed in pool {}: {error}",
+                        self.config.id
+                    ),
+                }
+            }
+        }
+        for run in to_promote {
+            self.promote_to_concept(run, tick);
+        }
     }
 
     /// Return an ordered pretraining frame, collapsing it to one reusable,

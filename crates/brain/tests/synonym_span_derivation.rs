@@ -23,7 +23,21 @@
 //! Nothing here is a tuning target. The assertions are the two structural
 //! claims; the distributions are printed.
 //!
-//! # Where this bottoms out: emergence has NO live caller
+//! # Where this bottomed out: emergence had NO live caller -- CLOSED
+//!
+//! EVERYTHING FROM HERE TO THE END OF THIS HEADER IS THE STATE BEFORE
+//! `PoolConfig::pretrain_emergence_max_run` (pool.rs), and is kept because it
+//! is the diagnosis the change was built from. What is no longer true: the
+//! assertions below no longer measure `total_concepts == total_binding`. They
+//! measure the opposite, and the numbers are in
+//! `emergence_ledger_cost_by_run_length` -- at the default bound of 3 the
+//! training path promotes 358 non-binding concepts at scale 1 and 1,772 at
+//! scale 64, for a sequence ledger of 0.121 MB whose keys grow 4.9x against
+//! 64x the facts. Recall held at 186/186 and the concept TIER still fires on
+//! 0 of 186 trained questions, so the second gate named at the bottom of this
+//! header (the matcher) is the one that is still shut.
+//!
+//! The diagnosis, as it stood:
 //!
 //! The assertions below measure that `total_concepts == total_binding ==` the
 //! number of taught facts at every scale, so not one non-binding concept has
@@ -164,6 +178,14 @@ fn decoy(r: usize, obj: &str, base: &str) -> String {
 }
 
 fn subject() -> Brain {
+    subject_with_run_bound(PoolConfig::defaults("probe", 0).pretrain_emergence_max_run)
+}
+
+/// The same subject with the training path's emergence bound set explicitly,
+/// so the ledger census below can price the bound rather than assume it.
+/// `bound < 2` is emergence OFF, which is what every brain did before
+/// `pretrain_emergence_max_run` existed.
+fn subject_with_run_bound(bound: usize) -> Brain {
     let mut cfg = BrainConfig::default();
     cfg.binding_emergence_threshold = 3;
     cfg.moment_history_window = 256;
@@ -173,6 +195,7 @@ fn subject() -> Brain {
         pc.recent_atoms_window = 2048;
         pc.concept_emergence_threshold = 2;
         pc.max_concept_member_count = 64;
+        pc.pretrain_emergence_max_run = bound;
         pc.decay_rate = 0.0001;
         pc.prune_floor = 0.005;
         brain.create_pool(pc, Box::new(BytePassthroughEncoding { prefix }) as Box<dyn AtomEncoding>);
@@ -189,10 +212,17 @@ fn teach(brain: &mut Brain, question: &str, answer: &str) {
 
 /// Every question the scorecard trains at scale 1, in its order.
 fn trained_world() -> Vec<(String, String)> {
+    trained_world_rooms(ROOMS)
+}
+
+/// The same world at the scorecard's other scales: it multiplies the room
+/// count, so `rooms = 8 * scale` and the fact count comes out at the
+/// scorecard's own 186 / 744 / 2,976 / 11,904.
+fn trained_world_rooms(rooms: usize) -> Vec<(String, String)> {
     let mut facts = Vec::new();
-    for r in 0..ROOMS {
+    for r in 0..rooms {
         let rm = room(r);
-        let next = room((r + 1) % ROOMS);
+        let next = room((r + 1) % rooms);
         for (i, obj) in OBJECTS.iter().enumerate() {
             facts.push((format!("{rm} {obj} color?"), color(r, i)));
             facts.push((format!("{rm} {obj} material?"), material(r, i)));
@@ -586,6 +616,110 @@ fn largest_j_splice_beats_smallest_j_on_every_family() {
     );
 }
 
+/// Price the training path's emergence ledger AS A FUNCTION OF THE BOUND, off
+/// the live pool after training, at the scorecard's own four scales.
+///
+/// The doc comment above carries the same shape counted analytically by a
+/// script, which is how the bound got chosen; this reads it back out of
+/// `Pool::side_structure_bytes` after `pretrain_binding_episode` has actually
+/// run, because an analytic count of distinct runs and the ledger a live pool
+/// ends up holding are two different claims. The `1,071 keys per observed
+/// frame` figure that the naive repair was priced from is one observation at
+/// one frame length and at `max_concept_member_count = 64`; this is the curve.
+///
+/// Reported, not asserted, for every (scale, bound) except the two facts the
+/// bound exists to guarantee: the ledger must not grow faster than the corpus,
+/// and the concept inventory must stop equalling the binding count.
+#[test]
+fn emergence_ledger_cost_by_run_length() {
+    // (scale, rooms, bounds priced at that scale). Scale 64 is priced at the
+    // live default and at OFF only: bound 64 at scale 1 already took the
+    // process to 769.6 MB (Cove, pass 13), so pricing a wide bound at 11,904
+    // facts would measure the machine's memory cap rather than the ledger.
+    let plan: Vec<(usize, usize, Vec<usize>)> = vec![
+        (1, 8, vec![0, 2, 3, 4, 8]),
+        (4, 32, vec![0, 2, 3, 4, 8]),
+        (16, 128, vec![0, 3]),
+        (64, 512, vec![0, 3]),
+    ];
+    println!(
+        "{:>5} {:>5} {:>6} {:>9} {:>11} {:>9} {:>9} {:>9}",
+        "scale", "bound", "facts", "ledger_n", "ledger_bytes", "concepts", "bindings", "neurons"
+    );
+    let mut default_rows: Vec<(usize, usize, usize)> = Vec::new();
+    for (scale, rooms, bounds) in plan {
+        for bound in bounds {
+            let mut brain = subject_with_run_bound(bound);
+            let facts = trained_world_rooms(rooms);
+            for _ in 0..2 {
+                for (q, a) in &facts {
+                    teach(&mut brain, q, a);
+                }
+            }
+            let mut ledger_entries = 0usize;
+            let mut ledger_bytes = 0usize;
+            for pid in brain.fabric().pool_ids() {
+                let Some(pool) = brain.fabric().pool(pid) else { continue };
+                let s = pool.read().side_structure_bytes();
+                ledger_entries += s.sequence_entries;
+                ledger_bytes += s.sequence_ledger;
+            }
+            let st = brain.stats();
+            println!(
+                "{scale:>5} {bound:>5} {:>6} {ledger_entries:>9} {ledger_bytes:>11} {:>9} {:>9} {:>9}",
+                facts.len(),
+                st.total_concepts,
+                st.total_binding,
+                st.total_neurons
+            );
+            if bound < 2 {
+                // Emergence off is the behaviour every brain had before the
+                // bound existed, and it is the control for every row: the
+                // ledger must be empty and concepts must equal bindings.
+                assert_eq!(
+                    ledger_entries, 0,
+                    "bound {bound} is emergence OFF, so the training path must add no ledger key"
+                );
+                assert_eq!(
+                    st.total_concepts, st.total_binding,
+                    "with emergence off every concept is still a binding"
+                );
+            } else {
+                assert!(
+                    st.total_concepts > st.total_binding,
+                    "bound {bound} at scale {scale}: emergence ran on the training path, so                      non-binding concepts must exist -- concepts {} bindings {}",
+                    st.total_concepts,
+                    st.total_binding
+                );
+                if bound == PoolConfig::defaults("probe", 0).pretrain_emergence_max_run {
+                    default_rows.push((facts.len(), ledger_entries, ledger_bytes));
+                }
+            }
+        }
+    }
+    // THE GROWTH CLASS IS THE POINT, not the absolute size. The ledger key is
+    // a byte RUN, and the number of distinct short runs is bounded by the
+    // ~59-byte alphabet rather than by the corpus, so at a small bound the key
+    // space saturates. At `max_concept_member_count = 64` the keys grew 65x
+    // for 64x the facts -- linear, 3.3 GB at scale 64 -- which is the whole
+    // reason the naive repair was ruled out. Asserted sub-linear here: if a
+    // future change makes the training ledger grow with the corpus again, this
+    // is the line that says so before the RAM gate does.
+    assert_eq!(default_rows.len(), 4, "the default bound must be priced at all four scales");
+    let (f_small, n_small, _) = default_rows[0];
+    let (f_big, n_big, b_big) = default_rows[3];
+    let fact_growth = f_big as f64 / f_small as f64;
+    let ledger_growth = n_big as f64 / n_small.max(1) as f64;
+    println!(
+        "default bound: facts x{fact_growth:.1} ({f_small} -> {f_big}), ledger keys x{ledger_growth:.1} ({n_small} -> {n_big}), {:.3} MB at scale 64",
+        b_big as f64 / 1e6
+    );
+    assert!(
+        ledger_growth < fact_growth,
+        "the training ledger must grow SLOWER than the corpus: facts x{fact_growth:.1}, keys x{ledger_growth:.1}"
+    );
+}
+
 #[test]
 fn beside_next_is_unreachable_and_on_material_is_ambiguous() {
     let mut brain = subject();
@@ -646,32 +780,45 @@ fn beside_next_is_unreachable_and_on_material_is_ambiguous() {
         "fabric: total_neurons {} total_concepts {} total_binding {} total_terminals {}",
         st.total_neurons, st.total_concepts, st.total_binding, st.total_terminals
     );
-    // IT IS AN EMERGENCE PROBLEM, AND THE ARITHMETIC IS THE WHOLE ARGUMENT.
-    // `total_concepts` equals `total_binding` equals the number of taught facts,
-    // and `total_neurons` exceeds it by only the count of DISTINCT BYTES. So
-    // every concept neuron in this fabric is a binding -- one per taught fact --
-    // and NOT ONE non-binding concept has emerged, with
-    // `concept_emergence_threshold = 2` set and two epochs of byte-identical
-    // sequences to collapse.
+    // IT WAS AN EMERGENCE PROBLEM AND NOW IT IS ONLY A MATCHER PROBLEM, and
+    // the two numbers above are what separate them.
     //
-    // Confirmed in the product's own artifact, not just here. From
-    // `docs/scorecard-baseline.json`, concepts == facts at EVERY scale:
-    // 186/186 (241 neurons), 744/744 (803), 2976/2976 (3035), 11904/11904
-    // (11963) -- an atom count pinned near 59 while facts grow 64x.
+    // Until `PoolConfig::pretrain_emergence_max_run` existed this read
+    // `assert_eq!(st.total_concepts, st.total_binding)` and
+    // `assert_eq!(st.total_concepts, facts.len())`: `total_concepts` equalled
+    // `total_binding` equalled the taught fact count at EVERY scale
+    // (`docs/scorecard-baseline.json`: 186/186, 744/744, 2976/2976,
+    // 11904/11904, with the atom count pinned near 59 while facts grew 64x),
+    // so every concept neuron was a binding and not one non-binding concept
+    // had ever emerged -- `atoms -> morphemes -> words` produced nothing and
+    // there was no ordered symbol anywhere in the fabric.
     //
-    // That is why a tie-break cannot be built: `atoms -> morphemes -> words ->
-    // phrases` produces nothing here, so there is no ordered symbol anywhere in
-    // the fabric and every match -- recall included -- is an unordered set of
-    // distinct bytes.
-    assert_eq!(
-        st.total_concepts, st.total_binding,
-        "every concept is a binding: not one non-binding concept has emerged.          When this fails, concepts ARE emerging and the tier discriminator          asserted above is worth re-measuring"
-    );
-    assert_eq!(
+    // Both of those assertions are now FALSE, which is the whole point of the
+    // change, and the command that showed it is
+    // `cargo test -p w1z4rd-brain --release --test synonym_span_derivation`:
+    // `left: 544, right: 186` at scale 1, i.e. 358 non-binding concepts where
+    // there had been zero, with recall still 186/186. The inverted assertion
+    // is the standing guard: if emergence is ever silently disabled on the
+    // training path again, this is the line that says so.
+    assert!(
+        st.total_concepts > st.total_binding,
+        "ordered symbols must exist: emergence runs on the training path, so the          concept count must EXCEED the binding count -- concepts {} bindings {}.          If these are equal again, the training path has stopped promoting runs",
         st.total_concepts,
-        facts.len(),
-        "one binding per taught fact, so neurons grow linearly with the corpus"
+        st.total_binding
     );
+    assert_eq!(
+        st.total_binding,
+        facts.len(),
+        "one binding per taught fact, so bindings grow linearly with the corpus"
+    );
+    // AND THE SECOND GATE IS STILL SHUT, measured rather than argued: the tier
+    // assertion above is still `0`, with 544 concepts in the pool instead of
+    // 0. So concepts existing is NOT sufficient -- `best_binding_match_v2`
+    // reduces each candidate binding to its non-atom members and skips the
+    // candidate when that set is empty, and every binding here was built from
+    // the raw atom sequence `ensure_frame_atoms_for_pretrain_profiled`
+    // returns. Making the binding reference the COLLAPSED sequence is the next
+    // change, and it is the one that can move an answer.
 
     // ---- beside_next: the empty family -------------------------------------
     //

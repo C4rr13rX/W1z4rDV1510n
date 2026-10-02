@@ -281,6 +281,53 @@ decides *which* terminals are resident, never how many. Paging the weakest
 terminals to SSD instead of deleting them is therefore the remaining lever, not
 a refinement.
 
+### Concept emergence on the training path, and the bound that makes it affordable
+
+Until `PoolConfig::pretrain_emergence_max_run` existed, **no non-binding concept
+had ever emerged in this substrate.** `total_concepts` equalled `total_binding`
+equalled the taught fact count at every scale — 186/186, 744/744, 2976/2976,
+11904/11904 in `docs/scorecard-baseline.json`, with the atom count pinned near
+59 while facts grew 64× — so every concept neuron was a cross-pool binding and
+the `atoms → morphemes → words` hierarchy described above produced nothing. Both
+paths that could promote a recurring run were closed: `pretrain_binding_episode`
+routed every frame to `Pool::ensure_frame_atoms_for_pretrain_profiled`, whose
+body was `.map(|label| self.ensure_atom(label, tick))` and which called no
+emergence; and `Pool::emergence_suppressed` correctly forbids emergence for the
+whole read-only answer scope, because answering through `Brain::observe` used to
+add ~1,071 permanent ledger keys per question and took scale 16 from 28.3 MB to
+546.7 MB.
+
+Emergence now runs on the training path, frame-locally, bounded by
+`pretrain_emergence_max_run` (default 3 — bigrams and trigrams). The bound is a
+separate field from `max_concept_member_count` (8 by default, 32 in the node, 64
+in the scorecard) because the bound decides the **growth class**, not the
+discount: a ledger key is a byte *run*, and the number of distinct short runs is
+limited by the ~59-byte alphabet rather than by the corpus, so a small bound
+saturates while a wide one is very nearly one key per frame. Measured off the
+live pool after training, `crates/brain/tests/synonym_span_derivation.rs`
+(`emergence_ledger_cost_by_run_length`):
+
+| bound | scale 1 keys | scale 4 | scale 16 | scale 64 | ledger bytes @64 | concepts @64 |
+|---|---|---|---|---|---|---|
+| off | 0 | 0 | 0 | 0 | 0 | 11,904 (= bindings) |
+| 2 | 143 | 193 | — | — | — | — |
+| 3 | 358 | 502 | 918 | 1,772 | 121,284 | 13,676 |
+| 4 | 634 | 1,060 | — | — | — | — |
+| 8 | 2,204 | 5,138 | — | — | — | — |
+
+At the default bound the keys grow **4.9× against 64× the facts** — sub-linear,
+0.121 MB at scale 64 — against 65× growth and 3.3 GB at the scorecard's
+`max_concept_member_count = 64`. 1,772 non-binding concepts exist at scale 64
+where there had been zero, and recall stayed 100 %.
+
+**What this does not yet buy.** `MatchTier::Concept` still fires on 0 of 186
+trained questions with 544 concepts in the scale-1 pool. The matcher is a second
+gate in sequence: `best_binding_match_v2` reduces each candidate binding to its
+non-atom members and skips the candidate when that set is empty, and every
+binding is still built from the raw atom sequence. So ordered symbols now exist
+in the fabric and no answer has changed because of them; making a binding
+reference the collapsed sequence is the next change.
+
 ### One-shot taught terminals are deleted past 7,822 ticks
 
 Terminals are born at weight 0.5. `apply_pending_decay` multiplies by
