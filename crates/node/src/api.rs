@@ -8346,7 +8346,35 @@ async fn hypothesis_research_loop(
             // foreground is training, so that is bounded by construction --
             // unlike the 200 ms idle thinking loop, which needs its own
             // decision. `W1Z4RD_HQ_DERIVE=0` turns it off without a rebuild.
-            let derived = if answer.as_ref().is_none_or(|a| a.is_empty())
+            // An EXACT binding recall, the same term `/brain/ask` above gates
+            // its derivation on, and the reason this site needed it too.
+            //
+            // The two routes disagreed, and that is a production-parity defect
+            // (M2) rather than a tuning difference. `/brain/ask` derives on
+            // `answer empty || outside_grounding || !recalled_exactly`; this
+            // loop derived on `answer empty` ALONE -- so any non-empty answer
+            // from `integrate_autonomous_tuned`, however far its best binding
+            // is from the prompt, suppressed the derivation entirely. That is
+            // the shadowing backlog `[988dd17c]` describes, and measurement put
+            // it here rather than in the fabric arm it named: that arm cannot
+            // fire today (`integrate()` answers 0 of 16 at
+            // `fabric_confidence 0.0000`, measured in
+            // `crates/brain/tests/fabric_arm_shadows_derivation.rs`), while
+            // this gate is on the live path for every queued hypothesis.
+            //
+            // RECALL and not precision, for the arithmetic the `/brain/ask`
+            // arm already states and this file should not restate: a composite
+            // prompt scores precision 1.0 against its own sub-question, so a
+            // precision test is inert. Measured on the 16-binding
+            // lamp/desk/material world: composite recall 0.7500, taught
+            // question recall 1.0000.
+            //
+            // Cost: this is bounded exactly as the derivation already was --
+            // one question per 30 s cycle, skipped while the foreground
+            // trains -- because it widens WHEN the derivation runs and not how
+            // much it may spend.
+            let recalled_exactly = b.best_binding_match_v2(query_pool).recall >= 0.999;
+            let derived = if (answer.as_ref().is_none_or(|a| a.is_empty()) || !recalled_exactly)
                 && std::env::var("W1Z4RD_HQ_DERIVE").as_deref() != Ok("0")
             {
                 crate::brain_api::derived_by_substitution_reply(
