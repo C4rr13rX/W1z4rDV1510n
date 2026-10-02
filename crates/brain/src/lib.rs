@@ -45,6 +45,7 @@ pub mod tier_orchestrator;
 pub mod workspace;
 pub mod crystallizer;
 pub mod code_repair;
+pub mod relation_transfer;
 
 pub use answer_path::{
     ANSWER_BINDING_MATCH_THRESHOLD, ANSWER_CHAIN_MAX_DEPTH, ANSWER_CHAIN_MAX_VISIT,
@@ -88,6 +89,7 @@ pub use workspace::{CompositionRule, GroundedRelation, PatternValue, RelationPat
                     TransientWorkspace, TypedValue};
 pub use crystallizer::{SemanticCrystallizer, SemanticFrame};
 pub use code_repair::{apply_code_repair_relation, apply_relation, CodeRepairError, CodeRepairRelation};
+pub use relation_transfer::{candidate_rewrites, derive_by_relation_transfer};
 pub use store::{
     MmapWalStore, NoopStore, RecoveryStats, Store, TerminalDelta, WalEvent,
     replay_into_brain,

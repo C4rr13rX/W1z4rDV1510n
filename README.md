@@ -341,6 +341,120 @@ Silence and uncertainty are first-class outputs here. A tokenized model cannot p
 - Punctuation is learned, not stripped. Commas before proper nouns build a different activation pattern than commas in lists because the character context around the comma was different in every sentence. The pool encodes the distinction. A tokenizer discards it as whitespace-adjacent noise.
 - Every level fires simultaneously. Character labels, phonetic bigrams, word labels, punctuation labels, layout role labels, and spatial zone labels all co-activate in the same training call. The hierarchy emerges from the data, not from architecture decisions made before training begins.
 
+### Subject-preserving relation transfer (`crates/brain/src/relation_transfer.rs`, 2026-10-01)
+
+One held-out integration family — a question of the shape `<subject> <relation>?` whose
+phrasing was trained for *other* subjects — measures **0.0 %, at every scale**: 0/6, 0/24,
+0/96, 0/384. It is a one-hop family, so at scale 1 its six probes cannot be a budget
+problem, and the pass that solved two other families outright (candidate-set fix,
+`dea50bd`) left it **byte-identical**. That makes it 384 of the 785 misses remaining at
+scale 64, or **48.9 % of everything left**.
+
+The cause is measured, not assumed. Every match in this world is precision × recall over
+the **unordered distinct byte set**. Modelling the matcher's own scorer over the 186
+trained questions, against each of the six held-out probes, gives the same reading for all
+six: the top match is **unique at 0.9000** and is the *wrong subject*, while the trained
+question that actually holds the answer sits at **rank 44**. The relation's bytes outweigh
+the subject's 9:1, so any mechanism that reaches the relation drags the wrong subject with
+it — neither a tie-break problem nor a budget problem. And `derive_by_substitution` can
+only splice spans taken from an **answer**, whereas the span needed here appears only
+inside a trained **question**.
+
+`derive_by_relation_transfer` adds exactly one capability: the insert may come from a
+trained question, found by **reverse decode** — observe the answer in the answer pool,
+decode back into the query pool. The accept rule is the existing one, so nothing can be
+invented: a rewrite is returned only when it scores at the exact ceiling (an exact trained
+binding) *and* resolves to something other than the answer the query had already landed
+on. Everything else returns no answer.
+
+Alignment alone does **not** separate the subject from the relation, which a unit test
+established against the first version of this description: for query `r001 beside?`
+against trained `r000 next?` the common prefix is 3 bytes and the suffix is 1, so the
+aligned span is `r00` ++ `0 next` ++ `?` = `r000 next?` — the wrong subject, because the
+differing bytes are adjacent and the alignment cannot cut between them. What preserves the
+subject is the **tail transfer**, `query[..a] ++ trained[i..]`, ordered by `|a − i|`:
+**candidate 5 of 4,395**, against the hundreds that a length-first ordering needed (50.0
+probes per derivation measured). That ordering is what makes the mechanism affordable
+inside a 32-probe budget, so it is asserted rather than described.
+
+#### Accepting at the ceiling is not enough, and counting only `right` hid it
+
+Composed as a fallback behind the existing derivation — it runs only when that returns
+nothing — the first version of this mechanism measured `42/54 (77.8%) -> 49/54 (90.7%)` at
+scale 1. That number is a **right-only count, and it is misleading**. The per-family table
+with `wrong` and `empty` in it:
+
+```text
+     beside_next  base right 0  wrong 0  empty 6  ->  fallback right 6  wrong 0  empty 0
+      next_color  base right 16 wrong 0  empty 0  ->  fallback right 16 wrong 0  empty 0
+next_on_material  base right 4  wrong 0  empty 4  ->  fallback right 4  wrong 4  empty 0
+     on_material  base right 22 wrong 0  empty 2  ->  fallback right 23 wrong 1  empty 0
+```
+
+`empty` goes to **0 in every family**: the mechanism never abstained. The +7 right was
+bought with **+5 wrong**, so the net is `42 -> 44`, against a brain that measures `wrong`
+0 at every scale and under a gate where `wrong` may never rise. The reason this was not
+caught where the mechanism was designed is worth stating plainly: that suite asserts only
+that `right` must not FALL, and an assertion on `right` is blind to a silence converted
+into an invention.
+
+The cause is structural rather than a threshold. A rewrite can be an exactly trained
+question — score 1.0 — and still return the answer to a *different* question than the one
+asked. For a one-hop family the single ceiling-reachable rewrite is the right one; for a
+multi-hop family several distinct trained questions are reachable at the ceiling and "the
+first one found" is arbitrary. No score cut separates them, because they all score exactly
+1.0.
+
+Two further rules therefore gate the accept, both general and neither aware of a family, a
+hop count or a relation word:
+
+**Uniqueness** is therefore the accept rule: every distinct ceiling-reachable answer inside
+the budget is collected, exactly one is returned, and a second distinct answer abstains
+immediately — a second answer settles it, because no further probe can make a non-unique
+chain unique. That cut invention from 5 to 3 at scale 1.
+
+Two things were tried on top and **both failed, in ways worth recording** because each is
+the obvious next idea:
+
+- **Enforcing subject preservation made it worse, by a factor of two.** Filtering to
+  rewrites that begin with the query's bytes up to its first differing byte — the property
+  this mechanism is *named* for, and which nothing was checking — took `next_on_material`
+  from 2 wrong to **4 wrong**. The candidates it removed were the ones producing the
+  *second* distinct answer, and a second distinct answer is what triggers the abstain.
+  Uniqueness is evidence of *absence*; pruning the search destroys the evidence while
+  leaving the conclusion. A narrower search makes a uniqueness test look more certain and
+  be less certain. The filter was reverted and the search is deliberately left wide.
+- **"Accept only when the search completed" is sound and unreachable here.** Every
+  `beside_next` probe spends exactly 32 of its 32 probes against 4,395 candidates, so every
+  search is truncated and exhaustiveness would abstain on everything, including the family
+  that works.
+
+#### The scale-32 reading, which is the one that settles it
+
+The clean one-hop result is a **scale-1 artefact**, not a property of hop count:
+
+```text
+s8   beside_next  base 0 right 0 wrong 24 empty  ->  fallback 6 right 0 wrong  0 empty
+s32  beside_next  base 0 right 0 wrong 24 empty  ->  fallback 4 right 3 WRONG 17 empty
+
+s8   ALL FAMILIES base 42/54  (77.8%) wrong 0  ->  48/54  (88.9%) wrong 3   NET 42 -> 45
+s32  ALL FAMILIES base 167/216 (77.3%) wrong 0  ->  171/216 (79.2%) wrong 4  NET 167 -> 167
+```
+
+With 32 rooms instead of 8 there are more trained questions reachable at the ceiling, so
+the chain stops being unique for the *same* family — and the net contribution at that scale
+is **exactly zero**: +4 right bought with +4 wrong. Recall is 100 % throughout (186/186 and
+744/744).
+
+**The call site in the node's answer path is deliberately not wired.** The committed
+scorecard baseline therefore contains none of this, and the honest summary is that the
+`42/54 -> 49/54` headline this mechanism first produced is net +3 at scale 1 and net 0 at
+scale 32, against a brain that measures `wrong` 0 at every scale. What the module ships
+today is the mechanism, the uniqueness rule, and the measurements that say it is not yet
+safe to put in the answer path — gated on `wrong` reaching 0 at every scale, the only
+condition under which the project's first standard, *a brain with no grounded answer has no
+answer*, is preserved.
+
 ---
 
 ## Benchmarks
