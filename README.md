@@ -598,7 +598,7 @@ training order and the same recall warm-up the baseline uses:
   s1 next_on_material   base    2/8   wrong 0 silent 6   ->  transfer    2/8   WRONG 2 silent 4
   s1 next_color         base   16/16  wrong 0 silent 0   ->  transfer   16/16  WRONG 0 silent 0
 
-  s4 beside_next        base    0/24  wrong 0 silent 24  ->  transfer    4/24  WRONG 3 silent 17
+  s4 beside_next        base    0/24  wrong 0 silent 24  ->  transfer    4/24  WRONG 0 silent 20
   s4 next_on_material   base    8/32  wrong 0 silent 24  ->  transfer    8/32  WRONG 1 silent 23
 ```
 
@@ -621,6 +621,7 @@ uniqueness evidence while leaving the conclusion. Measured against the same six 
 | **uniqueness** over the ceiling-reachable answer set | 5 → 3 at scale 1 |
 | **subject preservation** — the rewrite keeps the query’s byte at the first disagreement | **exactly inert** |
 | **ordered trained-frame identity** — `Brain::is_trained_frame`, FNV-1a over the frame bytes | **exactly inert** |
+| **the recall shortcut gated on the QUERY's ordered identity** (`f89b5c8`) | **all 3 of `beside_next`'s, scale 4** |
 
 The last two leave every per-family count byte-identical, while each has a unit test showing
 it discriminates in isolation (`r001 next?` accepted, `r000 next?` refused). They are kept
@@ -635,7 +636,20 @@ order-sensitive admission moved nothing — so the four wrong rewrites are **byt
 trained questions, present in the ordered digest, keeping the query’s own subject**. They
 are legitimate taught text asking *the wrong question*.
 
-That makes the limit semantic, and no accept rule on the rewrite reaches it: the only
+**The fourth condition is where the one-hop family's inventions actually were.** The
+function opened by returning the query's own best answer whenever it scored at the
+ceiling, commented as recall — and “at the ceiling” is only recall if the *query* was
+taught, which the score cannot establish. Uniqueness, subject preservation and ordered
+trained-frame identity all sit *below* that line, so anything taking it was returned with
+no accept rule at all. Gating it on `Brain::is_trained_frame` for the query itself takes
+scale-4 `beside_next` from **4 right / 3 wrong / 17 silent to 4 right / 0 wrong / 20
+silent** — every invention in the one-hop family removed, all four of its correct answers
+kept. So the “s32 beside_next 4 right 3 WRONG” reading above, recorded as uniqueness
+ceasing to hold at scale, was never uniqueness failing: it was three probes that never
+reached the uniqueness test. It changes nothing for `on_material` or `next_on_material`.
+
+That makes the limit semantic for the COMPOSITION families, and no accept rule on the
+rewrite reaches it: the only
 evidence the mechanism has is byte-set similarity to the query, which cannot separate “the
 sub-question whose answer composes into mine” from “a trained question that happens to score
 at the ceiling”. The reason the outcomes split by family is **hop count**. `beside_next` is
