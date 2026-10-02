@@ -370,19 +370,30 @@ fn check(scale: usize, floors: &[(&str, usize)]) {
 /// what a future accept rule has to turn green by driving `wrong` to 0 WITHOUT
 /// driving `beside_next` back to 0.
 ///
-/// # Where the invention comes from, which is NOT the splice
+/// # Where the invention comes from, which is NOT the splice and NOT the matcher
 ///
-/// Subject preservation applied AT THE ACCEPT -- the one placement
-/// `README.md:556` had not tried, since the refuted version pruned the search
-/// and destroyed the uniqueness evidence -- is **exactly inert here**: every
-/// per-family count above is byte-identical with and without
-/// `relation_transfer::preserves_subject`. So the accepted rewrites DO keep the
-/// query's own subject and still resolve to another room's answer, which puts
-/// the invention downstream of the rewrite, in the matcher: `best_binding_match_v2`
-/// scores precision x recall over the UNORDERED DISTINCT BYTE SET, so a
-/// subject-preserving rewrite reaches the ceiling against a trained question of
-/// a DIFFERENT room. That is backlog `f711d18a`, and it means no span-level or
-/// ordering-level accept rule can make this safe.
+/// TWO narrowings of the accept rule were added and measured against these
+/// exact rows, each applied to the one answer returned rather than as a
+/// pre-filter on the search (which would destroy the uniqueness evidence):
+///
+/// ```text
+///   subject preservation at the accept        EXACTLY INERT -- rows byte-identical
+///   is_trained_frame, ORDER-sensitive FNV-1a  EXACTLY INERT -- rows byte-identical
+/// ```
+///
+/// Each discriminates in isolation (`relation_transfer`'s unit tests), and
+/// neither moves one digit here. So the four wrong rewrites are byte-exact
+/// trained questions, present in the ordered digest, keeping the query's own
+/// subject -- legitimate taught text asking THE WRONG QUESTION. The first
+/// diagnosis, that the unordered-byte-set matcher was the fault (`f711d18a`),
+/// does not survive the order check: order was added and nothing changed.
+///
+/// What splits the families is HOP COUNT. `beside_next` is a held-out SYNONYM
+/// of a trained relation, so the rewrite's answer is identical to the query's
+/// and guessing the synonym is right; `on_material` and `next_on_material` are
+/// COMPOSITIONS no single trained question answers. The gate is therefore
+/// "fire only when the production derivation found no taught sub-question at
+/// all", which `derive_by_substitution_profiled` does not report today.
 #[test]
 fn wiring_the_transfer_into_the_answer_path_converts_silence_into_invention() {
     for scale in [1, 4] {

@@ -298,7 +298,7 @@ pub fn derive_by_relation_transfer(
             // query already resolved to, or the transfer has only rediscovered
             // the wrong-subject neighbour it started from.
             if answer != base_answer && !answers.contains(&answer) {
-                if preserves_subject(query, &trained, &rewrite) {
+                if admissible(brain, query_pool, query, &trained, &rewrite) {
                     preserving.push(answer.clone());
                 }
                 answers.push(answer);
@@ -309,7 +309,7 @@ pub fn derive_by_relation_transfer(
                 }
             } else if answer != base_answer
                 && !preserving.contains(&answer)
-                && preserves_subject(query, &trained, &rewrite)
+                && admissible(brain, query_pool, query, &trained, &rewrite)
             {
                 // Same answer, reached again by a rewrite that DOES preserve
                 // the subject. The uniqueness test has already counted this
@@ -326,6 +326,66 @@ pub fn derive_by_relation_transfer(
         return (Some(answers.remove(0)), probes);
     }
     (None, probes)
+}
+
+/// May this rewrite's answer be RETURNED? Two necessary conditions, both at the
+/// accept and neither on the search.
+///
+/// # ORDER. `score >= CEILING` does not mean "a question the brain was taught"
+///
+/// `best_binding_match_v2` scores precision x recall over the UNORDERED
+/// DISTINCT BYTE SET, so an anagram of a trained question reaches the exact
+/// ceiling -- and a rewrite that keeps the query's own subject can therefore
+/// resolve against a trained question of a DIFFERENT subject. That is why
+/// subject preservation alone measured exactly inert: all four inventions
+/// survived it, so the fault was never in the splice.
+///
+/// `Brain::is_trained_frame` is FNV-1a over the pool id and the frame BYTES, so
+/// it is order- and multiplicity-sensitive where the matcher is not. The
+/// production derivation already admits only rewrites that are in it; this
+/// mechanism accepted on the score alone, which is the whole gap.
+///
+/// This is the owner's rule stated in code: *an answer is returned only when
+/// every step of its derivation is an EXACT, ORDERED trained binding and the
+/// chain is UNIQUE*. Uniqueness is the caller's test over the answer SET;
+/// these two are the test on the DERIVATION.
+///
+/// # BOTH CONDITIONS ARE MEASURED INERT ON THIS WORLD, and that is the finding
+///
+/// Kept because they are the stated rule and cost nothing, NOT because they are
+/// what makes the mechanism safe -- it is not safe, and nothing here makes it
+/// so. Measured 2026-10-01 at scales 1 and 4 through
+/// `tests/integration_family_counts.rs`, the per-family counts are
+/// byte-identical with each condition and without it:
+///
+/// ```text
+///   uniqueness over the ceiling answer set    NOT inert (invention 5 -> 3)
+///   preserves_subject, at the accept          EXACTLY INERT
+///   is_trained_frame, ORDER-sensitive         EXACTLY INERT
+/// ```
+///
+/// So the four remaining inventions come from rewrites that are byte-exact
+/// trained questions, present in the ordered digest, keeping the query's own
+/// subject. They are legitimate taught text asking THE WRONG QUESTION, and the
+/// first diagnosis -- that the unordered byte-set matcher was the fault
+/// (`f711d18a`) -- does not survive this: order was added and changed nothing.
+///
+/// The limit is semantic and no accept rule on the rewrite reaches it. The one
+/// condition that separates the family this mechanism answers from the ones it
+/// invents on is HOP COUNT: `beside_next` is a held-out SYNONYM of a trained
+/// relation, so the rewrite's answer is identical to the query's; `on_material`
+/// and `next_on_material` are COMPOSITIONS that no single trained question
+/// answers. Firing the transfer only when the production derivation found no
+/// taught sub-question at all is therefore the gate, and
+/// `derive_by_substitution_profiled` does not report that today.
+fn admissible(
+    brain: &Brain,
+    query_pool: PoolId,
+    query: &[u8],
+    trained: &[u8],
+    rewrite: &[u8],
+) -> bool {
+    brain.is_trained_frame(query_pool, rewrite) && preserves_subject(query, trained, rewrite)
 }
 
 /// Does `rewrite` keep the QUERY's byte at the first position where the query
