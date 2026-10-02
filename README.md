@@ -352,6 +352,11 @@ attempts end in `derivation_starved` — the budget runs out, rather than the ch
 out. (`beside_next` starves 332 of 384 the same way, for a different reason: it finds no
 trained sub-question at all, so it never leaves the `n(n+1)/2` full-span search.)
 
+Starvation is not a general shortage, and the totals say so: of the **690** attempts that
+end starved at scale 64, **688** are in these two families — `on_material` contributes 2
+and `next_color` 0, out of 2,560 attempts between them. So the budget is adequate for every
+family that has a cut and a two-hop chain, and inadequate for exactly the two that do not.
+
 Two obvious repairs have now been priced and neither works.
 
 - **Raise the budget.** +32 probes buys integration **+4.1 %** at scale 64 for **+25 %
@@ -372,7 +377,18 @@ Two obvious repairs have now been priced and neither works.
   every lost answer becoming silence, so it passes the no-hallucination rule, the RAM rules
   and the timing rules and shows up only in the per-family hit count.
   `crates/brain/tests/integration_family_counts.rs` is the guard that now catches it in
-  seconds instead of a 3.8-minute scorecard run.
+  seconds instead of a 3.8-minute scorecard run — at **two** scales, because a scale-1
+  result is a hypothesis about scale 4 and not a measurement of it: measured the same week,
+  a one-hop mechanism that read 6/6 right at 8 rooms read 7 right and **5 wrong** at 32,
+  since a chain that is unique in a small world stops being unique in a larger one.
+
+A third fault hides inside the same word. `beside_next` also reports `derivation_starved`
+— 332 of 384 — but its `cut_hint_probes` is **exactly 0 at every scale**, against
+`on_material`'s 1533 of 1536 at a 1.00 hit rate. A cut hint is written only when a cut is
+*accepted*, so a family that never finds a trained sub-question never writes one and never
+reads one: it stays in the `n(n+1)/2` full-span search forever and the budget truncates it.
+One "starved" therefore means a chain too expensive to finish and the other means a search
+never given a cut to start from, and no budget or caching change can touch the second.
 
 What is left is structural rather than a cache or a constant: recursing on the sub-question
 instead of enumerating splices of it.

@@ -68,7 +68,8 @@ const ANSWER_POOL: u32 = 2;
 // difference there. The 17/31 multipliers are not decoration: that file records
 // that a salt sharing a factor with the list lengths made one probe per room
 // solvable by the prefix shortcut the world exists to defeat.
-const ROOMS: usize = 8;
+/// `ROOMS_PER_SCALE` in `examples/scorecard.rs`.
+const ROOMS_PER_SCALE: usize = 8;
 const EPOCHS: usize = 2;
 const OBJECTS: &[&str] = &["bed", "chair", "mirror", "desk", "lamp", "door", "window", "paper"];
 const COLORS: &[&str] = &["red", "blue", "green", "white", "black", "grey"];
@@ -118,11 +119,11 @@ fn subject() -> Brain {
     brain
 }
 
-fn trained_facts() -> Vec<(String, String)> {
+fn trained_facts(rooms: usize) -> Vec<(String, String)> {
     let mut facts = Vec::new();
-    for r in 0..ROOMS {
+    for r in 0..rooms {
         let rm = room(r);
-        let next = room((r + 1) % ROOMS);
+        let next = room((r + 1) % rooms);
         for (i, obj) in OBJECTS.iter().enumerate() {
             facts.push((format!("{rm} {obj} color?"), color(r, i)));
             facts.push((format!("{rm} {obj} material?"), material(r, i)));
@@ -140,14 +141,14 @@ fn trained_facts() -> Vec<(String, String)> {
 }
 
 /// The four held-out families, in the scorecard's order.
-fn families() -> Vec<(&'static str, Vec<(String, String)>)> {
+fn families(rooms: usize) -> Vec<(&'static str, Vec<(String, String)>)> {
     let mut on_material = Vec::new();
     let mut next_color = Vec::new();
     let mut next_on_material = Vec::new();
     let mut beside_next = Vec::new();
-    for r in 0..ROOMS {
+    for r in 0..rooms {
         let rm = room(r);
-        let nr = (r + 1) % ROOMS;
+        let nr = (r + 1) % rooms;
         for (obj, base) in RESTS_ON {
             on_material
                 .push((format!("{rm} {obj} on material?"), material(r, idx(base))));
@@ -222,9 +223,10 @@ fn shuffled(n: usize, epoch: usize) -> Vec<usize> {
 /// `(correct, wrong, silent)` per family, in the scorecard's probe order --
 /// order matters, because the derivation's shape caches are warmed by whatever
 /// ran before.
-fn measure() -> Vec<(&'static str, usize, usize, usize, usize)> {
+fn measure(scale: usize) -> Vec<(&'static str, usize, usize, usize, usize)> {
+    let rooms = ROOMS_PER_SCALE * scale;
     let mut brain = subject();
-    let facts = trained_facts();
+    let facts = trained_facts(rooms);
     for epoch in 0..EPOCHS {
         for i in shuffled(facts.len(), epoch) {
             let (q, a) = &facts[i];
@@ -248,7 +250,7 @@ fn measure() -> Vec<(&'static str, usize, usize, usize, usize)> {
     assert_eq!(recalled, facts.len(), "recall of trained material is ALWAYS 100 %");
 
     let mut out = Vec::new();
-    for (name, probes) in families() {
+    for (name, probes) in families(rooms) {
         let (mut correct, mut wrong, mut silent) = (0, 0, 0);
         for (q, want) in &probes {
             match infer(&mut brain, q) {
@@ -262,43 +264,56 @@ fn measure() -> Vec<(&'static str, usize, usize, usize, usize)> {
     out
 }
 
-/// The guard. Floors read off `docs/scorecard-baseline.json` at scale 1 with
-/// `json.load`, confirmed by running the example itself at HEAD:
-/// `integr 74.07`, `on_material 22/24`, `next_color 16/16`,
-/// `next_on_material 2/8`, `beside_next 0/6`.
-#[test]
-fn scale_one_integration_families_hold_their_baseline() {
-    // `beside_next` has no floor above 0: it is 0 at every scale and the
-    // mechanism that would fix it is not in this file's subject.
-    let floors = [("on_material", 22), ("next_color", 16), ("next_on_material", 2),
-                  ("beside_next", 0)];
-    let measured = measure();
+/// The guard, at a scale. Floors read off `docs/scorecard-baseline.json` with
+/// `json.load` and confirmed by running the example itself at HEAD: scale 1
+/// `integr 74.07` with 22/24, 16/16, 2/8, 0/6; scale 4 `integr 76.85` with
+/// 94/96, 64/64, 8/32, 0/24.
+fn check(scale: usize, floors: &[(&str, usize)]) {
+    let measured = measure(scale);
     let mut total_correct = 0;
     let mut total_probes = 0;
     for (name, correct, wrong, silent, probes) in &measured {
-        println!("  {name:<18} correct {correct:>3}/{probes:<3} WRONG {wrong}  silent {silent}");
+        println!("  s{scale} {name:<18} correct {correct:>4}/{probes:<4} WRONG {wrong}  silent {silent}");
         total_correct += correct;
         total_probes += probes;
     }
     println!(
-        "integration {:.2} % over {total_probes} probes",
+        "  s{scale} integration {:.2} % over {total_probes} probes",
         100.0 * total_correct as f32 / total_probes as f32
     );
     for (name, _correct, wrong, _, probes) in &measured {
         // PRIORITY ZERO, and it is first because a family may always abstain.
-        assert_eq!(*wrong, 0, "{name}: the derivation invented {wrong} answers of {probes}");
+        assert_eq!(*wrong, 0, "scale {scale} {name}: the derivation invented {wrong} of {probes}");
     }
     for (name, floor) in floors {
         let (_, correct, _, _, probes) = measured
             .iter()
-            .find(|(n, _, _, _, _)| *n == name)
+            .find(|(n, _, _, _, _)| n == name)
             .copied()
             .unwrap_or_else(|| panic!("{name} is a scorecard family"));
         assert!(
-            correct >= floor,
-            "{name} answered {correct} of {probes}; the committed scale-1 baseline is \
-             {floor}. A FALL here with `wrong` still 0 and the probe count DOWN is the \
-             signature of a splice-scan shortcut -- see this file's header."
+            correct >= *floor,
+            "scale {scale} {name} answered {correct} of {probes}; the committed baseline is              {floor}. A FALL here with `wrong` still 0 and the probe count DOWN is the              signature of a splice-scan shortcut -- see this file's header."
         );
     }
+}
+
+/// `beside_next` carries no floor above 0 at either scale: it is 0 at every
+/// scale and the mechanism that would fix it is not this file's subject.
+#[test]
+fn scale_one_integration_families_hold_their_baseline() {
+    check(1, &[("on_material", 22), ("next_color", 16), ("next_on_material", 2),
+               ("beside_next", 0)]);
+}
+
+/// A SECOND SCALE, because a scale-1 result is a hypothesis about scale 4 and
+/// not a measurement of it. Measured in this lab the same week: a 1-hop
+/// mechanism that read 6/6 right at 8 rooms read 7 right and 5 WRONG at 32,
+/// because a chain that is unique in a small world stops being unique in a
+/// larger one. Every family here decays along exactly that axis, so one scale
+/// cannot guard the other. Costs about six seconds.
+#[test]
+fn scale_four_integration_families_hold_their_baseline() {
+    check(4, &[("on_material", 94), ("next_color", 64), ("next_on_material", 8),
+               ("beside_next", 0)]);
 }
