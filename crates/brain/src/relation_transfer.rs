@@ -316,8 +316,11 @@ pub fn derive_by_relation_transfer(
     // Of the answers above, the ones reached by a SUBJECT-PRESERVING rewrite.
     // Kept beside `answers` rather than replacing it: see `AT THE ACCEPT`.
     let mut preserving: Vec<Vec<u8>> = Vec::new();
+    // Did the search END, or did it merely STOP? See `TRUNCATION` at the accept.
+    let mut truncated = false;
     for rewrite in candidate_rewrites(query, &trained) {
         if probes >= max_probes {
+            truncated = true;
             break;
         }
         if !seen.insert(rewrite.clone()) {
@@ -357,7 +360,32 @@ pub fn derive_by_relation_transfer(
     // UNIQUENESS, AND THEN SUBJECT PRESERVATION AT THE ACCEPT. Exactly one
     // distinct ceiling-reachable answer, AND that answer must have been
     // reached by a rewrite that kept the query's own subject.
-    if answers.len() == 1 && preserving.contains(&answers[0]) {
+    //
+    // TRUNCATION: "no second answer was found" is only evidence of uniqueness
+    // if the search could have found one. `answers.len() == 1` after the loop
+    // broke on `probes >= max_probes` says the budget ran out, NOT that the
+    // chain is unique -- the contradicting rewrite may be the very next
+    // candidate. This is the repository's own standing lesson ("a counter of
+    // zero from a path that has not had the opportunity to run is not a
+    // refutation"), applied to the one test that is supposed to make this
+    // mechanism safe.
+    //
+    // IT IS WHAT THE SCALE CURVE WAS MEASURING. Composed onto the scorecard's
+    // answer path (measured 2026-10-02, NOT shipped -- the wiring is Iris's
+    // `065d4737`), `beside_next` returns 6/6, 4/24 and 8/96 with ZERO wrong at
+    // scales 1, 4 and 16 and then 37/384 with TWELVE wrong at scale 64. An
+    // accept rule that is sound at three scales and unsound at the fourth is
+    // not a rule that is slightly too loose; it is a rule whose evidence
+    // thins as the candidate set grows. At scale 1 the budget covers the
+    // candidates and a second answer really is absent; at scale 64 there are
+    // ~4,395 candidates against a budget of 64, so the loop almost always
+    // stops early and "unique" means "unexamined".
+    //
+    // The cost is deliberate and is the owner's rule, not a tuning choice:
+    // where the budget cannot establish uniqueness the mechanism abstains,
+    // even though some of what it abstains on was right. Invention is worse
+    // than silence.
+    if answers.len() == 1 && preserving.contains(&answers[0]) && !truncated {
         return (Some(answers.remove(0)), probes);
     }
     (None, probes)
