@@ -250,6 +250,17 @@ and changing nothing else, `python tools/scorecard.py --scales 16,64`:
 | 16 | 44.3 → 50.8 | 35.8 → 34.1 | 24.9 → 28.0 | 512 → 2,976 | 68,943 → 94,370 | 29.9 → 52.2 |
 | 64 | 20.5 → 32.5 | 31.9 → 35.2 | 40.1 → 51.9 | 512 → 11,904 | 26,827 → 189,436 | 121.8 → 335.0 |
 
+**The left-hand column of that table no longer describes this brain, and the ablation needs
+re-running (noted 2026-10-01).** It was measured before `dea50bd`. Read off
+`docs/scorecard-baseline.json` today, scale 16 is **77.55 %** integration at **0.0 %**
+wrong and scale 64 is **77.29 %** at **0.0 %**, against the 44.3 / 35.8 and 20.5 / 31.9
+above. So what the bound costs is unknown at the current baseline: the "+6.5 and +12.0
+integration" it bought was bought against a brain answering wrong a third of the time, and
+a measurement whose starting point has moved by 57 points cannot be carried forward. The
+RAM and fan-out columns are a separate matter and are not in doubt — lifting the cap took
+peak 40.1 → 51.9 MB and hub fan-out 512 → 11,904 at scale 64, and nothing since has
+touched either.
+
 Recall stayed 100.0 % throughout. So the terminals the bound refuses are
 carrying answers — and unbounded fan-out is one terminal per fact by
 construction, costs +29.4 % peak RAM at scale 64 against a gate that allows
@@ -398,6 +409,76 @@ Silence and uncertainty are first-class outputs here. A tokenized model cannot p
 - Punctuation is learned, not stripped. Commas before proper nouns build a different activation pattern than commas in lists because the character context around the comma was different in every sentence. The pool encodes the distinction. A tokenizer discards it as whitespace-adjacent noise.
 - Every level fires simultaneously. Character labels, phonetic bigrams, word labels, punctuation labels, layout role labels, and spatial zone labels all co-activate in the same training call. The hierarchy emerges from the data, not from architecture decisions made before training begins.
 
+### Why the 3-hop family starves, and the two cheap fixes that are measured dead (2026-10-01)
+
+`next_on_material` is the one three-hop family, and it answers **113 of 512 at scale 64**.
+It is literally `next_color`'s head joined to `on_material`'s tail, and each half answers
+on its own: read off `docs/scorecard-baseline.json`, `next_color` is 1024/1024 at **4.10**
+probes per attempt and `on_material` is 1534/1536 at **4.07**. The composition should cost
+about eight probes. It costs **26.82** against a budget of 32, and **356 of its 512**
+attempts end in `derivation_starved` — the budget runs out, rather than the chain running
+out. (`beside_next` starves 332 of 384 the same way, for a different reason: it finds no
+trained sub-question at all, so it never leaves the `n(n+1)/2` full-span search.)
+
+Starvation is not a general shortage, and the totals say so: of the **690** attempts that
+end starved at scale 64, **688** are in these two families — `on_material` contributes 2
+and `next_color` 0, out of 2,560 attempts between them. So the budget is adequate for every
+family that has a cut and a two-hop chain, and inadequate for exactly the two that do not.
+
+Two obvious repairs have now been priced and neither works.
+
+- **Raise the budget.** +32 probes buys integration **+4.1 %** at scale 64 for **+25 %
+  RAM** and **7× wall** (backlog `f1bd9c76`). The probe is a full read-only fabric
+  observation, so the cost is linear in probes and the return is not.
+- **Memoise the splice scan.** `derive_by_substitution` already caches, per question
+  *shape* `(n, k)`, the deletion that finds the taught sub-question and the splice points
+  that reached the ceiling. The second is written from the ceiling arm only, so hop 1 of an
+  *n*-hop question learns nothing — its rewrite is the intermediate question, which is
+  untrained, which is exactly what makes the probe an integration probe — and it re-pays
+  the full `k + 1` scan forever. Caching "this shape reached no ceiling, so replay the
+  continuation and stop" measured **74.07 → 48.15** integration at scale 1, with
+  `on_material` falling **22/24 → 8/24**. `(n, k)` is a length and a cut, not a question:
+  a trained 22-byte recall probe and `r000 lamp on material?` share `(22, 12)` and have
+  entirely different rewrites, so the first to reach no ceiling teaches the cache a
+  negative the second obeys. The failure is **cheaper and wronger at once** —
+  probes-per-attempt fell 8.62 → 7.50 while hits fell 22 → 8 — and `wrong` stayed **0.0**,
+  every lost answer becoming silence, so it passes the no-hallucination rule, the RAM rules
+  and the timing rules and shows up only in the per-family hit count.
+  `crates/brain/tests/integration_family_counts.rs` is the guard that now catches it in
+  seconds instead of a 3.8-minute scorecard run — at **two** scales, because a scale-1
+  result is a hypothesis about scale 4 and not a measurement of it: measured the same week,
+  a one-hop mechanism that read 6/6 right at 8 rooms read 7 right and **5 wrong** at 32,
+  since a chain that is unique in a small world stops being unique in a larger one.
+
+A third fault hides inside the same word. `beside_next` also reports `derivation_starved`
+— 332 of 384 — but its `cut_hint_probes` is **exactly 0 at every scale**, against
+`on_material`'s 1533 of 1536 at a 1.00 hit rate. A cut hint is written only when a cut is
+*accepted*, so a family that never finds a trained sub-question never writes one and never
+reads one: it stays in the `n(n+1)/2` full-span search forever and the budget truncates it.
+One "starved" therefore means a chain too expensive to finish and the other means a search
+never given a cut to start from, and no budget or caching change can touch the second.
+
+What is left is structural rather than a cache or a constant: recursing on the sub-question
+instead of enumerating splices of it.
+
+**And the probe count is also the latency, so goal 3 and goal 4 are one constraint.** Read
+off the same baseline:
+
+| scale | `recall_ms` | `infer_ms` | ratio | probes/attempt | ms per probe |
+|---|---|---|---|---|---|
+| 1 | 0.377 | 3.846 | 10.2× | 14.98 | 0.257 |
+| 4 | 1.300 | 9.108 | 7.0× | 11.24 | 0.810 |
+| 16 | 2.055 | 12.845 | 6.2× | 9.75 | 1.317 |
+| 64 | 1.225 | 11.437 | 9.3× | 10.09 | 1.134 |
+
+A derivation probe costs about one recall (`ms per probe` tracks `recall_ms` to within a
+factor of 1.6 at every scale), so `infer_ms` is simply the probe count times a recall. The
+stated ceiling for an integration probe is **3× a plain recall**; the measurement is
+**6.2–10.2×**, so that target is missed at every scale today, and missed for the same
+reason integration is incomplete. It also makes the budget lever doubly wrong: buying
++4.1 % integration with +32 probes would roughly triple an `infer_ms` that is already over
+budget, which is what `f1bd9c76`'s "7× wall" was measuring.
+
 ### Subject-preserving relation transfer (`crates/brain/src/relation_transfer.rs`, 2026-10-01)
 
 One held-out integration family — a question of the shape `<subject> <relation>?` whose
@@ -519,6 +600,20 @@ answer*, is preserved.
 ### Integration: deriving answers that were never taught
 
 The primary measurement is `python tools/scorecard.py --stress`, which trains a synthetic world of rooms, objects and properties at four scales and then asks **held-out** questions — questions no training episode contained. Every number below is read back off `docs/scorecard-baseline.json`, which is committed — so a reader can check the table against a file in this repository rather than against a run nobody can reproduce. (Peak RSS jitters a few tenths of a MB run to run, so quoting it from a different run than the one that set the baseline is how a table like this goes quietly wrong.)
+
+**The correctness columns are bit-reproducible; the timing columns are not** (measured
+2026-10-01, eight runs of one binary: two at scale 1, three at scale 16, two at scale 64,
+plus the gate's own). `integration_pct` came back **77.546296** three times at scale 16 and
+**77.285880** twice at scale 64 — six decimal places, with `wrong %`, `recall %`, every
+per-family hit/wrong/starved count and the total `derivation_probes` (8,428 and 34,865)
+identical across every run and equal to the committed baseline. So a difference in those
+columns is a real difference and never noise. `infer_ms`, by contrast, spread 6.4 % across
+the three scale-16 runs (15.104 / 15.812 / 14.854) and **17 %** across the two at scale 64
+(14.090 / 12.052), and ran up to 23 % above the baseline's figure purely because the
+baseline was taken on an idle machine. The spread grows with scale, which is the opposite of
+what a flat-latency goal needs from its own instrument, so a latency check belongs on
+`derivation_probes_per_attempt` — bit-reproducible, and what `infer_ms` is made of — rather
+than on the clock.
 
 | scale | facts | recall % | integration % | **wrong %** | peak MB | wall s |
 |---|---|---|---|---|---|---|
