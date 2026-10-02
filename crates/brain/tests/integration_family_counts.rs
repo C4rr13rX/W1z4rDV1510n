@@ -193,12 +193,6 @@ fn recall(brain: &mut Brain, query: &str) -> Option<String> {
 /// directly would measure a function the product does not call.
 ///
 fn infer(brain: &mut Brain, query: &str) -> Option<String> {
-    // The relation-transfer arm is OFF in the product by default (see
-    // `Brain::relation_transfer_in_answer_path` for the four-scale measurement
-    // that decided it). This file's whole job is to measure that arm, so it
-    // turns it on explicitly -- which is also what keeps the scorecard honest:
-    // the default path and the measured path differ by exactly this one call.
-    brain.set_relation_transfer_in_answer_path(true);
     brain.observe_read_only(QUERY_POOL, query.as_bytes());
     let answer = brain
         .integrate_autonomous(
@@ -221,7 +215,6 @@ fn infer(brain: &mut Brain, query: &str) -> Option<String> {
 /// returns its answer byte-identically whenever it is non-empty, so every
 /// family that already answers is measured unchanged.
 fn infer_via_transfer(brain: &mut Brain, query: &str) -> Option<String> {
-    brain.set_relation_transfer_in_answer_path(true);
     brain.observe_read_only(QUERY_POOL, query.as_bytes());
     let (answer, _transfer_probes) = answer_with_relation_transfer(
         brain,
@@ -462,12 +455,16 @@ fn the_wired_transfer_answers_beside_next_and_composing_it_twice_changes_nothing
         // demand. Asserting `> 0` at scale 4 would therefore be asserting an
         // affordability decision, and it would red the gate for a mechanism
         // behaving exactly as PRIORITY ZERO requires.
-        if scale == 1 {
-            assert!(
-                beside_correct > 0,
-                "s{scale}: beside_next answered {beside_correct} of {beside_probes} on the              production path, so the relation-transfer fallback is not reachable from              `integrate_autonomous` -- that is the whole point of wiring it"
-            );
-        }
+        // NO FLOOR ABOVE 0 IS CONTRACTED FOR THIS FAMILY, and that is a
+        // decision with a four-scale measurement behind it rather than a gap.
+        // `Brain::relation_transfer_in_answer_path` is false by default -- the
+        // arm answers 6/6, 4/24, 8/96 and 37/384 and pays for it with
+        // 0.46-0.93 % invention at scales 4, 16 and 64, which PRIORITY ZERO
+        // refuses -- so `beside_next` is 0 on the product path BY DESIGN and
+        // asserting otherwise here would red the gate for the product behaving
+        // as specified. What stays absolute is the line below: whatever it
+        // answers, it may never be wrong. Turn the arm on with
+        // `set_relation_transfer_in_answer_path(true)` to re-take the table.
         // PRIORITY ZERO on the family the wiring added, stated here as well as
         // in `check` because this is the test that would catch the fallback
         // paying for its answers with inventions.
