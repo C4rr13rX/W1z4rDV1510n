@@ -8030,7 +8030,40 @@ impl Brain {
             .as_ref()
             .map(|b| !b.is_empty())
             .unwrap_or(false);
+        // An EXACT binding recall, and why this third term exists even though
+        // it is measured to be a no-op today.
+        //
+        // Backlog `[988dd17c]` reported this arm as shadowing `chain_explore`
+        // and the derivation below it. The shadowing SHAPE is real -- every arm
+        // that can compose an answer sits under this `return` -- but the
+        // condition above has two terms and the report priced only the second.
+        // Measured in `tests/fabric_arm_shadows_derivation.rs` on the
+        // 16-binding lamp/desk/material world: `integrate()` answers 0 of 16
+        // even on TRAINED questions and reports `fabric_confidence 0.0000`, so
+        // `fabric_has_answer` is false and this arm is unreachable at the
+        // node's 0.10 threshold and at the scorecard's 100.0 alike. Lowering
+        // the threshold to zero would not fire it.
+        //
+        // So this term fixes nothing today, and it is here because the arm's
+        // unreachability rests on a READING of one propagation path rather than
+        // on anything structural: the day `integrate()` starts answering, this
+        // `return` hands a propagation score back as if it were a retrieval,
+        // with the inner `outside_grounding` flag cleared, for a prompt the
+        // brain cannot bind exactly. PRIORITY ZERO prefers silence to a
+        // plausible answer, and the arms below are the ones that can be
+        // grounded.
+        //
+        // RECALL and not precision, and the arithmetic is at `4120` above:
+        // `precision = intersect / bind_query.len()`, `recall = intersect /
+        // q_atoms.len()`. A composite prompt CONTAINS its own sub-question, so
+        // that binding is explained whole and precision is 1.0 -- a precision
+        // test here would be inert, which is the defect it would be meant to
+        // fix. Measured on that same world: composite precision 1.0000, recall
+        // 0.7500; every taught question recalls 1.0000, so this cannot cost a
+        // retrieval. Both are asserted, not printed.
+        let recalled_exactly = bm.recall >= 0.999;
         if fabric_has_answer
+            && recalled_exactly
             && fabric_ans.grounding.fabric_confidence >= fabric_confidence_threshold
         {
             // Clear the inner outside_grounding flag — step 0 already
