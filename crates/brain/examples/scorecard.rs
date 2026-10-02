@@ -718,6 +718,13 @@ fn main() {
     // what is left (measured at scale 64: train 55.8 / recall 58.3 / infer 58.7
     // MB of peak RSS), so the mark after training is the one that matters.
     let (live_train, peak_train) = heap_mb();
+    // Posting-cap saturation, measured rather than inferred. A posting lookup
+    // that comes back FULL means the key's older bindings are invisible to it
+    // (the selection is newest-first), so this is the reach half of a miss.
+    // Before 2026-10-01 the only readout was one boolean on one key kind for
+    // the duration of one call, so "the cap is biting at scale 64" could only
+    // be argued from a fact count.
+    let caps_after_train = subject.brain.posting_cap_stats();
     let accounted_train = subject.accounted_bytes() as f64 / 1_048_576.0;
     let (mut recall_pct, mut recall_ms) = (f64::NAN, f64::NAN);
     let (mut integration_pct, mut infer_ms) = (f64::NAN, f64::NAN);
@@ -764,6 +771,7 @@ fn main() {
             // cumulative over the brain's life and the recall phase above has
             // already spent some of it.
             let cost_before = subject.brain.derivation_stats();
+            let caps_before = subject.brain.posting_cap_stats();
             let t0 = Instant::now();
             let mut h = 0usize;
             // A bare 0% says nothing about what to fix. Classifying the MISS by
@@ -787,6 +795,7 @@ fn main() {
             }
             secs += t0.elapsed().as_secs_f64();
             let cost = subject.brain.derivation_stats();
+            let caps = subject.brain.posting_cap_stats().minus(caps_before);
             let derivation_attempts = cost.attempts - cost_before.attempts;
             let derivation_answered = cost.answered - cost_before.answered;
             let derivation_probes = cost.probes - cost_before.probes;
@@ -825,6 +834,11 @@ fn main() {
                 // (attempts - answered - starved) declined with budget left,
                 // so raising the ceiling cannot reach them.
                 "derivation_starved": derivation_starved,
+                // Per-family posting-cap saturation over exactly this
+                // family's probes. `*_saturated` against `*_lookups` is the
+                // artifact criterion 1 of [11ebfa65] asks for.
+                "posting_caps": caps,
+                "posting_saturated_fraction": caps.saturated_fraction(),
                 "cut_hint_probes": cut_hint_probes,
                 "cut_hint_hits": cut_hint_hits,
                 "cut_hint_hit_rate": (cut_hint_probes > 0)
@@ -894,6 +908,14 @@ fn main() {
             "derivation_answered": subject.brain.derivation_stats().answered,
             "derivation_probes": subject.brain.derivation_stats().probes,
             "derivation_starved": subject.brain.derivation_stats().budget_exhausted,
+            // Whole-run and training-phase saturation. The training figure is
+            // the one that says whether a key is over its cap at all at this
+            // scale; the per-family figures above say whether the answer path
+            // then ran into it.
+            "posting_caps": subject.brain.posting_cap_stats(),
+            "posting_caps_train": caps_after_train,
+            "posting_saturated_fraction":
+                subject.brain.posting_cap_stats().saturated_fraction(),
             "derivation_probes_per_attempt": subject.brain.derivation_stats().probes_per_attempt(),
             "derivation_probes_per_answer": subject.brain.derivation_stats().probes_per_answer(),
             "trained_lit_mean": trained_lit as f64 / world.facts.len().max(1) as f64,

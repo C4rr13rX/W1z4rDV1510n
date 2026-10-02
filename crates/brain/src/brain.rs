@@ -1197,6 +1197,8 @@ pub struct Brain {
     trained_frames: ahash::AHashSet<u64>,
     /// What the derivation has SPENT, cumulative over this brain's life.
     derivation_stats: DerivationStats,
+    /// Posting-cap saturation, per key kind. See [`PostingCapCounters`].
+    posting_caps: PostingCapCounters,
 }
 
 /// What [`Brain::derive_by_substitution_profiled`] cost, cumulative.
@@ -1423,6 +1425,105 @@ fn recurrence_posting_refresh_due(use_count: u64) -> bool {
 
 const MAX_ROUTED_BINDING_CANDIDATES: usize = 512;
 
+/// Live count of posting-list lookups that came back FULL, per key kind.
+///
+/// `FeatureRoutePressure::composite_saturated` reported the same fact for one
+/// key kind, as a boolean, for the duration of one call — so "the cap is
+/// biting" could only ever be inferred from a fact count. These are cumulative
+/// over the brain's life and snapshotted by [`Brain::posting_cap_stats`], which
+/// is what lets a scorecard row state the saturation rate per scale instead of
+/// reasoning about it.
+///
+/// A saturated lookup is not merely a latency signal. The selection inside
+/// [`Brain::bounded_binding_postings_across_generations`] is NEWEST-first, so a
+/// full list means every binding older than the newest `limit` is invisible to
+/// that key — the reach half of a miss, not the ranking half.
+#[derive(Debug, Default)]
+struct PostingCapCounters {
+    sequence: std::sync::atomic::AtomicUsize,
+    sequence_saturated: std::sync::atomic::AtomicUsize,
+    feature: std::sync::atomic::AtomicUsize,
+    feature_saturated: std::sync::atomic::AtomicUsize,
+    composite: std::sync::atomic::AtomicUsize,
+    composite_saturated: std::sync::atomic::AtomicUsize,
+    motif: std::sync::atomic::AtomicUsize,
+    motif_saturated: std::sync::atomic::AtomicUsize,
+}
+
+impl PostingCapCounters {
+    fn record(&self, key: &BindingPostingKey, saturated: bool) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (total, full) = match key {
+            BindingPostingKey::Sequence(..) => (&self.sequence, &self.sequence_saturated),
+            BindingPostingKey::Feature(..) => (&self.feature, &self.feature_saturated),
+            BindingPostingKey::FeaturePair(..) => (&self.composite, &self.composite_saturated),
+            BindingPostingKey::Motif(..) => (&self.motif, &self.motif_saturated),
+        };
+        total.fetch_add(1, Relaxed);
+        if saturated {
+            full.fetch_add(1, Relaxed);
+        }
+    }
+
+    fn snapshot(&self) -> PostingCapStats {
+        use std::sync::atomic::Ordering::Relaxed;
+        PostingCapStats {
+            sequence_lookups: self.sequence.load(Relaxed),
+            sequence_saturated: self.sequence_saturated.load(Relaxed),
+            feature_lookups: self.feature.load(Relaxed),
+            feature_saturated: self.feature_saturated.load(Relaxed),
+            composite_lookups: self.composite.load(Relaxed),
+            composite_saturated: self.composite_saturated.load(Relaxed),
+            motif_lookups: self.motif.load(Relaxed),
+            motif_saturated: self.motif_saturated.load(Relaxed),
+        }
+    }
+}
+
+/// Snapshot of [`PostingCapCounters`]. Cumulative; subtract two snapshots to
+/// attribute saturation to one phase.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct PostingCapStats {
+    pub sequence_lookups: usize,
+    pub sequence_saturated: usize,
+    pub feature_lookups: usize,
+    pub feature_saturated: usize,
+    pub composite_lookups: usize,
+    pub composite_saturated: usize,
+    pub motif_lookups: usize,
+    pub motif_saturated: usize,
+}
+
+impl PostingCapStats {
+    pub fn minus(self, before: Self) -> Self {
+        Self {
+            sequence_lookups: self.sequence_lookups - before.sequence_lookups,
+            sequence_saturated: self.sequence_saturated - before.sequence_saturated,
+            feature_lookups: self.feature_lookups - before.feature_lookups,
+            feature_saturated: self.feature_saturated - before.feature_saturated,
+            composite_lookups: self.composite_lookups - before.composite_lookups,
+            composite_saturated: self.composite_saturated - before.composite_saturated,
+            motif_lookups: self.motif_lookups - before.motif_lookups,
+            motif_saturated: self.motif_saturated - before.motif_saturated,
+        }
+    }
+
+    /// Share of all posting lookups that came back full, or `None` when
+    /// nothing was looked up — a zero would read as "the cap never bit" where
+    /// the truth is "no lookup ran".
+    pub fn saturated_fraction(&self) -> Option<f64> {
+        let total = self.sequence_lookups
+            + self.feature_lookups
+            + self.composite_lookups
+            + self.motif_lookups;
+        let full = self.sequence_saturated
+            + self.feature_saturated
+            + self.composite_saturated
+            + self.motif_saturated;
+        (total > 0).then(|| full as f64 / total as f64)
+    }
+}
+
 /// Rarest query motifs consulted when a route has other evidence to fall back
 /// on. A latency bound, not a correctness one.
 const NARROW_MOTIF_POSTING_LIMIT: usize = 8;
@@ -1624,6 +1725,7 @@ impl Brain {
             derivation_splice_hints: Vec::new(),
             trained_frames: ahash::AHashSet::new(),
             derivation_stats: DerivationStats::default(),
+            posting_caps: PostingCapCounters::default(),
         }
     }
 
@@ -3323,7 +3425,28 @@ impl Brain {
     /// but becomes impossible to validate. Reserve an equal first-pass quota
     /// for every source, then spend unused capacity newest-first. Memory and
     /// neuron page-in stay bounded by `limit`, independent of corpus size.
+    /// Counting shell over [`Self::bounded_binding_postings_inner`]. The inner
+    /// routine has three exits and the measurement has to cover all of them,
+    /// so it is taken once here on the value every caller actually receives.
     fn bounded_binding_postings_across_generations(
+        &self,
+        key: &BindingPostingKey,
+        overlay: &[NeuronId],
+        limit: usize,
+    ) -> Vec<NeuronId> {
+        let out = self.bounded_binding_postings_inner(key, overlay, limit);
+        self.posting_caps.record(key, limit > 0 && out.len() >= limit);
+        out
+    }
+
+    /// Snapshot of how often each posting key kind came back FULL. Cumulative
+    /// over the brain's life; see [`PostingCapStats::minus`] to attribute it
+    /// to one phase.
+    pub fn posting_cap_stats(&self) -> PostingCapStats {
+        self.posting_caps.snapshot()
+    }
+
+    fn bounded_binding_postings_inner(
         &self,
         key: &BindingPostingKey,
         overlay: &[NeuronId],
@@ -3949,17 +4072,49 @@ impl Brain {
                 self.binding_feature_postings(query_pool, neuron_id),
             );
         }
-        if let Some(target_pool) = target_pool.filter(|_| !sequence.is_empty()) {
-            add_binding_evidence(
-                &mut candidates,
-                self.binding_sequence_postings(query_pool, target_pool, &sequence),
-            );
-        }
+        let exact = match target_pool.filter(|_| !sequence.is_empty()) {
+            Some(target_pool) => {
+                self.binding_sequence_postings(query_pool, target_pool, &sequence)
+            }
+            None => Vec::new(),
+        };
+        add_binding_evidence(&mut candidates, exact.iter().copied());
 
         let mut ids = rank_bounded_binding_evidence(
             candidates,
             MAX_ROUTED_BINDING_CANDIDATES,
         );
+        // Exact ordered sensory identity is authoritative, so it may not be
+        // OUTVOTED out of the candidate set by fuzzy per-byte evidence.
+        //
+        // `rank_bounded_binding_evidence` sorts on how many firing atoms voted
+        // for a binding and truncates to the cap, breaking ties by id
+        // descending -- newest first. A binding that every feature posting has
+        // dropped arrives here with exactly one vote, from this route, and
+        // loses both the sort and the tie-break. Measured off
+        // `logs/scorecard-latest.json` 2026-10-01: at scale 64 every one of
+        // 1,095,061 feature lookups came back FULL, so one vote is the normal
+        // case there rather than the exception, and merely CONSULTING the
+        // exact route moved scale-64 integration only 38.54 -> 39.00.
+        //
+        // The bound is preserved: the output is still at most
+        // `MAX_ROUTED_BINDING_CANDIDATES`, so this buys reach without buying
+        // latency or resident candidate bodies. It cannot invent an answer
+        // either -- an exact-sequence posting is the binding whose query atoms
+        // were observed in THIS order, and the scoring below is unchanged.
+        if !exact.is_empty() {
+            let present: ahash::AHashSet<NeuronId> = ids.iter().copied().collect();
+            let missing: Vec<NeuronId> = exact
+                .iter()
+                .copied()
+                .filter(|id| !present.contains(id))
+                .take(MAX_ROUTED_BINDING_CANDIDATES)
+                .collect();
+            if !missing.is_empty() {
+                ids.truncate(MAX_ROUTED_BINDING_CANDIDATES - missing.len());
+                ids.extend(missing);
+            }
+        }
         if let Some(binding_handle) = self.fabric.pool(self.binding_pool_id) {
             let mut bindings = binding_handle.write();
             ids.retain(|binding_id| match bindings.ensure_loaded(*binding_id) {
@@ -4771,7 +4926,7 @@ impl Brain {
     /// awareness.  Internally now delegates to
     /// [`Self::best_binding_match_v2`] and discards the tier tag.
     pub fn best_binding_match(&self, query_pool: PoolId) -> (f32, f32) {
-        let m = self.best_binding_match_atom_tier(query_pool);
+        let m = self.best_binding_match_atom_tier(query_pool, None);
         (m.precision, m.recall)
     }
 
@@ -4787,11 +4942,43 @@ impl Brain {
     /// 0.5.  Without this, a single concept lit by noise alongside
     /// many loose atoms would falsely pass the gate at precision=1.0.
     pub fn best_binding_match_v2(&self, query_pool: PoolId) -> BindingMatch {
-        let concept = self.best_binding_match_concept_tier(query_pool);
+        self.best_binding_match_routed(query_pool, None)
+    }
+
+    /// [`Self::best_binding_match_v2`] with the EXACT ordered sensory route
+    /// available to candidate selection.
+    ///
+    /// Why the target pool is a parameter at all. `routed_binding_candidates`
+    /// consults `binding_sequence_postings` -- the one key that is unique per
+    /// distinct taught question -- only when it is given a target pool, and
+    /// both tier scorers passed `None`. So the SCORE half of a probe saw only
+    /// per-byte feature postings, which are capped at 512 and selected
+    /// NEWEST-first, while the ANSWER half
+    /// (`decode_best_trained_binding_with_context`) passed the target pool and
+    /// had the exact route. Measured off `docs/scorecard-baseline.json`: an
+    /// `on_material` probe costs 5.2 questions per attempt at scale 4 and 26.2
+    /// at scale 64 on question lengths that are IDENTICAL at every scale, and
+    /// 852 of 1,536 attempts at scale 64 end `budget_exhausted` with an
+    /// `empty` answer. A byte like `r` or a space is a member of nearly every
+    /// fact, so at 11,904 facts its feature posting list is ~23x the cap and
+    /// the newest 512 hold only the last rooms taught -- the taught
+    /// sub-question of an EARLY room is not in the candidate set at all, its
+    /// score cannot reach 1.0, and the cut is never located. That is a REACH
+    /// failure, and no probe budget reaches it.
+    ///
+    /// This cannot invent an answer: an exact-sequence posting is the binding
+    /// whose query atoms were observed in this order, and the derivation's
+    /// acceptance test (`score >= 1.0 && is_trained_frame`) is unchanged.
+    pub fn best_binding_match_routed(
+        &self,
+        query_pool: PoolId,
+        target_pool: Option<PoolId>,
+    ) -> BindingMatch {
+        let concept = self.best_binding_match_concept_tier(query_pool, target_pool);
         if concept.tier == MatchTier::Concept {
             return concept;
         }
-        self.best_binding_match_atom_tier(query_pool)
+        self.best_binding_match_atom_tier(query_pool, target_pool)
     }
 
     /// Find the best binding for the current query-pool firing state
@@ -6712,7 +6899,11 @@ impl Brain {
         (margin >= required_margin).then_some((bytes, score, margin))
     }
 
-    fn best_binding_match_atom_tier(&self, query_pool: PoolId) -> BindingMatch {
+    fn best_binding_match_atom_tier(
+        &self,
+        query_pool: PoolId,
+        target_pool: Option<PoolId>,
+    ) -> BindingMatch {
         let q_atoms: ahash::AHashSet<NeuronId> = {
             let q = match self.fabric.pool(query_pool) {
                 Some(p) => p,
@@ -6732,7 +6923,7 @@ impl Brain {
             Some(p) => p,
             None => return BindingMatch::NONE,
         };
-        let candidate_ids = self.routed_binding_candidates(query_pool, None);
+        let candidate_ids = self.routed_binding_candidates(query_pool, target_pool);
         let bp_read = bp.read();
         let mut best = BindingMatch::NONE;
         for n in candidate_ids
@@ -6766,7 +6957,11 @@ impl Brain {
         best
     }
 
-    fn best_binding_match_concept_tier(&self, query_pool: PoolId) -> BindingMatch {
+    fn best_binding_match_concept_tier(
+        &self,
+        query_pool: PoolId,
+        target_pool: Option<PoolId>,
+    ) -> BindingMatch {
         // Pre-collect:
         //   - `firing_concepts`   — concepts that are currently firing
         //   - `firing_atoms`      — atoms that are currently firing
@@ -6850,7 +7045,7 @@ impl Brain {
             Some(p) => p,
             None => return BindingMatch::NONE,
         };
-        let candidate_ids = self.routed_binding_candidates(query_pool, None);
+        let candidate_ids = self.routed_binding_candidates(query_pool, target_pool);
         let query_handle = match self.fabric.pool(query_pool) {
             Some(pool) => pool,
             None => return BindingMatch::NONE,
@@ -7059,7 +7254,7 @@ impl Brain {
         target_pool: PoolId,
         question: &[u8],
     ) -> (f32, Option<Vec<u8>>) {
-        let score = self.probe_question_score(query_pool, question);
+        let score = self.probe_question_score(query_pool, target_pool, question);
         (score, self.probe_answer(query_pool, target_pool))
     }
 
@@ -7074,9 +7269,18 @@ impl Brain {
     /// no result — [`Self::probe_answer`] decodes from the activation this
     /// method leaves behind, which is exactly the state the combined version
     /// decoded from.
-    fn probe_question_score(&mut self, query_pool: PoolId, question: &[u8]) -> f32 {
+    fn probe_question_score(
+        &mut self,
+        query_pool: PoolId,
+        target_pool: PoolId,
+        question: &[u8],
+    ) -> f32 {
         self.observe_fabric_read_only(query_pool, question);
-        self.best_binding_match_v2(query_pool).score()
+        // The exact ordered route, not just the per-byte feature postings:
+        // see `best_binding_match_routed` for why the cap made an early
+        // room's taught sub-question unreachable from the score half alone.
+        self.best_binding_match_routed(query_pool, Some(target_pool))
+            .score()
     }
 
     /// Decode the answer for whatever question was last probed into
@@ -7275,7 +7479,7 @@ impl Brain {
                 self.derivation_stats.cut_hint_probes += 1;
                 // Score first: the answer is read only by the `>= 1.0` arm, so
                 // decoding every miss is work nothing consumes.
-                let score = self.probe_question_score(query_pool, &sub);
+                let score = self.probe_question_score(query_pool, target_pool, &sub);
                 if score >= 1.0 && self.is_trained_frame(query_pool, &sub) {
                     self.derivation_stats.cut_hint_hits += 1;
                     if let Some(answer) = self.probe_answer(query_pool, target_pool) {
@@ -7302,7 +7506,7 @@ impl Brain {
                         sub.extend_from_slice(&current[..k]);
                         sub.extend_from_slice(&current[n - t..]);
                         probes += 1;
-                        let score = self.probe_question_score(query_pool, &sub);
+                        let score = self.probe_question_score(query_pool, target_pool, &sub);
                         if score >= 1.0 && self.is_trained_frame(query_pool, &sub) {
                             if let Some(answer) = self.probe_answer(query_pool, target_pool) {
                                 known_prefix = Some((k, answer));
@@ -7417,7 +7621,7 @@ impl Brain {
                         continue;
                     }
                     probes += 1;
-                    let score = self.probe_question_score(query_pool, &rewrite);
+                    let score = self.probe_question_score(query_pool, target_pool, &rewrite);
                     // ONE rule for both arms: a rewrite can only be a
                     // derivation if it is a question the brain was actually
                     // TAUGHT. See [`Self::trained_frames`] -- the score cannot
@@ -10393,6 +10597,7 @@ impl Brain {
             derivation_splice_hints: Vec::new(),
             trained_frames: ahash::AHashSet::new(),
             derivation_stats: DerivationStats::default(),
+            posting_caps: PostingCapCounters::default(),
         };
         brain.rebuild_binding_sequence_index();
         (brain, missing)
@@ -10582,6 +10787,7 @@ impl Brain {
             derivation_splice_hints: Vec::new(),
             trained_frames: ahash::AHashSet::new(),
             derivation_stats: DerivationStats::default(),
+            posting_caps: PostingCapCounters::default(),
         };
         if let Some(count) = brain.disk_scalar(FINGERPRINT_TENTATIVE_COUNT_KEY) {
             brain.tentative_binding_count_total = count as usize;
