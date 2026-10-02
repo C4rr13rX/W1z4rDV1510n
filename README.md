@@ -427,9 +427,15 @@ family that has a cut and a two-hop chain, and inadequate for exactly the two th
 
 Two obvious repairs have now been priced and neither works.
 
-- **Raise the budget.** +32 probes buys integration **+4.1 %** at scale 64 for **+25 %
-  RAM** and **7× wall** (backlog `f1bd9c76`). The probe is a full read-only fabric
-  observation, so the cost is linear in probes and the return is not.
+- **Raise the budget — REFUTED 2026-10-01, this was the fix.** The entry here read
+  "+32 probes buys integration **+4.1 %** at scale 64 for **+25 % RAM** and **7× wall**
+  (backlog `f1bd9c76`)". Re-priced at 32, 64 and 128 against one binary, the return is
+  **+6.97 points** at scale 64 (77.286 → 84.259) and **+12.96/+8.80/+7.64** at scales
+  1/4/16, at **wrong 0.0 and recall 100.0 everywhere**, and the RAM cost does not
+  reproduce: peak moved 16.9 → 16.6, 19.3 → 19.5, 25.6 → 25.5, 39.8 → 39.7 MB across a
+  doubled budget. A probe is a read-only fabric observation, so it buys wall (77 s →
+  116 s at scale 64) and not residency. 64 and 128 agree to the last printed digit, so
+  **64 is the knee** and is now the shipped default.
 - **Memoise the splice scan.** `derive_by_substitution` already caches, per question
   *shape* `(n, k)`, the deletion that finds the taught sub-question and the splice points
   that reached the ceiling. The second is written from the ceiling arm only, so hop 1 of an
@@ -643,7 +649,9 @@ The previous measurement, for contrast, was integration 53.7 / 50.0 / 44.3 / 20.
 | 16 | 864 | 670 | **160** (19 %) | 9.8 | 77.6 % |
 | 64 | 3,456 | 2,671 | **690** (20 %) | 10.1 | 77.3 % |
 
-`DEFAULT_DERIVATION_PROBE_BUDGET` is 32 questions. At scale 64 the mean attempt now spends 10.1 of them against 26.5 before, and starvation is 20 % of attempts against 58 % — so the cap is no longer what most attempts die on, and "raise the budget" is no longer the indicated fix. What remains is a MISSING MECHANISM in one family rather than a shortage of probes, and the per-family split at scale 64 says which: `on_material` 1,534/1,536, `next_color` 1,024/1,024, `next_on_material` 113/512, `beside_next` **0/384**. Those four sum to 2,671, which is `derivation_answered` exactly, so the split is constrained rather than estimated. `beside_next` is 384 of the 785 remaining misses — 48.9 % — and no amount of budget reaches it, because what it needs is relation transfer.
+**`DEFAULT_DERIVATION_PROBE_BUDGET` is 64 questions, raised from 32 on 2026-10-01, and the paragraph that stood here — "the cap is no longer what most attempts die on, and 'raise the budget' is no longer the indicated fix" — was wrong.** It reasoned from the MEAN: 10.1 probes per attempt against a cap of 32 does say most attempts are nowhere near the cap, and that is exactly why the inference failed. The attempts at the cap were not a tail of the same distribution, they were one family whose questions are longer than the others', and the cap was below a floor the search's own shape sets. `derive_by_substitution_profiled` finds the taught sub-question with `k` outer over `1..n` and `t` inner over `0..=1`, so a cold cut costs up to `2(n - 1)` questions **before the splice search asks anything** — 52 at `n = 27`, which is the length of the 3-hop questions (`lit_mean` 27.9, against 23.0 and 21.6 for the 2-hop families). A ceiling of 32 therefore ran out *inside* the sub-question search on every long question whose cut was not already cached, so those attempts could not fail at a rewrite; they never reached one. Measured at scale 64 across one binary: integration **77.286 → 84.259 → 84.259** at budgets 32 → 64 → 128, so everything a ceiling can buy is bought at 64. `next_on_material` went 113/512 → 352/512 and `on_material` closed the last 2 empties it had carried at every scale (1,534/1,536 → 1,536/1,536). Re-price it with `scorecard --scale N --derivation-budget B` rather than rebuilding per value.
+
+What a budget still does not reach, and this half of the paragraph survived its re-measurement: `beside_next` is **0/384 at 32, 64 and 128** while its starvation falls 332 → 332 → 121, so it starves on a search that cannot win rather than one that ran out. It needs relation transfer. The per-family split at scale 64, at the budget of 32 these rows were taken under: `on_material` 1,534/1,536, `next_color` 1,024/1,024, `next_on_material` 113/512, `beside_next` **0/384**. Those four sum to 2,671, which is `derivation_answered` exactly, so the split is constrained rather than estimated. `beside_next` is 384 of the 785 remaining misses — 48.9 % — and no amount of budget reaches it, because what it needs is relation transfer.
 
 What is *not* the cause, measured rather than assumed: the deletion scan's size. A room is `r{r:03}`, four bytes at every scale below 1,000 rooms, so a question is the same length at scale 64 as at scale 1 and the scan it implies is the same size. `on_material` nevertheless pays 5.2 probes per attempt at scale 4 and 26.2 at scale 64 on identical question lengths. The cut-hint cache is keyed on question length and keeps only the shortest cut seen at that length, which does collide (`on_material` is 22–24 bytes, `next_color` 20–23) — but the scorecard asks each family as a block with `on_material` first, so ordering protects it and `next_color` still scores 98.4 % at scale 16. Length collision is therefore not the dominant term.
 
