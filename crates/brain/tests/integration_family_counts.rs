@@ -224,8 +224,21 @@ fn shuffled(n: usize, epoch: usize) -> Vec<usize> {
 /// order matters, because the derivation's shape caches are warmed by whatever
 /// ran before.
 fn measure(scale: usize) -> Vec<(&'static str, usize, usize, usize, usize)> {
+    measure_at_budget(scale, None)
+}
+
+/// `measure`, with the derivation's probe budget overridden. The override
+/// exists so the floor assertions below can be shown to FAIL, not merely seen
+/// to pass -- a guard seen only green has not been shown to discriminate.
+fn measure_at_budget(
+    scale: usize,
+    budget: Option<usize>,
+) -> Vec<(&'static str, usize, usize, usize, usize)> {
     let rooms = ROOMS_PER_SCALE * scale;
     let mut brain = subject();
+    if let Some(b) = budget {
+        brain.set_derivation_probe_budget(b);
+    }
     let facts = trained_facts(rooms);
     for epoch in 0..EPOCHS {
         for i in shuffled(facts.len(), epoch) {
@@ -316,4 +329,49 @@ fn scale_one_integration_families_hold_their_baseline() {
 fn scale_four_integration_families_hold_their_baseline() {
     check(4, &[("on_material", 94), ("next_color", 64), ("next_on_material", 8),
                ("beside_next", 0)]);
+}
+
+/// THE DISCRIMINATOR. A guard seen only green guards nothing, and the
+/// regression this file was written for -- `on_material` 22/24 -> 8/24 with
+/// `wrong` still 0 and the probe count DOWN -- is reproduced here by the one
+/// knob that produces the same shape without a source change: starving the
+/// derivation. The floors must FAIL under it.
+///
+/// Four probes is below the 4.07 `probes_per_attempt` `on_material` needs at
+/// scale 64, so the families that answer today cannot complete their chains.
+/// What the test asserts is not a particular count but that the floor arm
+/// moves: `on_material` must drop below its floor of 22, and `wrong` must
+/// STILL be 0, because starving the derivation may only turn answers into
+/// silence. That second half is the standard -- abstaining always passes --
+/// and it is why the floor arm has to exist separately from the `wrong` arm.
+#[test]
+fn the_floor_arm_fails_when_the_derivation_is_starved() {
+    let starved = measure_at_budget(1, Some(4));
+    for (name, correct, wrong, silent, probes) in &starved {
+        println!("  budget 4  {name:<18} correct {correct:>3}/{probes:<3} WRONG {wrong}  silent {silent}");
+    }
+    let (_, on_material, _wrong, _, _) = starved
+        .iter()
+        .find(|(n, _, _, _, _)| *n == "on_material")
+        .copied()
+        .expect("on_material is a scorecard family");
+    assert!(
+        on_material < 22,
+        "a 4-probe budget left on_material at {on_material} of 24, so the floor of 22          cannot discriminate and this file guards nothing"
+    );
+    assert_eq!(
+        starved.iter().map(|(_, _, w, _, _)| *w).sum::<usize>(),
+        0,
+        "starving the derivation turned an answer WRONG rather than silent;          abstaining is always allowed and inventing never is"
+    );
+    // And the control: the same world at the shipped budget clears the floor,
+    // so the failure above is the budget and not the world.
+    let shipped = measure(1);
+    let (_, on_material_ok, _, _, _) = shipped
+        .iter()
+        .find(|(n, _, _, _, _)| *n == "on_material")
+        .copied()
+        .expect("on_material is a scorecard family");
+    println!("  shipped   on_material correct {on_material_ok}/24  (starved: {on_material}/24)");
+    assert!(on_material_ok >= 22, "control: the shipped budget must clear the floor");
 }
