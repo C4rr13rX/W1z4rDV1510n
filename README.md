@@ -316,9 +316,19 @@ live pool after training, `crates/brain/tests/synonym_span_derivation.rs`
 | 8 | 2,204 | 5,138 | — | — | — | — |
 
 At the default bound the keys grow **4.9× against 64× the facts** — sub-linear,
-0.121 MB at scale 64 — against 65× growth and 3.3 GB at the scorecard's
-`max_concept_member_count = 64`. 1,772 non-binding concepts exist at scale 64
-where there had been zero, and recall stayed 100 %.
+0.121 MB at scale 64. 1,772 non-binding concepts exist at scale 64 where there
+had been zero, and recall stayed 100 %.
+
+The often-quoted alternative — 11,009,761 keys and 3,347 MB at
+`max_concept_member_count = 64` — is a **projection, not a measurement**: it is
+an analytic count of distinct runs over the same corpus, taken while the ledger
+it prices was never populated by anything. Setting the scorecard's bound to the
+node's 32 moves the gated numbers not at all (recall 100/100/100, integration
+74.1/76.9/64.5, terminals 5584/22342/68943 — digit-for-digit identical to 64),
+because that parameter governs the fire path and nothing in this world took it.
+It still does: training-path emergence is bounded by its own field, so
+`max_concept_member_count` remains inert here and the 64-vs-32 difference
+between the scorecard and the node remains a cost nobody is paying.
 
 **What this does not yet buy.** `MatchTier::Concept` still fires on 0 of 186
 trained questions with 544 concepts in the scale-1 pool. The matcher is a second
