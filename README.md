@@ -393,6 +393,24 @@ never given a cut to start from, and no budget or caching change can touch the s
 What is left is structural rather than a cache or a constant: recursing on the sub-question
 instead of enumerating splices of it.
 
+**And the probe count is also the latency, so goal 3 and goal 4 are one constraint.** Read
+off the same baseline:
+
+| scale | `recall_ms` | `infer_ms` | ratio | probes/attempt | ms per probe |
+|---|---|---|---|---|---|
+| 1 | 0.377 | 3.846 | 10.2× | 14.98 | 0.257 |
+| 4 | 1.300 | 9.108 | 7.0× | 11.24 | 0.810 |
+| 16 | 2.055 | 12.845 | 6.2× | 9.75 | 1.317 |
+| 64 | 1.225 | 11.437 | 9.3× | 10.09 | 1.134 |
+
+A derivation probe costs about one recall (`ms per probe` tracks `recall_ms` to within a
+factor of 1.6 at every scale), so `infer_ms` is simply the probe count times a recall. The
+stated ceiling for an integration probe is **3× a plain recall**; the measurement is
+**6.2–10.2×**, so that target is missed at every scale today, and missed for the same
+reason integration is incomplete. It also makes the budget lever doubly wrong: buying
++4.1 % integration with +32 probes would roughly triple an `infer_ms` that is already over
+budget, which is what `f1bd9c76`'s "7× wall" was measuring.
+
 ### Subject-preserving relation transfer (`crates/brain/src/relation_transfer.rs`, 2026-10-01)
 
 One held-out integration family — a question of the shape `<subject> <relation>?` whose
