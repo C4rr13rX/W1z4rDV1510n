@@ -714,9 +714,14 @@ every scale** and no family loses a correct answer:
   scale  integr%         wrong%         peak_mb        beside_next      next_on_material
      1   87.04 -> 98.15  0.00 -> 0.00   16.9 -> 24.4   0/6   -> 6/6     7/8   unchanged
      4   85.65 -> 87.50  0.00 -> 0.46   19.4 -> 27.5   0/24  -> 4/24    +material:1
-    16   85.19 -> 86.11  0.00 -> 0.93   25.6 -> 32.9   0/96  -> 8/96    +material:8
-    64   84.26 -> 85.42  0.00 -> 0.64   41.1 -> 46.4   0/384 -> 37/384  +material:10, room:12
+    16   85.19 -> 86.1   0.00 -> 0.93   25.6 -> 32.9   0/96  -> 8/96    +material:8
+    64   84.26 -> 85.4   0.00 -> 0.64   41.1 -> 46.4   0/384 -> 37/384  +material:10, room:12
 ```
+
+The scale-1 and scale-4 integration figures are two-decimal because
+`tests/integration_family_counts.rs` prints them that way; the scale-16 and
+scale-64 ones are one-decimal because the scorecard's table is, and the
+full-precision JSON was overwritten by the arm-OFF run that follows.
 
 `IRIS_SCORE_EXIT=1`: **two independent reds, and the gain is real.** +11.1 points of
 integration at scale 1 is bought with 0.46–0.93 % invention at the larger scales, which
