@@ -590,7 +590,11 @@ Everything above was measured with the composition written inside a test. The mo
 exports the composition itself — `answer_with_relation_transfer`, production derivation
 first and transfer only on silence — and `crates/brain/tests/integration_family_counts.rs`
 asks the scorecard's own four families through it, against the same world, the same
-training order and the same recall warm-up the baseline uses:
+training order and the same recall warm-up the baseline uses. **Every row below was taken
+at `DEFAULT_DERIVATION_PROBE_BUDGET` 32**, which is stated because the budget decides what
+production answers and therefore what is left silent for the transfer to see at all — at
+64 the two composition families answer far more, so these counts are not comparable across
+a budget change and must be re-measured rather than read across:
 
 ```text
   s1 beside_next        base    0/6   wrong 0 silent 6   ->  transfer    6/6   WRONG 0 silent 0
