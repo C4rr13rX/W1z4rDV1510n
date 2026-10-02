@@ -30,12 +30,15 @@
 //! is the diagnosis the change was built from. What is no longer true: the
 //! assertions below no longer measure `total_concepts == total_binding`. They
 //! measure the opposite, and the numbers are in
-//! `emergence_ledger_cost_by_run_length` -- at the default bound of 3 the
+//! `emergence_ledger_cost_by_run_length` -- at `EMERGENCE_RUN_BOUND = 3` the
 //! training path promotes 358 non-binding concepts at scale 1 and 1,772 at
 //! scale 64, for a sequence ledger of 0.121 MB whose keys grow 4.9x against
 //! 64x the facts. Recall held at 186/186 and the concept TIER still fires on
 //! 0 of 186 trained questions, so the second gate named at the bottom of this
-//! header (the matcher) is the one that is still shut.
+//! header (the matcher) is the one that is still shut. `PoolConfig::defaults`
+//! ships the bound at 0 (OFF) because six committed tests assert the
+//! invariant it breaks -- `python tools/gate.py` named them -- so it is opt-in
+//! until those six guards are updated, and this file is where it is exercised.
 //!
 //! The diagnosis, as it stood:
 //!
@@ -178,8 +181,14 @@ fn decoy(r: usize, obj: &str, base: &str) -> String {
 }
 
 fn subject() -> Brain {
-    subject_with_run_bound(PoolConfig::defaults("probe", 0).pretrain_emergence_max_run)
+    subject_with_run_bound(EMERGENCE_RUN_BOUND)
 }
+
+/// The bound this file measures at. `PoolConfig::defaults` ships 0 (OFF)
+/// because six committed tests assert the invariant emergence breaks -- see
+/// `default_pretrain_emergence_max_run` -- so the bound is named here rather
+/// than read from the default, and this file is where it is exercised.
+const EMERGENCE_RUN_BOUND: usize = 3;
 
 /// The same subject with the training path's emergence bound set explicitly,
 /// so the ledger census below can price the bound rather than assume it.
@@ -691,7 +700,7 @@ fn emergence_ledger_cost_by_run_length() {
                     st.total_concepts,
                     st.total_binding
                 );
-                if bound == PoolConfig::defaults("probe", 0).pretrain_emergence_max_run {
+                if bound == EMERGENCE_RUN_BOUND {
                     default_rows.push((facts.len(), ledger_entries, ledger_bytes));
                 }
             }
