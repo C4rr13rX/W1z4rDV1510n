@@ -658,7 +658,20 @@ pub struct PoolConfig {
     /// saturates. Short runs are also what the emergence hierarchy wants
     /// (atoms -> morphemes -> words), and a 64-byte concept memorises one
     /// phrase verbatim.
-    #[serde(default = "default_pretrain_emergence_max_run")]
+    /// NOT PERSISTED, and `skip` rather than `default` for a measured reason:
+    /// `PoolConfig` is bincode-serialized into the `.wbrain` container, and
+    /// bincode is POSITIONAL -- it writes no field names -- so inserting a
+    /// field shifts every later field by one and a committed fixture fails to
+    /// restore. Measured: `committed_wbrain_still_resolves_its_binding_routes`
+    /// and `committed_fixture_actually_carries_posting_generations` died on
+    /// `invalid value: integer 1036831949, expected variant index 0 <= i < 2`
+    /// -- 1036831949 is 0x3DCCCCCD, the f32 bit pattern of `plasticity_baseline
+    /// = 0.1`, i.e. the reader was two fields out of step. `serde(default)`
+    /// cannot help: it covers a MISSING field in a self-describing format, and
+    /// bincode has no way to know a field is missing. `skip` keeps the field
+    /// out of the stream in both directions, so old and new containers restore
+    /// identically and this knob is set programmatically only.
+    #[serde(skip, default = "default_pretrain_emergence_max_run")]
     pub pretrain_emergence_max_run: usize,
     pub concept_emergence_threshold: u32,
     pub max_weight: f32,
