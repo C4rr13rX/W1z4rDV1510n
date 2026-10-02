@@ -341,6 +341,42 @@ Silence and uncertainty are first-class outputs here. A tokenized model cannot p
 - Punctuation is learned, not stripped. Commas before proper nouns build a different activation pattern than commas in lists because the character context around the comma was different in every sentence. The pool encodes the distinction. A tokenizer discards it as whitespace-adjacent noise.
 - Every level fires simultaneously. Character labels, phonetic bigrams, word labels, punctuation labels, layout role labels, and spatial zone labels all co-activate in the same training call. The hierarchy emerges from the data, not from architecture decisions made before training begins.
 
+### Why the 3-hop family starves, and the two cheap fixes that are measured dead (2026-10-01)
+
+`next_on_material` is the one three-hop family, and it answers **113 of 512 at scale 64**.
+It is literally `next_color`'s head joined to `on_material`'s tail, and each half answers
+on its own: read off `docs/scorecard-baseline.json`, `next_color` is 1024/1024 at **4.10**
+probes per attempt and `on_material` is 1534/1536 at **4.07**. The composition should cost
+about eight probes. It costs **26.82** against a budget of 32, and **356 of its 512**
+attempts end in `derivation_starved` — the budget runs out, rather than the chain running
+out. (`beside_next` starves 332 of 384 the same way, for a different reason: it finds no
+trained sub-question at all, so it never leaves the `n(n+1)/2` full-span search.)
+
+Two obvious repairs have now been priced and neither works.
+
+- **Raise the budget.** +32 probes buys integration **+4.1 %** at scale 64 for **+25 %
+  RAM** and **7× wall** (backlog `f1bd9c76`). The probe is a full read-only fabric
+  observation, so the cost is linear in probes and the return is not.
+- **Memoise the splice scan.** `derive_by_substitution` already caches, per question
+  *shape* `(n, k)`, the deletion that finds the taught sub-question and the splice points
+  that reached the ceiling. The second is written from the ceiling arm only, so hop 1 of an
+  *n*-hop question learns nothing — its rewrite is the intermediate question, which is
+  untrained, which is exactly what makes the probe an integration probe — and it re-pays
+  the full `k + 1` scan forever. Caching "this shape reached no ceiling, so replay the
+  continuation and stop" measured **74.07 → 48.15** integration at scale 1, with
+  `on_material` falling **22/24 → 8/24**. `(n, k)` is a length and a cut, not a question:
+  a trained 22-byte recall probe and `r000 lamp on material?` share `(22, 12)` and have
+  entirely different rewrites, so the first to reach no ceiling teaches the cache a
+  negative the second obeys. The failure is **cheaper and wronger at once** —
+  probes-per-attempt fell 8.62 → 7.50 while hits fell 22 → 8 — and `wrong` stayed **0.0**,
+  every lost answer becoming silence, so it passes the no-hallucination rule, the RAM rules
+  and the timing rules and shows up only in the per-family hit count.
+  `crates/brain/tests/integration_family_counts.rs` is the guard that now catches it in
+  seconds instead of a 3.8-minute scorecard run.
+
+What is left is structural rather than a cache or a constant: recursing on the sub-question
+instead of enumerating splices of it.
+
 ### Subject-preserving relation transfer (`crates/brain/src/relation_transfer.rs`, 2026-10-01)
 
 One held-out integration family — a question of the shape `<subject> <relation>?` whose
