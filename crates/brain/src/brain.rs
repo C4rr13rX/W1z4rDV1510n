@@ -1090,6 +1090,22 @@ pub struct Brain {
     /// [`Fabric::observe_without_moment`], so a probe allocates nothing that
     /// outlives it, and the budget's remaining cost is wall time alone.
     derivation_probe_budget: usize,
+    /// How many UNTAUGHT rewrites the last substitution walked through, which is
+    /// the only thing that distinguishes a one-hop question from a composition
+    /// without reading a byte of either.
+    ///
+    /// Set once per [`Self::derive_by_substitution_profiled`] call and read only
+    /// by [`Self::integrate_autonomous`]. A hop that advances `current` to a
+    /// rewrite the brain was NEVER taught is, by construction, a hop into an
+    /// intermediate question -- the `continuation` arm's own doc says so, and
+    /// that arm exists because an n-hop probe's intermediate is untrained by
+    /// construction. A question whose search never took that arm is therefore
+    /// one the brain tried to answer in a single hop and could not.
+    ///
+    /// Why this field rather than a return value: the method is public and has
+    /// callers in `tests/` and `examples/` whose signatures would all have to
+    /// change for a value exactly one caller reads.
+    derivation_last_continuations: usize,
     /// Where the taught sub-question has been found before, as
     /// `(question length, cut point, tail length kept)`.
     ///
@@ -7872,8 +7888,51 @@ impl Brain {
             chain_max_depth,
             self.derivation_probe_budget,
         );
-        let Some(derived) = derived.filter(|a| !a.is_empty()) else {
-            return direct;
+        // SUBSTITUTION FAILED, SO TRY THE ONE OTHER DERIVATION IN THE LIBRARY.
+        //
+        // `derive_by_substitution` can only splice spans taken from an ANSWER.
+        // A held-out probe of the shape `<subject> <relation>?` needs a span
+        // that only ever appears inside a trained QUESTION, so that family is
+        // not slow or unlucky for it -- it is unreachable. Measured: the
+        // scorecard's `beside_next` is 0 of 384 at scale 64 at budgets 32, 64
+        // AND 128, byte-identical, which is 11.1 points of the integration
+        // metric and the largest single bucket left.
+        // `crate::relation_transfer` supplies exactly that span and nothing
+        // else; see its module doc for why alignment alone cannot.
+        //
+        // WHY HERE AND NOWHERE ELSE. This method is the one derivation path the
+        // scorecard (`examples/scorecard.rs`) and both node answer routes
+        // (`brain_api.rs`, `bin/brain_server.rs`) all call, so a fallback added
+        // here reaches the product and the measurement in the same commit --
+        // the project's parity rule -- and cannot drift between them.
+        //
+        // IT MAY ONLY SPEND ON A SILENCE. The arm runs only when substitution
+        // returned nothing, so no answer the brain already derives can change
+        // and no probe is spent on a question that is already answered. The
+        // cost lands on the empty bucket alone: 544 of 3,456 probes at scale
+        // 64.
+        let derived = match derived.filter(|a| !a.is_empty()) {
+            Some(derived) => derived,
+            None => {
+                let (transferred, transfer_probes) =
+                    crate::relation_transfer::derive_by_relation_transfer(
+                        self,
+                        query_pool,
+                        target_pool,
+                        &question,
+                        self.derivation_probe_budget,
+                    );
+                let Some(transferred) = transferred.filter(|a| !a.is_empty()) else {
+                    return direct;
+                };
+                tracing::debug!(
+                    probes = transfer_probes,
+                    question = %String::from_utf8_lossy(&question),
+                    answer = %String::from_utf8_lossy(&transferred),
+                    "derived an answer by relation transfer"
+                );
+                transferred
+            }
         };
         tracing::debug!(
             probes,

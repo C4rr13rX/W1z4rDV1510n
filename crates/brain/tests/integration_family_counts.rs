@@ -395,42 +395,57 @@ fn check(scale: usize, floors: &[(&str, usize)]) {
 /// "fire only when the production derivation found no taught sub-question at
 /// all", which `derive_by_substitution_profiled` does not report today.
 #[test]
-fn wiring_the_transfer_into_the_answer_path_converts_silence_into_invention() {
+fn the_wired_transfer_answers_beside_next_and_composing_it_twice_changes_nothing() {
     for scale in [1, 4] {
         let base = measure(scale);
         let with = measure_via(scale, infer_via_transfer);
-        let mut gained = 0usize;
-        let mut invented = 0usize;
         for ((name, bc, bw, bs, probes), (_, wc, ww, ws, _)) in base.iter().zip(with.iter()) {
             println!(
-                "  s{scale} {name:<18} base {bc:>4}/{probes:<4} wrong {bw} silent {bs}  \
-                 ->  transfer {wc:>4}/{probes:<4} WRONG {ww} silent {ws}"
+                "  s{scale} {name:<18} production {bc:>4}/{probes:<4} wrong {bw} silent {bs}  \
+                 ->  composed again {wc:>4}/{probes:<4} WRONG {ww} silent {ws}"
             );
-            assert!(
-                wc >= bc,
-                "s{scale} {name}: the transfer fires only on an empty production answer, so it              cannot cost a family a correct answer -- {bc} fell to {wc}"
+            // ONE CALL SITE, PROVED BY IDEMPOTENCE. The fallback now lives
+            // inside `Brain::integrate_autonomous`, which is the single
+            // derivation path `examples/scorecard.rs`, `brain_api.rs` and
+            // `bin/brain_server.rs` all call. `answer_with_relation_transfer`
+            // composes the SAME mechanism over that method, so if the wiring
+            // is where this says it is, composing it a second time can only
+            // return what production already returned -- the inner call
+            // answers and the outer one never runs. A difference here means
+            // the mechanism is wired in two places that disagree, which is
+            // the parity failure the project forbids, and it is an ABSOLUTE
+            // contract rather than a comparison against the product.
+            assert_eq!(
+                (bc, bw, bs),
+                (wc, ww, ws),
+                "s{scale} {name}: composing the transfer over a path that already contains it              changed the answer, so the fallback is wired in more than one place"
             );
-            gained += wc - bc;
-            invented += ww - bw;
         }
-        println!("  s{scale} transfer gained {gained} correct and invented {invented}");
+        // WHAT THE WIRING BUYS, as an absolute floor and not as a margin over
+        // an arm. `beside_next` is a held-out SYNONYM of a trained relation,
+        // so the span it needs appears only inside a trained QUESTION and
+        // `derive_by_substitution` cannot reach it at any budget: measured
+        // 0 of 384 at scale 64 at budgets 32, 64 AND 128, byte-identical.
+        // Relation transfer is the only mechanism in the library that supplies
+        // it, so a non-zero here is the one reading that says it is reachable
+        // from the product.
+        let (_, beside_correct, beside_wrong, _, beside_probes) = base
+            .iter()
+            .find(|(n, _, _, _, _)| *n == "beside_next")
+            .copied()
+            .expect("beside_next is a scorecard family");
+        println!("  s{scale} beside_next {beside_correct}/{beside_probes} wrong {beside_wrong}");
         assert!(
-            gained > 0,
-            "s{scale}: the transfer answered nothing the production path did not, so there is          no gain left to weigh against its cost and this guard has gone stale"
+            beside_correct > 0,
+            "s{scale}: beside_next answered {beside_correct} of {beside_probes} on the              production path, so the relation-transfer fallback is not reachable from              `integrate_autonomous` -- that is the whole point of wiring it"
         );
-        // NOT `assert!(invented > 0)`. That arm was here and it is a tripwire
-        // that fires on an IMPROVEMENT: the transfer sees only the probes
-        // production leaves silent, so anything that answers more -- a wider
-        // `DEFAULT_DERIVATION_PROBE_BUDGET`, a better accept rule, a cheaper
-        // 3-hop -- removes its inventions by removing its opportunities, and
-        // the test would have gone red on a strictly better brain. The project
-        // rule is to assert ABSOLUTE contracts and PRINT comparisons, so the
-        // zero is announced loudly instead.
-        if invented == 0 {
-            println!(
-                "  s{scale} WIRE IT: the transfer invented nothing at this scale. Measure the      remaining scales, then route examples/scorecard.rs `fn infer` and the node's      `derived_by_substitution_reply` through `answer_with_relation_transfer` in ONE      commit and re-baseline. Backlog 6eb030ab."
-            );
-        }
+        // PRIORITY ZERO on the family the wiring added, stated here as well as
+        // in `check` because this is the test that would catch the fallback
+        // paying for its answers with inventions.
+        assert_eq!(
+            beside_wrong, 0,
+            "s{scale}: the relation-transfer fallback invented {beside_wrong} beside_next              answers; a brain with no grounded answer has NO answer"
+        );
     }
 }
 
