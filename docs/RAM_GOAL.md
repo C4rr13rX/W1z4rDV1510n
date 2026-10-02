@@ -334,6 +334,16 @@ deficit again, and read `probes_per_answer` at scale 64 (baseline 91,715/1,332
 with `derivation_starved` at 26.54 of a 32-probe budget, so extra candidates can
 cost probes rather than buy answers.
 
+The budget in that last sentence is now **64**, raised 2026-10-01 after the
+re-pricing in `DEFAULT_DERIVATION_PROBE_BUDGET`'s doc comment, and the RAM half
+of the warning did not survive the measurement: peak moved 16.9 → 16.6, 19.3 →
+19.5, 25.6 → 25.5 and 39.8 → 39.7 MB at scales 1/4/16/64 across a doubled
+budget, for integration +12.96/+8.80/+7.64/+6.97 points at wrong 0.0 and recall
+100.0. A probe is a read-only fabric observation, so it buys **wall** (scale 64:
+77 s → 116 s) and not residency. The probe-cost caution above therefore applies
+to latency, which is goal 4 and not yet gated, and not to the RAM goal this
+document owns.
+
 ## How to work
 
 - **Measure first.** Find which structure holds the RAM (counts × sizes, or a
