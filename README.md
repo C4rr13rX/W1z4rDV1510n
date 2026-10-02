@@ -584,14 +584,50 @@ the chain stops being unique for the *same* family — and the net contribution 
 is **exactly zero**: +4 right bought with +4 wrong. Recall is 100 % throughout (186/186 and
 744/744).
 
-**The call site in the node's answer path is deliberately not wired.** The committed
-scorecard baseline therefore contains none of this, and the honest summary is that the
-`42/54 -> 49/54` headline this mechanism first produced is net +3 at scale 1 and net 0 at
-scale 32, against a brain that measures `wrong` 0 at every scale. What the module ships
-today is the mechanism, the uniqueness rule, and the measurements that say it is not yet
-safe to put in the answer path — gated on `wrong` reaching 0 at every scale, the only
-condition under which the project's first standard, *a brain with no grounded answer has no
-answer*, is preserved.
+#### Measured through the production entry, 2026-10-01, and it is still not safe
+
+Everything above was measured with the composition written inside a test. The module now
+exports the composition itself — `answer_with_relation_transfer`, production derivation
+first and transfer only on silence — and `crates/brain/tests/integration_family_counts.rs`
+asks the scorecard's own four families through it, against the same world, the same
+training order and the same recall warm-up the baseline uses:
+
+```text
+  s1 beside_next        base    0/6   wrong 0 silent 6   ->  transfer    6/6   WRONG 0 silent 0
+  s1 on_material        base   22/24  wrong 0 silent 2   ->  transfer   22/24  WRONG 2 silent 0
+  s1 next_on_material   base    2/8   wrong 0 silent 6   ->  transfer    2/8   WRONG 2 silent 4
+  s1 next_color         base   16/16  wrong 0 silent 0   ->  transfer   16/16  WRONG 0 silent 0
+
+  s4 beside_next        base    0/24  wrong 0 silent 24  ->  transfer    4/24  WRONG 3 silent 17
+  s4 next_on_material   base    8/32  wrong 0 silent 24  ->  transfer    8/32  WRONG 1 silent 23
+```
+
+No family loses a correct answer — the fallback cannot, since it fires only on silence —
+and **every invention is a converted silence**: `on_material` silent 2 → wrong 2,
+`next_on_material` silent 6 → silent 4 + wrong 2. Integration at scale 1 reads 85.19 % over
+54 probes against 74.07 %, which is exactly the kind of headline the `wrong` column exists
+to refuse. Under PRIORITY ZERO it is a refusal, so the transfer stays out of the answer
+path and the test above pins both halves: a future accept rule has to drive `wrong` to 0
+*without* driving `beside_next` back to 0.
+
+#### The invention is in the MATCHER, not in the splice, and that is a new result
+
+Subject preservation was re-tried at the **accept** rather than as a pre-filter on the
+search — the one placement the refutation above had not covered, since pruning the search
+destroys the uniqueness evidence while leaving the conclusion. Applied to the single
+answer returned, with every candidate still asked and every distinct answer still counted
+toward uniqueness, it is **exactly inert**: all six rows above are byte-identical with and
+without it, and its unit test shows it does discriminate the pair the mechanism is built on
+(`r001 next?` accepted, `r000 next?` refused).
+
+An inert narrowing is informative here. The accepted rewrites *do* keep the query's own
+subject and *still* resolve to another room's answer, so the wrong answer is not produced
+by the splice at all — it is produced downstream, by `best_binding_match_v2`, which scores
+precision × recall over the **unordered distinct byte set**. A subject-preserving rewrite
+reaches the exact ceiling against a trained question of a *different* room, because order
+and multiplicity are not represented. That is the defect tracked as backlog `f711d18a`, and
+it means **no span-level or candidate-ordering accept rule can make this mechanism safe**:
+relation transfer is blocked on an order-sensitive matcher, not on a better search.
 
 ---
 
@@ -632,7 +668,7 @@ The previous measurement, for contrast, was integration 53.7 / 50.0 / 44.3 / 20.
 
 **Why the wrong % is 0 and was 4× the correct % until 2026-10-01.** The accept rule was "a rewrite scoring 1.0 is a question the brain was taught", and that is structurally false. The matcher scores precision × recall over *sets* of firing atom neurons; an atom is a byte, so a binding trained on `"r000 desk material?"` holds one member per **distinct** byte and represents neither order nor multiplicity. Every anagram therefore scores exactly 1.0 — `"r0desk material?"` drops two `0`s and a space, all repeats, reaches the ceiling, and answers a different room's material. It is reachable as a real rewrite. The fix records the identity of what was taught (`Brain::trained_frames`, a 64-bit digest per frame written on the training path) and admits only rewrites that are in it; an untaught rewrite may still *continue* a multi-hop chain but can never *be* the answer. `crates/brain/tests/derivation_rejects_untaught.rs` pins both directions, including a premise test asserting the anagram really does reach the ceiling.
 
-**Known limits, stated rather than averaged away.** `beside_next` is 0 of 6 / 24 / 96 / 384: no sub-question of `"r001 beside?"` is known, and the relation word dominates the subject 9:1 on shared bytes, so the top match is the *wrong room* at 0.90 while the question holding the answer sits at rank 44. The 3-hop family `next_on_material` is the weakest that works at all, re-measured at all four scales after the candidate-ranking fix: 2/8, 8/32, 32/128, 113/512. The fix moved only the two larger scales (22/128 → 32/128, 23/512 → 113/512) and left 2/8 and 8/32 byte-identical, so it did not cost this family coverage anywhere — the earlier claim that it did, "slightly *below* its pre-fix count of 29/512, the one family where honesty cost coverage", was wrong. And `Brain::trained_frames` is not persisted, so a brain restored from a snapshot derives nothing until it is retrained — the node is affected, and it is tracked as backlog item `9ee0e10c`.
+**Known limits, stated rather than averaged away.** `beside_next` is 0 of 6 / 24 / 96 / 384: no sub-question of `"r001 beside?"` is known, and the relation word dominates the subject 9:1 on shared bytes, so the top match is the *wrong room* at 0.90 while the question holding the answer sits at rank 44. The mechanism that *does* answer it exists and is exported (`relation_transfer`, above) and is deliberately not in the answer path: composed behind the production derivation it takes `beside_next` to 6/6 at scale 1 and 4/24 at scale 4 while converting four silences into inventions at each scale, which PRIORITY ZERO refuses. It is blocked on the unordered-byte-set matcher (`f711d18a`), not on its own search. The 3-hop family `next_on_material` is the weakest that works at all, re-measured at all four scales after the candidate-ranking fix: 2/8, 8/32, 32/128, 113/512. The fix moved only the two larger scales (22/128 → 32/128, 23/512 → 113/512) and left 2/8 and 8/32 byte-identical, so it did not cost this family coverage anywhere — the earlier claim that it did, "slightly *below* its pre-fix count of 29/512, the one family where honesty cost coverage", was wrong. And `Brain::trained_frames` is not persisted, so a brain restored from a snapshot derives nothing until it is retrained — the node is affected, and it is tracked as backlog item `9ee0e10c`.
 
 **Integration no longer decays with scale, and budget starvation is no longer the dominant term.** Both halves of this section said the opposite until 2026-10-01, and the correction is one change: `routed_binding_candidates` ranked an EXACT identity match inside a candidate set that could outvote it, so the derivation's own accept rule discarded answers it had already found. Fixing the ranking took scale 64 from 38.5 to 77.3 — and because an exact match is found in fewer probes than a search that misses, the probe cost fell with it. Every number here is a field of `docs/scorecard-baseline.json`, so it is checkable against a committed file:
 

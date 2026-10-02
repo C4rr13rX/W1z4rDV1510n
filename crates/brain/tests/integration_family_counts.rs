@@ -56,8 +56,9 @@
 //! allowed, so only invention and a fall in `correct` are failures.
 
 use w1z4rd_brain::{
-    AtomEncoding, Brain, BrainConfig, BytePassthroughEncoding, PoolConfig,
-    ANSWER_CHAIN_MAX_DEPTH, ANSWER_CHAIN_MAX_VISIT, ANSWER_FABRIC_CONFIDENCE_THRESHOLD,
+    answer_with_relation_transfer, AtomEncoding, Brain, BrainConfig, BytePassthroughEncoding,
+    PoolConfig, ANSWER_CHAIN_MAX_DEPTH, ANSWER_CHAIN_MAX_VISIT,
+    ANSWER_FABRIC_CONFIDENCE_THRESHOLD,
 };
 
 const QUERY_POOL: u32 = 1;
@@ -187,9 +188,10 @@ fn recall(brain: &mut Brain, query: &str) -> Option<String> {
 }
 
 /// The scorecard's `infer`, call for call: `observe_read_only`, then
-/// `integrate_autonomous` at the shipped constants, then
+/// `answer_with_relation_transfer` at the shipped constants, then
 /// `finish_read_only_inference`. Asking through `derive_by_substitution`
 /// directly would measure a function the product does not call.
+///
 fn infer(brain: &mut Brain, query: &str) -> Option<String> {
     brain.observe_read_only(QUERY_POOL, query.as_bytes());
     let answer = brain
@@ -201,6 +203,28 @@ fn infer(brain: &mut Brain, query: &str) -> Option<String> {
             ANSWER_CHAIN_MAX_VISIT,
         )
         .answer;
+    let _ = brain.finish_read_only_inference();
+    answer.filter(|a| !a.is_empty()).map(|a| String::from_utf8_lossy(&a).to_string())
+}
+
+/// `infer`, with `relation_transfer` composed behind it -- the wiring backlog
+/// item `f16e499d` asks for. NOT the production path: the test below is what
+/// says why.
+///
+/// `answer_with_relation_transfer` calls `integrate_autonomous` itself and
+/// returns its answer byte-identically whenever it is non-empty, so every
+/// family that already answers is measured unchanged.
+fn infer_via_transfer(brain: &mut Brain, query: &str) -> Option<String> {
+    brain.observe_read_only(QUERY_POOL, query.as_bytes());
+    let (answer, _transfer_probes) = answer_with_relation_transfer(
+        brain,
+        QUERY_POOL,
+        ANSWER_POOL,
+        query.as_bytes(),
+        ANSWER_FABRIC_CONFIDENCE_THRESHOLD,
+        ANSWER_CHAIN_MAX_DEPTH,
+        ANSWER_CHAIN_MAX_VISIT,
+    );
     let _ = brain.finish_read_only_inference();
     answer.filter(|a| !a.is_empty()).map(|a| String::from_utf8_lossy(&a).to_string())
 }
@@ -224,7 +248,19 @@ fn shuffled(n: usize, epoch: usize) -> Vec<usize> {
 /// order matters, because the derivation's shape caches are warmed by whatever
 /// ran before.
 fn measure(scale: usize) -> Vec<(&'static str, usize, usize, usize, usize)> {
-    measure_at_budget(scale, None)
+    measure_at_budget(scale, None, infer)
+}
+
+/// `measure`, asking through a different answer path. The path is a parameter
+/// so a candidate mechanism is measured against the SAME world, the same
+/// training order and the same recall warm-up as production -- a mechanism
+/// measured on a brain built a different way is not comparable to the baseline
+/// it is being judged against.
+fn measure_via(
+    scale: usize,
+    ask: fn(&mut Brain, &str) -> Option<String>,
+) -> Vec<(&'static str, usize, usize, usize, usize)> {
+    measure_at_budget(scale, None, ask)
 }
 
 /// `measure`, with the derivation's probe budget overridden. The override
@@ -233,6 +269,7 @@ fn measure(scale: usize) -> Vec<(&'static str, usize, usize, usize, usize)> {
 fn measure_at_budget(
     scale: usize,
     budget: Option<usize>,
+    ask: fn(&mut Brain, &str) -> Option<String>,
 ) -> Vec<(&'static str, usize, usize, usize, usize)> {
     let rooms = ROOMS_PER_SCALE * scale;
     let mut brain = subject();
@@ -266,7 +303,7 @@ fn measure_at_budget(
     for (name, probes) in families(rooms) {
         let (mut correct, mut wrong, mut silent) = (0, 0, 0);
         for (q, want) in &probes {
-            match infer(&mut brain, q) {
+            match ask(&mut brain, q) {
                 None => silent += 1,
                 Some(a) if a == *want => correct += 1,
                 Some(_) => wrong += 1,
@@ -311,6 +348,72 @@ fn check(scale: usize, floors: &[(&str, usize)]) {
     }
 }
 
+/// WHAT HAPPENS IF `relation_transfer` IS WIRED INTO THE ANSWER PATH, measured
+/// through the composed production entry rather than through a test-local copy
+/// of the composition.
+///
+/// This is the one guard that makes backlog item `f16e499d` decidable in five
+/// seconds instead of a scorecard run, and it pins BOTH halves of the answer,
+/// because either half alone is misleading:
+///
+/// ```text
+///   s1 beside_next   0/6  silent 6  ->  6/6  WRONG 0      the gain is real
+///   s1 on_material  22/24 silent 2  -> 22/24 WRONG 2      and so is the cost
+///   s4 beside_next   0/24 silent 24 ->  4/24 WRONG 3
+///   s4 next_on_mat    8/32          ->  8/32 WRONG 1
+/// ```
+///
+/// Every invention is a SILENCE CONVERTED -- no family loses a correct answer
+/// -- and under PRIORITY ZERO that is still a refusal: a brain with no grounded
+/// answer has no answer, and the gate ratchets `wrong` toward 0 and may never
+/// let it rise. So the transfer stays out of the answer path, and this test is
+/// what a future accept rule has to turn green by driving `wrong` to 0 WITHOUT
+/// driving `beside_next` back to 0.
+///
+/// # Where the invention comes from, which is NOT the splice
+///
+/// Subject preservation applied AT THE ACCEPT -- the one placement
+/// `README.md:556` had not tried, since the refuted version pruned the search
+/// and destroyed the uniqueness evidence -- is **exactly inert here**: every
+/// per-family count above is byte-identical with and without
+/// `relation_transfer::preserves_subject`. So the accepted rewrites DO keep the
+/// query's own subject and still resolve to another room's answer, which puts
+/// the invention downstream of the rewrite, in the matcher: `best_binding_match_v2`
+/// scores precision x recall over the UNORDERED DISTINCT BYTE SET, so a
+/// subject-preserving rewrite reaches the ceiling against a trained question of
+/// a DIFFERENT room. That is backlog `f711d18a`, and it means no span-level or
+/// ordering-level accept rule can make this safe.
+#[test]
+fn wiring_the_transfer_into_the_answer_path_converts_silence_into_invention() {
+    for scale in [1, 4] {
+        let base = measure(scale);
+        let with = measure_via(scale, infer_via_transfer);
+        let mut gained = 0usize;
+        let mut invented = 0usize;
+        for ((name, bc, bw, bs, probes), (_, wc, ww, ws, _)) in base.iter().zip(with.iter()) {
+            println!(
+                "  s{scale} {name:<18} base {bc:>4}/{probes:<4} wrong {bw} silent {bs}  \
+                 ->  transfer {wc:>4}/{probes:<4} WRONG {ww} silent {ws}"
+            );
+            assert!(
+                wc >= bc,
+                "s{scale} {name}: the transfer fires only on an empty production answer, so it              cannot cost a family a correct answer -- {bc} fell to {wc}"
+            );
+            gained += wc - bc;
+            invented += ww - bw;
+        }
+        println!("  s{scale} transfer gained {gained} correct and invented {invented}");
+        assert!(
+            gained > 0,
+            "s{scale}: the transfer answered nothing the production path did not, so there is          no gain left to weigh against its cost and this guard has gone stale"
+        );
+        assert!(
+            invented > 0,
+            "s{scale}: the transfer invented NOTHING -- if an accept rule has fixed that, wire          it into the answer path, re-baseline the scorecard, and delete this assertion"
+        );
+    }
+}
+
 /// `beside_next` carries no floor above 0 at either scale: it is 0 at every
 /// scale and the mechanism that would fix it is not this file's subject.
 #[test]
@@ -346,7 +449,7 @@ fn scale_four_integration_families_hold_their_baseline() {
 /// and it is why the floor arm has to exist separately from the `wrong` arm.
 #[test]
 fn the_floor_arm_fails_when_the_derivation_is_starved() {
-    let starved = measure_at_budget(1, Some(4));
+    let starved = measure_at_budget(1, Some(4), infer);
     for (name, correct, wrong, silent, probes) in &starved {
         println!("  budget 4  {name:<18} correct {correct:>3}/{probes:<3} WRONG {wrong}  silent {silent}");
     }

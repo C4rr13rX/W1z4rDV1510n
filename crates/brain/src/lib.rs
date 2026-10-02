@@ -89,7 +89,9 @@ pub use workspace::{CompositionRule, GroundedRelation, PatternValue, RelationPat
                     TransientWorkspace, TypedValue};
 pub use crystallizer::{SemanticCrystallizer, SemanticFrame};
 pub use code_repair::{apply_code_repair_relation, apply_relation, CodeRepairError, CodeRepairRelation};
-pub use relation_transfer::{candidate_rewrites, derive_by_relation_transfer};
+pub use relation_transfer::{
+    answer_with_relation_transfer, candidate_rewrites, derive_by_relation_transfer,
+};
 pub use store::{
     MmapWalStore, NoopStore, RecoveryStats, Store, TerminalDelta, WalEvent,
     replay_into_brain,
