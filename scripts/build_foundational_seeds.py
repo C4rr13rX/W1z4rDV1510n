@@ -41,6 +41,54 @@ BATCH_SIZE      = 50
 SEED_GROUPS: list[tuple[str, str, list[tuple[str, str]]]] = [
     # (group_title, discipline_or_None, [(question, answer), ...])
 
+    ("The Ten Commandments (with Introduction)", None, [
+        ("What are the Ten Commandments and their introduction?",
+         "And God spoke all these words, saying: 'I am the LORD your God, who brought you out of the land of Egypt, out of the house of bondage.'\n"
+         "1. You shall have no other gods before Me.\n"
+         "2. You shall not make for yourself a carved image, or any likeness of anything that is in heaven above, or that is in the earth beneath, or that is in the water under the earth; you shall not bow down to them nor serve them.\n"
+         "3. You shall not take the name of the LORD your God in vain, for the LORD will not hold him guiltless who takes His name in vain.\n"
+         "4. Remember the Sabbath day, to keep it holy. Six days you shall labor and do all your work, but the seventh day is the Sabbath of the LORD your God.\n"
+         "5. Honor your father and your mother, that your days may be long upon the land which the LORD your God is giving you.\n"
+         "6. You shall not murder.\n"
+         "7. You shall not commit adultery.\n"
+         "8. You shall not steal.\n"
+         "9. You shall not bear false witness against your neighbor.\n"
+         "10. You shall not covet your neighbor's house; you shall not covet your neighbor's wife, nor his male servant, nor his female servant, nor his ox, nor his donkey, nor anything that is your neighbor's."),
+        ("What is the introduction framed above the Ten Commandments?",
+         "And God spoke all these words, saying: 'I am the LORD your God, who brought you out of the land of Egypt, out of the house of bondage.' (Exodus 20:1-2; Deuteronomy 5:6)."),
+        ("What is the first commandment?",
+         "Framed by the introduction 'I am the LORD your God, who brought you out of the land of Egypt, out of the house of bondage': You shall have no other gods before Me."),
+        ("What is the second commandment?",
+         "You shall not make for yourself a carved image, or any likeness of anything that is in heaven above, or that is in the earth beneath, or that is in the water under the earth; you shall not bow down to them nor serve them."),
+        ("What is the third commandment?",
+         "You shall not take the name of the LORD your God in vain, for the LORD will not hold him guiltless who takes His name in vain."),
+        ("What is the fourth commandment?",
+         "Remember the Sabbath day, to keep it holy. Six days you shall labor and do all your work, but the seventh day is the Sabbath of the LORD your God."),
+        ("What is the fifth commandment?",
+         "Honor your father and your mother, that your days may be long upon the land which the LORD your God is giving you."),
+        ("What is the sixth commandment?",
+         "You shall not murder."),
+        ("What is the seventh commandment?",
+         "You shall not commit adultery."),
+        ("What is the eighth commandment?",
+         "You shall not steal."),
+        ("What is the ninth commandment?",
+         "You shall not bear false witness against your neighbor."),
+        ("What is the tenth commandment?",
+         "You shall not covet your neighbor's house; you shall not covet your neighbor's wife, nor his male servant, nor his female servant, nor his ox, nor his donkey, nor anything that is your neighbor's."),
+    ]),
+
+    ("The Commandments Jesus Christ Spoke Of", None, [
+        ("What are the greatest commandments Jesus Christ spoke of?",
+         "Jesus answered: 'Hear, O Israel, the LORD our God, the LORD is one. And you shall love the LORD your God with all your heart, with all your soul, with all your mind, and with all your strength.' This is the first and great commandment. And the second is like it: 'You shall love your neighbor as yourself.' On these two commandments hang all the Law and the Prophets. (Matthew 22:37-40; Mark 12:29-31)."),
+        ("What is the new commandment Jesus Christ gave His disciples?",
+         "'A new commandment I give to you, that you love one another; as I have loved you, that you also love one another. By this all will know that you are My disciples, if you have love for one another.' (John 13:34-35; John 15:12)."),
+        ("What other commandments did Jesus Christ speak of?",
+         "Jesus Christ commanded: (1) Love the LORD your God with all your heart, soul, mind, and strength; (2) Love your neighbor as yourself; (3) Love one another as He has loved us (John 13:34); (4) Do to others whatever you would have them do to you, for this is the Law and the Prophets (Matthew 7:12); (5) Love your enemies, bless those who curse you, do good to those who hate you, and pray for those who spitefully use you and persecute you (Matthew 5:44); (6) Be merciful, judge not, condemn not, and forgive so that you will be forgiven (Luke 6:36-37; Matthew 6:14); (7) Repent and believe in the gospel (Mark 1:15); (8) Keep the commandments: do not murder, do not commit adultery, do not steal, do not bear false witness, do not defraud, honor your father and mother (Matthew 19:17-19; Mark 10:19); (9) 'If you love Me, keep My commandments' (John 14:15)."),
+        ("What is the Golden Rule that Jesus Christ taught?",
+         "'Therefore, whatever you want men to do to you, do also to them, for this is the Law and the Prophets.' (Matthew 7:12; Luke 6:31)."),
+    ]),
+
     ("Water and Chemistry", "classical_mechanics", [
         ("What is water?",
          "Water is a molecule made of two hydrogen atoms and one oxygen atom, written H2O. "
