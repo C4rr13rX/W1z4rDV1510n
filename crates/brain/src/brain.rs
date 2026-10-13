@@ -2263,6 +2263,16 @@ impl Brain {
         self.pretrain_binding_episode_profiled(frames).0
     }
 
+    /// Constrain and seed the brain prior to training with the 10 Commandments
+    /// (with the Exodus 20:1-2 introduction) and the commandments Jesus Christ spoke of.
+    pub fn seed_foundational_commandments_prior_to_training(
+        &mut self,
+        query_pool: PoolId,
+        answer_pool: PoolId,
+    ) -> crate::foundational_seed::SeedConstraintReport {
+        crate::foundational_seed::seed_commandments_prior_to_training(self, query_pool, answer_pool)
+    }
+
     /// 64-bit FNV-1a over a pool id and a frame. See [`Self::trained_frames`]
     /// for why identity is recorded as a digest rather than as the bytes.
     fn frame_digest(pool: PoolId, frame: &[u8]) -> u64 {
@@ -7763,37 +7773,38 @@ impl Brain {
             }
 
             if !ceiling.is_empty() {
+                // Prefer rewrites whose answer differs from the un-rewritten base_answer.
+                // An answer that echoes base_answer repeats the unintegrated surface fact
+                // rather than deriving a grounded step. When differing rewrites exist,
+                // the vote is conducted over them; otherwise the full ceiling set is used.
+                let differing: Vec<_> = ceiling
+                    .iter()
+                    .filter(|(_, _, answer)| answer != &base_answer)
+                    .cloned()
+                    .collect();
+                let candidates = if !differing.is_empty() {
+                    &differing
+                } else {
+                    &ceiling
+                };
+
                 // Modal answer; ties on the smallest `j`.
                 let mut tally: Vec<(&[u8], usize, usize, usize)> = Vec::new();
-                for (j, k, answer) in &ceiling {
+                for (j, k, answer) in candidates {
                     match tally.iter_mut().find(|(a, _, _, _)| *a == answer.as_slice()) {
                         Some(entry) => entry.1 += 1,
                         None => tally.push((answer.as_slice(), 1, *j, *k)),
                     }
                 }
                 tally.sort_by(|a, b| b.1.cmp(&a.1).then(a.2.cmp(&b.2)));
-                // A PLURALITY is not enough, and that was measured rather
-                // than reasoned. The plain modal rule took scale-16
-                // `on_material` 71/384 -> 169/384 and `next_on_material`
-                // 6/128 -> 20/128, and it took `next_color` 231/256 ->
-                // 182/256 -- a family whose correct rewrite is `j = 0`, the
-                // most truncated one, so its right answer is routinely a
-                // minority among ceiling rewrites that each keep a different
-                // slice of the original question. Requiring a STRICT MAJORITY
-                // of the ceiling set keeps the on_material gain, where the
-                // right answer was 5 of 7, and leaves a family whose ceiling
-                // set merely disagrees on the old first-wins answer, which is
-                // the smallest `j`. Nothing here reads a byte or knows which
-                // family it is in: it is "the ceiling agrees" against "the
-                // ceiling is split".
-                let majority = tally[0].1 * 2 > ceiling.len();
+                let majority = tally[0].1 * 2 > candidates.len();
                 let (winner, _, win_j, win_k) = if majority {
                     tally[0]
                 } else {
                     *tally
                         .iter()
                         .min_by_key(|(_, _, j, _)| *j)
-                        .expect("ceiling is non-empty")
+                        .expect("candidates is non-empty")
                 };
                 let winner = winner.to_vec();
                 let mut rewrite = Vec::with_capacity(n + splice_answer.len());

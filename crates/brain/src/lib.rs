@@ -46,6 +46,7 @@ pub mod workspace;
 pub mod crystallizer;
 pub mod code_repair;
 pub mod relation_transfer;
+pub mod foundational_seed;
 
 pub use answer_path::{
     ANSWER_BINDING_MATCH_THRESHOLD, ANSWER_CHAIN_MAX_DEPTH, ANSWER_CHAIN_MAX_VISIT,
@@ -95,4 +96,9 @@ pub use relation_transfer::{
 pub use store::{
     MmapWalStore, NoopStore, RecoveryStats, Store, TerminalDelta, WalEvent,
     replay_into_brain,
+};
+pub use foundational_seed::{
+    FoundationalSeedPair, SeedConstraintReport,
+    FOUNDATIONAL_SEED_PAIRS, TEN_COMMANDMENTS_INTRO,
+    seed_commandments_prior_to_training,
 };
