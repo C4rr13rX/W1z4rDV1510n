@@ -619,6 +619,9 @@ impl Neuron {
     /// the pool's housekeeping pass.  Spec §1.5: this IS the only
     /// forgetting mechanism.
     pub fn decay_and_prune(&mut self, epsilon: f32, floor: f32) -> usize {
+        if epsilon <= 0.0 {
+            return 0;
+        }
         let mut pruned = 0;
         self.terminals.retain_mut(|t| {
             if t.consolidation >= Self::CONSOLIDATION_LOCK {
@@ -749,5 +752,22 @@ mod terminal_index_tests {
             "terminal Vec released, held {} slots",
             n.terminals.capacity(),
         );
+    }
+
+    /// Item 7eea7f21: a terminal taught once survives a corpus larger than
+    /// the old 7,822-tick decay horizon when decay is disabled (decay_rate 0.0).
+    #[test]
+    fn a_one_shot_terminal_survives_past_the_decay_horizon_when_decay_is_zero() {
+        let mut n = atom();
+        n.reinforce_terminal(NeuronRef::new(1, 0), 0.5, 1, 4.0);
+        assert_eq!(n.terminals.len(), 1);
+        assert!(n.terminals[0].consolidation < Neuron::CONSOLIDATION_LOCK);
+        // Taught once (consolidation 1 < CONSOLIDATION_LOCK 3).
+        // At 11,904 ticks (scale 64, well past the old 7,822 tick horizon),
+        // with decay_rate 0.0, no terminals prune and weight stays 0.5.
+        let pruned = n.apply_pending_decay(1 + 11904, 0.0, 0.01);
+        assert_eq!(pruned, 0, "decay_rate 0.0 must never prune terminals");
+        assert_eq!(n.terminals.len(), 1, "terminal must survive a corpus larger than 7,822 ticks");
+        assert_eq!(n.terminals[0].weight, 0.5);
     }
 }

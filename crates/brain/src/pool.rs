@@ -1458,7 +1458,7 @@ impl PoolConfig {
             pretrain_emergence_max_run: default_pretrain_emergence_max_run(),
             concept_emergence_threshold: 3,
             max_weight: 4.0,
-            decay_rate: 0.0005,
+            decay_rate: 0.0,
             prune_floor: 0.01,
             plasticity_baseline: 0.1,
             sparsity_mode: ControlMode::Constant(1.0),
@@ -4661,6 +4661,10 @@ impl Pool {
     pub fn tick_housekeeping_lazy(&mut self, current_tick: u64) {
         let decay = self.config.decay_rate;
         let floor = self.config.prune_floor;
+        if decay <= 0.0 {
+            self.apply_heterosynaptic_ltd(current_tick);
+            return;
+        }
         // Clone the firing set so we can mutate neurons while iterating.
         let firing_ids: Vec<NeuronId> = self.currently_firing.iter().copied().collect();
         let mut total_pruned: usize = 0;
@@ -4676,6 +4680,10 @@ impl Pool {
     pub fn tick_housekeeping(&mut self, current_tick: u64) {
         let decay = self.config.decay_rate;
         let floor = self.config.prune_floor;
+        if decay <= 0.0 {
+            self.apply_heterosynaptic_ltd(current_tick);
+            return;
+        }
         let mut total_pruned: usize = 0;
         for n in self.neurons.iter_mut() {
             total_pruned += n.decay_and_prune(decay, floor);

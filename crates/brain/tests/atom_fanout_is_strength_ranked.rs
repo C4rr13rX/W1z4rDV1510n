@@ -239,51 +239,37 @@ fn cap_zero_is_unbounded() {
 /// The terminals decay spares are the ones taught three or more times; the
 /// ones it deletes are the few-shot ones docs/TEACHING_BENCHMARK.md is about.
 ///
-/// This test does not assert that behaviour is CORRECT -- it is not, and
-/// backlog item 7eea7f21 is the fix. It asserts the horizon, so that anyone
-/// moving `decay_rate` or `prune_floor` is told in one line what it does to
-/// one-shot retention, and so the fix has a pin to flip.
+/// THE DECAY HORIZON PIN, flipped for item 7eea7f21.
+///
+/// With `PoolConfig::defaults` setting `decay_rate = 0.0`, a terminal taught
+/// once (consolidation 1, not locked) survives a corpus larger than 7,822 ticks
+/// (tested at scale 64: 11,904 ticks) without being deleted.
 #[test]
-fn a_one_shot_terminal_is_deleted_once_the_corpus_exceeds_the_decay_horizon() {
-    const DECAY: f32 = 0.0005; // PoolConfig::defaults
-    const FLOOR: f32 = 0.01; //  PoolConfig::defaults
-    let horizon = (FLOOR / 0.5f32).ln() / (1.0 - DECAY).ln();
-    assert!(
-        (horizon - 7822.1).abs() < 0.5,
-        "the horizon arithmetic moved: {horizon}"
-    );
+fn a_terminal_taught_once_survives_a_corpus_larger_than_7822_ticks() {
+    let cfg = w1z4rd_brain::pool::PoolConfig::defaults("test", 1);
+    assert_eq!(cfg.decay_rate, 0.0, "decay_rate defaults to 0.0 under item 7eea7f21");
+    let floor = cfg.prune_floor;
 
     // Taught once, then a corpus of 2,976 further facts (scale 16).
     let mut survives = atom();
     survives.reinforce_terminal_bounded(target(0), 0.5, 1, 4.0, 0);
-    survives.apply_pending_decay(1, DECAY, FLOOR); // bootstrap the decay clock
-    let pruned = survives.apply_pending_decay(1 + 2976, DECAY, FLOOR);
-    assert_eq!(pruned, 0, "scale 16 is 0.38 of the horizon; nothing should prune");
+    survives.apply_pending_decay(1, cfg.decay_rate, floor); // bootstrap the decay clock
+    let pruned = survives.apply_pending_decay(1 + 2976, cfg.decay_rate, floor);
+    assert_eq!(pruned, 0, "scale 16: nothing should prune");
     assert_eq!(survives.terminals.len(), 1);
-    let w = survives.terminals[0].weight;
-    assert!(
-        // f64 says 0.11286991652; the tolerance is for f32 `powi` drift over
-        // 2,976 multiplications, not for uncertainty about the value.
-        (w - 0.112870).abs() < 1e-3,
-        "weight after 2,976 ticks is {w}, expected 0.112870"
-    );
+    assert_eq!(survives.terminals[0].weight, 0.5);
 
-    // The same terminal, a corpus of 11,904 facts (scale 64). 1.52x the
-    // horizon, so it is gone.
-    let mut deleted = atom();
-    deleted.reinforce_terminal_bounded(target(0), 0.5, 1, 4.0, 0);
-    deleted.apply_pending_decay(1, DECAY, FLOOR);
-    let pruned = deleted.apply_pending_decay(1 + 11904, DECAY, FLOOR);
-    assert_eq!(pruned, 1, "scale 64 is 1.52x the horizon; the terminal should be gone");
-    assert!(
-        deleted.terminals.is_empty(),
-        "a fact taught once survived 11,904 ticks: {:?}",
-        deleted.terminals
-    );
+    // The same terminal, a corpus of 11,904 facts (scale 64). Exceeds 7,822
+    // ticks; with decay disabled it survives at full weight.
+    let mut past_horizon = atom();
+    past_horizon.reinforce_terminal_bounded(target(0), 0.5, 1, 4.0, 0);
+    past_horizon.apply_pending_decay(1, cfg.decay_rate, floor);
+    let pruned = past_horizon.apply_pending_decay(1 + 11904, cfg.decay_rate, floor);
+    assert_eq!(pruned, 0, "scale 64 is 11,904 ticks (> 7,822); terminal must survive");
+    assert_eq!(past_horizon.terminals.len(), 1);
+    assert_eq!(past_horizon.terminals[0].weight, 0.5);
 
-    // Taught three times, so consolidation-locked: exempt at any corpus size.
-    // This is the 100 %-recall anchor and the reason recall stays 100.0 at
-    // scale 64 while integration falls -- recall's terminals are locked.
+    // Taught three times: consolidation-locked, exempt at any corpus size.
     let mut locked = atom();
     locked.reinforce_terminal_bounded(target(0), 0.5, 1, 4.0, 0);
     for tick in 2..=4u64 {
@@ -295,8 +281,8 @@ fn a_one_shot_terminal_is_deleted_once_the_corpus_exceeds_the_decay_horizon() {
         locked.terminals[0].consolidation,
         Neuron::CONSOLIDATION_LOCK
     );
-    locked.apply_pending_decay(4, DECAY, FLOOR);
-    let pruned = locked.apply_pending_decay(4 + 11904, DECAY, FLOOR);
+    locked.apply_pending_decay(4, cfg.decay_rate, floor);
+    let pruned = locked.apply_pending_decay(4 + 11904, cfg.decay_rate, floor);
     assert_eq!(pruned, 0, "a consolidation-locked terminal was pruned");
     assert_eq!(locked.terminals.len(), 1);
 }
