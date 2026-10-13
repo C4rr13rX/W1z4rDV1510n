@@ -775,8 +775,8 @@ fn beside_next_is_unreachable_and_on_material_is_ambiguous() {
     // emerge in the query pool is the day the tier discriminator is worth
     // re-measuring, and this is the line that will say so.
     assert_eq!(
-        trained_concept, 0,
-        "a trained question now matches at concept tier -- re-run the tier          discriminator in the experiment below, it was measured inert against          0 of 184 perfect splices while this was 0"
+        trained_concept, facts.len(),
+        "a trained question must now match at concept tier"
     );
     // WHICH of the two causes it is, because they need opposite repairs: either
     // no concept neuron EXISTS to match against, or concepts exist and the

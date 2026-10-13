@@ -1242,6 +1242,7 @@ pub struct Brain {
     /// refusing every ceiling rewrite rather than to admitting them. That
     /// loses derivations and invents none, which is the safe direction.
     trained_frames: ahash::AHashSet<u64>,
+    trained_episode_bindings: ahash::AHashMap<u64, NeuronId>,
     /// What the derivation has SPENT, cumulative over this brain's life.
     derivation_stats: DerivationStats,
     /// Posting-cap saturation, per key kind. See [`PostingCapCounters`].
@@ -1807,6 +1808,7 @@ impl Brain {
             derivation_cut_hints: Vec::new(),
             derivation_splice_hints: Vec::new(),
             trained_frames: ahash::AHashSet::new(),
+            trained_episode_bindings: ahash::AHashMap::new(),
             derivation_stats: DerivationStats::default(),
             posting_caps: PostingCapCounters::default(),
         }
@@ -2284,6 +2286,19 @@ impl Brain {
         h
     }
 
+    fn episode_digest(frames: &[(PoolId, Vec<u8>)]) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for (pool_id, frame) in frames {
+            for b in pool_id.to_le_bytes().iter().chain(frame.iter()) {
+                h ^= *b as u64;
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            h ^= 0xff;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        h
+    }
+
     /// Was this exact frame ever TAUGHT to this brain in this pool?
     ///
     /// The question [`Self::best_binding_match_v2`] cannot answer: a score of
@@ -2376,7 +2391,10 @@ impl Brain {
         // generation scans caused multi-second random-read tails for novel
         // episodes even though the one required lifetime lookup took only
         // milliseconds.
-        let existing = if lifetime > 1 {
+        let ep_digest = Self::episode_digest(frames);
+        let existing = if let Some(&ep_binding_id) = self.trained_episode_bindings.get(&ep_digest) {
+            Some(ep_binding_id)
+        } else if lifetime > 1 {
             self.existing_binding_id(&fingerprint)
         } else {
             None
@@ -2384,12 +2402,19 @@ impl Brain {
         profile.binding_lookup_ns = stage.elapsed().as_nanos() as u64;
         let stage = std::time::Instant::now();
         let id = if let Some(id) = existing {
+            let members: Vec<NeuronRef> = fingerprint
+                .members_per_pool()
+                .iter()
+                .flat_map(|(pid, ns)| ns.iter().map(|&nid| NeuronRef::new(*pid, nid)))
+                .collect();
             if let Some(binding_pool) = self.fabric.pool(self.binding_pool_id) {
                 if let Some(neuron) = binding_pool.write().get_mut(id) {
                     neuron.use_count = neuron.use_count.saturating_add(1);
                     neuron.last_fired_tick = now;
+                    neuron.members = members.clone();
                 }
             }
+            self.index_binding_members(id, &members);
             id
         } else {
             let Some(id) = self.promote_binding_concept(&fingerprint) else {
@@ -2399,6 +2424,7 @@ impl Brain {
             self.tentative_promoted.insert(fingerprint, id);
             self.tentative_binding_count_total =
                 self.tentative_binding_count_total.saturating_add(1);
+            self.trained_episode_bindings.insert(ep_digest, id);
             id
         };
         profile.binding_write_ns = stage.elapsed().as_nanos() as u64;
@@ -3284,15 +3310,12 @@ impl Brain {
             let Some(pool) = self.fabric.pool(member.pool) else {
                 continue;
             };
-            if pool
-                .read()
-                .get(member.neuron)
-                .is_some_and(|neuron| neuron.is_atom())
-            {
+            let pool_read = pool.read();
+            if let Some(leaves) = pool_read.expand_to_atom_leaves_bounded(&[member.neuron], 512) {
                 atom_sequences
                     .entry(member.pool)
                     .or_default()
-                    .push(member.neuron);
+                    .extend(leaves);
             }
         }
         for (&query_pool, sequence) in &atom_sequences {
@@ -5336,7 +5359,12 @@ impl Brain {
                     if m.pool == query_pool {
                         match q.get(m.neuron) {
                             Some(qn) if qn.is_atom() => bind_q_atoms.push(m.neuron),
-                            Some(_) => bind_q_concepts.push(m.neuron),
+                            Some(_) => {
+                                bind_q_concepts.push(m.neuron);
+                                if let Some(leaves) = q.expand_to_atom_leaves_bounded(&[m.neuron], 512) {
+                                    bind_q_atoms.extend(leaves);
+                                }
+                            }
                             None => {}
                         }
                     } else if m.pool == target_pool {
@@ -5566,16 +5594,7 @@ impl Brain {
             ensure_neuron_trees_loaded(&mut target_handle.write(), &roots);
         }
         let t = target_handle.read();
-        let target_atoms: Vec<NeuronRef> = target_members
-            .iter()
-            .filter(|m| t.get(m.neuron).is_some_and(|n| n.is_atom()))
-            .copied()
-            .collect();
-        let bytes = if target_atoms.is_empty() {
-            t.decode_concept_members(&target_members)
-        } else {
-            t.decode_concept_members(&target_atoms)
-        };
+        let bytes = t.decode_concept_members(&target_members);
         drop(t);
 
         if bytes.is_empty() { None } else { Some(bytes) }
@@ -5715,6 +5734,9 @@ impl Brain {
                         Some(n) if n.is_atom() => member_atoms.push(member.neuron),
                         Some(_) => {
                             member_concepts.insert(member.neuron);
+                            if let Some(leaves) = pool.expand_to_atom_leaves_bounded(&[member.neuron], 512) {
+                                member_atoms.extend(leaves);
+                            }
                         }
                         None => {}
                     }
@@ -5797,16 +5819,7 @@ impl Brain {
             .filter(|m| m.pool == target_pool)
             .copied()
             .collect();
-        let atoms: Vec<NeuronRef> = members
-            .iter()
-            .filter(|m| target.get(m.neuron).is_some_and(|n| n.is_atom()))
-            .copied()
-            .collect();
-        let bytes = if atoms.is_empty() {
-            target.decode_concept_members(&members)
-        } else {
-            target.decode_concept_members(&atoms)
-        };
+        let bytes = target.decode_concept_members(&members);
         if bytes.is_empty() {
             None
         } else {
@@ -6352,20 +6365,7 @@ impl Brain {
                 .filter(|member| member.pool == target_pool)
                 .copied()
                 .collect();
-            let atoms: Vec<NeuronRef> = members
-                .iter()
-                .filter(|member| {
-                    target
-                        .get(member.neuron)
-                        .is_some_and(|neuron| neuron.is_atom())
-                })
-                .copied()
-                .collect();
-            let bytes = if atoms.is_empty() {
-                target.decode_concept_members(&members)
-            } else {
-                target.decode_concept_members(&atoms)
-            };
+            let bytes = target.decode_concept_members(&members);
             if bytes.is_empty() {
                 continue;
             }
@@ -6582,20 +6582,7 @@ impl Brain {
                 .filter(|member| member.pool == target_pool)
                 .copied()
                 .collect();
-            let atoms: Vec<NeuronRef> = members
-                .iter()
-                .filter(|member| {
-                    target
-                        .get(member.neuron)
-                        .is_some_and(|neuron| neuron.is_atom())
-                })
-                .copied()
-                .collect();
-            let bytes = if atoms.is_empty() {
-                target.decode_concept_members(&members)
-            } else {
-                target.decode_concept_members(&atoms)
-            };
+            let bytes = target.decode_concept_members(&members);
             if bytes.is_empty() {
                 continue;
             }
@@ -6879,20 +6866,7 @@ impl Brain {
                 .filter(|member| member.pool == target_pool)
                 .copied()
                 .collect();
-            let atoms: Vec<NeuronRef> = members
-                .iter()
-                .filter(|member| {
-                    target
-                        .get(member.neuron)
-                        .is_some_and(|neuron| neuron.is_atom())
-                })
-                .copied()
-                .collect();
-            let bytes = if atoms.is_empty() {
-                target.decode_concept_members(&members)
-            } else {
-                target.decode_concept_members(&atoms)
-            };
+            let bytes = target.decode_concept_members(&members);
             if bytes.is_empty() {
                 continue;
             }
@@ -8040,12 +8014,6 @@ impl Brain {
                 transferred
             }
         };
-        tracing::debug!(
-            probes,
-            question = %String::from_utf8_lossy(&question),
-            answer = %String::from_utf8_lossy(&derived),
-            "derived an answer by substitution"
-        );
         let mut grounding = direct.grounding.clone();
         // Composition, not retrieval: the answer was assembled from questions
         // the brain was taught and this one was not among them.
@@ -8340,7 +8308,16 @@ impl Brain {
         if target_candidates.is_empty() {
             // Chain found nothing in target pool → return the fabric
             // attempt (which may have low confidence; honest signal).
-            return fabric_ans;
+            return if fabric_has_answer
+                && recalled_exactly
+                && fabric_ans.grounding.fabric_confidence >= fabric_confidence_threshold
+            {
+                fabric_ans
+            } else {
+                let mut rejected = fabric_ans;
+                rejected.answer = None;
+                rejected
+            };
         }
         target_candidates
             .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -10859,6 +10836,7 @@ impl Brain {
             derivation_cut_hints: Vec::new(),
             derivation_splice_hints: Vec::new(),
             trained_frames: ahash::AHashSet::new(),
+            trained_episode_bindings: ahash::AHashMap::new(),
             derivation_stats: DerivationStats::default(),
             posting_caps: PostingCapCounters::default(),
         };
@@ -11051,6 +11029,7 @@ impl Brain {
             derivation_cut_hints: Vec::new(),
             derivation_splice_hints: Vec::new(),
             trained_frames: ahash::AHashSet::new(),
+            trained_episode_bindings: ahash::AHashMap::new(),
             derivation_stats: DerivationStats::default(),
             posting_caps: PostingCapCounters::default(),
         };

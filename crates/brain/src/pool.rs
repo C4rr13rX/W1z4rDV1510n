@@ -3444,9 +3444,37 @@ impl Pool {
         self.last_observed_sequence = sequence.clone();
         profile.touch_atoms_ns = stage.elapsed().as_nanos() as u64;
         let stage = std::time::Instant::now();
-        self.emerge_concepts_from_pretrain_frame(&sequence, tick);
+        for &id in &sequence {
+            self.push_recent(id);
+            self.check_concept_emergence(tick);
+        }
+        let mut collapsed: Vec<NeuronId> = Vec::with_capacity(sequence.len());
+        for &atom in &sequence {
+            collapsed.push(atom);
+            loop {
+                let max_len = self.config.max_concept_member_count.min(8).min(collapsed.len());
+                if max_len < 2 {
+                    break;
+                }
+                let mut matched: Option<(usize, NeuronId)> = None;
+                for len in (2..=max_len).rev() {
+                    let start = collapsed.len() - len;
+                    if let Some(cid) = self.concept_id_for_sequence(&collapsed[start..]) {
+                        matched = Some((len, cid));
+                        break;
+                    }
+                }
+                let Some((len, cid)) = matched else { break };
+                collapsed.truncate(collapsed.len() - len);
+                collapsed.push(cid);
+                if let Some(neuron) = self.neurons.get_mut(cid as usize) {
+                    neuron.use_count = neuron.use_count.saturating_add(1);
+                    neuron.last_fired_tick = tick;
+                }
+            }
+        }
         profile.sequence_recurrence_ns = stage.elapsed().as_nanos() as u64;
-        (sequence, profile)
+        (collapsed, profile)
     }
 
     /// Frame-local, run-length-bounded concept emergence on the TRAINING path.
@@ -3479,6 +3507,7 @@ impl Pool {
     ///
     /// Promotion is gated on `emergence_suppressed` for exactly the reason the
     /// fire path is: answering is not learning.
+    #[allow(dead_code)]
     fn emerge_concepts_from_pretrain_frame(&mut self, sequence: &[NeuronId], tick: u64) {
         let bound = self.config.pretrain_emergence_max_run;
         if self.emergence_suppressed || bound < 2 || sequence.len() < 2 {
@@ -4331,7 +4360,7 @@ impl Pool {
     /// remains within `limit`. Mature concepts-of-concepts can represent very
     /// long repeated ancestry; eagerly materialising every flattened sequence
     /// during restore made a small checkpoint consume tens of gigabytes.
-    fn expand_to_atom_leaves_bounded(
+    pub fn expand_to_atom_leaves_bounded(
         &self,
         member_ids: &[NeuronId],
         limit: usize,
@@ -4931,7 +4960,7 @@ impl Pool {
             return;
         }
 
-        let max_len = self.config.max_concept_member_count.min(buf_len);
+        let max_len = self.config.max_concept_member_count.min(buf_len).min(8);
         let threshold = self.config.concept_emergence_threshold;
         let mut to_promote: Vec<SequenceFingerprint> = Vec::new();
 
