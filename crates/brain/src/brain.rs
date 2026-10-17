@@ -1611,13 +1611,21 @@ fn rank_bounded_binding_evidence(
     evidence: AHashMap<NeuronId, u16>,
     limit: usize,
 ) -> Vec<NeuronId> {
+    if limit == 0 {
+        return Vec::new();
+    }
     let mut ranked: Vec<_> = evidence.into_iter().collect();
-    ranked.sort_unstable_by(|(left_id, left_score), (right_id, right_score)| {
+    let cmp = |(left_id, left_score): &(NeuronId, u16),
+               (right_id, right_score): &(NeuronId, u16)| {
         right_score
             .cmp(left_score)
             .then_with(|| right_id.cmp(left_id))
-    });
-    ranked.truncate(limit);
+    };
+    if ranked.len() > limit {
+        ranked.select_nth_unstable_by(limit, cmp);
+        ranked.truncate(limit);
+    }
+    ranked.sort_unstable_by(cmp);
     ranked.into_iter().map(|(id, _)| id).collect()
 }
 
@@ -3182,19 +3190,12 @@ impl Brain {
         let binding_ref = NeuronRef::new(self.binding_pool_id, id);
         for m in &terminal_members {
             if let Some(p) = self.fabric.pool(m.pool) {
-                let mut pp = p.write();
-                let mxw = pp.config.max_weight;
-                let atom_cap = pp.config.max_atom_fanout;
-                let was_added = if let Some(n) = pp.get_mut(m.neuron) {
-                    let saturated =
-                        atom_cap > 0 && n.is_atom() && n.terminals.len() >= atom_cap;
-                    !saturated && n.reinforce_terminal(binding_ref, 0.5, now, mxw)
-                } else {
-                    false
-                };
-                if was_added {
-                    pp.total_terminals += 1;
-                }
+                p.write().reinforce_atom_terminal_keeping_overflow(
+                    m.neuron,
+                    binding_ref,
+                    0.5,
+                    now,
+                );
             }
         }
         self.index_binding_members(id, &members);
@@ -4108,6 +4109,43 @@ impl Brain {
         out
     }
 
+    fn goal_paged_binding_routes(&self, query: &Pool, sequence: &[NeuronId]) -> Vec<NeuronId> {
+        let mut seen_atoms = ahash::AHashSet::new();
+        let mut current: Option<Vec<NeuronId>> = None;
+        for &neuron_id in sequence {
+            if !seen_atoms.insert(neuron_id) {
+                continue;
+            }
+            let mut routes = query.binding_routes_from(neuron_id, self.binding_pool_id);
+            if routes.is_empty() {
+                if current.is_some() {
+                    break;
+                }
+                continue;
+            }
+            if !routes.is_sorted() {
+                routes.sort_unstable();
+            }
+            match &mut current {
+                None => {
+                    current = Some(routes);
+                }
+                Some(active) => {
+                    let next: Vec<NeuronId> = active
+                        .iter()
+                        .copied()
+                        .filter(|id| routes.binary_search(id).is_ok())
+                        .collect();
+                    if next.is_empty() {
+                        break;
+                    }
+                    *active = next;
+                }
+            }
+        }
+        current.unwrap_or_default()
+    }
+
     /// Resolve only bindings reachable from the current query state.
     ///
     /// Exact ordered-sequence postings preserve directly trained episodes,
@@ -4123,7 +4161,7 @@ impl Brain {
         let Some(query_handle) = self.fabric.pool(query_pool) else {
             return Vec::new();
         };
-        let (firing, sequence, terminal_routes) = {
+        let (firing, sequence, terminal_routes, goal_routes) = {
             let query = query_handle.read();
             let firing: Vec<NeuronId> = query.currently_firing().collect();
             let mut terminal_routes = Vec::new();
@@ -4138,11 +4176,9 @@ impl Brain {
                     );
                 }
             }
-            (
-                firing,
-                query.last_observed_sequence().to_vec(),
-                terminal_routes,
-            )
+            let sequence = query.last_observed_sequence().to_vec();
+            let goal_routes = self.goal_paged_binding_routes(&query, &sequence);
+            (firing, sequence, terminal_routes, goal_routes)
         };
 
         let mut candidates = AHashMap::new();
@@ -4152,6 +4188,17 @@ impl Brain {
                 &mut candidates,
                 self.binding_feature_postings(query_pool, neuron_id),
             );
+        }
+        if !goal_routes.is_empty() {
+            let boost: u16 = if goal_routes.len() <= MAX_ROUTED_BINDING_CANDIDATES {
+                16
+            } else {
+                1
+            };
+            for id in goal_routes {
+                let score = candidates.entry(id).or_insert(0);
+                *score = score.saturating_add(boost);
+            }
         }
         let exact = match target_pool.filter(|_| !sequence.is_empty()) {
             Some(target_pool) => {

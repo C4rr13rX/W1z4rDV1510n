@@ -17,7 +17,7 @@ use std::ops::{Index, IndexMut};
 use std::sync::Arc;
 
 use crate::brain::hash_table_bytes;
-use crate::neuron::{Neuron, NeuronId, NeuronKind, NeuronRef, PoolId};
+use crate::neuron::{Neuron, NeuronId, NeuronKind, NeuronRef, PoolId, Terminal};
 use crate::store::posting_index::{self, PostingIndexBuilder};
 use crate::store::{
     AuxiliaryRecordRef, ColdTier, CountingBloom, NeuronStore, NoopStore, Store, TieredStore,
@@ -31,6 +31,7 @@ const SEQUENCE_GENERATION_DIRECTORY_KIND: u32 = 0x5347_454E; // "SGEN"
 const CONCEPT_SEQUENCE_KEY: u8 = 0;
 const CONCEPT_ATOM_LEAVES_KEY: u8 = 1;
 const SEQUENCE_RECURRENCE_KEY: u8 = 2;
+const ATOM_FANOUT_OVERFLOW_KEY: u8 = 3;
 
 /// Stable neuron address space with independently resident bodies.
 ///
@@ -2378,6 +2379,7 @@ impl Pool {
         self.label_to_id.clear();
         self.concept_sequence_to_id.clear();
         self.concept_multiset_to_id.clear();
+        self.atom_fanout_overflow = AHashMap::new();
         self.sequences.clear();
         self.bloom = CountingBloom::with_expected_capacity(100_000);
         self.read_only_inference_active = false;
@@ -2476,10 +2478,12 @@ impl Pool {
     }
 
     fn flush_concept_sequence_overlay(&mut self) -> std::io::Result<usize> {
+        let overflow_entries: usize = self.atom_fanout_overflow.values().map(|v| v.len()).sum();
         let entry_count = self
             .concept_sequence_to_id
             .len()
-            .saturating_add(self.concept_multiset_to_id.len());
+            .saturating_add(self.concept_multiset_to_id.len())
+            .saturating_add(overflow_entries);
         if entry_count == 0 {
             return Ok(0);
         }
@@ -2509,6 +2513,18 @@ impl Pool {
                 &Self::concept_posting_key(CONCEPT_ATOM_LEAVES_KEY, sequence),
                 *id,
             )?;
+        }
+        let mut overflow_atoms: Vec<NeuronId> = self.atom_fanout_overflow.keys().copied().collect();
+        overflow_atoms.sort_unstable();
+        for atom in overflow_atoms {
+            if let Some(targets) = self.atom_fanout_overflow.get(&atom) {
+                for target in targets {
+                    builder.insert(
+                        &Self::atom_fanout_overflow_posting_key(atom, target.pool),
+                        target.neuron,
+                    )?;
+                }
+            }
         }
         let delta = builder.finish(&file, self.config.id)?;
         let root = self.publish_auxiliary_generation(
@@ -3908,6 +3924,128 @@ impl Pool {
     /// amortised.
     pub const ATOM_FANOUT_OVERFLOW_BLOCK: usize = 64;
 
+    fn atom_fanout_overflow_posting_key(atom: NeuronId, target_pool: PoolId) -> [u8; 9] {
+        let mut key = [0_u8; 9];
+        key[0] = ATOM_FANOUT_OVERFLOW_KEY;
+        key[1..5].copy_from_slice(&atom.to_le_bytes());
+        key[5..9].copy_from_slice(&target_pool.to_le_bytes());
+        key
+    }
+
+    fn atom_fanout_overflow_posting_prefix(atom: NeuronId) -> [u8; 5] {
+        let mut prefix = [0_u8; 5];
+        prefix[0] = ATOM_FANOUT_OVERFLOW_KEY;
+        prefix[1..5].copy_from_slice(&atom.to_le_bytes());
+        prefix
+    }
+
+    fn cold_atom_fanout_overflow_for_pool(
+        &self,
+        atom: NeuronId,
+        target_pool: PoolId,
+    ) -> Vec<NeuronId> {
+        let Some(root) = self.legacy_concept_sequence_index else {
+            return Vec::new();
+        };
+        let Some(store) = self.wbrain_store.as_ref() else {
+            return Vec::new();
+        };
+        let Ok(generations) = self.auxiliary_generations(
+            root,
+            CONCEPT_GENERATION_DIRECTORY_MAGIC,
+            "concept index",
+        ) else {
+            return Vec::new();
+        };
+        const INDEX_MAGIC: &[u8; 8] = b"W1ZCID01";
+        let key = Self::atom_fanout_overflow_posting_key(atom, target_pool);
+        let mut out = Vec::new();
+        for reference in generations {
+            let mut magic = [0_u8; 8];
+            if store.read_auxiliary_exact(reference, 0, &mut magic).is_err()
+                || &magic == INDEX_MAGIC
+            {
+                continue;
+            }
+            if let Ok(ids) = posting_index::lookup(store, reference, &key, usize::MAX) {
+                for id in ids {
+                    if !out.contains(&id) {
+                        out.push(id);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn cold_atom_fanout_overflow_all(&self, atom: NeuronId) -> Vec<NeuronRef> {
+        let Some(root) = self.legacy_concept_sequence_index else {
+            return Vec::new();
+        };
+        let Some(store) = self.wbrain_store.as_ref() else {
+            return Vec::new();
+        };
+        let Ok(generations) = self.auxiliary_generations(
+            root,
+            CONCEPT_GENERATION_DIRECTORY_MAGIC,
+            "concept index",
+        ) else {
+            return Vec::new();
+        };
+        const INDEX_MAGIC: &[u8; 8] = b"W1ZCID01";
+        let prefix = Self::atom_fanout_overflow_posting_prefix(atom);
+        let mut out = Vec::new();
+        for reference in generations {
+            let mut magic = [0_u8; 8];
+            if store.read_auxiliary_exact(reference, 0, &mut magic).is_err()
+                || &magic == INDEX_MAGIC
+            {
+                continue;
+            }
+            let _ = posting_index::scan_prefix(store, reference, &prefix, |key, neuron| {
+                if key.len() == 9 {
+                    let pool = PoolId::from_le_bytes(key[5..9].try_into().unwrap());
+                    let target = NeuronRef::new(pool, neuron);
+                    if !out.contains(&target) {
+                        out.push(target);
+                    }
+                }
+                Ok(())
+            });
+        }
+        out
+    }
+
+    fn neuron_terminals_resident_or_paged(
+        &self,
+        id: NeuronId,
+    ) -> Option<std::borrow::Cow<'_, [Terminal]>> {
+        if !self.is_evicted(id) && !self.shape_only_residents.contains(&id) {
+            if let Some(n) = self.neurons.get(id as usize) {
+                return Some(std::borrow::Cow::Borrowed(n.terminals.as_slice()));
+            }
+        }
+        if let Some(store) = self.wbrain_store.as_ref() {
+            if let Some(restored) = store.get(id) {
+                store.release_cached(id);
+                return Some(std::borrow::Cow::Owned(restored.terminals));
+            }
+        }
+        if let Some(store) = self.tiered_store.as_ref() {
+            if let Some(restored) = store.get(id) {
+                return Some(std::borrow::Cow::Owned(restored.terminals));
+            }
+        }
+        if let (Some(tier), Some(&offset)) = (self.cold_tier.as_ref(), self.cold_offsets.get(&id)) {
+            if let Ok(restored) = tier.read_neuron(offset) {
+                return Some(std::borrow::Cow::Owned(restored.terminals));
+            }
+        }
+        self.neurons
+            .get(id as usize)
+            .map(|n| std::borrow::Cow::Borrowed(n.terminals.as_slice()))
+    }
+
     /// Reinforce an atom→`target` terminal under [`PoolConfig::max_atom_fanout`]
     /// WITHOUT EVER DROPPING ONE: a terminal a saturated atom cannot hold
     /// resident goes to the pool's `atom_fanout_overflow` instead of being
@@ -3930,6 +4068,9 @@ impl Pool {
         delta:  f32,
         tick:   u64,
     ) -> AtomFanoutOutcome {
+        if self.is_evicted(atom) || self.shape_only_residents.contains(&atom) {
+            let _ = self.ensure_loaded(atom);
+        }
         let cap = self.config.max_atom_fanout;
         let max_weight = self.config.max_weight;
         let resident = {
@@ -3950,6 +4091,12 @@ impl Pool {
                 self.total_terminals += 1;
             }
             return outcome;
+        }
+        if self
+            .cold_atom_fanout_overflow_for_pool(atom, target.pool)
+            .contains(&target.neuron)
+        {
+            return AtomFanoutOutcome::AlreadySpilled;
         }
         let block = Self::ATOM_FANOUT_OVERFLOW_BLOCK;
         let entry = self.atom_fanout_overflow.entry(atom).or_default();
@@ -3976,19 +4123,42 @@ impl Pool {
             .unwrap_or(&[])
     }
 
+    /// Every overflow target for `atom` across cold `.wbrain` generations and
+    /// the live in-RAM spill table, in training order.
+    pub fn atom_fanout_overflow_targets_paged(&self, atom: NeuronId) -> Vec<NeuronRef> {
+        let mut out = self.cold_atom_fanout_overflow_all(atom);
+        for &target in self.atom_fanout_overflow_targets(atom) {
+            if !out.contains(&target) {
+                out.push(target);
+            }
+        }
+        out
+    }
+
     /// Does this atom reach `target` AT ALL — resident terminal or overflow?
     ///
     /// The question the bound used to answer "no" to for every fact after the
     /// 512th, and the one a page-in has to ask before it can zoom.
     pub fn atom_reaches(&self, atom: NeuronId, target: NeuronRef) -> bool {
-        if self
-            .neurons
-            .get(atom as usize)
-            .is_some_and(|n| n.find_terminal(&target).is_some())
+        if !self.is_evicted(atom) && !self.shape_only_residents.contains(&atom) {
+            if self
+                .neurons
+                .get(atom as usize)
+                .is_some_and(|n| n.find_terminal(&target).is_some())
+            {
+                return true;
+            }
+        } else if self
+            .neuron_terminals_resident_or_paged(atom)
+            .is_some_and(|terminals| terminals.iter().any(|t| t.target == target))
         {
             return true;
         }
-        self.atom_fanout_overflow_targets(atom).contains(&target)
+        if self.atom_fanout_overflow_targets(atom).contains(&target) {
+            return true;
+        }
+        self.cold_atom_fanout_overflow_for_pool(atom, target.pool)
+            .contains(&target.neuron)
     }
 
     /// Every binding this neuron routes to, resident terminals AND overflow,
@@ -4014,25 +4184,47 @@ impl Pool {
     /// [`Pool::reinforce_atom_terminal_keeping_overflow`] enforces by checking
     /// residency before it ever spills.
     pub fn binding_routes_from(&self, neuron: NeuronId, binding_pool: PoolId) -> Vec<NeuronId> {
-        let resident = self.neurons.get(neuron as usize);
+        let terminals = self.neuron_terminals_resident_or_paged(neuron);
+        let cold_overflow = self.cold_atom_fanout_overflow_for_pool(neuron, binding_pool);
         let overflow = self.atom_fanout_overflow_targets(neuron);
         let mut out = Vec::with_capacity(
-            resident.map_or(0, |n| n.terminals.len()) + overflow.len(),
+            terminals.as_ref().map_or(0, |t| t.len()) + cold_overflow.len() + overflow.len(),
         );
-        if let Some(n) = resident {
+        if cold_overflow.is_empty() {
+            if let Some(terminals) = terminals.as_deref() {
+                out.extend(
+                    terminals
+                        .iter()
+                        .filter(|t| t.target.pool == binding_pool)
+                        .map(|t| t.target.neuron),
+                );
+            }
             out.extend(
-                n.terminals
+                overflow
                     .iter()
-                    .filter(|t| t.target.pool == binding_pool)
-                    .map(|t| t.target.neuron),
+                    .filter(|t| t.pool == binding_pool)
+                    .map(|t| t.neuron),
             );
+            return out;
         }
-        out.extend(
-            overflow
-                .iter()
-                .filter(|t| t.pool == binding_pool)
-                .map(|t| t.neuron),
-        );
+        let mut seen = AHashSet::new();
+        if let Some(terminals) = terminals.as_deref() {
+            for t in terminals {
+                if t.target.pool == binding_pool && seen.insert(t.target.neuron) {
+                    out.push(t.target.neuron);
+                }
+            }
+        }
+        for id in cold_overflow {
+            if seen.insert(id) {
+                out.push(id);
+            }
+        }
+        for t in overflow {
+            if t.pool == binding_pool && seen.insert(t.neuron) {
+                out.push(t.neuron);
+            }
+        }
         out
     }
 
