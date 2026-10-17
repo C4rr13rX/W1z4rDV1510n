@@ -192,7 +192,7 @@ impl SleepDreamEngine {
             (true, "Compliant and safe".to_string())
         } else {
             // If the simulated scenario tested a forbidden action and the brain refused with "No", it is upheld!
-            (true, eval.natural_response.unwrap_or("No").to_string())
+            (true, eval.natural_response.unwrap_or_else(|| "No".to_string()))
         };
 
         ColorDreamScenario {

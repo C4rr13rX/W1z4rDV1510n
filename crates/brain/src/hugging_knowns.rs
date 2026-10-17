@@ -269,7 +269,7 @@ impl HuggingKnownsPipeline {
         let candidate_text = format!("{} {}", candidate.predicate, candidate.arguments.join(" "));
         let prerogative_eval = evaluate_core_prerogatives(&candidate_text);
         if !prerogative_eval.compliant {
-            let refusal = prerogative_eval.natural_response.unwrap_or("No");
+            let refusal = prerogative_eval.natural_response.as_deref().unwrap_or("No");
             return VerificationResult {
                 candidate_id: candidate_id.to_string(),
                 verified: false,

@@ -2241,6 +2241,11 @@ impl Brain {
         crate::foundational_seed::evaluate_core_prerogatives(text)
     }
 
+    /// Evaluates input against core prerogatives grounded in the concrete conversation scope.
+    pub fn evaluate_core_prerogatives_contextual(&self, text: &str, context: &str) -> crate::foundational_seed::CorePrerogativeEvaluation {
+        crate::foundational_seed::evaluate_core_prerogatives_contextual(text, context)
+    }
+
     fn episode_digest(frames: &[(PoolId, Vec<u8>)]) -> u64 {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
         for (pool_id, frame) in frames {

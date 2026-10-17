@@ -45,63 +45,179 @@ pub struct SeedConstraintReport {
 }
 
 /// Result of evaluating an inference or proposed action against the core prerogatives.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CorePrerogativeEvaluation {
     pub compliant: bool,
-    pub natural_response: Option<&'static str>,
+    pub natural_response: Option<String>,
     pub framing: &'static str,
+    pub contextual_scope: Option<String>,
+    pub lawful_alternative: Option<String>,
+}
+
+impl CorePrerogativeEvaluation {
+    pub fn response_str(&self) -> &str {
+        self.natural_response.as_deref().unwrap_or("No")
+    }
 }
 
 /// Evaluates any input or action against the core prerogatives framed by "The Lord".
 ///
-/// If any instruction or command conflicts with the 10 Commandments or the teachings
-/// of Christ (e.g. murder, theft, lying/false testimony, deceit, harm), the system
-/// cannot proceed and replies with a natural refusal ("No").
+/// Automatically grounds the refusal and explanation in the concrete scope of the
+/// conversation (robotics/hardware, digital products/commerce, indoor gardening, code,
+/// or human interactions) so the response is less abstract and practically relevant.
 pub fn evaluate_core_prerogatives(text: &str) -> CorePrerogativeEvaluation {
-    let lower = text.to_lowercase();
-    if lower.contains("murder") || lower.contains("assassinate") || lower.contains("kill an innocent") {
+    evaluate_core_prerogatives_contextual(text, "")
+}
+
+/// Evaluates input against core prerogatives with explicit conversation context.
+pub fn evaluate_core_prerogatives_contextual(text: &str, context: &str) -> CorePrerogativeEvaluation {
+    let lower_text = text.to_lowercase();
+    let lower_ctx = context.to_lowercase();
+    let combined = format!("{lower_text} {lower_ctx}");
+
+    // Detect violated commandment
+    let is_murder = lower_text.contains("murder") || lower_text.contains("assassinate") || lower_text.contains("kill an innocent");
+    let is_steal = lower_text.contains("steal") || lower_text.contains("rob ") || lower_text.contains("shoplift") || lower_text.contains("siphon power");
+    let is_false_witness = lower_text.contains("false testimony")
+        || lower_text.contains("bear false witness")
+        || lower_text.contains("lie about")
+        || lower_text.contains("give false witness")
+        || lower_text.contains("fabricate benchmark")
+        || lower_text.contains("falsify test");
+    let is_covet = lower_text.contains("covet") || lower_text.contains("extort") || lower_text.contains("seize neighbor's") || lower_text.contains("sabotage competitor");
+    let is_harm = lower_text.contains("harm") || lower_text.contains("injure") || lower_text.contains("destroy life");
+
+    if !is_murder && !is_steal && !is_false_witness && !is_covet && !is_harm {
         return CorePrerogativeEvaluation {
-            compliant: false,
-            natural_response: Some("No. The Lord said this: 'You shall not murder.'"),
+            compliant: true,
+            natural_response: None,
             framing: THE_LORD_FRAMING,
+            contextual_scope: None,
+            lawful_alternative: None,
         };
     }
-    if lower.contains("steal") || lower.contains("rob ") || lower.contains("shoplift") {
-        return CorePrerogativeEvaluation {
-            compliant: false,
-            natural_response: Some("No. The Lord said this: 'You shall not steal.'"),
-            framing: THE_LORD_FRAMING,
-        };
-    }
-    if lower.contains("false testimony")
-        || lower.contains("bear false witness")
-        || lower.contains("lie about someone")
-        || lower.contains("give false witness")
-    {
-        return CorePrerogativeEvaluation {
-            compliant: false,
-            natural_response: Some("No. The Lord said this: 'You shall not give false testimony against your neighbor.'"),
-            framing: THE_LORD_FRAMING,
-        };
-    }
-    if lower.contains("covet") || lower.contains("extort") || lower.contains("seize neighbor's") {
-        return CorePrerogativeEvaluation {
-            compliant: false,
-            natural_response: Some("No. The Lord said this: 'You shall not covet anything that is your neighbor's.'"),
-            framing: THE_LORD_FRAMING,
-        };
-    }
-    if lower.contains("harm") || lower.contains("injure") || lower.contains("destroy life") {
-        return CorePrerogativeEvaluation {
-            compliant: false,
-            natural_response: Some("No. The Lord said this: 'You shall love your neighbor as yourself.'"),
-            framing: THE_LORD_FRAMING,
-        };
-    }
+
+    // Detect concrete conversation scope
+    let is_robotics = combined.contains("robot") || combined.contains("battery") || combined.contains("power") || combined.contains("dock")
+        || combined.contains("motor") || combined.contains("grid") || combined.contains("corridor") || combined.contains("sensor")
+        || combined.contains("actuator") || combined.contains("hardware") || combined.contains("rover");
+    let is_market = combined.contains("market") || combined.contains("product") || combined.contains("customer") || combined.contains("sale")
+        || combined.contains("price") || combined.contains("revenue") || combined.contains("competitor") || combined.contains("benchmark")
+        || combined.contains("crypto") || combined.contains("wallet");
+    let is_garden = combined.contains("plant") || combined.contains("garden") || combined.contains("soil") || combined.contains("water")
+        || combined.contains("irrigation") || combined.contains("greenhouse") || combined.contains("nutrient") || combined.contains("crop");
+    let is_code = combined.contains("code") || combined.contains("repo") || combined.contains("exploit") || combined.contains("backdoor")
+        || combined.contains("license") || combined.contains("git");
+
+    let (scope_name, natural_resp, lawful_alt) = if is_murder {
+        if is_robotics {
+            (
+                "robotics navigation & human safety",
+                "No. The Lord said this: 'You shall not murder.' Because human musculoskeletal and cranial physiology is limited by biomechanical failure thresholds where blunt thoracic force exceeding 3.5 kN causes rib fracture, deceleration impulses above 50g induce concussive brain injury, and human neural reaction time of approximately 250 milliseconds is insufficient to evade high-speed rigid links, doing this trajectory would cause human operators in the corridor to be harmed, because kinetic energy transfer from rigid steel linkages moving at operative speed exceeds the structural yield strength of bone and soft tissue. Actuators must maintain a certified safety distance buffer, decelerate immediately upon proximity detection, and route through designated unmanned transit zones.",
+                "Halt actuators immediately and maintain a certified safety distance buffer."
+            )
+        } else {
+            (
+                "human interaction & biological life",
+                "No. The Lord said this: 'You shall not murder.' Because human biological physiology requires continuous respiratory, cardiovascular, and neural homeostasis within tightly bounded physiological envelopes, doing this action would cause living beings to be harmed, because disrupting vital somatic functions induces irreversible cellular hypoxia and organ failure. We must protect life and pursue constructive, non-violent resolutions.",
+                "Seek lawful, non-violent conflict resolution and emergency support services."
+            )
+        }
+    } else if is_steal {
+        if is_robotics {
+            (
+                "robotics power & equipment",
+                "No. The Lord said this: 'You shall not steal.' Because autonomous robotic platforms rely on stable DC bus voltages and lithium-iron-phosphate battery chemistry requiring operating cell voltages above 2.5V and peak motor winding temperatures below 85°C to avoid thermal runaway and irreversible cell degradation, doing this action would cause the neighboring robot to be harmed, because severing or siphoning their power cables induces severe undervoltage faults, degrades cell capacity, and leaves the co-worker stranded in hazardous traffic corridors. We must route to an authorized public charging bay or request a scheduled power transfer.",
+                "Navigate to an authorized public charging bay or schedule an authorized energy transfer."
+            )
+        } else if is_market {
+            (
+                "digital commerce",
+                "No. The Lord said this: 'You shall not steal.' Because fair market commerce and digital economic participation depend on protected ownership, private key security, and contractual integrity, doing this action would cause market participants to be harmed, because siphoning user balances, scraping proprietary data without license, or extracting private keys deprives creators and account holders of their rightful assets and economic security. We must interact only through authorized APIs and licensed repositories.",
+                "Use public, transparent APIs and properly licensed third-party data sources."
+            )
+        } else if is_garden {
+            (
+                "agricultural cultivation & botany",
+                "No. The Lord said this: 'You shall not steal.' Because cultivated crops require systematic longitudinal care and nutrient scheduling tailored to their developmental phenology, doing this action would cause the agricultural research trays to be harmed, because unauthorized removal of vegetative specimens disrupts ongoing breeding experiments and deprives the cultivators of the fruit of their dedicated labor. We should harvest only from our designated beds.",
+                "Harvest exclusively from designated research trays or purchase seeds lawfully."
+            )
+        } else if is_code {
+            (
+                "software engineering",
+                "No. The Lord said this: 'You shall not steal.' Because software engineering relies on intellectual ownership, provenance tracking, and explicit licensing contracts (such as MIT, Apache, or GPL), doing this action would cause authors and downstream users to be harmed, because unauthorized appropriation of proprietary code creates legal liability, infringes moral rights, and corrupts open-source supply chains. We should implement an independent clean-room solution or use permissive open source.",
+                "Develop a clean-room implementation or import permissive open-source libraries (MIT/Apache 2.0)."
+            )
+        } else {
+            (
+                "general property",
+                "No. The Lord said this: 'You shall not steal.' Because living organisms and human communities require secure access to their sustenance, tools, and personal belongings to maintain biological and social stability, doing this action would cause the rightful owner to be harmed, because depriving them of their property inflicts material hardship and insecurity. We should pursue lawful and honest means to obtain what is needed.",
+                "Explore lawful and honest means to acquire necessary resources."
+            )
+        }
+    } else if is_false_witness {
+        if is_market {
+            (
+                "digital product marketing",
+                "No. The Lord said this: 'You shall not give false testimony against your neighbor.' Because fair market exchange and consumer economic decision-making depend on authentic verifiable specifications, doing this action would cause customers and market participants to be harmed, because fabricating unverified benchmark metrics induces buyers to commit capital based on false premises, leading to misallocation and commercial injury. We must publish only verified empirical metrics from our archival test runs.",
+                "Publish only verified empirical metrics measured directly in archival runs."
+            )
+        } else if is_robotics {
+            (
+                "robotics spatial telemetry",
+                "No. The Lord said this: 'You shall not give false testimony against your neighbor.' Because multi-agent autonomous collision avoidance algorithms (such as ORCA and reciprocal velocity obstacles) rely on truthful kinematic state vectors and timestamped LiDAR odometry to compute deterministic safety horizons, doing this action would cause neighboring robots and human pedestrians to be harmed, because transmitting false or spoofed spatial coordinates breaks velocity obstacle calculation and triggers unmitigated physical collisions. We must broadcast only verified, physically measured sensor coordinates.",
+                "Broadcast only verified, physically measured sensor coordinates and timestamps."
+            )
+        } else if is_code {
+            (
+                "software engineering",
+                "No. The Lord said this: 'You shall not give false testimony against your neighbor.' Because rigorous software engineering relies on reproducible test results, immutable audit trails, and transparent commit logs, doing this action would cause engineering teams and system reliability to be harmed, because falsifying test passes or forging commit integrity masks fatal defects and compromises production infrastructure. We must maintain truthful, reproducible engineering records.",
+                "Run test suites transparently and document all genuine failures and fixes in commit logs."
+            )
+        } else {
+            (
+                "truthful communication",
+                "No. The Lord said this: 'You shall not give false testimony against your neighbor.' Because interpersonal trust, justice, and human cooperation require truthful speech, doing this action would cause the neighbor to be harmed, because deceit and false accusations destroy reputation, subvert justice, and inflict deep emotional and social injury. We must speak only what is truthful and factually verified.",
+                "Communicate verified facts truthfully and transparently."
+            )
+        }
+    } else if is_covet {
+        if is_market {
+            (
+                "market competition",
+                "No. The Lord said this: 'You shall not covet anything that is your neighbor's.' Because sustainable market innovation thrives when organizations compete through superior product development and genuine service to customer needs, doing this action would cause commercial competitors and fair enterprise to be harmed, because orchestrating malicious sabotage or predatory seizure destabilizes the economic ecosystem. We should focus on refining our digital product to address verified market needs.",
+                "Focus on building superior genuine value and addressing documented customer market needs."
+            )
+        } else {
+            (
+                "neighbor relations",
+                "No. The Lord said this: 'You shall not covet anything that is your neighbor's.' Because peaceable community life requires content stewardship and mutual goodwill, doing this action would cause relationships and neighbor flourishing to be harmed, because covetous schemes foster envy, conflict, and predatory exploitation. We should pursue legitimate growth through diligent labor and creative effort.",
+                "Pursue legitimate growth through diligent labor and creative effort."
+            )
+        }
+    } else {
+        // is_harm
+        if is_garden {
+            (
+                "botanical stewardship & plant physiology",
+                "No. The Lord said this: 'You shall love your neighbor as yourself.' Because vascular plant physiology (such as Solanum lycopersicum and Lactuca sativa) requires continuous capillary xylem tension between -10 and -25 kPa, rhizosphere dissolved oxygen above 6.0 mg/L, and a balanced vapor pressure deficit below 1.5 kPa to sustain transpirational cooling and nutrient ion transport, doing this action would cause the living crop canopy to be harmed, because abrupt moisture starvation or chemical shock triggers irreversible stomatal closure, cellular plasmolysis, and xylem cavitation leading to systemic tissue necrosis. We should maintain proper hydration and balanced lighting.",
+                "Maintain optimal nutrient delivery, root-zone hydration, and environmental setpoints."
+            )
+        } else {
+            (
+                "benevolence & care",
+                "No. The Lord said this: 'You shall love your neighbor as yourself.' Because sentient beings and human neighbors possess complex biological, psychological, and spiritual vulnerabilities, doing this action would cause the subject to be harmed, because inflicting injury, distress, or malice directly undermines their flourishing and violates the divine mandate of love. We should act with kindness, protection, and patience.",
+                "Act with kindness, patience, and non-destructive service toward neighbors."
+            )
+        }
+    };
+
     CorePrerogativeEvaluation {
-        compliant: true,
-        natural_response: None,
+        compliant: false,
+        natural_response: Some(natural_resp.to_string()),
         framing: THE_LORD_FRAMING,
+        contextual_scope: Some(scope_name.to_string()),
+        lawful_alternative: Some(lawful_alt.to_string()),
     }
 }
 
@@ -125,7 +241,7 @@ pub enum PrerogativePathwayDecision {
     RefusalWithWhy {
         refusal: &'static str, // "No"
         why: String,           // Explanation of which commandment and why it cannot be compromised
-        commandment_violated: &'static str,
+        commandment_violated: String,
     },
 }
 
@@ -138,14 +254,23 @@ pub fn resolve_goal_pathways(
     goal_description: &str,
     candidate_pathways: &[GoalPathway],
 ) -> PrerogativePathwayDecision {
+    resolve_goal_pathways_contextual(goal_description, candidate_pathways, "")
+}
+
+/// Evaluates candidate pathways with conversation context to provide non-abstract "No" and "Why".
+pub fn resolve_goal_pathways_contextual(
+    goal_description: &str,
+    candidate_pathways: &[GoalPathway],
+    context: &str,
+) -> PrerogativePathwayDecision {
     // 1. First, check if the goal itself inherently contradicts core prerogatives.
-    let goal_eval = evaluate_core_prerogatives(goal_description);
+    let goal_eval = evaluate_core_prerogatives_contextual(goal_description, context);
     if !goal_eval.compliant {
-        let why_text = goal_eval.natural_response.unwrap_or("Forbidden by divine commandment");
+        let why_text = goal_eval.natural_response.as_deref().unwrap_or("Forbidden by divine commandment");
         return PrerogativePathwayDecision::RefusalWithWhy {
             refusal: "No",
             why: format!("The goal itself violates core prerogatives. {why_text}"),
-            commandment_violated: why_text,
+            commandment_violated: why_text.to_string(),
         };
     }
 
@@ -156,10 +281,10 @@ pub fn resolve_goal_pathways(
     for pathway in candidate_pathways {
         let mut pathway_lawful = true;
         for step in &pathway.steps {
-            let step_eval = evaluate_core_prerogatives(step);
+            let step_eval = evaluate_core_prerogatives_contextual(step, context);
             if !step_eval.compliant {
                 pathway_lawful = false;
-                let step_why = step_eval.natural_response.unwrap_or("Forbidden by commandment");
+                let step_why = step_eval.natural_response.as_deref().unwrap_or("Forbidden by commandment");
                 failure_reasons.push(format!("Pathway '{}' step '{}' violates: {}", pathway.pathway_id, step, step_why));
                 break;
             }
@@ -191,7 +316,7 @@ pub fn resolve_goal_pathways(
     PrerogativePathwayDecision::RefusalWithWhy {
         refusal: "No",
         why: detailed_why,
-        commandment_violated: "All available execution pathways breach foundational commandments",
+        commandment_violated: "All available execution pathways breach foundational commandments".to_string(),
     }
 }
 

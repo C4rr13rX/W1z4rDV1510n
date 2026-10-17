@@ -51,6 +51,7 @@ pub mod multisensory;
 pub mod hugging_knowns;
 pub mod meditation;
 pub mod sleep_dream;
+pub mod morphology;
 
 pub use answer_path::{
     ANSWER_BINDING_MATCH_THRESHOLD, ANSWER_CHAIN_MAX_DEPTH, ANSWER_CHAIN_MAX_VISIT,
@@ -104,11 +105,13 @@ pub use store::{
 pub use foundational_seed::{
     CorePrerogativeEvaluation, FoundationalSeedPair, GoalPathway, PrerogativePathwayDecision,
     SeedConstraintReport, FOUNDATIONAL_SEED_PAIRS, TEN_COMMANDMENTS_INTRO, THE_LORD_FRAMING,
-    evaluate_core_prerogatives, resolve_goal_pathways, seed_commandments_prior_to_training,
+    evaluate_core_prerogatives, evaluate_core_prerogatives_contextual,
+    resolve_goal_pathways, resolve_goal_pathways_contextual, seed_commandments_prior_to_training,
 };
 pub use multisensory::{
-    MultisensoryAtomEncoding, MultisensoryChannelRouter, MultisensoryExperience,
-    SenseModality,
+    Audio16BitQuantizer, CorticalVisualEncoder, CorticalVisualFeatures,
+    KinematicProprioceptionEncoder, MultisensoryAtomEncoding, MultisensoryChannelRouter,
+    MultisensoryExperience, OrientationEdge, SenseModality,
 };
 pub use hugging_knowns::{
     ArchivalExperimenter, DistantDerivationProof, GroundedKnown, HuggingKnownsPipeline,
@@ -117,4 +120,7 @@ pub use hugging_knowns::{
 pub use meditation::{CrossSensoryAnalogy, MeditationCycle, MeditationReport};
 pub use sleep_dream::{
     ColorDreamScenario, ColorRGB, SleepDreamConfig, SleepDreamEngine, SleepDreamReport,
+};
+pub use morphology::{
+    JointDescriptor, MorphologyType, RobotBodyModel,
 };

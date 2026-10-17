@@ -252,3 +252,261 @@ impl MultisensoryChannelRouter {
         self.pool_to_modality.len()
     }
 }
+
+/// 16-bit Audio Quantizer and Spectral Feature Extractor.
+///
+/// Enforces 16-bit signed PCM integer sampling [-32768, 32767] as the minimum
+/// functional resolution threshold for acoustic feature extraction (avoiding 8-bit degradation).
+#[derive(Debug, Clone, Default)]
+pub struct Audio16BitQuantizer {
+    pub sample_rate: u32,
+}
+
+impl Audio16BitQuantizer {
+    pub fn new(sample_rate: u32) -> Self {
+        Self { sample_rate }
+    }
+
+    /// Quantizes continuous f32 audio samples [-1.0, 1.0] to signed 16-bit PCM integers.
+    pub fn quantize_f32_to_pcm16(samples: &[f32]) -> Vec<i16> {
+        samples
+            .iter()
+            .map(|&s| {
+                let clamped = s.clamp(-1.0, 1.0);
+                if clamped < 0.0 {
+                    (clamped * 32768.0).round() as i16
+                } else {
+                    (clamped * 32767.0).round() as i16
+                }
+            })
+            .collect()
+    }
+
+    /// Extracts 16 discrete spectral energy sub-bands from 16-bit PCM samples.
+    pub fn extract_band_energies_16(pcm16: &[i16]) -> [i16; 16] {
+        let mut bands = [0i16; 16];
+        if pcm16.is_empty() {
+            return bands;
+        }
+        let chunk_size = (pcm16.len() / 16).max(1);
+        for (b, chunk) in pcm16.chunks(chunk_size).take(16).enumerate() {
+            let mut sum_sq = 0.0f64;
+            for &val in chunk {
+                let norm = (val as f64) / 32768.0;
+                sum_sq += norm * norm;
+            }
+            let rms = (sum_sq / (chunk.len() as f64)).sqrt();
+            bands[b] = ((rms.min(1.0)) * 32767.0).round() as i16;
+        }
+        bands
+    }
+
+    /// Converts 16 spectral bands into discrete atom tokens.
+    pub fn atomize_bands(bands: &[i16; 16]) -> Vec<String> {
+        let mut atoms = Vec::with_capacity(17);
+        atoms.push("aud:modality".to_string());
+        for (idx, &energy) in bands.iter().enumerate() {
+            let quantized_bin = ((energy.max(0) as u32 * 255) / 32767) as u8;
+            atoms.push(format!("aud:b{idx:02x}:v{quantized_bin:02x}"));
+        }
+        atoms
+    }
+}
+
+/// A sparse orientation edge token emulating Hubel & Wiesel primary visual cortex (V1) simple cells.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct OrientationEdge {
+    pub x: usize,
+    pub y: usize,
+    pub angle_deg: u16, // 0, 45, 90, 135
+    pub magnitude: u8,
+}
+
+/// Output of biological cortical visual processing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CorticalVisualFeatures {
+    pub dominant_color_vga: u8,
+    pub sparse_edges: Vec<OrientationEdge>,
+    pub compression_ratio: f32,
+    pub atoms: Vec<String>,
+}
+
+/// Cortical Visual Encoder combining VGA 256-color palette quantization with
+/// biological orientation-selective edge filters (angles of light: 0°, 45°, 90°, 135°).
+#[derive(Debug, Clone, Default)]
+pub struct CorticalVisualEncoder;
+
+impl CorticalVisualEncoder {
+    /// Quantizes RGB to an 8-bit VGA 256-color palette index.
+    pub fn rgb_to_vga256(r: u8, g: u8, b: u8) -> u8 {
+        let diff = (r as i32 - g as i32).abs().max((r as i32 - b as i32).abs()).max((g as i32 - b as i32).abs());
+        if diff < 12 {
+            let avg = ((r as u32 + g as u32 + b as u32) / 3) as u8;
+            let gray_idx = ((avg as u32 * 23) / 255).min(23) as u8;
+            232 + gray_idx
+        } else {
+            let r6 = ((r as u32 * 5) / 255).min(5) as u8;
+            let g6 = ((g as u32 * 5) / 255).min(5) as u8;
+            let b6 = ((b as u32 * 5) / 255).min(5) as u8;
+            16 + 36 * r6 + 6 * g6 + b6
+        }
+    }
+
+    /// Processes a 2D image buffer into sparse Hubel-Wiesel orientation angles of light
+    /// and VGA 256-color palette atoms, discarding flat uniform areas.
+    pub fn process_frame(
+        width: usize,
+        height: usize,
+        rgba_or_rgb: &[u8],
+        channels: usize,
+        contrast_threshold: f32,
+    ) -> CorticalVisualFeatures {
+        let total_pixels = width * height;
+        if total_pixels == 0 || rgba_or_rgb.len() < total_pixels * channels {
+            return CorticalVisualFeatures {
+                dominant_color_vga: 0,
+                sparse_edges: Vec::new(),
+                compression_ratio: 1.0,
+                atoms: Vec::new(),
+            };
+        }
+
+        let mut luminance = vec![0.0f32; total_pixels];
+        let mut color_histogram = [0u32; 256];
+
+        for y in 0..height {
+            for x in 0..width {
+                let p_idx = y * width + x;
+                let src_idx = p_idx * channels;
+                let r = rgba_or_rgb[src_idx];
+                let g = rgba_or_rgb[src_idx + 1];
+                let b = rgba_or_rgb[src_idx + 2];
+
+                luminance[p_idx] = 0.299 * (r as f32) + 0.587 * (g as f32) + 0.114 * (b as f32);
+                let vga = Self::rgb_to_vga256(r, g, b);
+                color_histogram[vga as usize] += 1;
+            }
+        }
+
+        // Find dominant palette color
+        let mut dominant_color = 0u8;
+        let mut max_count = 0u32;
+        for (c, &cnt) in color_histogram.iter().enumerate() {
+            if cnt > max_count {
+                max_count = cnt;
+                dominant_color = c as u8;
+            }
+        }
+
+        // Sobel edge filtering for orientation angles of light
+        let mut sparse_edges = Vec::new();
+        let mut atoms = Vec::new();
+        atoms.push("vis:modality".to_string());
+        atoms.push(format!("vis:pal256:{dominant_color:02x}"));
+
+        for y in 1..height.saturating_sub(1) {
+            for x in 1..width.saturating_sub(1) {
+                let gx = -luminance[(y - 1) * width + (x - 1)]
+                    + luminance[(y - 1) * width + (x + 1)]
+                    - 2.0 * luminance[y * width + (x - 1)]
+                    + 2.0 * luminance[y * width + (x + 1)]
+                    - luminance[(y + 1) * width + (x - 1)]
+                    + luminance[(y + 1) * width + (x + 1)];
+
+                let gy = -luminance[(y - 1) * width + (x - 1)]
+                    - 2.0 * luminance[(y - 1) * width + x]
+                    - luminance[(y - 1) * width + (x + 1)]
+                    + luminance[(y + 1) * width + (x - 1)]
+                    + 2.0 * luminance[(y + 1) * width + x]
+                    + luminance[(y + 1) * width + (x + 1)];
+
+                let mag = (gx * gx + gy * gy).sqrt();
+                if mag >= contrast_threshold {
+                    // Orientation of the light bar/edge is perpendicular to the spatial gradient
+                    let mut edge_rad = gy.atan2(gx) + std::f32::consts::FRAC_PI_2;
+                    while edge_rad < 0.0 {
+                        edge_rad += std::f32::consts::PI;
+                    }
+                    while edge_rad >= std::f32::consts::PI {
+                        edge_rad -= std::f32::consts::PI;
+                    }
+                    let deg = edge_rad.to_degrees();
+
+                    let discrete_angle = if deg >= 22.5 && deg < 67.5 {
+                        45
+                    } else if deg >= 67.5 && deg < 112.5 {
+                        90
+                    } else if deg >= 112.5 && deg < 157.5 {
+                        135
+                    } else {
+                        0
+                    };
+
+                    let mag_u8 = mag.min(255.0) as u8;
+                    sparse_edges.push(OrientationEdge {
+                        x,
+                        y,
+                        angle_deg: discrete_angle,
+                        magnitude: mag_u8,
+                    });
+
+                    // Emit spatial orientation atom
+                    let norm_x = ((x as f32 / width as f32) * 16.0) as u8;
+                    let norm_y = ((y as f32 / height as f32) * 16.0) as u8;
+                    atoms.push(format!("vis:e:a{discrete_angle:03}:x{norm_x:01x}y{norm_y:01x}"));
+                }
+            }
+        }
+
+        let raw_bytes = (total_pixels * channels) as f32;
+        let compressed_bytes = (3 + sparse_edges.len() * 4).max(1) as f32;
+        let compression_ratio = raw_bytes / compressed_bytes;
+
+        CorticalVisualFeatures {
+            dominant_color_vga: dominant_color,
+            sparse_edges,
+            compression_ratio,
+            atoms,
+        }
+    }
+}
+
+/// Proprioceptive Kinematic Encoder for normalizing joint angles and torques into 16-bit seed representations.
+#[derive(Debug, Clone, Default)]
+pub struct KinematicProprioceptionEncoder;
+
+impl KinematicProprioceptionEncoder {
+    /// Normalizes joint angle [-PI, PI] and torque [-maxTorque, maxTorque] into 16-bit signed values.
+    pub fn quantize(angle_rad: f32, torque_nm: f32, max_torque_nm: f32) -> (i16, i16) {
+        let norm_angle = (angle_rad / std::f32::consts::PI).clamp(-1.0, 1.0);
+        let q_angle = if norm_angle < 0.0 {
+            (norm_angle * 32768.0).round() as i16
+        } else {
+            (norm_angle * 32767.0).round() as i16
+        };
+
+        let q_torque = if max_torque_nm > 0.0 {
+            let norm_torque = (torque_nm / max_torque_nm).clamp(-1.0, 1.0);
+            if norm_torque < 0.0 {
+                (norm_torque * 32768.0).round() as i16
+            } else {
+                (norm_torque * 32767.0).round() as i16
+            }
+        } else {
+            0
+        };
+
+        (q_angle, q_torque)
+    }
+
+    /// Converts normalized joint values into discrete kinematic atom tokens.
+    pub fn atomize_joint(joint_id: &str, q_angle: i16, q_torque: i16) -> Vec<String> {
+        let angle_bin = (((q_angle as i32 + 32768) * 255) / 65535) as u8;
+        let torque_bin = (((q_torque as i32 + 32768) * 255) / 65535) as u8;
+        vec![
+            "kin:modality".to_string(),
+            format!("kin:j{joint_id}:a{angle_bin:02x}:t{torque_bin:02x}"),
+        ]
+    }
+}
+
