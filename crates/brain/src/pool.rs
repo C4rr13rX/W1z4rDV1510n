@@ -3444,37 +3444,9 @@ impl Pool {
         self.last_observed_sequence = sequence.clone();
         profile.touch_atoms_ns = stage.elapsed().as_nanos() as u64;
         let stage = std::time::Instant::now();
-        for &id in &sequence {
-            self.push_recent(id);
-            self.check_concept_emergence(tick);
-        }
-        let mut collapsed: Vec<NeuronId> = Vec::with_capacity(sequence.len());
-        for &atom in &sequence {
-            collapsed.push(atom);
-            loop {
-                let max_len = self.config.max_concept_member_count.min(8).min(collapsed.len());
-                if max_len < 2 {
-                    break;
-                }
-                let mut matched: Option<(usize, NeuronId)> = None;
-                for len in (2..=max_len).rev() {
-                    let start = collapsed.len() - len;
-                    if let Some(cid) = self.concept_id_for_sequence(&collapsed[start..]) {
-                        matched = Some((len, cid));
-                        break;
-                    }
-                }
-                let Some((len, cid)) = matched else { break };
-                collapsed.truncate(collapsed.len() - len);
-                collapsed.push(cid);
-                if let Some(neuron) = self.neurons.get_mut(cid as usize) {
-                    neuron.use_count = neuron.use_count.saturating_add(1);
-                    neuron.last_fired_tick = tick;
-                }
-            }
-        }
+        self.emerge_concepts_from_pretrain_frame(&sequence, tick);
         profile.sequence_recurrence_ns = stage.elapsed().as_nanos() as u64;
-        (collapsed, profile)
+        (sequence, profile)
     }
 
     /// Frame-local, run-length-bounded concept emergence on the TRAINING path.

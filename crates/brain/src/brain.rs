@@ -5819,7 +5819,20 @@ impl Brain {
             .filter(|m| m.pool == target_pool)
             .copied()
             .collect();
-        let bytes = target.decode_concept_members(&members);
+        let atoms: Vec<NeuronRef> = members
+            .iter()
+            .filter(|member| {
+                target
+                    .get(member.neuron)
+                    .is_some_and(|neuron| neuron.is_atom())
+            })
+            .copied()
+            .collect();
+        let bytes = if atoms.is_empty() {
+            target.decode_concept_members(&members)
+        } else {
+            target.decode_concept_members(&atoms)
+        };
         if bytes.is_empty() {
             None
         } else {
@@ -6365,7 +6378,20 @@ impl Brain {
                 .filter(|member| member.pool == target_pool)
                 .copied()
                 .collect();
-            let bytes = target.decode_concept_members(&members);
+            let atoms: Vec<NeuronRef> = members
+                .iter()
+                .filter(|member| {
+                    target
+                        .get(member.neuron)
+                        .is_some_and(|neuron| neuron.is_atom())
+                })
+                .copied()
+                .collect();
+            let bytes = if atoms.is_empty() {
+                target.decode_concept_members(&members)
+            } else {
+                target.decode_concept_members(&atoms)
+            };
             if bytes.is_empty() {
                 continue;
             }
@@ -6582,7 +6608,20 @@ impl Brain {
                 .filter(|member| member.pool == target_pool)
                 .copied()
                 .collect();
-            let bytes = target.decode_concept_members(&members);
+            let atoms: Vec<NeuronRef> = members
+                .iter()
+                .filter(|member| {
+                    target
+                        .get(member.neuron)
+                        .is_some_and(|neuron| neuron.is_atom())
+                })
+                .copied()
+                .collect();
+            let bytes = if atoms.is_empty() {
+                target.decode_concept_members(&members)
+            } else {
+                target.decode_concept_members(&atoms)
+            };
             if bytes.is_empty() {
                 continue;
             }
@@ -6866,7 +6905,20 @@ impl Brain {
                 .filter(|member| member.pool == target_pool)
                 .copied()
                 .collect();
-            let bytes = target.decode_concept_members(&members);
+            let atoms: Vec<NeuronRef> = members
+                .iter()
+                .filter(|member| {
+                    target
+                        .get(member.neuron)
+                        .is_some_and(|neuron| neuron.is_atom())
+                })
+                .copied()
+                .collect();
+            let bytes = if atoms.is_empty() {
+                target.decode_concept_members(&members)
+            } else {
+                target.decode_concept_members(&atoms)
+            };
             if bytes.is_empty() {
                 continue;
             }
