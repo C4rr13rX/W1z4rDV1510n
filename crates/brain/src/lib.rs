@@ -47,6 +47,10 @@ pub mod crystallizer;
 pub mod code_repair;
 pub mod relation_transfer;
 pub mod foundational_seed;
+pub mod multisensory;
+pub mod hugging_knowns;
+pub mod meditation;
+pub mod sleep_dream;
 
 pub use answer_path::{
     ANSWER_BINDING_MATCH_THRESHOLD, ANSWER_CHAIN_MAX_DEPTH, ANSWER_CHAIN_MAX_VISIT,
@@ -101,4 +105,16 @@ pub use foundational_seed::{
     CorePrerogativeEvaluation, FoundationalSeedPair, SeedConstraintReport,
     FOUNDATIONAL_SEED_PAIRS, TEN_COMMANDMENTS_INTRO, THE_LORD_FRAMING,
     evaluate_core_prerogatives, seed_commandments_prior_to_training,
+};
+pub use multisensory::{
+    MultisensoryAtomEncoding, MultisensoryChannelRouter, MultisensoryExperience,
+    SenseModality,
+};
+pub use hugging_knowns::{
+    ArchivalExperimenter, DistantDerivationProof, GroundedKnown, HuggingKnownsPipeline,
+    HypothesisCandidate, MemoryArchivalExperimenter, VerificationMethod, VerificationResult,
+};
+pub use meditation::{CrossSensoryAnalogy, MeditationCycle, MeditationReport};
+pub use sleep_dream::{
+    ColorDreamScenario, ColorRGB, SleepDreamConfig, SleepDreamEngine, SleepDreamReport,
 };
