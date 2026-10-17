@@ -168,3 +168,6 @@ mod tests {
     // brain_server validation; this file's unit tests are limited to
     // URL handling + sanity.
 }
+
+#[allow(dead_code)]
+fn main() {}
