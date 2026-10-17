@@ -1199,49 +1199,6 @@ pub struct Brain {
     /// through to the full scan, so a stale hint costs its own probes and
     /// changes no answer.
     derivation_splice_hints: Vec<(usize, usize, Vec<usize>)>,
-    /// Which exact frames this brain has been TAUGHT, as
-    /// `hash(pool, frame bytes)`.
-    ///
-    /// # Why the fabric cannot answer this itself
-    ///
-    /// [`Self::best_binding_match_atom_tier`] scores a question against a
-    /// binding by set intersection: `bind_query` is the binding's query-pool
-    /// member neurons and `q_atoms` is the firing ones, and precision and
-    /// recall are both `intersect / len`. An atom is a BYTE, so a binding
-    /// trained on `"r000 desk material?"` has one member per DISTINCT byte of
-    /// it — order and multiplicity are not represented anywhere in the member
-    /// set. Every string built from the same distinct bytes therefore scores
-    /// exactly 1.0 against it, which is why the derivation's accept rule
-    /// ("a question scoring 1.0 IS a question the brain was taught") is false
-    /// and was measured false: 184 rewrites reached the ceiling over 24
-    /// `on_material` probes and 24 were taught. `"r0desk material?"` is the
-    /// named case — anagram-equal to `"r000 desk material?"`, 4 bytes shorter,
-    /// scoring 1.0, and answering a different room's material.
-    ///
-    /// The vote was the previous answer and it is a MITIGATION: it needs the
-    /// true answer to be a strict majority of the ceiling set, so it recovers
-    /// nothing where truncations outnumber it. Measured at scale 64 the
-    /// invention still ran at 31.9 % against 20.5 % correct.
-    ///
-    /// # Why a digest and not a parser
-    ///
-    /// This reads no byte and knows no grammar. It is the identity of what was
-    /// taught, recorded where it is known for certain — on the training path,
-    /// from the frame the caller handed in — and consulted as a membership
-    /// test. Nothing about rooms, terminators, spans or families enters, and a
-    /// frame the brain was never taught cannot be admitted by it however it
-    /// scores.
-    ///
-    /// 64-bit FNV-1a over the pool id and the frame, so a frame costs 8 bytes
-    /// rather than its length. At the scorecard's scale 64 that is ~24 k
-    /// entries for 11,904 facts — measured below 0.5 MB, against a peak of
-    /// 40 MB.
-    ///
-    /// Not persisted, for the same reason the hint caches are not: a restored
-    /// brain has not been told what it was taught, so it falls back to
-    /// refusing every ceiling rewrite rather than to admitting them. That
-    /// loses derivations and invents none, which is the safe direction.
-    trained_frames: ahash::AHashSet<u64>,
     trained_episode_bindings: ahash::AHashMap<u64, NeuronId>,
     /// What the derivation has SPENT, cumulative over this brain's life.
     derivation_stats: DerivationStats,
@@ -1807,7 +1764,6 @@ impl Brain {
             relation_transfer_in_answer_path: false,
             derivation_cut_hints: Vec::new(),
             derivation_splice_hints: Vec::new(),
-            trained_frames: ahash::AHashSet::new(),
             trained_episode_bindings: ahash::AHashMap::new(),
             derivation_stats: DerivationStats::default(),
             posting_caps: PostingCapCounters::default(),
@@ -2285,17 +2241,6 @@ impl Brain {
         crate::foundational_seed::evaluate_core_prerogatives(text)
     }
 
-    /// 64-bit FNV-1a over a pool id and a frame. See [`Self::trained_frames`]
-    /// for why identity is recorded as a digest rather than as the bytes.
-    fn frame_digest(pool: PoolId, frame: &[u8]) -> u64 {
-        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        for b in pool.to_le_bytes().iter().chain(frame.iter()) {
-            h ^= *b as u64;
-            h = h.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        h
-    }
-
     fn episode_digest(frames: &[(PoolId, Vec<u8>)]) -> u64 {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
         for (pool_id, frame) in frames {
@@ -2311,21 +2256,36 @@ impl Brain {
 
     /// Was this exact frame ever TAUGHT to this brain in this pool?
     ///
-    /// The question [`Self::best_binding_match_v2`] cannot answer: a score of
-    /// 1.0 proves only that the frame's distinct bytes are exactly a trained
-    /// binding's, which every anagram and every truncation that drops a
-    /// repeated byte also satisfies. See [`Self::trained_frames`].
-    ///
-    /// False for every frame of a brain restored from a snapshot, which has
-    /// not been told what it was taught.
+    /// Consults the binding sequence index directly rather than a separate
+    /// frame-digest set: every promoted binding indexes its ordered atom
+    /// sequence per represented `(query_pool, target_pool)` pair.
     pub fn is_trained_frame(&self, pool: PoolId, frame: &[u8]) -> bool {
-        self.trained_frames.contains(&Self::frame_digest(pool, frame))
-    }
-
-    /// How many distinct frames this brain has been taught. The RAM cost of
-    /// [`Self::trained_frames`] is 8 bytes times this.
-    pub fn trained_frame_count(&self) -> usize {
-        self.trained_frames.len()
+        if frame.is_empty() || pool == self.binding_pool_id {
+            return false;
+        }
+        let Some(pool_handle) = self.fabric.pool(pool) else {
+            return false;
+        };
+        let sequence: Vec<NeuronId> = {
+            let p = pool_handle.read();
+            let labels = p.encoded_labels(frame);
+            if labels.is_empty() {
+                return false;
+            }
+            let mut seq = Vec::with_capacity(labels.len());
+            for label in labels {
+                let Some(id) = p.label_to_id(&label) else {
+                    return false;
+                };
+                seq.push(id);
+            }
+            seq
+        };
+        self.fabric
+            .pool_ids()
+            .into_iter()
+            .filter(|&target| target != pool && target != self.binding_pool_id)
+            .any(|target| !self.binding_sequence_postings(pool, target, &sequence).is_empty())
     }
 
     /// Pretrain one episode while attributing its wall time to the bounded
@@ -2343,11 +2303,6 @@ impl Brain {
             if *pool_id == self.binding_pool_id || frame.is_empty() {
                 continue;
             }
-            // The one place the exact taught frame is known for certain. See
-            // [`Self::trained_frames`]: the binding's member set loses order
-            // and multiplicity, so after this line nothing can tell this frame
-            // from any anagram of it.
-            self.trained_frames.insert(Self::frame_digest(*pool_id, frame));
             let Some(pool) = self.fabric.pool(*pool_id) else {
                 profile.frame_lookup_ns = stage.elapsed().as_nanos() as u64;
                 return (None, profile);
@@ -7033,17 +6988,28 @@ impl Brain {
         query_pool: PoolId,
         target_pool: Option<PoolId>,
     ) -> BindingMatch {
-        let q_atoms: ahash::AHashSet<NeuronId> = {
+        let q_seq: Vec<NeuronId> = {
             let q = match self.fabric.pool(query_pool) {
                 Some(p) => p,
                 None => return BindingMatch::NONE,
             };
             let q = q.read();
-            q.currently_firing()
-                .filter(|nid| q.get(*nid).map_or(false, |n| n.is_atom()))
-                .collect()
+            if !q
+                .currently_firing()
+                .any(|nid| q.get(nid).map_or(false, |n| n.is_atom()))
+            {
+                return BindingMatch::NONE;
+            }
+            let seq = q.last_observed_sequence();
+            if !seq.is_empty() {
+                seq.to_vec()
+            } else {
+                q.currently_firing()
+                    .filter(|nid| q.get(*nid).map_or(false, |n| n.is_atom()))
+                    .collect()
+            }
         };
-        if q_atoms.is_empty() {
+        if q_seq.is_empty() {
             return BindingMatch::NONE;
         }
 
@@ -7053,6 +7019,11 @@ impl Brain {
             None => return BindingMatch::NONE,
         };
         let candidate_ids = self.routed_binding_candidates(query_pool, target_pool);
+        let q_handle = match self.fabric.pool(query_pool) {
+            Some(p) => p,
+            None => return BindingMatch::NONE,
+        };
+        let q_read = q_handle.read();
         let bp_read = bp.read();
         let mut best = BindingMatch::NONE;
         for n in candidate_ids
@@ -7062,18 +7033,25 @@ impl Brain {
             if n.is_atom() {
                 continue;
             }
-            let bind_query: ahash::AHashSet<NeuronId> = n
+            let bind_query: Vec<NeuronId> = n
                 .members
                 .iter()
-                .filter(|m| m.pool == query_pool)
+                .filter(|m| {
+                    m.pool == query_pool
+                        && q_read.get(m.neuron).map_or(true, |qn| qn.is_atom())
+                })
                 .map(|m| m.neuron)
                 .collect();
             if bind_query.is_empty() {
                 continue;
             }
-            let intersect = bind_query.iter().filter(|a| q_atoms.contains(a)).count() as f32;
+            let intersect = bind_query
+                .iter()
+                .zip(q_seq.iter())
+                .filter(|(a, b)| a == b)
+                .count() as f32;
             let precision = intersect / bind_query.len() as f32;
-            let recall = intersect / q_atoms.len() as f32;
+            let recall = intersect / q_seq.len() as f32;
             let candidate = BindingMatch {
                 precision,
                 recall,
@@ -7615,7 +7593,7 @@ impl Brain {
                 // Score first: the answer is read only by the `>= 1.0` arm, so
                 // decoding every miss is work nothing consumes.
                 let score = self.probe_question_score(query_pool, target_pool, &sub);
-                if score >= 1.0 && self.is_trained_frame(query_pool, &sub) {
+                if score >= 1.0 {
                     self.derivation_stats.cut_hint_hits += 1;
                     if let Some(answer) = self.probe_answer(query_pool, target_pool) {
                         known_prefix = Some((k, answer));
@@ -7642,7 +7620,7 @@ impl Brain {
                         sub.extend_from_slice(&current[n - t..]);
                         probes += 1;
                         let score = self.probe_question_score(query_pool, target_pool, &sub);
-                        if score >= 1.0 && self.is_trained_frame(query_pool, &sub) {
+                        if score >= 1.0 {
                             if let Some(answer) = self.probe_answer(query_pool, target_pool) {
                                 known_prefix = Some((k, answer));
                                 self.note_derivation_cut(n, k, t);
@@ -7757,18 +7735,10 @@ impl Brain {
                     }
                     probes += 1;
                     let score = self.probe_question_score(query_pool, target_pool, &rewrite);
-                    // ONE rule for both arms: a rewrite can only be a
-                    // derivation if it is a question the brain was actually
-                    // TAUGHT. See [`Self::trained_frames`] -- the score cannot
-                    // establish that, because an atom is a byte and the
-                    // binding's member set holds neither order nor
-                    // multiplicity, so every anagram of a trained question
-                    // scores 1.0 against it. This is the test the method's own
-                    // doc comment says the score was standing in for.
-                    //
-                    // Cheap by construction: a hash-set lookup, taken BEFORE
-                    // the decode, so a rejected rewrite costs no answer.
-                    let taught = self.is_trained_frame(query_pool, &rewrite);
+                    // Positional agreement in `best_binding_match_atom_tier`
+                    // reaches 1.0 only when both lengths and every position
+                    // match the stored binding sequence.
+                    let taught = score >= 1.0;
                     if !taught {
                         self.derivation_stats.rejected_untaught += 1;
                         // Not an answer, but possibly the next question. Same
@@ -10897,7 +10867,6 @@ impl Brain {
             relation_transfer_in_answer_path: false,
             derivation_cut_hints: Vec::new(),
             derivation_splice_hints: Vec::new(),
-            trained_frames: ahash::AHashSet::new(),
             trained_episode_bindings: ahash::AHashMap::new(),
             derivation_stats: DerivationStats::default(),
             posting_caps: PostingCapCounters::default(),
@@ -11090,7 +11059,6 @@ impl Brain {
             relation_transfer_in_answer_path: false,
             derivation_cut_hints: Vec::new(),
             derivation_splice_hints: Vec::new(),
-            trained_frames: ahash::AHashSet::new(),
             trained_episode_bindings: ahash::AHashMap::new(),
             derivation_stats: DerivationStats::default(),
             posting_caps: PostingCapCounters::default(),

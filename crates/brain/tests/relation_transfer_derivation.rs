@@ -577,12 +577,12 @@ fn does_the_reverse_decode_separate_a_taught_rewrite_from_a_byte_set_twin() {
         "round-trip as a taught-detector: true-pos {tp} false-pos {fp} false-neg {fn_} true-neg {tn}"
     );
     assert!(perfect_total > 0, "there must be perfect splices, or the census is vacuous");
-    // The one thing that must hold for the test to be worth anything: there
-    // ARE untaught rewrites scoring at the ceiling. That is the defect, and it
-    // is asserted so the census cannot go vacuous if the matcher changes.
-    assert!(
-        perfect_total > perfect_taught,
-        "untaught rewrites must reach the ceiling, or the accept-at-1.0 rule is already sound: \
+    // Positional agreement in `best_binding_match_atom_tier` (item `f711d18a`)
+    // makes `score >= 1.0` require exact length and per-position equality, so
+    // only taught rewrites reach the ceiling (`24 of 24`).
+    assert_eq!(
+        perfect_total, perfect_taught,
+        "under positional agreement only taught rewrites may reach the ceiling: \
          {perfect_total} perfect of which {perfect_taught} taught"
     );
     // THE REFUTATION, pinned. If the reverse decode ever becomes a usable
@@ -734,7 +734,11 @@ fn a_vote_over_ceiling_rewrites_beats_the_first_one() {
     for (family, (f, v, n)) in &tally {
         assert!(v >= f, "{family} fell under the vote: {f}/{n} -> {v}/{n}");
     }
-    assert!(v_tot > f_tot, "the vote must move something: {f_tot} -> {v_tot}");
+    assert_eq!(
+        (f_tot, v_tot),
+        (40, 40),
+        "under positional agreement first-wins and vote both reach 40/54 (24/24 on_material + 16/16 next_color): {f_tot} -> {v_tot}"
+    );
 }
 
 /// `derive_by_substitution_profiled`'s own loop with BOTH changes in it, so the
@@ -1082,14 +1086,15 @@ fn at_scale_four_no_vote_threshold_separates_the_two_families() {
     // acquire votes and can outvote `j = 0`. A vote over mutually inconsistent
     // confusions degrades exactly as confusability grows, which is scale.
     //
-    // Both regressions are pinned as assertions. A plurality that stops costing
-    // next_color at scale 4 means the matcher changed, and this is the line that
-    // will say so.
+    // Positional agreement (`best_binding_match_atom_tier`) prevents truncated
+    // rewrites like "rr001 bed color?" from reaching 1.0 against "r010 bed color?",
+    // so plurality no longer costs `next_color` at scale 4.
     let nc_p = arms[&("next_color", "production_32")];
     let nc_pl = arms[&("next_color", "plurality_128")];
-    assert!(
-        nc_pl.0 < nc_p.0,
-        "the plurality must still cost next_color at scale 4 -- that regression is this          test's finding, measured 64/64 -> 53/64: {nc_p:?} -> {nc_pl:?}"
+    assert_eq!(
+        nc_pl.0, nc_p.0,
+        "under positional agreement, truncated rewrites stay below 1.0 so plurality no longer \
+         costs next_color at scale 4: {nc_p:?} -> {nc_pl:?}"
     );
 
     // AND THE MAJORITY RULE DOES NOT RECOVER IT EITHER, WHICH IS THE RESULT.

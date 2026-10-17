@@ -84,10 +84,10 @@ fn teach_world(brain: &mut Brain) {
     }
 }
 
-/// The premise: the anagram really does reach the ceiling, so the score cannot
-/// be the accept test. If this assertion ever fails the matcher has gained
-/// order or multiplicity evidence and the rest of this file is about a defect
-/// that no longer exists — which is a reason to re-measure, not to delete it.
+/// With positional agreement over the binding's stored member sequence
+/// (`best_binding_match_atom_tier`), the anagram and truncation no longer
+/// reach the ceiling 1.0, so `score >= 1.0` is honest on its own and
+/// `Brain::trained_frames` is deleted.
 #[test]
 fn the_anagram_reaches_the_ceiling_so_the_score_cannot_be_the_accept_test() {
     let mut brain = brain();
@@ -104,10 +104,45 @@ fn the_anagram_reaches_the_ceiling_so_the_score_cannot_be_the_accept_test() {
         "{TAUGHT:?} is taught, so it must score the ceiling; scored {taught_score}"
     );
     assert!(
-        anagram_score >= 1.0,
-        "the whole defect is that {ANAGRAM:?} scores the ceiling too; scored {anagram_score}. \
-         If this is now below 1.0 the matcher has changed and the fix may be redundant."
+        anagram_score < 1.0,
+        "{ANAGRAM:?} must score below the ceiling under positional agreement; scored {anagram_score}"
     );
+}
+
+/// Pins both halves of item `f711d18a`:
+/// (A) Anagram ties on `"r001 beside?"` (`r010 beside?`, `r100 beside?`,
+///     `r011 beside?`) drop from 1.0000 on distinct bytes to 10/12 = 0.8333,
+///     10/12 = 0.8333, and 11/12 = 0.9167 in precision/recall (score < 1.0),
+///     while the truth `"r001 beside?"` stays at 1.0000.
+/// (B) The adjacent room `"r000 beside?"` has precision and recall 11/12 =
+///     0.9167 against `"r001 beside?"`, which is why positional agreement alone
+///     does not move `beside_next`.
+#[test]
+fn positional_agreement_breaks_anagram_ties_and_leaves_adjacent_room_at_eleven_twelfths() {
+    let mut brain = brain();
+    for _ in 0..3 {
+        teach(&mut brain, "r001 beside?", "r002");
+    }
+
+    brain.observe_fabric_read_only(QUERY_POOL, b"r001 beside?");
+    let truth = brain.best_binding_match_v2(QUERY_POOL);
+    assert!((truth.precision - 1.0).abs() < 1e-5 && (truth.recall - 1.0).abs() < 1e-5);
+
+    for (anagram, expected_ratio) in [
+        ("r010 beside?", 10.0 / 12.0),
+        ("r100 beside?", 10.0 / 12.0),
+        ("r011 beside?", 11.0 / 12.0),
+        ("r000 beside?", 11.0 / 12.0),
+    ] {
+        brain.observe_fabric_read_only(QUERY_POOL, anagram.as_bytes());
+        let m = brain.best_binding_match_v2(QUERY_POOL);
+        assert!(
+            (m.precision - expected_ratio).abs() < 1e-4
+                && (m.recall - expected_ratio).abs() < 1e-4
+                && m.score() < 1.0,
+            "{anagram:?} expected precision=recall={expected_ratio:.4}, got {m:?}"
+        );
+    }
 }
 
 /// The fix, in the direction that matters: the anagram is REFUSED.

@@ -591,26 +591,33 @@ fn largest_j_splice_beats_smallest_j_on_every_family() {
     // one perfect splice and why the 6 that look right today are the rooms
     // whose material coincides with `r000`'s.
     //
-    // These assertions therefore pin the MEASUREMENT, so that the next reader
-    // who reaches for `.rev()` sees `next_color` at 14/16 here in 16 seconds
-    // rather than in a scorecard run.
+    // Under positional agreement (`best_binding_match_atom_tier`), untaught
+    // truncated splices like `"r0desk material?"` (`j = 2`) no longer score 1.0:
+    // - `smallest_j` no longer stops at `j = 2` with 18 wrong answers; it walks
+    //   to `j = 5` (`"rNNN <base> material?"`) for every 4-byte object (`vase`,
+    //   `book`, 16/24 right, 0 wrong, 8 empty where 6-byte `kettle` exhausts
+    //   this un-cached 32-probe test harness before `j = 5`).
+    // - `largest_j` no longer costs `next_color` (both orders hold 16/16 with 0
+    //   wrong because untaught large-`j` splices no longer score 1.0), and gets
+    //   8/24 right, 0 wrong on `on_material`.
     let om_small = tally[&("on_material", "smallest_j")];
     let om_large = tally[&("on_material", "largest_j")];
     let nc_small = tally[&("next_color", "smallest_j")];
     let nc_large = tally[&("next_color", "largest_j")];
-    assert!(
-        om_large.0 > om_small.0,
-        "largest-j must still be the better order for on_material: {om_small:?} -> {om_large:?}"
+    assert_eq!(
+        (om_small.0, om_small.1, om_large.0, om_large.1),
+        (16, 0, 8, 0),
+        "under positional agreement, neither order produces wrong answers on on_material and smallest_j reaches j=5 inside 32 probes for 16/24: {om_small:?} vs {om_large:?}"
     );
-    assert!(
-        nc_large.0 < nc_small.0,
-        "and it must still COST next_color, which is what makes it unshippable \
-         as a one-line reorder: {nc_small:?} -> {nc_large:?}"
+    assert_eq!(
+        (nc_small.0, nc_large.0),
+        (16, 16),
+        "under positional agreement, both orders hold 16/16 on next_color: {nc_small:?} vs {nc_large:?}"
     );
-    assert!(
-        large_right > small_right,
-        "the aggregate improves ({small_right} -> {large_right}) even though a family falls -- \
-         which is exactly why the aggregate is not the thing to gate on"
+    assert_eq!(
+        (small_right, large_right),
+        (34, 26),
+        "smallest_j beats largest_j (34/54 vs 26/54) once untaught splices at j=2 no longer score 1.0"
     );
     // Neither order moves the family whose misses are EMPTY, because its misses
     // are not a tie-break problem at all. Measured in the test above: no
