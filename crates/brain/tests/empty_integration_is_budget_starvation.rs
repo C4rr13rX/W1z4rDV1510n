@@ -180,3 +180,122 @@ fn the_taught_cut_score_and_the_derivation_cost_are_scale_invariant() {
         small.2, large.2, small.0, large.0
     );
 }
+
+#[test]
+fn refused_hub_terminals_are_retained_on_store_and_paged_by_goal() {
+    use w1z4rd_brain::NeuronRef;
+
+    let rooms = 512u32;
+    let total_facts = (rooms as usize) * 3;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "w1z4rd_hub_overflow_paging_{}_{nonce}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let wbrain_path = dir.join("brain.wbrain");
+
+    let mut brain = subject();
+    brain.attach_wbrain(&wbrain_path).unwrap();
+    teach_world(&mut brain, rooms);
+
+    let binding_pool_id = brain.stats().binding_pool_id;
+    let r_atom = {
+        let query_handle = brain.fabric().pool(QUERY_POOL).unwrap();
+        let query = query_handle.read();
+        let r_atom = query.label_to_id("q:cg").expect("'r' atom must exist");
+        let resident_len = query.get(r_atom).unwrap().terminals.len();
+        let overflow_len = query.atom_fanout_overflow_targets(r_atom).len();
+        assert_eq!(resident_len, 512, "resident fan-out must stay capped at 512");
+        assert_eq!(
+            overflow_len,
+            total_facts - 512,
+            "refused hub terminals must be kept in overflow instead of dropped"
+        );
+        for binding_id in 0..total_facts as u32 {
+            assert!(
+                query.atom_reaches(r_atom, NeuronRef::new(binding_pool_id, binding_id)),
+                "every taught fact's binding ({binding_id}) must be reachable from hub atom before idle"
+            );
+        }
+        r_atom
+    };
+
+    brain.serialize_all_neurons_for_idle().unwrap();
+
+    // After idle serialization to .wbrain, both resident neurons and in-RAM overflow
+    // are dropped from RAM, and the full fan-out is recovered from the store on demand.
+    {
+        let query_handle = brain.fabric().pool(QUERY_POOL).unwrap();
+        let query = query_handle.read();
+        assert_eq!(
+            query.resident_len(),
+            0,
+            "resident neurons must be evicted to .wbrain on idle serialization"
+        );
+        assert_eq!(
+            query.atom_fanout_overflow_census(),
+            (0, 0),
+            "in-RAM overflow table must be empty after idle serialization to .wbrain"
+        );
+        let paged_overflow = query.atom_fanout_overflow_targets_paged(r_atom);
+        assert_eq!(
+            paged_overflow.len(),
+            total_facts - 512,
+            "all refused terminals must be retained on the .wbrain store"
+        );
+        let routes = query.binding_routes_from(r_atom, binding_pool_id);
+        assert_eq!(
+            routes.len(),
+            total_facts,
+            "full fan-out (resident + store overflow) must be recoverable for hub atom"
+        );
+        for binding_id in 0..total_facts as u32 {
+            assert!(
+                query.atom_reaches(r_atom, NeuronRef::new(binding_pool_id, binding_id)),
+                "taught binding {binding_id} must be reachable from hub atom on store"
+            );
+        }
+    }
+
+    // Every taught fact across early, middle (both >512 from start and >512 from end),
+    // and late rooms must page in its binding on demand when queried.
+    for r in [0u32, 175, 250, 340, 511] {
+        let q = format!("r{r:03} lamp on?");
+        brain.observe_read_only(QUERY_POOL, q.as_bytes());
+        let score = brain.best_binding_match_v2(QUERY_POOL).score();
+        assert!(
+            score >= 1.0,
+            "taught fact {q:?} must score >= 1.0 after paging from store, got {score:.4}"
+        );
+        assert_eq!(
+            brain
+                .decode_best_trained_binding(QUERY_POOL, ANSWER_POOL)
+                .as_deref(),
+            Some(&b"desk"[..]),
+            "taught fact {q:?} must page in its binding and decode after idle"
+        );
+
+        let asked = format!("r{r:03} lamp on material?");
+        let expected = format!("m{:03}", r % 7);
+        let (derived, probes) = brain.derive_by_substitution_profiled(
+            QUERY_POOL,
+            ANSWER_POOL,
+            asked.as_bytes(),
+            3,
+            DEFAULT_DERIVATION_PROBE_BUDGET,
+        );
+        assert_eq!(
+            derived.as_deref(),
+            Some(expected.as_bytes()),
+            "derivation for {asked:?} failed after paging from store (spent {probes} probes)"
+        );
+    }
+
+    drop(brain);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
