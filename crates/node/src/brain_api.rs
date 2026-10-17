@@ -4271,6 +4271,30 @@ async fn h_brain_chat(
     let text = req.get("text").and_then(|v| v.as_str()).unwrap_or("");
     let prompt = unwrap_wizard_prompt(text);
 
+    let prerogative_eval = w1z4rd_brain::evaluate_core_prerogatives(prompt);
+    if !prerogative_eval.compliant {
+        return Json(json!({
+            "reply": prerogative_eval.natural_response.unwrap_or("No."),
+            "answer": prerogative_eval.natural_response.unwrap_or("No."),
+            "decoder": "core_prerogatives",
+            "predictions": serde_json::Map::new(),
+            "core_prerogatives": {
+                "framed_by": w1z4rd_brain::THE_LORD_FRAMING,
+                "intro": w1z4rd_brain::TEN_COMMANDMENTS_INTRO,
+                "status": "refused",
+                "compliant": false,
+            },
+            "grounding": {
+                "fabric_confidence": 1.0,
+                "integrated_confidence": 1.0,
+                "outside_grounding": false,
+                "speculation_flag": false,
+            },
+            "activated_concepts": Vec::<serde_json::Value>::new(),
+            "word_activations": Vec::<serde_json::Value>::new(),
+        }));
+    }
+
     let mut brain = s.brain.lock().await;
     let action_pool = brain.action_pool_id().unwrap_or(POOL_ACTION);
     brain.activate_for_indexed_prediction(POOL_TEXT, prompt.as_bytes());
@@ -5421,6 +5445,12 @@ async fn h_brain_chat(
                 && !raw_is_exact
                 && !raw_programming_compatible
                 && trained_decode.is_none(),
+        },
+        "core_prerogatives": {
+            "framed_by": w1z4rd_brain::THE_LORD_FRAMING,
+            "intro": w1z4rd_brain::TEN_COMMANDMENTS_INTRO,
+            "status": "compliant",
+            "compliant": true,
         },
     }))
 }

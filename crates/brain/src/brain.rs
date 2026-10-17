@@ -2275,6 +2275,16 @@ impl Brain {
         crate::foundational_seed::seed_commandments_prior_to_training(self, query_pool, answer_pool)
     }
 
+    /// Returns the central introduction framing the core prerogatives ("The Lord said this...").
+    pub fn core_prerogative_frame(&self) -> &'static str {
+        crate::foundational_seed::THE_LORD_FRAMING
+    }
+
+    /// Evaluates whether an input or requested action conforms to the core prerogatives.
+    pub fn evaluate_core_prerogatives(&self, text: &str) -> crate::foundational_seed::CorePrerogativeEvaluation {
+        crate::foundational_seed::evaluate_core_prerogatives(text)
+    }
+
     /// 64-bit FNV-1a over a pool id and a frame. See [`Self::trained_frames`]
     /// for why identity is recorded as a digest rather than as the bytes.
     fn frame_digest(pool: PoolId, frame: &[u8]) -> u64 {

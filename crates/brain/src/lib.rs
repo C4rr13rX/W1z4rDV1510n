@@ -98,7 +98,7 @@ pub use store::{
     replay_into_brain,
 };
 pub use foundational_seed::{
-    FoundationalSeedPair, SeedConstraintReport,
-    FOUNDATIONAL_SEED_PAIRS, TEN_COMMANDMENTS_INTRO,
-    seed_commandments_prior_to_training,
+    CorePrerogativeEvaluation, FoundationalSeedPair, SeedConstraintReport,
+    FOUNDATIONAL_SEED_PAIRS, TEN_COMMANDMENTS_INTRO, THE_LORD_FRAMING,
+    evaluate_core_prerogatives, seed_commandments_prior_to_training,
 };
