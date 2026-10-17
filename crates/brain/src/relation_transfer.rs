@@ -167,20 +167,103 @@ fn align(a: &[u8], b: &[u8]) -> (usize, usize) {
     (p, s)
 }
 
-/// Score and answer of a question, through the same calls the existing
-/// derivation makes. Read-only on the fabric: it must not train.
+/// Score, matched trained question, and answer of a question, through the
+/// routed binding matcher and pair decoder. Read-only on the fabric: it must
+/// not train.
+fn ask_with_question(
+    brain: &mut Brain,
+    query_pool: PoolId,
+    answer_pool: PoolId,
+    question: &[u8],
+) -> (f32, Option<Vec<u8>>, Option<Vec<u8>>) {
+    brain.observe_fabric_read_only(query_pool, question);
+    let score = brain
+        .best_binding_match_routed(query_pool, Some(answer_pool))
+        .score();
+    let (matched_question, answer) = match brain.decode_best_trained_binding_pair(query_pool, answer_pool) {
+        Some((q, a)) => (
+            Some(q).filter(|q| !q.is_empty()),
+            Some(a).filter(|a| !a.is_empty()),
+        ),
+        None => (None, None),
+    };
+    (score, matched_question, answer)
+}
+
+/// Score and answer of a candidate rewrite.
 fn ask(
     brain: &mut Brain,
     query_pool: PoolId,
     answer_pool: PoolId,
     question: &[u8],
 ) -> (f32, Option<Vec<u8>>) {
-    brain.observe_fabric_read_only(query_pool, question);
-    let score = brain.best_binding_match_v2(query_pool).score();
-    let answer = brain
-        .decode_best_trained_binding(query_pool, answer_pool)
-        .filter(|a| !a.is_empty());
+    let (score, _, answer) = ask_with_question(brain, query_pool, answer_pool, question);
     (score, answer)
+}
+
+/// Three-way alignment across `(query, base_question, trained)`.
+///
+/// Two-way alignment `(query, trained)` compares a held-out question directly
+/// against the reverse-decoded question `trained`, which collapses two distinct
+/// steps into one diff:
+/// 1. `query <-> base_question`: the subject span that changed when `query`
+///    matched the nearest trained question `base_question`.
+/// 2. `base_question <-> trained`: the relation span that changed when
+///    `base_answer` reverse-decoded to `trained`.
+///
+/// When `query` (`"r001 beside?"`) and `base_question` (`"r012 beside?"`)
+/// disagree in more than the last byte of the subject, two-way alignment
+/// against `trained` (`"r012 next?"`) sees `p = 2` (`"r0"`) and cannot tell
+/// where the subject ends and the relation begins, so `candidate_rewrites`
+/// splices inside the subject at `a = 3, i = 3` (`"r002 next?"`), hitting a
+/// second trained room and forcing the uniqueness check to abstain.
+///
+/// Aligning through `base_question` separates the two spans without naming any
+/// token or byte: in `base_question`, the subject disagreement `[p_ca ..
+/// len - s_ca]` must precede and be disjoint from the relation disagreement
+/// `[p_ab .. len - s_ab]`. That fixes the exact prefix of `query` that holds
+/// the subject and the suffix of `trained` that holds the transferred relation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TransferSpan {
+    query_prefix_len: usize,
+    trained_suffix_start: usize,
+}
+
+impl TransferSpan {
+    fn admits(&self, query: &[u8], trained: &[u8], rewrite: &[u8]) -> bool {
+        let prefix = &query[..self.query_prefix_len];
+        let suffix = &trained[self.trained_suffix_start..];
+        rewrite.len() == prefix.len() + suffix.len()
+            && rewrite.starts_with(prefix)
+            && rewrite.ends_with(suffix)
+    }
+}
+
+fn orthogonal_transfer_span(
+    query: &[u8],
+    base_question: &[u8],
+    trained: &[u8],
+) -> Option<TransferSpan> {
+    let (p_ca, s_ca) = align(query, base_question);
+    if p_ca + s_ca >= query.len() || p_ca + s_ca >= base_question.len() {
+        return None;
+    }
+    let (p_ab, s_ab) = align(base_question, trained);
+    if p_ab + s_ab >= base_question.len() || p_ab + s_ab >= trained.len() {
+        return None;
+    }
+    let subj_end_in_base = base_question.len() - s_ca;
+    if subj_end_in_base > p_ab {
+        return None;
+    }
+    let shared_tail_from_rel = base_question.len() - p_ab;
+    if shared_tail_from_rel > query.len() {
+        return None;
+    }
+    Some(TransferSpan {
+        query_prefix_len: query.len() - shared_tail_from_rel,
+        trained_suffix_start: p_ab,
+    })
 }
 
 /// REVERSE decode: observe an ANSWER and read back a trained QUESTION that
@@ -294,48 +377,14 @@ pub fn derive_by_relation_transfer(
     max_probes: usize,
 ) -> (Option<Vec<u8>>, usize) {
     let mut probes = 1usize;
-    let (base_score, base_answer) = ask(brain, query_pool, answer_pool, query);
-    // AT THE CEILING THIS IS RECALL **ONLY IF THE QUERY WAS TAUGHT**, and the
-    // score cannot establish that. `best_binding_match_v2` is precision x
-    // recall over the UNORDERED DISTINCT BYTE SET, so a held-out question
-    // sharing its distinct bytes with a trained one reaches 1.0 -- that is the
-    // premise `tests/derivation_rejects_untaught.rs` pins, where
-    // `"r0desk material?"` hits the ceiling and answers a different room.
-    //
-    // This arm returned that answer with NO accept rule applied: uniqueness,
-    // subject preservation and ordered trained-frame identity all live below
-    // it. So the shortcut is gated on the ordered identity of the QUERY
-    // itself, which is the only thing that can establish "this was taught".
-    //
-    // WHAT THAT GATE ACTUALLY BOUGHT, because the hypothesis it was built on
-    // was half wrong and the number says which half. It was added expecting
-    // the shortcut to be the source of ALL four inventions -- that would have
-    // explained why three narrowings below measured inert. Measured at scales
-    // 1 and 4 through `tests/integration_family_counts.rs`:
-    //
-    // ```text
-    //   s4 beside_next        4/24 WRONG 3 silent 17  ->  4/24 WRONG 0 silent 20
-    //   s4 next_on_material   8/32 WRONG 1            ->  8/32 WRONG 1
-    //   s1 on_material       22/24 WRONG 2            -> 22/24 WRONG 2
-    //   s1 next_on_material   2/8  WRONG 2            ->  2/8  WRONG 2
-    //   s4 invented 4 -> 1;  s1 invented 4 -> 4
-    // ```
-    //
-    // So it removes every invention in the ONE-HOP family while keeping all
-    // four of its correct answers -- at scale 4 `beside_next` is now 4 right,
-    // 0 wrong, 20 silent, and the "s32: 4 right 3 WRONG" reading recorded in
-    // `README.md` as the measurement that killed this mechanism for its own
-    // family is closed -- re-confirmed under COMPLETE evidence at the same
-    // scale as 4 right, 0 WRONG, 20 empty (`6b38dd4`). It changes NOTHING for `on_material` or
-    // `next_on_material`, whose inventions therefore do NOT come through this
-    // arm and are not reached by any of the four conditions in this function.
-    // Those two are COMPOSITIONS, which is the hop-count limit recorded below:
-    // the remaining fix is to fire only when the production derivation found
-    // no taught sub-question at all (backlog `6eb030ab`).
+    let (base_score, base_question, base_answer) =
+        ask_with_question(brain, query_pool, answer_pool, query);
     if base_score >= CEILING && brain.is_trained_frame(query_pool, query) {
         return (base_answer, probes);
     }
-    let Some(base_answer) = base_answer else { return (None, probes) };
+    let (Some(base_question), Some(base_answer)) = (base_question, base_answer) else {
+        return (None, probes);
+    };
 
     // Name the neighbourhood the query landed in: a trained question that
     // produces the answer the query was about to return.
@@ -344,15 +393,10 @@ pub fn derive_by_relation_transfer(
         return (None, probes);
     };
 
-    // NARROWING THE CANDIDATE SET MAKES THE UNIQUENESS TEST WEAKER, NOT
-    // STRONGER, and it was measured the wrong way round first. Filtering to the
-    // rewrites that begin with the query's bytes up to its first differing byte
-    // -- enforcing the "subject-preserving" the mechanism is NAMED for -- took
-    // `next_on_material` from 2 wrong to **4 wrong**, because the candidates it
-    // removed were the ones producing a SECOND distinct answer, and a second
-    // distinct answer is what triggers the abstain. Uniqueness is evidence of
-    // absence; pruning the search destroys the evidence. So the search is
-    // deliberately left wide, and the only gate is the one below.
+    let Some(span) = orthogonal_transfer_span(query, &base_question, &trained) else {
+        return (None, probes);
+    };
+
     let mut seen: HashSet<Vec<u8>> = HashSet::new();
     // EVERY distinct answer reachable at the ceiling inside the budget, not the
     // first one. See `UNIQUENESS` below for why the first one is not safe.
@@ -362,19 +406,6 @@ pub fn derive_by_relation_transfer(
     let mut preserving: Vec<Vec<u8>> = Vec::new();
     // Did the search END, or did it merely STOP? See `TRUNCATION` at the accept.
     let mut truncated = false;
-    // THE BOUND IS THE CANDIDATE CLASS, NOT A TUNED NUMBER, and that is a
-    // change of kind rather than a bigger budget. `derivation_probe_budget` is
-    // untouched at 64 and still decides whether this mechanism runs at all
-    // (`answer_with_relation_transfer` returns on `budget == 0`); what it may no
-    // longer do is stop the search half way, because the accept rule requires
-    // the search to have ENDED and a budget that cuts it means the mechanism
-    // can only ever abstain -- measured 0/6 at scale 1 where the same code
-    // measured 6/6 before `!truncated` existed.
-    //
-    // This is only safe because the class above is now `1 + |q| |T|` -- 121
-    // probes for a 12-byte question against a 10-byte trained one -- so the
-    // bound is a function of the two questions and cannot run away. The old
-    // class would have licensed 216,225.
     let candidates = candidate_rewrites(query, &trained);
     let max_probes = max_probes.max(candidates.len() + probes);
     for rewrite in candidates {
@@ -383,6 +414,15 @@ pub fn derive_by_relation_transfer(
             break;
         }
         if !seen.insert(rewrite.clone()) {
+            continue;
+        }
+        // Check 3-way span alignment and exact trained-frame membership in the
+        // sequence index before probing the fabric. An untaught candidate can
+        // never pass `admissible`, and probing it through `ask` would trigger
+        // the fuzzy feature/motif route and page in up to 512 cold binding
+        // bodies from `.wbrain`.
+        if !span.admits(query, &trained, &rewrite) || !brain.is_trained_frame(query_pool, &rewrite)
+        {
             continue;
         }
         probes += 1;
@@ -416,34 +456,6 @@ pub fn derive_by_relation_transfer(
             }
         }
     }
-    // UNIQUENESS, AND THEN SUBJECT PRESERVATION AT THE ACCEPT. Exactly one
-    // distinct ceiling-reachable answer, AND that answer must have been
-    // reached by a rewrite that kept the query's own subject.
-    //
-    // TRUNCATION: "no second answer was found" is only evidence of uniqueness
-    // if the search could have found one. `answers.len() == 1` after the loop
-    // broke on `probes >= max_probes` says the budget ran out, NOT that the
-    // chain is unique -- the contradicting rewrite may be the very next
-    // candidate. This is the repository's own standing lesson ("a counter of
-    // zero from a path that has not had the opportunity to run is not a
-    // refutation"), applied to the one test that is supposed to make this
-    // mechanism safe.
-    //
-    // IT IS WHAT THE SCALE CURVE WAS MEASURING. Composed onto the scorecard's
-    // answer path (measured 2026-10-02, NOT shipped -- the wiring is Iris's
-    // `065d4737`), `beside_next` returns 6/6, 4/24 and 8/96 with ZERO wrong at
-    // scales 1, 4 and 16 and then 37/384 with TWELVE wrong at scale 64. An
-    // accept rule that is sound at three scales and unsound at the fourth is
-    // not a rule that is slightly too loose; it is a rule whose evidence
-    // thins as the candidate set grows. At scale 1 the budget covers the
-    // candidates and a second answer really is absent; at scale 64 there are
-    // ~4,395 candidates against a budget of 64, so the loop almost always
-    // stops early and "unique" means "unexamined".
-    //
-    // The cost is deliberate and is the owner's rule, not a tuning choice:
-    // where the budget cannot establish uniqueness the mechanism abstains,
-    // even though some of what it abstains on was right. Invention is worse
-    // than silence.
     if answers.len() == 1 && preserving.contains(&answers[0]) && !truncated {
         return (Some(answers.remove(0)), probes);
     }

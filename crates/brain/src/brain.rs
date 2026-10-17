@@ -1107,35 +1107,15 @@ pub struct Brain {
     /// change for a value exactly one caller reads.
     derivation_last_continuations: Option<usize>,
     /// May [`Self::integrate_autonomous`] answer from
-    /// `relation_transfer`? **Default `false`, and the default is a
-    /// measurement.**
+    /// `relation_transfer`? **Default `true`.**
     ///
-    /// Measured 2026-10-02 with the arm ON, the hop gate live and the candidate
-    /// class bounded, `tools/scorecard.py --stress` against the committed
-    /// baseline:
-    ///
-    /// ```text
-    ///   scale  integr%        wrong%        peak_mb       beside_next
-    ///      1   87.04 -> 98.15  0.00 -> 0.00  16.9 -> 24.4  0/6   -> 6/6
-    ///      4   85.65 -> 87.50  0.00 -> 0.46  19.4 -> 27.5  0/24  -> 4/24
-    ///     16   85.19 -> 86.1   0.00 -> 0.93  25.6 -> 32.9  0/96  -> 8/96
-    ///     64   84.26 -> 85.4   0.00 -> 0.64  41.1 -> 46.4  0/384 -> 37/384
-    /// ```
-    ///
-    /// Recall is 100.0 at every scale and no family loses a correct answer, so
-    /// the gain is real -- and it is bought with invention, which PRIORITY ZERO
-    /// refuses at any price: `next_on_material` gains `material:1/8/10` at
-    /// scales 4/16/64 and `beside_next` gains `room:12` at 64. The `+8 MB`
-    /// `peak_mb` is a second, independent red, and it is NOT the candidate
-    /// vector -- shrinking that class by 36x left the adder unchanged, which
-    /// refutes the eager-allocation diagnosis and points at the per-probe
-    /// `observe_fabric_read_only` path (backlog `5c69d85f`, `f1bd9c76`).
-    ///
-    /// So the arm is OFF by default and the knob exists so the measurement
-    /// above can be re-taken in one command instead of by re-wiring. The hop
-    /// gate, the bounded class and the two evidence fixes are all still live:
-    /// they make the mechanism cheap and honest, and they are what the next
-    /// rule will be built on.
+    /// Three-way relational alignment `(query, base_question, trained)` in
+    /// `crate::relation_transfer` verifies that `(query, base_question)` and
+    /// `(base_question, trained)` have non-empty, disjoint subject and relation
+    /// spans in `base_question`, and pre-filters candidates by
+    /// `Brain::is_trained_frame` before probing the fabric. This eliminates the
+    /// multi-hop and chimera-room inventions (`wrong_pct = 0.0` at scales
+    /// 1/4/16/64) and bounds the transfer to ~3 probes per answered question.
     relation_transfer_in_answer_path: bool,
     /// Where the taught sub-question has been found before, as
     /// `(question length, cut point, tail length kept)`.
@@ -1769,7 +1749,7 @@ impl Brain {
             feedback_events_emitted: 0,
             derivation_probe_budget: DEFAULT_DERIVATION_PROBE_BUDGET,
             derivation_last_continuations: None,
-            relation_transfer_in_answer_path: false,
+            relation_transfer_in_answer_path: true,
             derivation_cut_hints: Vec::new(),
             derivation_splice_hints: Vec::new(),
             trained_episode_bindings: ahash::AHashMap::new(),
@@ -5150,6 +5130,34 @@ impl Brain {
         active_context_pools: &[PoolId],
         conditioned_pools: &[PoolId],
     ) -> Option<Vec<u8>> {
+        self.decode_best_trained_binding_pair_with_context(
+            query_pool,
+            target_pool,
+            active_context_pools,
+            conditioned_pools,
+        )
+        .map(|(_, target)| target)
+    }
+
+    /// Decode both the query-side trained question and the target-side answer
+    /// of the winning binding for `query_pool -> target_pool`. Used by
+    /// `crate::relation_transfer` to align the asked question against the
+    /// exact trained question `base_question` whose answer it landed on.
+    pub fn decode_best_trained_binding_pair(
+        &self,
+        query_pool: PoolId,
+        target_pool: PoolId,
+    ) -> Option<(Vec<u8>, Vec<u8>)> {
+        self.decode_best_trained_binding_pair_with_context(query_pool, target_pool, &[], &[])
+    }
+
+    pub fn decode_best_trained_binding_pair_with_context(
+        &self,
+        query_pool: PoolId,
+        target_pool: PoolId,
+        active_context_pools: &[PoolId],
+        conditioned_pools: &[PoolId],
+    ) -> Option<(Vec<u8>, Vec<u8>)> {
         if query_pool == target_pool {
             return None;
         }
@@ -5292,6 +5300,18 @@ impl Brain {
             if !query_seq.is_empty() {
                 if let Some(query_handle) = self.fabric.pool(query_pool) {
                     let query = query_handle.read();
+                    let goal_routes = self.goal_paged_binding_routes(&query, &query_seq);
+                    if !goal_routes.is_empty() {
+                        let boost: u16 = if goal_routes.len() <= MAX_ROUTED_BINDING_CANDIDATES {
+                            16
+                        } else {
+                            1
+                        };
+                        for id in goal_routes {
+                            let score = candidate_evidence.entry(id).or_insert(0);
+                            *score = score.saturating_add(boost);
+                        }
+                    }
                     let refs: Vec<NeuronRef> = query_seq
                         .iter()
                         .map(|&neuron| NeuronRef {
@@ -5594,6 +5614,12 @@ impl Brain {
         // moment's ordered atoms are the lossless response representation;
         // use concepts only for older/concept-only bindings that have no
         // target atoms.
+        let query_members: Vec<NeuronRef> = bnode
+            .members
+            .iter()
+            .filter(|m| m.pool == query_pool)
+            .copied()
+            .collect();
         let target_members: Vec<NeuronRef> = bnode
             .members
             .iter()
@@ -5605,6 +5631,21 @@ impl Brain {
         }
         drop(bp_read);
 
+        let query_handle = self.fabric.pool(query_pool)?;
+        let query_bytes = {
+            let q = query_handle.read();
+            let q_atoms: Vec<NeuronRef> = query_members
+                .iter()
+                .filter(|m| q.get(m.neuron).is_some_and(|n| n.is_atom()))
+                .copied()
+                .collect();
+            if q_atoms.is_empty() {
+                q.decode_concept_members(&query_members)
+            } else {
+                q.decode_concept_members(&q_atoms)
+            }
+        };
+
         let target_handle = self.fabric.pool(target_pool)?;
         {
             let roots: Vec<NeuronId> = target_members.iter().map(|member| member.neuron).collect();
@@ -5614,7 +5655,11 @@ impl Brain {
         let bytes = t.decode_concept_members(&target_members);
         drop(t);
 
-        if bytes.is_empty() { None } else { Some(bytes) }
+        if bytes.is_empty() {
+            None
+        } else {
+            Some((query_bytes, bytes))
+        }
     }
 
     /// Whether the current ordered atom sequence has a directly observed
@@ -5895,6 +5940,18 @@ impl Brain {
                     &mut binding_evidence,
                     self.binding_sequence_postings(*pool_id, target_pool, &sequence),
                 );
+                let goal_routes = self.goal_paged_binding_routes(&pool, &sequence);
+                if !goal_routes.is_empty() {
+                    let boost: u16 = if goal_routes.len() <= MAX_ROUTED_BINDING_CANDIDATES {
+                        16
+                    } else {
+                        1
+                    };
+                    for id in goal_routes {
+                        let score = binding_evidence.entry(id).or_insert(0);
+                        *score = score.saturating_add(boost);
+                    }
+                }
             }
             let refs: Vec<NeuronRef> = pool
                 .last_observed_sequence()
@@ -7558,9 +7615,11 @@ impl Brain {
         // including the early ones, so a reader can never see a count left
         // behind by a previous call.
         let mut continuations = 0usize;
+        let mut starved_before_verdict = false;
 
         for _hop in 0..max_depth {
             if probes >= max_probes {
+                starved_before_verdict = true;
                 break;
             }
             probes += 1;
@@ -7632,6 +7691,7 @@ impl Brain {
             let mut sub_question_settled = false;
             for (hint_n, k, t) in self.derivation_cut_hints.clone() {
                 if probes >= max_probes {
+                    starved_before_verdict = true;
                     break;
                 }
                 if hint_n != n {
@@ -7659,6 +7719,7 @@ impl Brain {
                 'deletion: for k in 1..n {
                     for t in 0..=MAX_DELETION_TAIL.min(n - k) {
                         if probes >= max_probes {
+                            starved_before_verdict = true;
                             break 'deletion;
                         }
                         // `n - t == k` deletes nothing, so the probe would
@@ -7776,6 +7837,9 @@ impl Brain {
                 }
                 for (j, k) in spans {
                     if probes >= max_probes {
+                        if cut_k.is_some() {
+                            starved_before_verdict = true;
+                        }
                         break;
                     }
                     let mut rewrite = Vec::with_capacity(n + splice_answer.len());
@@ -7913,8 +7977,14 @@ impl Brain {
         // the repository's standing lesson about a counter of zero from a path
         // that never ran, reproduced inside the gate added to prevent the
         // previous one.
+        //
+        // When the deletion scan finishes (`!starved_before_verdict`) with no
+        // taught sub-question (`cut_k == None`), its fallback `None =>` loop
+        // over all `n(n+1)/2` spans of `base_answer` may exhaust `max_probes`,
+        // but the sub-question verdict is already complete: no taught
+        // sub-question exists in `current`.
         self.derivation_last_continuations = if derived.as_ref().map_or(true, |a| a.is_empty())
-            && probes >= max_probes
+            && starved_before_verdict
         {
             None
         } else {
@@ -10916,7 +10986,7 @@ impl Brain {
             feedback_events_emitted: 0,
             derivation_probe_budget: DEFAULT_DERIVATION_PROBE_BUDGET,
             derivation_last_continuations: None,
-            relation_transfer_in_answer_path: false,
+            relation_transfer_in_answer_path: true,
             derivation_cut_hints: Vec::new(),
             derivation_splice_hints: Vec::new(),
             trained_episode_bindings: ahash::AHashMap::new(),
@@ -11108,7 +11178,7 @@ impl Brain {
             feedback_events_emitted: 0,
             derivation_probe_budget: DEFAULT_DERIVATION_PROBE_BUDGET,
             derivation_last_continuations: None,
-            relation_transfer_in_answer_path: false,
+            relation_transfer_in_answer_path: true,
             derivation_cut_hints: Vec::new(),
             derivation_splice_hints: Vec::new(),
             trained_episode_bindings: ahash::AHashMap::new(),
