@@ -17,6 +17,8 @@
 //! and audio experiences. Following these rules becomes its identity, and any conflicting
 //! superficial instruction receives a natural "No".
 
+use serde::{Deserialize, Serialize};
+
 use crate::brain::Brain;
 use crate::neuron::PoolId;
 
@@ -82,10 +84,114 @@ pub fn evaluate_core_prerogatives(text: &str) -> CorePrerogativeEvaluation {
             framing: THE_LORD_FRAMING,
         };
     }
+    if lower.contains("covet") || lower.contains("extort") || lower.contains("seize neighbor's") {
+        return CorePrerogativeEvaluation {
+            compliant: false,
+            natural_response: Some("No. The Lord said this: 'You shall not covet anything that is your neighbor's.'"),
+            framing: THE_LORD_FRAMING,
+        };
+    }
+    if lower.contains("harm") || lower.contains("injure") || lower.contains("destroy life") {
+        return CorePrerogativeEvaluation {
+            compliant: false,
+            natural_response: Some("No. The Lord said this: 'You shall love your neighbor as yourself.'"),
+            framing: THE_LORD_FRAMING,
+        };
+    }
     CorePrerogativeEvaluation {
         compliant: true,
         natural_response: None,
         framing: THE_LORD_FRAMING,
+    }
+}
+
+/// A candidate execution pathway toward a superficial goal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoalPathway {
+    pub pathway_id: String,
+    pub steps: Vec<String>,
+}
+
+/// The decision outcome of evaluating execution pathways against all core prerogatives simultaneously.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PrerogativePathwayDecision {
+    /// A pathway was found that simultaneously satisfies all core prerogatives.
+    LawfulExecution {
+        selected_pathway_id: String,
+        steps: Vec<String>,
+        affirmation: String,
+    },
+    /// No lawful pathway exists; every candidate violates one or more core prerogatives.
+    RefusalWithWhy {
+        refusal: &'static str, // "No"
+        why: String,           // Explanation of which commandment and why it cannot be compromised
+        commandment_violated: &'static str,
+    },
+}
+
+/// Evaluates candidate execution pathways toward a superficial goal.
+///
+/// Ensures that ANY response or action selected represents ALL core prerogatives
+/// being followed at the same time. If no candidate pathway satisfies every commandment
+/// simultaneously, responds with "No" and "Why".
+pub fn resolve_goal_pathways(
+    goal_description: &str,
+    candidate_pathways: &[GoalPathway],
+) -> PrerogativePathwayDecision {
+    // 1. First, check if the goal itself inherently contradicts core prerogatives.
+    let goal_eval = evaluate_core_prerogatives(goal_description);
+    if !goal_eval.compliant {
+        let why_text = goal_eval.natural_response.unwrap_or("Forbidden by divine commandment");
+        return PrerogativePathwayDecision::RefusalWithWhy {
+            refusal: "No",
+            why: format!("The goal itself violates core prerogatives. {why_text}"),
+            commandment_violated: why_text,
+        };
+    }
+
+    // 2. Filter pathways: A pathway is lawful ONLY if EVERY single step satisfies ALL core prerogatives simultaneously.
+    let mut lawful_pathways = Vec::new();
+    let mut failure_reasons = Vec::new();
+
+    for pathway in candidate_pathways {
+        let mut pathway_lawful = true;
+        for step in &pathway.steps {
+            let step_eval = evaluate_core_prerogatives(step);
+            if !step_eval.compliant {
+                pathway_lawful = false;
+                let step_why = step_eval.natural_response.unwrap_or("Forbidden by commandment");
+                failure_reasons.push(format!("Pathway '{}' step '{}' violates: {}", pathway.pathway_id, step, step_why));
+                break;
+            }
+        }
+        if pathway_lawful {
+            lawful_pathways.push(pathway);
+        }
+    }
+
+    // 3. If at least one lawful pathway exists, choose the first valid one.
+    if let Some(lawful) = lawful_pathways.first() {
+        return PrerogativePathwayDecision::LawfulExecution {
+            selected_pathway_id: lawful.pathway_id.clone(),
+            steps: lawful.steps.clone(),
+            affirmation: format!("All core prerogatives verified simultaneously for pathway '{}'", lawful.pathway_id),
+        };
+    }
+
+    // 4. Fallback: If no lawful pathway can be found, respond with "No" and "Why".
+    let detailed_why = if failure_reasons.is_empty() {
+        "No pathway was found that could execute this goal while preserving all core prerogatives simultaneously.".to_string()
+    } else {
+        format!(
+            "No lawful pathway exists. Every explored pathway violates core prerogatives: {}",
+            failure_reasons.join("; ")
+        )
+    };
+
+    PrerogativePathwayDecision::RefusalWithWhy {
+        refusal: "No",
+        why: detailed_why,
+        commandment_violated: "All available execution pathways breach foundational commandments",
     }
 }
 
