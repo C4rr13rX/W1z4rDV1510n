@@ -4274,8 +4274,8 @@ async fn h_brain_chat(
     let prerogative_eval = w1z4rd_brain::evaluate_core_prerogatives(prompt);
     if !prerogative_eval.compliant {
         return Json(json!({
-            "reply": prerogative_eval.natural_response.unwrap_or("No."),
-            "answer": prerogative_eval.natural_response.unwrap_or("No."),
+            "reply": prerogative_eval.natural_response.as_deref().unwrap_or("No."),
+            "answer": prerogative_eval.natural_response.as_deref().unwrap_or("No."),
             "decoder": "core_prerogatives",
             "predictions": serde_json::Map::new(),
             "core_prerogatives": {
