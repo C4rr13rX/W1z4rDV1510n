@@ -158,6 +158,19 @@ type Tally = (usize, usize, usize, usize);
 /// Run every integration probe twice -- the production derivation alone, then
 /// the same derivation with the transfer behind it -- and tally both by family.
 fn both_arms(rooms: usize) -> (Brain, Vec<(String, String)>, Vec<(&'static str, Tally, Tally)>) {
+    both_arms_at(rooms, MAX_PROBES)
+}
+
+/// `both_arms` with the FALLBACK's budget separated from the production path's.
+///
+/// The production arm always gets `MAX_PROBES`, because it is the baseline and
+/// must not move. Only the transfer's own budget varies, which is what makes
+/// the two runs comparable: any difference is the transfer's evidence, not a
+/// different baseline.
+fn both_arms_at(
+    rooms: usize,
+    fb_budget: usize,
+) -> (Brain, Vec<(String, String)>, Vec<(&'static str, Tally, Tally)>) {
     use std::collections::BTreeMap;
     let mut brain = subject();
     let facts = teach_world_n(&mut brain, rooms);
@@ -193,7 +206,7 @@ fn both_arms(rooms: usize) -> (Brain, Vec<(String, String)>, Vec<(&'static str, 
                     QUERY_POOL,
                     ANSWER_POOL,
                     q.as_bytes(),
-                    MAX_PROBES,
+                    fb_budget,
                 );
                 (a.map(|a| String::from_utf8_lossy(&a).to_string()), c)
             }
@@ -349,4 +362,105 @@ fn the_public_candidate_order_puts_the_wanted_rewrite_inside_the_budget() {
         position < MAX_PROBES,
         "the wanted rewrite must land inside the {MAX_PROBES}-probe budget, got {position}"
     );
+}
+
+/// IS THE ONE-HOP CHAIN UNIQUE, OR WAS IT ONLY EVER UNEXAMINED?
+///
+/// # The question, and why it had to be asked before anything was wired
+///
+/// `derive_by_relation_transfer` accepts only when
+/// `answers.len() == 1 && preserving.contains(..) && !truncated`. The third
+/// condition was added at the end of pass 19 for a reason the module's own
+/// comment states: at scale 32 there are ~4,395 candidate rewrites against a
+/// budget of 32, the loop almost always breaks on `probes >= max_probes`, and
+/// "no second answer was found" is then a statement about the budget rather
+/// than about the chain.
+///
+/// It was never measured composed. Measured here at HEAD, scale 8:
+///
+/// ```text
+///   s8 beside_next  base 0 right 0 wrong 6 empty  ->  fallback 0 right 0 wrong 6 empty
+/// ```
+///
+/// Zero wrong, and zero right: with the budget below the candidate count the
+/// guard fires on EVERY probe, so the mechanism abstains on everything. That
+/// is not a tighter accept rule, it is an unreachable one -- the same shape as
+/// this repository's standing lesson that a guard keyed on evidence the host
+/// cannot produce is inert, except here the inert branch is the ACCEPT and the
+/// cost is the whole mechanism.
+///
+/// # What this test separates, and it is the only thing that can
+///
+/// CLAIM: the chain really is unique and the guard is sound in principle --
+/// with a budget large enough to EXHAUST the candidate set, `truncated` never
+/// fires, the one-hop family comes back right, and the repair is to make the
+/// candidate set small enough to exhaust rather than to delete the guard.
+///
+/// COMPLEMENT: with full evidence a SECOND ceiling-reaching answer appears, the
+/// chain was never unique, and the `6/6` recorded for this family was an
+/// artefact of stopping before the contradiction. Then no budget fixes it, the
+/// accept rule is wrong at its root, and the mechanism must not be wired at
+/// all.
+///
+/// The two differ in `right` and in `wrong` under the SAME accept rule, with
+/// only the budget changed -- so neither outcome can be reached by tuning, and
+/// the test cannot tell its author what they want to hear.
+///
+/// # The absolute assertions
+///
+/// `wrong == 0` under full evidence is PRIORITY ZERO and is not relative to
+/// anything: a mechanism that invents when it has seen every candidate is
+/// unsound however good its net looks. Recall must survive, because every
+/// probe observes the fabric. The baseline arm may not move, because it is
+/// what makes the two budgets comparable. `right` is PRINTED and not asserted,
+/// because its value is the finding.
+#[test]
+fn full_evidence_says_whether_the_one_hop_chain_is_unique_or_merely_unexamined() {
+    // Far above any candidate count this world can produce, so the loop can
+    // only end by running out of candidates. The probe count reported back is
+    // then the SIZE of the candidate set, which is the number the budget has
+    // to beat and which nothing has ever printed.
+    const FULL: usize = 1_000_000;
+
+    for rooms in [ROOMS, ROOMS * 4] {
+        let (_, _, budgeted) = both_arms_at(rooms, MAX_PROBES);
+        let (mut brain, facts, full) = both_arms_at(rooms, FULL);
+
+        for ((family, b0, f0), (_, b1, f1)) in budgeted.iter().zip(full.iter()) {
+            assert_eq!(
+                (b0.0, b0.1, b0.2),
+                (b1.0, b1.1, b1.2),
+                "s{rooms} {family}: the production baseline moved between runs, so the two \
+                 budgets are not comparable"
+            );
+            println!(
+                "s{rooms:<3} {family:>17}  budget {MAX_PROBES:<7} right {} wrong {} empty {} probes {}  \
+                 ||  budget FULL right {} wrong {} empty {} probes {}",
+                f0.0, f0.1, f0.2, f0.3, f1.0, f1.1, f1.2, f1.3
+            );
+        }
+
+        let bn = |rows: &[(&'static str, Tally, Tally)]| -> Tally {
+            rows.iter().find(|(f, _, _)| *f == "beside_next").expect("the held-out family").2
+        };
+        let (bb, bf) = (bn(&budgeted), bn(&full));
+        println!(
+            "s{rooms:<3} ONE-HOP under full evidence: {} right {} wrong {} empty \
+             (at budget {MAX_PROBES} it was {} right {} wrong {} empty)",
+            bf.0, bf.1, bf.2, bb.0, bb.1, bb.2
+        );
+
+        // PRIORITY ZERO, and it is absolute rather than relative to the
+        // budgeted arm: having examined every candidate, an answer is either
+        // grounded or it is not returned.
+        let wrong: usize = full.iter().map(|(_, _, f)| f.1).sum();
+        assert_eq!(
+            wrong, 0,
+            "s{rooms} the transfer invented {wrong} answers with the ENTIRE candidate set \
+             examined, so the accept rule is unsound at its root and no budget repairs it"
+        );
+
+        let r = recall(&mut brain, &facts);
+        assert_eq!(r, facts.len(), "s{rooms} recall must still be 100%: {r}/{}", facts.len());
+    }
 }
