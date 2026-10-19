@@ -14185,9 +14185,40 @@ def parse_rfc3339(text):
             + fraction - offset)
 '''
 
-# Negate the offset on '+' instead of '-'. Every Z-suffixed vector is
-# unaffected, which is most of what a hand-written suite tends to contain;
-# only the offset instants move, and they move by twice the offset.
+REFERENCES["scientific_3d_geometry_robotics-0017"] = '''
+import math
+
+def swept_aabb(a, va, b, vb, duration):
+    vectors = (*a, va, *b, vb)
+    if len(a) != 2 or len(b) != 2 or any(len(v) != 3 for v in vectors):
+        raise ValueError('shape')
+    if not math.isfinite(duration) or duration < 0:
+        raise ValueError('duration')
+    if any(not math.isfinite(x) for v in vectors for x in v):
+        raise ValueError('nonfinite')
+    if any(box[0][i] > box[1][i] for box in (a, b) for i in range(3)):
+        raise ValueError('bounds')
+    enter, leave = 0.0, duration
+    for i in range(3):
+        relative = va[i] - vb[i]
+        if relative == 0:
+            if a[1][i] < b[0][i] or b[1][i] < a[0][i]:
+                return None
+            continue
+        t1 = (b[0][i] - a[1][i]) / relative
+        t2 = (b[1][i] - a[0][i]) / relative
+        enter = max(enter, min(t1, t2))
+        leave = min(leave, max(t1, t2))
+        if enter > leave:
+            return None
+    return enter
+'''
+
+MUTATIONS["scientific_3d_geometry_robotics-0017"] = (
+    'relative = va[i] - vb[i]', 'relative = va[i]',
+)
+
+# Negate the offset on '+' instead of '-'. Z-suffixed vectors are unaffected.
 MUTATIONS["validation_parsing_serialization-0026"] = (
     '        if rest[0] == "-":',
     '        if rest[0] == "+":',

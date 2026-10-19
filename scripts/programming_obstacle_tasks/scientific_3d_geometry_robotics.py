@@ -39,6 +39,77 @@ FAMILY = "scientific_3d_geometry_robotics"
 
 TASKS = [
     task(
+        f"{FAMILY}-0017", FAMILY,
+        prompt=(
+            "Implement swept_aabb(a, va, b, vb, duration). Each box is a "
+            "pair (minimum_xyz, maximum_xyz); velocities are xyz vectors in "
+            "distance units per second. Return the earliest time in the "
+            "closed interval [0, duration] when the linearly moving boxes "
+            "touch or overlap, or None if they never do. Initial contact "
+            "returns 0. Zero-width boxes are allowed. Reject negative or "
+            "nonfinite duration, nonfinite coordinates or velocities, "
+            "non-three-dimensional vectors, and inverted bounds with "
+            "ValueError. Do not mutate inputs."
+        ),
+        validator=LOAD_CANDIDATE + require("swept_aabb") + """
+import copy
+import math
+
+def check(a, va, b, vb, duration, expected):
+    inputs = (a, va, b, vb, duration)
+    before = copy.deepcopy(inputs)
+    actual = swept_aabb(*inputs)
+    assert inputs == before, 'collision query mutated scene data'
+    if expected is None:
+        assert actual is None, 'reported a collision outside the time window'
+    else:
+        assert isinstance(actual, (int, float)), 'missing time of contact'
+        assert math.isfinite(actual) and abs(actual - expected) < 1e-9
+
+unit = [[0, 0, 0], [1, 1, 1]]
+far = [[5, 0, 0], [6, 1, 1]]
+zero = [0, 0, 0]
+check(unit, zero, unit, zero, 0, 0)
+check(unit, zero, far, zero, 100, None)
+check(unit, [-1, 0, 0], far, zero, 100, None)
+check(unit, [10, 0, 0], far, zero, 1, 0.4)
+check(unit, [10, 0, 0], far, zero, 0.39, None)
+check(unit, [10, 0, 0], far, zero, 0.4, 0.4)
+check(unit, [3, 0, 0], far, [-1, 0, 0], 2, 1)
+check(far, [-1, 0, 0], unit, [3, 0, 0], 2, 1)
+# Common drift must not change relative contact time.
+check(unit, [10, 7, -3], far, [6, 7, -3], 2, 1)
+check(unit, [10, 0, 0], [[5, 2, 0], [6, 3, 1]], zero, 10, None)
+# Each axis collides separately, but their time intervals do not overlap.
+check(unit, [1, 1, 0], [[2, 6, 0], [3, 7, 1]], zero, 10, None)
+check(unit, [1, 1, 0], [[2, 4, 0], [3, 5, 1]], zero, 10, 3)
+check([[0, 0, 0], [0, 0, 0]], [1, 1, 1],
+      [[2, 2, 2], [2, 2, 2]], zero, 2, 2)
+for duration in (-1, float('nan'), float('inf')):
+    try:
+        swept_aabb(unit, zero, far, zero, duration)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('invalid duration accepted')
+for a, va in (([[1, 0, 0], [0, 1, 1]], zero),
+              ([[0, 0], [1, 1]], zero),
+              (unit, [0, 0]),
+              (unit, [0, float('inf'), 0]),
+              ([[0, 0, float('nan')], [1, 1, 1]], zero)):
+    for swap in (False, True):
+        try:
+            if swap:
+                swept_aabb(far, zero, a, va, 1)
+            else:
+                swept_aabb(a, va, far, zero, 1)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('invalid geometry accepted')
+""",
+    ),
+    task(
         f"{FAMILY}-0001", FAMILY,
         prompt=(
             "Implement three Python functions over 4x4 homogeneous rigid "

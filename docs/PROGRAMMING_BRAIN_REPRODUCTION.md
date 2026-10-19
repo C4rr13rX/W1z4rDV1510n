@@ -474,3 +474,26 @@ The complete, auditable definition of done is
 The watcher exits only after the contract's generated completion marker contains
 all required passing fields. The marker is a routing guard, not proof by itself;
 its referenced reports remain authoritative.
+
+### Held-out Robot World collision coverage (2026-10-19)
+
+The authored obstacle inventory is now 256/1,000, not a finished or passing
+course. `scientific_3d_geometry_robotics-0017` measures continuous collision
+time between moving axis-aligned boxes, including tunneling between frames,
+relative motion, closed time boundaries, and disjoint axis contact intervals.
+It is held-out evaluator material: never copy its prompt, fixtures, reference
+implementation, or mutations into a training corpus.
+
+Reproduce validator qualification with:
+
+```powershell
+python -m pytest tests/test_programming_obstacle_course.py -q -k 'swept_collision or scientific_3d_geometry_robotics-0017'
+python -m pytest tests/test_programming_obstacle_course.py -q
+python scripts/programming_obstacle_manifest.py
+```
+
+The manifest command must still exit 2 while the course is incomplete. A
+passing reference and rejected mutations establish validator discrimination,
+not the brain's ability to solve the task. If the brain fails it later, use
+separately authored/licensed teaching examples, then rerun frozen held-out
+evaluation and retention; do not train on the failing obstacle itself.

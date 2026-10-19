@@ -551,6 +551,20 @@ def test_a_broken_solution_fails_its_validator(item):
     )
 
 
+@pytest.mark.parametrize("old,new", [
+    ("if enter > leave:", "if enter >= leave:"),
+    ("enter, leave = 0.0, duration", "enter, leave = 0.0, float('inf')"),
+    ("leave = min(leave, max(t1, t2))", "leave = leave"),
+])
+def test_swept_collision_rejects_temporal_contract_mutations(old, new):
+    task_id = "scientific_3d_geometry_robotics-0017"
+    item = next(item for item in AUTHORED if item.task_id == task_id)
+    reference = REFERENCES[task_id]
+    assert old in reference
+    result = run_task(item, reference.replace(old, new, 1))
+    assert result.outcome == FAILED, result.detail
+
+
 def test_no_task_is_defined_twice_in_the_reference_tables():
     """A duplicate entry silently scores a task against the wrong solution.
 
