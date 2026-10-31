@@ -513,13 +513,14 @@ invented: a rewrite is returned only when it scores at the exact ceiling (an exa
 binding) *and* resolves to something other than the answer the query had already landed
 on. Everything else returns no answer.
 
-The scorecard calls `answer_with_relation_transfer` after observing the query. The node's
-`derived_by_substitution_reply` keeps its existing derivation first, then calls the same
-wrapper only when that derivation is silent; the wrapper preserves any answer from
-`integrate_autonomous` and admits relation transfer only when the deletion scan concluded
-without a taught sub-question. `integration_family_counts` checks that composing the wrapper
-again leaves answers unchanged at scales 1, 4, and 16. The gate checks scorecard recall,
-wrong answers, integration, and RAM through scale 64.
+The scorecard calls `integrate_autonomous` after observing the query; its relation-transfer
+fallback is inside that shared brain entry point. The node's `derived_by_substitution_reply`
+keeps its existing derivation first, then calls `answer_with_relation_transfer` only when
+that derivation is silent. The wrapper preserves any answer from `integrate_autonomous` and
+uses the same taught-sub-question verdict before attempting transfer.
+`integration_family_counts` checks that composing the wrapper again leaves answers unchanged
+at scales 1, 4, and 16. The gate checks scorecard recall, wrong answers, integration, and RAM
+through scale 64.
 
 Alignment alone does **not** separate the subject from the relation, which a unit test
 established against the first version of this description: for query `r001 beside?`
@@ -679,21 +680,44 @@ at the ceiling”. The reason the outcomes split by family is **hop count**. `be
 a held-out *synonym* of a trained relation — `r001 beside?` rewrites to the taught
 `r001 next?` and the answer is *identical*, so guessing the synonym is right. `on_material`
 and `next_on_material` are *compositions* that no single trained question answers, so the
-same mechanism guesses and is wrong. The gate that separates them is therefore “fire only
-when the production derivation found no taught sub-question at all” — what the mechanism was
-designed for.
+same mechanism guesses and is wrong. The intended gate is therefore “fire only when the
+production derivation found no taught sub-question at all.” The current answer path now
+requires an explicit completed-negative verdict for that condition; the historical family
+measurements below predate this verdict gate and are not current scorecard results.
 
-#### Wired, 2026-10-02: the hop gate and the bounded candidate class
+#### Wired, 2026-10-31: report the taught-sub-question verdict
 
-`derive_by_substitution_profiled` now reports it. It counts the hops it walks into a rewrite
-the brain was **never taught** — its `continuation` arm, which exists only because an n-hop
-probe's intermediate question is untrained by construction — and publishes the count as
-`Brain::derivation_last_continuations()`. A composition takes that arm; a one-hop question
-cannot. The transfer fires only on `Some(0)`: no byte of the question is read, no relation is
-named and no family is special-cased. `None` means the search did not *conclude* (it never
-ran, or it ran out of probes), and a hop count from a search that had no opportunity to hop
-is not evidence — a 4-probe budget read `0` for every family and let the transfer answer
-`next_color` wrong, which is what the starvation test exists to catch.
+`derive_by_substitution_profiled_with_status` returns whether substitution found an exact,
+ordered taught sub-question, alongside the answer and probe count. The status is `Some(true)`
+when one is found, `Some(false)` only when the deletion scan completes without one, and
+`None` when the search cannot reach a verdict. The compatibility method
+`derive_by_substitution_profiled` retains its two-value return. Both
+`Brain::integrate_autonomous` and `answer_with_relation_transfer` permit relation transfer
+only for `Some(false)`. This
+prevents a zero continuation count, or a result left over from a prior question, from
+standing in for proof that no taught sub-question was found. The existing continuation
+counter remains available as a diagnostic, but no longer decides this fallback.
+
+`integration_family_counts::relation_transfer_requires_a_completed_negative_subquestion_verdict`
+checks that a one-probe starved search returns `None`, an exact taught sub-question returns
+`Some(true)`, and a completed scan with none returns `Some(false)`. The family test continues
+to exercise scales 1, 4, and 16; the full gate exercises the production scorecard through
+scale 64.
+
+The 2026-10-31 `tools/gate.py` stress run measured the production path below. These are
+synthetic room-world regression results, not 3D Robot World object-count or spatial-extent
+measurements.
+
+| scale | facts | recall | integration | wrong | peak RAM |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 186 | 100.0% | 100.0% | 0.0% | 17.0 MB |
+| 4 | 744 | 100.0% | 99.1% | 0.0% | 19.9 MB |
+| 16 | 2,976 | 100.0% | 95.8% | 0.0% | 26.9 MB |
+| 64 | 11,904 | 100.0% | 90.3% | 0.0% | 48.5 MB |
+
+The gate's scale-64 run completed without a timeout. The JSON artifact is
+[`logs/scorecard-latest.json`](logs/scorecard-latest.json); compare its values with
+`docs/scorecard-baseline.json` before treating a later run as a gain.
 
 `candidate_rewrites` also lost its exhaustive span-over-span class, for two measured
 reasons. It was **97.6 %** of the candidates (4,411 → 121 for a 12-byte question against a
@@ -723,12 +747,11 @@ The scale-1 and scale-4 integration figures are two-decimal because
 scale-64 ones are one-decimal because the scorecard's table is, and the
 full-precision JSON was overwritten by the arm-OFF run that follows.
 
-`IRIS_SCORE_EXIT=1`: **two independent reds, and the gain is real.** +11.1 points of
-integration at scale 1 is bought with 0.46–0.93 % invention at the larger scales, which
-PRIORITY ZERO refuses at any price, and `peak_mb` breaches the +15 % allowance at three
-scales. So `Brain::relation_transfer_in_answer_path` is **`false` by default** and
-`set_relation_transfer_in_answer_path(true)` re-takes the table above in one command. The
-mechanism, the hop gate and the bounded class all ship; only the answer is withheld.
+That arm-ON versus arm-OFF table is a historical measurement, not the current default
+configuration. The current `Brain` initializer sets
+`relation_transfer_in_answer_path: true`; the current answer gate is the taught-sub-question
+verdict described above. Re-measure the table with the current checkout before using its
+historical scores as a present-day comparison.
 
 Two diagnoses died in that run and both were mine:
 
@@ -737,12 +760,11 @@ Two diagnoses died in that run and both were mine:
   +8.0/+8.1/+9.1/+5.8 measured before it. Same number, 36× less allocation — so the cost is
   the per-probe `observe_fabric_read_only` path, which backlog `5c69d85f` and `f1bd9c76`
   already name, and not an eager `Vec`.
-- **The hop gate does not separate the families.** `material:1/8/10` survive it. A
-  composition whose first hop finds neither a taught rewrite nor a better untaught one
-  `break`s immediately — zero continuations, no answer, gate passes — so "no intermediate
-  question" and "gave up before finding one" read identically. It is still worth keeping:
-  it costs nothing (those families are byte-identical at budget 32 and at full exhaustion,
-  `6b38dd4`) and it is the only reading that distinguishes the two at all.
+- **Historical hop-gate result.** In the old gate, `material:1/8/10` survived it. A
+  composition whose first hop found neither a taught rewrite nor a better untaught one
+  `break`-ed immediately — zero continuations, no answer, gate passes — so “no intermediate
+  question” and “gave up before finding one” read identically. That counter remains
+  diagnostic; the current fallback uses the explicit taught-sub-question verdict above.
 
 The composed entry point (`answer_with_relation_transfer`) applies the identical gate and
 the identical switch, and returns the production table byte-for-byte, which is how the
@@ -789,7 +811,7 @@ The previous measurement, for contrast, was integration 53.7 / 50.0 / 44.3 / 20.
 
 **Why the wrong % is 0 and was 4× the correct % until 2026-10-01.** The accept rule was "a rewrite scoring 1.0 is a question the brain was taught", and that is structurally false. The matcher scores precision × recall over *sets* of firing atom neurons; an atom is a byte, so a binding trained on `"r000 desk material?"` holds one member per **distinct** byte and represents neither order nor multiplicity. Every anagram therefore scores exactly 1.0 — `"r0desk material?"` drops two `0`s and a space, all repeats, reaches the ceiling, and answers a different room's material. It is reachable as a real rewrite. The fix records the identity of what was taught (`Brain::trained_frames`, a 64-bit digest per frame written on the training path) and admits only rewrites that are in it; an untaught rewrite may still *continue* a multi-hop chain but can never *be* the answer. `crates/brain/tests/derivation_rejects_untaught.rs` pins both directions, including a premise test asserting the anagram really does reach the ceiling.
 
-**Known limits, stated rather than averaged away.** `beside_next` is 0 of 6 / 24 / 96 / 384: no sub-question of `"r001 beside?"` is known, and the relation word dominates the subject 9:1 on shared bytes, so the top match is the *wrong room* at 0.90 while the question holding the answer sits at rank 44. The mechanism that *does* answer it exists and is exported (`relation_transfer`, above) and is deliberately not in the answer path: composed behind the production derivation it takes `beside_next` to 6/6 at scale 1 and 4/24 at scale 4 while converting four silences into inventions at each scale, which PRIORITY ZERO refuses. Three narrowings of its accept rule were measured and two are exactly inert, so what blocks it is not its search and not the matcher's byte-set collapse: it needs to fire only on queries with no taught sub-question, and the production derivation does not report that. The 3-hop family `next_on_material` is the weakest that works at all, re-measured at all four scales after the candidate-ranking fix: 2/8, 8/32, 32/128, 113/512. The fix moved only the two larger scales (22/128 → 32/128, 23/512 → 113/512) and left 2/8 and 8/32 byte-identical, so it did not cost this family coverage anywhere — the earlier claim that it did, "slightly *below* its pre-fix count of 29/512, the one family where honesty cost coverage", was wrong. And `Brain::trained_frames` is not persisted, so a brain restored from a snapshot derives nothing until it is retrained — the node is affected, and it is tracked as backlog item `9ee0e10c`.
+**Known limits, stated rather than averaged away.** The historical arm-off baseline found `beside_next` at 0 of 6 / 24 / 96 / 384: no sub-question of `"r001 beside?"` is known, and the relation word dominates the subject 9:1 on shared bytes, so the top match is the *wrong room* at 0.90 while the question holding the answer sits at rank 44. A historical arm-on comparison took it to 6/6 at scale 1 and 4/24 at scale 4 while converting four silences into inventions at each scale. Those arm-on/off figures predate the taught-sub-question verdict gate and are not current product measurements. The current scorecard is the source for current results. The 3-hop family `next_on_material` is the weakest that works at all, re-measured at all four scales after the candidate-ranking fix: 2/8, 8/32, 32/128, 113/512. The fix moved only the two larger scales (22/128 → 32/128, 23/512 → 113/512) and left 2/8 and 8/32 byte-identical, so it did not cost this family coverage anywhere — the earlier claim that it did, "slightly *below* its pre-fix count of 29/512, the one family where honesty cost coverage", was wrong. And `Brain::trained_frames` is not persisted, so a brain restored from a snapshot derives nothing until it is retrained — the node is affected, and it is tracked as backlog item `9ee0e10c`.
 
 **Integration no longer decays with scale, and budget starvation is no longer the dominant term.** Both halves of this section said the opposite until 2026-10-01, and the correction is one change: `routed_binding_candidates` ranked an EXACT identity match inside a candidate set that could outvote it, so the derivation's own accept rule discarded answers it had already found. Fixing the ranking took scale 64 from 38.5 to 77.3 — and because an exact match is found in fewer probes than a search that misses, the probe cost fell with it. Every number here is a field of `docs/scorecard-baseline.json`, so it is checkable against a committed file:
 

@@ -532,8 +532,10 @@ pub fn derive_by_relation_transfer(
 /// relation, so the rewrite's answer is identical to the query's; `on_material`
 /// and `next_on_material` are COMPOSITIONS that no single trained question
 /// answers. Firing the transfer only when the production derivation found no
-/// taught sub-question at all is therefore the gate, and
-/// `derive_by_substitution_profiled` does not report that today.
+/// taught sub-question at all is therefore the gate. The profiled production
+/// derivation now reports whether its search found one, completed without one,
+/// or could not reach a verdict; only the completed negative result permits
+/// this transfer.
 fn admissible(
     brain: &Brain,
     query_pool: PoolId,
@@ -652,13 +654,10 @@ pub fn answer_with_relation_transfer(
     if budget == 0 {
         return (None, 0);
     }
-    // THE SAME HOP GATE THE WIRED PATH APPLIES, read off the brain rather than
-    // re-derived here. `integrate_autonomous` above has just run the
-    // substitution, so `derivation_last_continuations` describes THIS question:
-    // non-zero means the search walked through an intermediate question, i.e. a
-    // COMPOSITION, and borrowing one trained relation is the wrong shape for it
-    // -- measured 1, 8 and 10 WRONG for +0, +0 and +4 correct on
-    // `next_on_material` at scales 4, 16 and 64.
+    // THE SAME SUB-QUESTION VERDICT THE WIRED PATH APPLIES, read off the brain
+    // rather than re-derived here. `integrate_autonomous` above has just run
+    // substitution, so this status belongs to THIS question. Only a completed
+    // scan that found no exact taught sub-question licenses the transfer.
     //
     // It is here as well as in `Brain::integrate_autonomous` because this
     // function is the OUTER composition, and the parity test asserts that
@@ -667,14 +666,13 @@ pub fn answer_with_relation_transfer(
     // product refuses, which is the scorecard-vs-node divergence the project
     // forbids.
     //
-    // `None` means the substitution did not CONCLUDE -- it never ran, or it ran
-    // out of probes -- and a hop count from a search that had no opportunity to
-    // hop is not evidence. Only `Some(0)` licenses the transfer.
-    if brain.derivation_last_continuations() != Some(0) {
+    // `None` means the substitution did not conclude; that is not evidence of
+    // absence. Only `Some(false)` licenses the transfer.
+    if brain.derivation_found_taught_subquestion() != Some(false) {
         return (None, 0);
     }
-    // AND THE SAME DEFAULT-OFF SWITCH, for the same parity reason: the wired
-    // path answers from this mechanism only when
+    // AND THE SAME SWITCH, for the same parity reason: the wired path answers
+    // from this mechanism only when
     // `relation_transfer_in_answer_path` is set, so the composed entry must
     // too, or the two disagree and the scorecard measures a route the product
     // does not run. See that field for the four-scale measurement that makes

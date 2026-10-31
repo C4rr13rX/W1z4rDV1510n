@@ -1090,32 +1090,21 @@ pub struct Brain {
     /// [`Fabric::observe_without_moment`], so a probe allocates nothing that
     /// outlives it, and the budget's remaining cost is wall time alone.
     derivation_probe_budget: usize,
-    /// How many UNTAUGHT rewrites the last substitution walked through, which is
-    /// the only thing that distinguishes a one-hop question from a composition
-    /// without reading a byte of either.
-    ///
-    /// Set once per [`Self::derive_by_substitution_profiled`] call and read only
-    /// by [`Self::integrate_autonomous`]. A hop that advances `current` to a
-    /// rewrite the brain was NEVER taught is, by construction, a hop into an
-    /// intermediate question -- the `continuation` arm's own doc says so, and
-    /// that arm exists because an n-hop probe's intermediate is untrained by
-    /// construction. A question whose search never took that arm is therefore
-    /// one the brain tried to answer in a single hop and could not.
-    ///
-    /// Why this field rather than a return value: the method is public and has
-    /// callers in `tests/` and `examples/` whose signatures would all have to
-    /// change for a value exactly one caller reads.
+    /// How many UNTAUGHT rewrites the last substitution walked through. This is
+    /// retained as a diagnostic; relation transfer uses the explicit
+    /// `derivation_found_taught_subquestion` verdict instead.
     derivation_last_continuations: Option<usize>,
+    /// Whether the latest substitution search found an exact taught
+    /// sub-question. `None` means it could not reach a verdict.
+    derivation_found_taught_subquestion: Option<bool>,
     /// May [`Self::integrate_autonomous`] answer from
     /// `relation_transfer`? **Default `true`.**
     ///
     /// Three-way relational alignment `(query, base_question, trained)` in
-    /// `crate::relation_transfer` verifies that `(query, base_question)` and
-    /// `(base_question, trained)` have non-empty, disjoint subject and relation
-    /// spans in `base_question`, and pre-filters candidates by
-    /// `Brain::is_trained_frame` before probing the fabric. This eliminates the
-    /// multi-hop and chimera-room inventions (`wrong_pct = 0.0` at scales
-    /// 1/4/16/64) and bounds the transfer to ~3 probes per answered question.
+    /// `crate::relation_transfer` verifies disjoint subject and relation spans
+    /// and requires an exact trained frame. The answer path additionally
+    /// requires a completed negative taught-sub-question verdict before it
+    /// invokes this transfer.
     relation_transfer_in_answer_path: bool,
     /// Where the taught sub-question has been found before, as
     /// `(question length, cut point, tail length kept)`.
@@ -1749,6 +1738,7 @@ impl Brain {
             feedback_events_emitted: 0,
             derivation_probe_budget: DEFAULT_DERIVATION_PROBE_BUDGET,
             derivation_last_continuations: None,
+            derivation_found_taught_subquestion: None,
             relation_transfer_in_answer_path: true,
             derivation_cut_hints: Vec::new(),
             derivation_splice_hints: Vec::new(),
@@ -7654,20 +7644,44 @@ impl Brain {
         max_depth: usize,
         max_probes: usize,
     ) -> (Option<Vec<u8>>, usize) {
+        let (answer, probes, _) = self.derive_by_substitution_profiled_with_status(
+            query_pool,
+            target_pool,
+            query,
+            max_depth,
+            max_probes,
+        );
+        (answer, probes)
+    }
+
+    /// [`Self::derive_by_substitution_profiled`] with its taught sub-question
+    /// verdict included in the result.
+    pub fn derive_by_substitution_profiled_with_status(
+        &mut self,
+        query_pool: PoolId,
+        target_pool: PoolId,
+        query: &[u8],
+        max_depth: usize,
+        max_probes: usize,
+    ) -> (Option<Vec<u8>>, usize, Option<bool>) {
         if query.is_empty() || query_pool == target_pool || max_depth == 0 {
             self.derivation_last_continuations = None;
-            return (None, 0);
+            self.derivation_found_taught_subquestion = None;
+            return (None, 0, None);
         }
+        self.derivation_found_taught_subquestion = None;
         self.derivation_stats.attempts += 1;
         let mut probes = 0usize;
         let mut current = query.to_vec();
         let mut derived: Option<Vec<u8>> = None;
+        let mut found_taught_subquestion = false;
         // How many hops walked to a rewrite the brain was NEVER taught. See
         // `derivation_last_continuations`: it is set from this at every return,
         // including the early ones, so a reader can never see a count left
         // behind by a previous call.
         let mut continuations = 0usize;
         let mut starved_before_verdict = false;
+        let mut completed_subquestion_scan = false;
 
         for _hop in 0..max_depth {
             if probes >= max_probes {
@@ -7686,6 +7700,10 @@ impl Brain {
             // measured as 161 questions per 2-hop derivation against the 26 the
             // productive hop actually needs.
             if base_score >= 1.0 {
+                if self.is_trained_frame(query_pool, &current) {
+                    found_taught_subquestion = true;
+                    self.derivation_found_taught_subquestion = Some(true);
+                }
                 break;
             }
 
@@ -7698,14 +7716,13 @@ impl Brain {
             // an answer path that already asks 3,456 integration questions at
             // scale 64.
             //
-            // The cheap answer uses a property of the score. A question scores
-            // 1.0 only when precision AND recall are 1 — the matched binding's
-            // query atoms are exactly the question's, nothing unexplained
-            // either way — so a prefix that scores 1.0 IS a question the brain
-            // was taught. The SHORTEST such prefix is the taught sub-question,
-            // and then the only freedom left is where its answer is spliced in:
-            // k is known, so only j varies. That is `k + (k+1)` questions
-            // instead of `n(n+1)/2`.
+            // A ceiling score identifies a candidate sub-question cheaply, but
+            // it is not proof that the ordered frame was taught: the binding
+            // score compares an unordered byte set. Count a candidate as taught
+            // only when `is_trained_frame` also confirms its exact frame. Once
+            // the deletion fixes the sub-question cut `k`, only the splice
+            // position `j` varies: `k + (k+1)` probes instead of
+            // `n(n+1)/2`.
             //
             // The full span search stays as the fallback, so a world whose
             // sub-questions are not prefix-shaped still derives; it just costs
@@ -7757,7 +7774,9 @@ impl Brain {
                 // Score first: the answer is read only by the `>= 1.0` arm, so
                 // decoding every miss is work nothing consumes.
                 let score = self.probe_question_score(query_pool, target_pool, &sub);
-                if score >= 1.0 {
+                if score >= 1.0 && self.is_trained_frame(query_pool, &sub) {
+                    found_taught_subquestion = true;
+                    self.derivation_found_taught_subquestion = Some(true);
                     self.derivation_stats.cut_hint_hits += 1;
                     if let Some(answer) = self.probe_answer(query_pool, target_pool) {
                         known_prefix = Some((k, answer));
@@ -7785,7 +7804,9 @@ impl Brain {
                         sub.extend_from_slice(&current[n - t..]);
                         probes += 1;
                         let score = self.probe_question_score(query_pool, target_pool, &sub);
-                        if score >= 1.0 {
+                        if score >= 1.0 && self.is_trained_frame(query_pool, &sub) {
+                            found_taught_subquestion = true;
+                            self.derivation_found_taught_subquestion = Some(true);
                             if let Some(answer) = self.probe_answer(query_pool, target_pool) {
                                 known_prefix = Some((k, answer));
                                 self.note_derivation_cut(n, k, t);
@@ -7794,6 +7815,9 @@ impl Brain {
                         }
                     }
                 }
+            }
+            if !starved_before_verdict {
+                completed_subquestion_scan = true;
             }
 
             // WHICH ceiling rewrite, and why this is a vote rather than the
@@ -8007,9 +8031,9 @@ impl Brain {
                     Some((_, next_question)) => {
                         // A hop into a question the brain was never taught. By
                         // the arm's own doc that is an INTERMEDIATE question,
-                        // which only a composition has, so counting these is
-                        // how a caller tells a composition from a one-hop
-                        // question without reading a byte of either.
+                        // which only a composition has, so the counter remains
+                        // useful diagnostic information. The transfer gate
+                        // uses the separate taught-sub-question verdict.
                         continuations += 1;
                         current = next_question;
                     }
@@ -8018,17 +8042,15 @@ impl Brain {
             }
         }
 
+        if found_taught_subquestion {
+            self.derivation_found_taught_subquestion = Some(true);
+        } else if completed_subquestion_scan && !starved_before_verdict {
+            self.derivation_found_taught_subquestion = Some(false);
+        }
         self.observe_fabric_read_only(query_pool, query);
-        // PUBLISHED ONLY WHEN THE SEARCH CONCLUDED, and that is not a detail.
-        // A starved search takes no continuation hop for the same reason it
-        // finds no answer -- it ran out of probes -- so `0` from a starved call
-        // is "no opportunity", not "no intermediate question". Measured: at a
-        // 4-probe budget the hop gate read 0 for every family and let the
-        // transfer answer `next_color` WRONG, which is the starvation test's
-        // whole contract (starving may only turn answers into silence). This is
-        // the repository's standing lesson about a counter of zero from a path
-        // that never ran, reproduced inside the gate added to prevent the
-        // previous one.
+        // The continuation count remains diagnostic. It is not a proof that
+        // the deletion scan found or did not find an exact taught question;
+        // the status returned above carries that separate verdict.
         //
         // When the deletion scan finishes (`!starved_before_verdict`) with no
         // taught sub-question (`cut_k == None`), its fallback `None =>` loop
@@ -8052,7 +8074,7 @@ impl Brain {
             None if probes >= max_probes => self.derivation_stats.budget_exhausted += 1,
             None => {}
         }
-        (derived, probes)
+        (derived, probes, self.derivation_found_taught_subquestion)
     }
 
     /// What the derivation has cost this brain so far. See [`DerivationStats`]
@@ -8126,14 +8148,11 @@ impl Brain {
         if direct.answer.as_ref().map_or(false, |a| !a.is_empty()) {
             return direct;
         }
-        // STALENESS. The counter below gates the relation-transfer arm, and
-        // every early return under this point skips the substitution that sets
-        // it -- so without this line the gate reads the PREVIOUS question's hop
-        // count. Measured: the composed entry point and this one then disagreed
-        // at scale 4 and the parity assert in
-        // `tests/integration_family_counts.rs` went red, which is the one thing
-        // that test exists to catch.
+        // Clear the previous query's diagnostics and verdict before any early
+        // return. A missing verdict on this query is not evidence that no taught
+        // sub-question exists.
         self.derivation_last_continuations = None;
+        self.derivation_found_taught_subquestion = None;
         if self.derivation_probe_budget == 0 {
             return direct;
         }
@@ -8144,61 +8163,45 @@ impl Brain {
         let Some(question) = self.fresh_observed_frame(query_pool) else {
             return direct;
         };
-        let (derived, probes) = self.derive_by_substitution_profiled(
-            query_pool,
-            target_pool,
-            &question,
-            chain_max_depth,
-            self.derivation_probe_budget,
-        );
+        let (derived, _probes, subquestion_status) =
+            self.derive_by_substitution_profiled_with_status(
+                query_pool,
+                target_pool,
+                &question,
+                chain_max_depth,
+                self.derivation_probe_budget,
+            );
         // SUBSTITUTION FAILED, SO TRY THE ONE OTHER DERIVATION IN THE LIBRARY.
         //
         // `derive_by_substitution` can only splice spans taken from an ANSWER.
         // A held-out probe of the shape `<subject> <relation>?` needs a span
-        // that only ever appears inside a trained QUESTION, so that family is
-        // not slow or unlucky for it -- it is unreachable. Measured: the
-        // scorecard's `beside_next` is 0 of 384 at scale 64 at budgets 32, 64
-        // AND 128, byte-identical, which is 11.1 points of the integration
-        // metric and the largest single bucket left.
+        // that only ever appears inside a trained QUESTION, which is why the
+        // separate relation-transfer mechanism exists.
         // `crate::relation_transfer` supplies exactly that span and nothing
         // else; see its module doc for why alignment alone cannot.
         //
-        // WHY HERE AND NOWHERE ELSE. This method is the one derivation path the
-        // scorecard (`examples/scorecard.rs`) and both node answer routes
-        // (`brain_api.rs`, `bin/brain_server.rs`) all call, so a fallback added
-        // here reaches the product and the measurement in the same commit --
-        // the project's parity rule -- and cannot drift between them.
+        // The scorecard (`examples/scorecard.rs`) and node's composed answer
+        // route (`brain_api.rs`) both reach this derivation, keeping the
+        // measurement and product on the same status gate.
         //
         // IT MAY ONLY SPEND ON A SILENCE. The arm runs only when substitution
         // returned nothing, so no answer the brain already derives can change
         // and no probe is spent on a question that is already answered. The
-        // cost lands on the empty bucket alone: 544 of 3,456 probes at scale
-        // 64.
+        // cost lands on the empty bucket alone.
         //
-        // AND IT MAY ONLY SPEND ON A SILENCE WITH NO INTERMEDIATE QUESTION.
-        // Composed on emptiness alone it is measured to invent, and the
-        // inventions are not spread across the families: at scales 4/16/64
-        // `next_on_material` gained 1, 8 and 10 WRONG for +0, +0 and +4
-        // correct, while `beside_next` gained 6, 4, 8 and 37 correct for 0
-        // wrong at the first three scales (Cove, 2026-10-02). What separates
-        // them is HOP COUNT -- `beside_next` is a held-out SYNONYM of a trained
-        // relation, so one trained question answers it, and the other two are
-        // COMPOSITIONS no single trained question answers, so the transfer's
-        // one-question rewrite is the wrong shape for them by construction.
-        //
-        // `derivation_last_continuations` is that distinction as a counter
-        // rather than as a family name: it counts the hops the substitution
-        // just walked into a rewrite the brain was NEVER taught, which is the
-        // `continuation` arm, which exists precisely because an n-hop probe's
-        // intermediate question is untrained. A search that never took it is a
-        // question the brain tried to answer in ONE hop and could not -- which
-        // is exactly where a single borrowed relation can be right. Nothing
-        // here reads a byte of the question, names a relation or knows a
-        // family, so no probe is special-cased.
+        // AND IT MAY ONLY SPEND ON A COMPLETED NEGATIVE SEARCH. The profiled
+        // derivation reports `Some(false)` only after its deletion scan
+        // completes without finding an exact ordered taught sub-question.
+        // `Some(true)` means a taught sub-question was found; `None` means the
+        // scan did not establish either result (for example, it starved).
+        // Only the completed negative result licenses borrowing a relation.
+        // This keeps the transfer away from compositions whose intermediate
+        // question the production derivation already found, without using a
+        // family name or hop-count heuristic.
         let derived = match derived.filter(|a| !a.is_empty()) {
             Some(derived) => derived,
             None if !self.relation_transfer_in_answer_path => return direct,
-            None if self.derivation_last_continuations != Some(0) => return direct,
+            None if subquestion_status != Some(false) => return direct,
             None => {
                 let (transferred, transfer_probes) =
                     crate::relation_transfer::derive_by_relation_transfer(
@@ -8324,15 +8327,8 @@ impl Brain {
     }
 
     /// How many hops the last [`Self::derive_by_substitution_profiled`] walked
-    /// into a rewrite the brain was NEVER taught -- its `continuation` arm.
-    ///
-    /// `0` says the substitution tried to answer in ONE hop and could not,
-    /// which is the only case where borrowing a whole relation from one trained
-    /// question can be right. Read by [`Self::integrate_autonomous`]'s relation-
-    /// transfer arm and by `relation_transfer::answer_with_relation_transfer`,
-    /// which must gate identically or the two disagree and the parity test
-    /// `the_wired_transfer_answers_beside_next_and_composing_it_twice_changes_nothing`
-    /// fails -- that is the test's whole job.
+    /// into an untaught rewrite. Kept for diagnostics; relation transfer is
+    /// gated by [`Self::derivation_found_taught_subquestion`] instead.
     ///
     /// Reset at every return of that method, including the early one, so it is
     /// never a count left over from a previous call.
@@ -8340,14 +8336,20 @@ impl Brain {
         self.derivation_last_continuations
     }
 
+    /// Verdict from the latest substitution search, shared with composed
+    /// answer paths. `None` means no complete verdict was reached.
+    pub fn derivation_found_taught_subquestion(&self) -> Option<bool> {
+        self.derivation_found_taught_subquestion
+    }
+
     /// Let [`Self::integrate_autonomous`] answer from `relation_transfer`.
-    /// See `relation_transfer_in_answer_path` for the four-scale measurement
-    /// that makes `false` the default.
+    /// The switch is enabled by default; fallback answers still require a
+    /// completed negative taught-sub-question verdict.
     pub fn set_relation_transfer_in_answer_path(&mut self, on: bool) {
         self.relation_transfer_in_answer_path = on;
     }
 
-    /// Whether the relation-transfer arm may answer. `false` by default.
+    /// Whether the relation-transfer arm may answer. `true` by default.
     pub fn relation_transfer_in_answer_path(&self) -> bool {
         self.relation_transfer_in_answer_path
     }
@@ -11038,6 +11040,7 @@ impl Brain {
             feedback_events_emitted: 0,
             derivation_probe_budget: DEFAULT_DERIVATION_PROBE_BUDGET,
             derivation_last_continuations: None,
+            derivation_found_taught_subquestion: None,
             relation_transfer_in_answer_path: true,
             derivation_cut_hints: Vec::new(),
             derivation_splice_hints: Vec::new(),
@@ -11230,6 +11233,7 @@ impl Brain {
             feedback_events_emitted: 0,
             derivation_probe_budget: DEFAULT_DERIVATION_PROBE_BUDGET,
             derivation_last_continuations: None,
+            derivation_found_taught_subquestion: None,
             relation_transfer_in_answer_path: true,
             derivation_cut_hints: Vec::new(),
             derivation_splice_hints: Vec::new(),

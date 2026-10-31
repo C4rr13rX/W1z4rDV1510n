@@ -207,9 +207,9 @@ fn infer(brain: &mut Brain, query: &str) -> Option<String> {
     answer.filter(|a| !a.is_empty()).map(|a| String::from_utf8_lossy(&a).to_string())
 }
 
-/// `infer`, with `relation_transfer` composed behind it -- the wiring backlog
-/// item `f16e499d` asks for. NOT the production path: the test below is what
-/// says why.
+/// `infer`, with the composed wrapper placed behind it to prove the second
+/// composition is inert. Production uses the fallback inside
+/// `integrate_autonomous`; this helper checks route parity.
 ///
 /// `answer_with_relation_transfer` calls `integrate_autonomous` itself and
 /// returns its answer byte-identically whenever it is non-empty, so every
@@ -227,6 +227,58 @@ fn infer_via_transfer(brain: &mut Brain, query: &str) -> Option<String> {
     );
     let _ = brain.finish_read_only_inference();
     answer.filter(|a| !a.is_empty()).map(|a| String::from_utf8_lossy(&a).to_string())
+}
+
+#[test]
+fn relation_transfer_requires_a_completed_negative_subquestion_verdict() {
+    let mut brain = subject();
+    let facts = trained_facts(ROOMS_PER_SCALE);
+    for (query, answer) in &facts {
+        brain.pretrain_binding_episode(&[
+            (QUERY_POOL, query.as_bytes().to_vec()),
+            (ANSWER_POOL, answer.as_bytes().to_vec()),
+        ]);
+    }
+
+    let (_, _, status) = brain.derive_by_substitution_profiled_with_status(
+        QUERY_POOL,
+        ANSWER_POOL,
+        b"r000 lamp on?",
+        2,
+        32,
+    );
+    assert_eq!(
+        status,
+        Some(true),
+        "an exact taught question at the ceiling is a found sub-question"
+    );
+
+    let (_, _, status) = brain.derive_by_substitution_profiled_with_status(
+        QUERY_POOL,
+        ANSWER_POOL,
+        b"r000 lamp on?x",
+        2,
+        1,
+    );
+    assert_eq!(status, None, "a starved scan has no verdict");
+
+    let (_, _, status) = brain.derive_by_substitution_profiled_with_status(
+        QUERY_POOL,
+        ANSWER_POOL,
+        b"r000 lamp on?x",
+        2,
+        32,
+    );
+    assert_eq!(status, Some(true), "an exact taught sub-question is reported");
+
+    let (_, _, status) = brain.derive_by_substitution_profiled_with_status(
+        QUERY_POOL,
+        ANSWER_POOL,
+        b"r001 beside?",
+        2,
+        128,
+    );
+    assert_eq!(status, Some(false), "a completed negative scan is reported");
 }
 
 /// `examples/scorecard.rs`'s own training order, copied exactly. Order is not
@@ -348,29 +400,12 @@ fn check(scale: usize, floors: &[(&str, usize)]) {
     }
 }
 
-/// WHAT HAPPENS IF `relation_transfer` IS WIRED INTO THE ANSWER PATH, measured
-/// through the composed production entry rather than through a test-local copy
-/// of the composition.
+/// Production-path parity check. Historical arm-on/off measurements motivated
+/// gating relation transfer on the explicit taught-sub-question verdict; the
+/// assertions now verify that the composed wrapper is idempotent and wrong
+/// answers stay at zero at scales 1, 4, and 16.
 ///
-/// This is the one guard that makes backlog item `f16e499d` decidable in five
-/// seconds instead of a scorecard run, and it pins BOTH halves of the answer,
-/// because either half alone is misleading:
-///
-/// ```text
-///   s1 beside_next   0/6  silent 6  ->  6/6  WRONG 0      the gain is real
-///   s1 on_material  22/24 silent 2  -> 22/24 WRONG 2      and so is the cost
-///   s4 beside_next   0/24 silent 24 ->  4/24 WRONG 3
-///   s4 next_on_mat    8/32          ->  8/32 WRONG 1
-/// ```
-///
-/// Every invention is a SILENCE CONVERTED -- no family loses a correct answer
-/// -- and under PRIORITY ZERO that is still a refusal: a brain with no grounded
-/// answer has no answer, and the gate ratchets `wrong` toward 0 and may never
-/// let it rise. So the transfer stays out of the answer path, and this test is
-/// what a future accept rule has to turn green by driving `wrong` to 0 WITHOUT
-/// driving `beside_next` back to 0.
-///
-/// # Where the invention comes from, which is NOT the splice and NOT the matcher
+/// # Historical diagnosis: where the invention came from
 ///
 /// TWO narrowings of the accept rule were added and measured against these
 /// exact rows, each applied to the one answer returned rather than as a
@@ -388,12 +423,10 @@ fn check(scale: usize, floors: &[(&str, usize)]) {
 /// diagnosis, that the unordered-byte-set matcher was the fault (`f711d18a`),
 /// does not survive the order check: order was added and nothing changed.
 ///
-/// What splits the families is HOP COUNT. `beside_next` is a held-out SYNONYM
-/// of a trained relation, so the rewrite's answer is identical to the query's
-/// and guessing the synonym is right; `on_material` and `next_on_material` are
-/// COMPOSITIONS no single trained question answers. The gate is therefore
-/// "fire only when the production derivation found no taught sub-question at
-/// all", which `derive_by_substitution_profiled` does not report today.
+/// The transfer gate now uses the production derivation's explicit status:
+/// only a completed scan with no exact ordered taught sub-question permits the
+/// fallback. This test applies the composed wrapper a second time and asserts
+/// parity with production, while keeping wrong answers at zero.
 #[test]
 fn the_wired_transfer_answers_beside_next_and_composing_it_twice_changes_nothing() {
     for scale in [1, 4, 16] {
@@ -464,17 +497,10 @@ fn the_wired_transfer_answers_beside_next_and_composing_it_twice_changes_nothing
         // behaving exactly as PRIORITY ZERO requires.
         // NO FLOOR ABOVE 0 IS CONTRACTED FOR THIS FAMILY, and that is a
         // decision with a four-scale measurement behind it rather than a gap.
-        // `Brain::relation_transfer_in_answer_path` is false by default -- the
-        // arm answers 6/6, 4/24, 8/96 and 37/384 and pays for it with
-        // 0.46-0.93 % invention at scales 4, 16 and 64, which PRIORITY ZERO
-        // refuses -- so `beside_next` is 0 on the product path BY DESIGN and
-        // asserting otherwise here would red the gate for the product behaving
-        // as specified. What stays absolute is the line below: whatever it
-        // answers, it may never be wrong. Turn the arm on with
-        // `set_relation_transfer_in_answer_path(true)` to re-take the table.
-        // PRIORITY ZERO on the family the wiring added, stated here as well as
-        // in `check` because this is the test that would catch the fallback
-        // paying for its answers with inventions.
+        // The default answer path enables the transfer, but only after the
+        // completed-negative verdict. The historical arm-on/off table above
+        // predates that gate; current reachability is measured by the scorecard.
+        // Whatever this path answers, it may never be wrong.
         assert_eq!(
             beside_wrong, 0,
             "s{scale}: the relation-transfer fallback invented {beside_wrong} beside_next              answers; a brain with no grounded answer has NO answer"

@@ -3638,7 +3638,13 @@ pub(crate) fn derived_by_substitution_reply(
         return None;
     }
     let derived = brain
-        .derive_by_substitution(\n            query_pool,\n            action_pool,\n            prompt.as_bytes(),\n            w1z4rd_brain::ANSWER_CHAIN_MAX_DEPTH,\n            budget,\n        )
+        .derive_by_substitution(
+            query_pool,
+            action_pool,
+            prompt.as_bytes(),
+            w1z4rd_brain::ANSWER_CHAIN_MAX_DEPTH,
+            budget,
+        )
         .or_else(|| {
             w1z4rd_brain::answer_with_relation_transfer(
                 brain,
