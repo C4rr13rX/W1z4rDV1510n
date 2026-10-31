@@ -641,7 +641,7 @@ pub struct PoolConfig {
     /// the byte's ability to spray activation into every concept it ever
     /// appeared in, which is the "index lookup, not a byte firing into
     /// millions of terminals" the goal asks for.
-    #[serde(default = "default_max_atom_fanout")]
+    #[serde(skip, default = "default_max_atom_fanout")]
     pub max_atom_fanout: usize,
     /// Maximum run length emergence considers ON THE TRAINING PATH, where it
     /// is frame-local. 0 or 1 disables it, which is how every brain behaved
