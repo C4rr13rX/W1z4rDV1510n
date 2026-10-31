@@ -1021,8 +1021,13 @@ mod tests {
         {
             let mut brain = Brain::new(BrainConfig::default());
             binding_pool_id = brain.binding_pool_id();
+            let config = PoolConfig::defaults("frames", 10);
+            assert_eq!(
+                config.pretrain_emergence_max_run, 3,
+                "restored pools must start with bounded training-path emergence enabled"
+            );
             brain.create_pool(
-                PoolConfig::defaults("frames", 10),
+                config,
                 Box::new(BytePassthroughEncoding {
                     prefix: "frame".into(),
                 }),

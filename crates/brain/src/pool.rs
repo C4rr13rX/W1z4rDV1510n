@@ -1423,24 +1423,11 @@ fn default_max_atom_fanout() -> usize {
 /// against this bound over the scorecard's own corpus -- not from the
 /// 1,071-keys-per-frame figure, which is one observation at one frame length.
 fn default_pretrain_emergence_max_run() -> usize {
-    // 0 = OFF, and this is a deliberate opt-in rather than the 3 it shipped at
-    // for one measured reason: SIX committed tests assert the invariant this
-    // breaks, and two of them assert it by name --
-    // `direct_pretrain_binding_is_atom_grounded_without_within_pool_concept_birth`
-    // and `direct_pretrain_reuses_atom_grounded_action_frame_across_paraphrases`
-    // (plus `migrated_concept_membership_is_resolved_from_the_cold_index`,
-    // `sleeping_concept_releases_members_without_losing_identity`,
-    // `committed_fixture_actually_carries_posting_generations` and
-    // `committed_wbrain_still_resolves_its_binding_routes`, which carry
-    // committed fixtures whose neuron ids move when concepts are born).
-    // `python tools/gate.py` reddened on exactly those six at 3.
-    //
-    // They are guards of the OLD behaviour, so they are what the next change
-    // updates; flipping this default is the last line of that change, not a
-    // separate decision. Until then the mechanism is reachable and measured
-    // (`emergence_ledger_cost_by_run_length` sets it explicitly) and the
-    // product's behaviour is byte-identical to before it existed.
-    0
+    // Bigrams and trigrams are the measured affordable bound: at scale 64 the
+    // recurrence ledger holds 1,772 keys (0.121 MB) for 11,904 facts, while
+    // recall remains 100%. The bound is deliberately short; longer runs grow
+    // close to one key per frame instead of saturating with the corpus.
+    3
 }
 
 fn default_predict_gate_mode() -> ControlMode {

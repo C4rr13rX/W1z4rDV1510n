@@ -184,10 +184,9 @@ fn subject() -> Brain {
     subject_with_run_bound(EMERGENCE_RUN_BOUND)
 }
 
-/// The bound this file measures at. `PoolConfig::defaults` ships 0 (OFF)
-/// because six committed tests assert the invariant emergence breaks -- see
-/// `default_pretrain_emergence_max_run` -- so the bound is named here rather
-/// than read from the default, and this file is where it is exercised.
+/// The bound this file measures at. `PoolConfig::defaults` ships 3; the
+/// experiment names it explicitly so its ledger census remains stable if the
+/// production default changes later.
 const EMERGENCE_RUN_BOUND: usize = 3;
 
 /// The same subject with the training path's emergence bound set explicitly,
@@ -799,7 +798,7 @@ fn beside_next_is_unreachable_and_on_material_is_ambiguous() {
     // IT WAS AN EMERGENCE PROBLEM AND NOW IT IS ONLY A MATCHER PROBLEM, and
     // the two numbers above are what separate them.
     //
-    // Until `PoolConfig::pretrain_emergence_max_run` existed this read
+    // With the training-path bound disabled, this read
     // `assert_eq!(st.total_concepts, st.total_binding)` and
     // `assert_eq!(st.total_concepts, facts.len())`: `total_concepts` equalled
     // `total_binding` equalled the taught fact count at EVERY scale
