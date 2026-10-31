@@ -148,7 +148,7 @@ DEFAULT_CONFIG = {
         # healthy panel, so the supervisor "restarted" Django every 3 polls
         # and spawned a fresh CoolCryptoUtilities console each cycle.
         "port":           8001,
-        "threads":        8,
+        "threads":        24,
         # Probe the SPA root, not /api/wizard-chat/status/ — the status
         # endpoint fans out to the node's /health + /brain and can take
         # 4-6 s under training load, pushing past health_timeout and
@@ -207,6 +207,18 @@ DEFAULT_CONFIG = {
                 # Skip while a history supervisor is training, to avoid
                 # fighting it for the node's inner lock.
                 "skip_if_running": "brain_history_supervisor",
+            },
+            {
+                "name":  "tradingagent_worker",
+                "match": "tradingagent_worker",
+                "args":  ["-X", "utf8", "web/manage.py", "tradingagent_worker"],
+                "log":   "agent_worker",
+            },
+            {
+                "name":  "evolve_strategies",
+                "match": "evolve_strategies",
+                "args":  ["-X", "utf8", "web/manage.py", "evolve_strategies", "--loop"],
+                "log":   "evolve",
             },
         ],
     },
@@ -620,9 +632,17 @@ def start_node(cfg: dict, log: Logger) -> int | None:
     # otherwise prefers <W1Z4RDV1510N_DATA_DIR>/brain, which is NOT where the
     # live node checkpoints -- a relaunch would start from an empty fabric and
     # orphan the running brain.
-    node_brain_dir = node_cfg.get("node_brain_dir")
+    node_brain_dir = node_cfg.get("node_brain_dir") or str(PROJECT_ROOT / "brain-data")
     if node_brain_dir:
         env["W1Z4RD_NODE_BRAIN_DIR"] = str(node_brain_dir)
+    identity_path = node_cfg.get("identity") or str(PROJECT_ROOT / "brains" / "market_small.identity.toml")
+    if identity_path and pathlib.Path(identity_path).exists():
+        env["W1Z4RD_BRAIN_IDENTITY"] = str(identity_path)
+    deployment_path = node_cfg.get("deployment") or str(PROJECT_ROOT / "brains" / "market_django.deployment.toml")
+    if deployment_path and pathlib.Path(deployment_path).exists():
+        env["W1Z4RD_BRAIN_DEPLOYMENT"] = str(deployment_path)
+    addr = str(node_cfg.get("addr") or "127.0.0.1:8090")
+    node_args = node_cfg.get("args") or ["--config", "node_config.json", "api", "--addr", addr]
     stdout_path = pathlib.Path(node_cfg["data_dir"]) / "training" / "node_stdout.log"
     stderr_path = pathlib.Path(node_cfg["data_dir"]) / "training" / "node_stderr.log"
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
@@ -637,14 +657,14 @@ def start_node(cfg: dict, log: Logger) -> int | None:
             creation = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
         with open(stdout_path, "ab") as outf, open(stderr_path, "ab") as errf:
             proc = subprocess.Popen(
-                [binary],
+                [binary, *node_args],
                 cwd=node_cfg["working_dir"],
                 env=env,
                 stdout=outf, stderr=errf, stdin=subprocess.DEVNULL,
                 creationflags=creation if os.name == "nt" else 0,
                 close_fds=True,
             )
-        log.info(f"started node, PID={proc.pid}")
+        log.info(f"started node, PID={proc.pid}, addr={addr}")
         return proc.pid
     except Exception as exc:
         log.error(f"failed to launch node: {exc}")
@@ -733,9 +753,11 @@ def start_django(cfg: dict, log: Logger) -> int | None:
     time.sleep(1.0)
 
     env = os.environ.copy()
-    env["WAITRESS_HOST"]    = str(dcfg["host"])
-    env["WAITRESS_PORT"]    = str(dcfg["port"])
-    env["WAITRESS_THREADS"] = str(dcfg["threads"])
+    env["WAITRESS_HOST"]               = str(dcfg["host"])
+    env["WAITRESS_PORT"]               = str(dcfg["port"])
+    env["WAITRESS_THREADS"]            = str(dcfg["threads"])
+    env["EDGEFORGE_AUTOSTART"]         = "1"
+    env["BRANDDOZER_SESSION_PROVIDER"] = "agy"
 
     stdout_path = pathlib.Path(cfg["supervisor"]["log_dir"]) / "django_stdout.log"
     stderr_path = pathlib.Path(cfg["supervisor"]["log_dir"]) / "django_stderr.log"
@@ -1204,6 +1226,25 @@ def run_supervisor(cfg: dict, log: Logger, once: bool = False) -> int:
         time.sleep(cfg["node"]["poll_interval"])
 
 
+def _acquire_single_instance_mutex() -> object | None:
+    """Acquire a Windows named mutex so only one long-running supervisor runs."""
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        ERROR_ALREADY_EXISTS = 183
+        handle = kernel32.CreateMutexW(None, False, "Local\\W1z4rDV1510nSupervisorMutex")
+        if not handle:
+            return True
+        if kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+            kernel32.CloseHandle(handle)
+            return None
+        return handle
+    except Exception:
+        return True
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--once", action="store_true",
@@ -1215,6 +1256,11 @@ def main() -> int:
     if args.print_config:
         print(json.dumps(cfg, indent=2))
         return 0
+    mutex_handle = None
+    if not args.once:
+        mutex_handle = _acquire_single_instance_mutex()
+        if mutex_handle is None:
+            return 0
     log = Logger(cfg["supervisor"]["log_dir"], cfg["supervisor"]["log_file_name"])
     try:
         return run_supervisor(cfg, log, once=args.once)

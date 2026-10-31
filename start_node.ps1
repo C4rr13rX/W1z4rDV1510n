@@ -34,9 +34,28 @@ $root = $PSScriptRoot
 $logDir = Join-Path $root "logs"
 New-Item -ItemType Directory -Force $logDir | Out-Null
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-Start-Process -FilePath (Join-Path $root "bin\w1z4rd_node.exe") `
-    -ArgumentList "--config","node_config.json","api","--addr",$Addr `
-    -WorkingDirectory $root -WindowStyle Hidden `
-    -RedirectStandardOutput (Join-Path $logDir "node-$stamp.out.log") `
-    -RedirectStandardError  (Join-Path $logDir "node-$stamp.err.log")
+$nodeBin = Join-Path $root "bin\w1z4rd_node.exe"
+$outLog  = Join-Path $logDir "node-$stamp.out.log"
+$errLog  = Join-Path $logDir "node-$stamp.err.log"
+$envPairs = @()
+foreach ($key in @("W1Z4RD_TIER_MIN_SYS_AVAIL_MB","W1Z4RD_BRAIN_AUTOCHECKPOINT_SECS","W1Z4RD_NODE_BRAIN_DIR","W1Z4RD_BRAIN_IDENTITY","W1Z4RD_BRAIN_DEPLOYMENT")) {
+    $val = [Environment]::GetEnvironmentVariable($key, "Process")
+    if ($val) { $envPairs += "set `"$key=$val`"" }
+}
+$envPrefix = if ($envPairs.Count -gt 0) { ($envPairs -join " && ") + " && " } else { "" }
+$cmdLine = "cmd.exe /c `"${envPrefix}cd /d `"$root`" && `"$nodeBin`" --config node_config.json api --addr $Addr >> `"$outLog`" 2>> `"$errLog`"`""
+$startedWmi = $false
+try {
+    $startup = ([wmiclass]"Win32_ProcessStartup").CreateInstance()
+    $startup.ShowWindow = 0
+    $res = ([wmiclass]"Win32_Process").Create($cmdLine, $root, $startup)
+    if ($res.ReturnValue -eq 0) { $startedWmi = $true }
+} catch {}
+if (-not $startedWmi) {
+    Start-Process -FilePath $nodeBin `
+        -ArgumentList "--config","node_config.json","api","--addr",$Addr `
+        -WorkingDirectory $root -WindowStyle Hidden `
+        -RedirectStandardOutput $outLog `
+        -RedirectStandardError  $errLog
+}
 Write-Host "w1z4rd_node starting on $Addr (RAM floor ${MinSysAvailMb}MB, checkpoint every ${CheckpointSecs}s, logs: logs\node-$stamp.*.log)"
