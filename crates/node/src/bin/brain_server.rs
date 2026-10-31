@@ -2911,6 +2911,38 @@ mod answer_path_grounding_tests {
         assert!(unknown.grounding.outside_grounding);
         assert!(unknown.reply.is_empty());
 
+        {
+            let mut brain = state.brain.blocking_lock();
+            brain.activate_for_prediction(POOL_TEXT, b"r000 lamp on?");
+        }
+        let taught_integrated = runtime
+            .block_on(integrate(
+                State(state.clone()),
+                Json(IntegrateRequest {
+                    query_pool: POOL_TEXT,
+                    target_pool: POOL_ACTION,
+                }),
+            ))
+            .0;
+        assert!(!taught_integrated.outside_grounding);
+        assert_eq!(taught_integrated.answer.as_deref(), Some("ZGVzaw"));
+
+        {
+            let mut brain = state.brain.blocking_lock();
+            brain.activate_for_prediction(POOL_TEXT, b"r000 lamp on?");
+        }
+        let taught_concept_first = runtime
+            .block_on(integrate_concept_first(
+                State(state.clone()),
+                Json(IntegrateRequest {
+                    query_pool: POOL_TEXT,
+                    target_pool: POOL_ACTION,
+                }),
+            ))
+            .0;
+        assert!(!taught_concept_first.outside_grounding);
+        assert_eq!(taught_concept_first.trained_answer_b64.as_deref(), Some("ZGVzaw"));
+
         let taught = runtime
             .block_on(chat(
                 State(state),

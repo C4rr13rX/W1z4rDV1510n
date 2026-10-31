@@ -6754,6 +6754,34 @@ class Model:
             "predict route returned a gibberish answer"
         );
 
+        // `/brain/chat` has a separate multi-pool decode path. It must apply
+        // the same precision floor before reporting a trained decode, even
+        // when that decode itself returns a plausible partial binding.
+        let response = runtime
+            .block_on(h_brain_chat(
+                State(state.clone()),
+                Json(json!({"text": "quasarithmetic zxqv"})),
+            ))
+            .0;
+        assert_eq!(
+            response["grounding"]["outside_grounding"],
+            true,
+            "chat route marked gibberish grounded"
+        );
+        assert_eq!(
+            response["reply"],
+            "",
+            "chat route returned a gibberish answer"
+        );
+        let response = runtime
+            .block_on(h_brain_chat(
+                State(state.clone()),
+                Json(json!({"text": "r000 lamp on?"})),
+            ))
+            .0;
+        assert_eq!(response["grounding"]["outside_grounding"], false);
+        assert_eq!(response["reply"], "desk");
+
         // A taught question remains on the same route and above the floor.
         {
             let mut brain = state.brain.blocking_lock();
@@ -6932,6 +6960,18 @@ class Model:
         // Exercise the actual HTTP chat handler: a fuzzy raw decoder result
         // must not prevent the composite prompt from reaching derivation.
         brain.set_derivation_probe_budget(32);
+        brain.activate_for_indexed_prediction(POOL_TEXT, b"r000 lamp on material?");
+        assert!(
+            brain
+                .decode_best_trained_binding(POOL_TEXT, POOL_ACTION)
+                .is_some(),
+            "fixture must reproduce an inexact trained decode that can shadow derivation"
+        );
+        let fuzzy_precision = brain.best_binding_match_v2(POOL_TEXT).precision;
+        assert!(
+            fuzzy_precision < TRAINED_BINDING_PRECISION_FLOOR,
+            "composite prompt precision {fuzzy_precision} unexpectedly clears the trained-binding floor"
+        );
         let state = BrainApiState {
             brain: Arc::new(Mutex::new(brain)),
             thinking: Arc::new(ThinkingState::default()),

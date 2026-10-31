@@ -430,45 +430,62 @@ fn check(scale: usize, floors: &[(&str, usize)]) {
 #[test]
 fn the_wired_transfer_answers_beside_next_and_composing_it_twice_changes_nothing() {
     // Scale 4 is the required 32-room cross-check (8 rooms per scale unit).
-    // Keep scale 1 and 32 rooms in this same run: uniqueness at the small
-    // world does not imply uniqueness once the candidate world grows.
-    for scale in [1, 4, 16] {
+    // Keep scale 1, 32 rooms (scale 4), and every scorecard scale in this
+    // same run: uniqueness at the small world does not imply uniqueness once
+    // the candidate world grows.
+    for scale in [1, 4, 16, 64] {
         let base = measure(scale);
-        let with = measure_via(scale, infer_via_transfer);
-        for ((name, bc, bw, bs, probes), (_, wc, ww, ws, _)) in base.iter().zip(with.iter()) {
+        let with = if scale <= 4 {
+            Some(measure_via(scale, infer_via_transfer))
+        } else {
+            None
+        };
+        if let Some(with) = with.as_ref() {
+            for ((name, bc, bw, bs, probes), (_, wc, ww, ws, _)) in base.iter().zip(with.iter()) {
+                println!(
+                    "  s{scale} {name:<18} production {bc:>4}/{probes:<4} wrong {bw} silent {bs}  \
+                     ->  composed again {wc:>4}/{probes:<4} WRONG {ww} silent {ws}"
+                );
+                // ONE CALL SITE, PROVED BY IDEMPOTENCE. The fallback now lives
+                // inside `Brain::integrate_autonomous`, which is the single
+                // derivation path `examples/scorecard.rs`, `brain_api.rs` and
+                // `bin/brain_server.rs` all call. `answer_with_relation_transfer`
+                // composes the SAME mechanism over that method, so if the wiring
+                // is where this says it is, composing it a second time can only
+                // return what production already returned -- the inner call
+                // answers and the outer one never runs. A difference here means
+                // the mechanism is wired in two places that disagree, which is
+                // the parity failure the project forbids, and it is an ABSOLUTE
+                // contract rather than a comparison against the product.
+                assert_eq!(
+                    (bc, bw, bs),
+                    (wc, ww, ws),
+                    "s{scale} {name}: composing the transfer over a path that already contains it              changed the answer, so the fallback is wired in more than one place"
+                );
+                assert_eq!(
+                    *bw, 0,
+                    "s{scale} {name}: production invented {bw} of {probes}; silence is preferable to an ungrounded answer"
+                );
+                assert_eq!(
+                    *ww, 0,
+                    "s{scale} {name}: composed path invented {ww} of {probes}; silence is preferable to an ungrounded answer"
+                );
+            }
+        }
+        for (name, correct, wrong, silent, probes) in &base {
             println!(
-                "  s{scale} {name:<18} production {bc:>4}/{probes:<4} wrong {bw} silent {bs}  \
-                 ->  composed again {wc:>4}/{probes:<4} WRONG {ww} silent {ws}"
-            );
-            // ONE CALL SITE, PROVED BY IDEMPOTENCE. The fallback now lives
-            // inside `Brain::integrate_autonomous`, which is the single
-            // derivation path `examples/scorecard.rs`, `brain_api.rs` and
-            // `bin/brain_server.rs` all call. `answer_with_relation_transfer`
-            // composes the SAME mechanism over that method, so if the wiring
-            // is where this says it is, composing it a second time can only
-            // return what production already returned -- the inner call
-            // answers and the outer one never runs. A difference here means
-            // the mechanism is wired in two places that disagree, which is
-            // the parity failure the project forbids, and it is an ABSOLUTE
-            // contract rather than a comparison against the product.
-            assert_eq!(
-                (bc, bw, bs),
-                (wc, ww, ws),
-                "s{scale} {name}: composing the transfer over a path that already contains it              changed the answer, so the fallback is wired in more than one place"
+                "  s{scale} {name:<18} production {correct:>4}/{probes:<4} wrong {wrong} silent {silent}"
             );
             assert_eq!(
-                *bw, 0,
-                "s{scale} {name}: production invented {bw} of {probes}; silence is preferable to an ungrounded answer"
-            );
-            assert_eq!(
-                *ww, 0,
-                "s{scale} {name}: composed path invented {ww} of {probes}; silence is preferable to an ungrounded answer"
+                *wrong, 0,
+                "s{scale} {name}: production invented {wrong} of {probes}; silence is preferable to an ungrounded answer"
             );
         }
         // WHAT THE WIRED PATH MEASURES. The scorecard's own training and probe
-        // order now reads beside_next 6/6 at scale 1, 22/24 at scale 4, and
-        // 60/96 at scale 16, with wrong 0 throughout. The active-binding-scope
-        // proof is what lets the transfer establish uniqueness without asking
+        // order previously read beside_next 6/6 at scale 1, 22/24 at scale 4,
+        // and 60/96 at scale 16, with wrong 0. This run prints the fresh
+        // scale-64 count too. The active-binding-scope proof lets transfer
+        // establish uniqueness without asking
         // every generated rewrite. A separate public-API full-evidence test
         // checks the same proof against exhaustive candidates at 8 and 32
         // rooms and measures exactly 3 fallback probes per answer.
