@@ -261,32 +261,14 @@ fn the_public_transfer_answers_the_zero_family_at_two_scales_and_costs_no_family
                 b.0,
                 f.0
             );
-            // (3) PRIORITY ZERO, CONFINED RATHER THAN CLAIMED.
-            //
-            // `f.1 <= b.1` for EVERY family is what this test asserted first,
-            // and it is FALSE: the multi-hop families invent. Measured at
-            // scale 1 under the uniqueness rule, `next_on_material` goes wrong
-            // 0 -> 2 and `on_material` 0 -> 1, because a rewrite can be an
-            // exactly trained question and still answer a different question
-            // than the one asked, and 32 probes against 4,395 candidates
-            // cannot prove the chain unique.
-            //
-            // THE NEXT VERSION OF THIS TEST ASSERTED `wrong == 0` FOR THE
-            // ONE-HOP FAMILY, and scale 32 refuted that too:
-            //
-            //   s8  beside_next  0 right 0 wrong 24 empty -> 6 right 0 wrong 0 empty
-            //   s32 beside_next  0 right 0 wrong 24 empty -> 4 right 3 WRONG 17 empty
-            //
-            // So the clean one-hop result is a SCALE-1 ARTEFACT, not a property
-            // of hop count: with 32 rooms instead of 8 there are simply more
-            // trained questions reachable at the ceiling, and the chain stops
-            // being unique for the same family. Nothing here is confined by hop
-            // count, and a scale-1-only reading of this mechanism is what made
-            // it look safe twice.
-            //
-            // What survives is below: the composition cannot LOSE an answer,
-            // and NET must not fall. The call site in the answer path stays
-            // unwired until wrong is 0 at every scale.
+            // PRIORITY ZERO: the active-scope uniqueness proof must never add
+            // a wrong answer at any family or scale.
+            assert!(
+                f.1 <= b.1,
+                "s{rooms} {family} the transfer increased wrong answers: {} -> {}",
+                b.1,
+                f.1
+            );
         }
 
         let n0 = t0.0 + t0.1 + t0.2;
@@ -309,8 +291,7 @@ fn the_public_transfer_answers_the_zero_family_at_two_scales_and_costs_no_family
         // (2) THE FAMILY THE MECHANISM EXISTS FOR, at this scale. The production
         // path must be 0 here -- otherwise this file is measuring something
         // other than the family that is 0 at every scale -- and the transfer
-        // must reach it at all. `wrong` is PRINTED and not asserted to 0,
-        // because at scale 32 it is 3; see (3).
+        // must reach it at all.
         let bn = rows
             .iter()
             .find(|(f, _, _)| *f == "beside_next")
@@ -321,8 +302,9 @@ fn the_public_transfer_answers_the_zero_family_at_two_scales_and_costs_no_family
             "s{rooms} the public transfer must answer the family that is 0 at every scale: {:?}",
             bn.2
         );
+        assert_eq!(bn.2 .1, 0, "s{rooms} the one-hop transfer must never return a wrong answer");
         println!(
-            "s{rooms:<3} one-hop family NET {} (right {} wrong {}) -- 0 wrong holds at s8 and NOT at s32",
+            "s{rooms:<3} one-hop family NET {} (right {} wrong {}) -- wrong 0 at both scales",
             bn.2 .0 as i64 - bn.2 .1 as i64,
             bn.2 .0,
             bn.2 .1
@@ -444,10 +426,34 @@ fn full_evidence_says_whether_the_one_hop_chain_is_unique_or_merely_unexamined()
             rows.iter().find(|(f, _, _)| *f == "beside_next").expect("the held-out family").2
         };
         let (bb, bf) = (bn(&budgeted), bn(&full));
+        let base_fallback = budgeted
+            .iter()
+            .find(|(family, _, _)| *family == "beside_next")
+            .expect("the world has the held-out relation family")
+            .1;
+        let net_fallback_probes = bb.3.saturating_sub(base_fallback.3);
         println!(
             "s{rooms:<3} ONE-HOP under full evidence: {} right {} wrong {} empty \
              (at budget {MAX_PROBES} it was {} right {} wrong {} empty)",
             bf.0, bf.1, bf.2, bb.0, bb.1, bb.2
+        );
+
+        println!(
+            "s{rooms:<3} fabric uniqueness cost: {net_fallback_probes} net fallback probes / {} answers = {:.2} per answer (plain recall: 1)",
+            bb.0,
+            net_fallback_probes as f32 / bb.0.max(1) as f32
+        );
+        assert!(bb.0 > 0, "s{rooms} the scorecard budget must return a one-hop answer");
+        assert_eq!(bb.1, 0, "s{rooms} the scorecard budget must not invent an answer");
+        assert_eq!(
+            (bb.0, bb.1, bb.2),
+            (bf.0, bf.1, bf.2),
+            "s{rooms} the fabric-side uniqueness verdict must agree with exhaustive evidence"
+        );
+        assert!(
+            net_fallback_probes <= 3 * bb.0,
+            "s{rooms} uniqueness used {net_fallback_probes} net fallback probes for {} returned answers; the ceiling is 3x plain recall",
+            bb.0
         );
 
         // PRIORITY ZERO, and it is absolute rather than relative to the

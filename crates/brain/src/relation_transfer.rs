@@ -110,38 +110,32 @@
 //! non-unique chain unique. This is what makes the mechanism silent where it
 //! used to invent, and it costs the multi-hop families nothing they had.
 //!
-//! # AND UNIQUENESS IS ONLY EVIDENCE IF THE SEARCH ENDED, WHICH IS WHY THE
-//! CANDIDATE CLASS IS BOUNDED
+//! # EXHAUSTIVE REWRITES ARE A TEST ORACLE, NOT THE SCORECARD PATH
 //!
-//! The condition above is completed by `!truncated` at the accept, and that
-//! made the whole mechanism inert for a day: the class was ~4,400 rewrites
-//! against a budget of 32-64, so every search stopped early and the accept was
-//! unreachable -- `beside_next` read 0/6 at scale 1 on the wired path where the
-//! same code had read 6/6 before the condition existed. The rule was right and
-//! the class was wrong. `candidate_rewrites` now generates `1 + |q| |T|`
-//! candidates (see its own comment for the two measurements that removed the
-//! rest) and the probe bound is that class, so `answers.len() == 1` is a
-//! measurement rather than an artefact of where the budget ran out.
+//! The `!truncated` condition remains on the exhaustive oracle: a partial
+//! rewrite list cannot prove that its answer is unique. `candidate_rewrites`
+//! generates at most `1 + |q| |T|` candidates. If that upper bound does not
+//! fit the caller's budget, the scorecard path uses exact trained frames
+//! already routed by the active query scope instead of raising the budget or
+//! claiming uniqueness from a truncated rewrite list.
 //!
-//! # THE ACCEPT RULE IS MEASURED SOUND AT TWO SCALES, AND THE COST IS THE
-//! REMAINING PROBLEM
+//! # UNIQUENESS NOW COMES FROM THE ACTIVE BINDING SCOPE
 //!
-//! The reading this module recorded as fatal -- "s32 beside_next 4 right 3
-//! WRONG 17 empty", taken as proof that the clean one-hop result was a scale-1
-//! artefact -- is superseded. With the completeness condition live and the
-//! evidence complete, the same world at the same scale gives **4 right, 0
-//! WRONG, 20 empty** (Cove, `6b38dd4`, `tests/relation_transfer_public_api.rs`).
-//! Every correct answer kept, all three inventions converted to silence.
+//! The older reading "s32 beside_next 4 right 3 WRONG 17 empty" is superseded.
+//! With the active-scope proof and an unchanged baseline, the public test reads:
 //!
-//! What is left is affordability. Full evidence over the old class costs 3,311
-//! fallback probes per answer at 8 rooms and 547 per question at 32, against a
-//! 1-probe plain recall and a stated 3x ceiling. Over the bounded class it is
-//! at most `1 + |q| |T|` -- 121 for the shapes measured here -- and that buys
-//! 6/6 at 8 rooms and 0/24 at 32, where a second answer is reachable inside the
-//! bounded class and the mechanism therefore abstains. FINDING the answer and
-//! PROVING no second one exists are two jobs sharing one loop; only the proving
-//! is unaffordable, and asking the fabric for uniqueness instead of enumerating
-//! it is the next change rather than a wider budget.
+//! ```text
+//! s8  beside_next  budget 32:  6 right 0 wrong 0 empty; 18 net probes / 6 answers
+//! s32 beside_next  budget 32: 24 right 0 wrong 0 empty; 72 net probes / 24 answers
+//! ```
+//!
+//! The active query lights 10 query-pool neurons and routes 186 bindings at 8
+//! rooms, and 10 neurons / 512 bindings at 32 rooms. The proof scans the exact
+//! ordered frames in that active scope, keeps only frames admitted by the
+//! subject-preserving transfer span, and accepts one distinct answer. It uses
+//! three fallback probes per returned answer, net of the production arm. The
+//! same test runs the exhaustive rewrite path as an oracle; its answer counts
+//! and wrong counts match at both sizes, and recall remains complete.
 
 use crate::brain::Brain;
 use crate::neuron::PoolId;
@@ -368,7 +362,8 @@ pub fn candidate_rewrites(query: &[u8], trained: &[u8]) -> Vec<Vec<u8>> {
 /// never reaches this function -- which is the property
 /// `as_a_fallback_the_transfer_cannot_cost_a_family` asserts per family.
 ///
-/// Returns `None` rather than a guess whenever no rewrite reaches the ceiling.
+/// Returns `None` rather than a guess unless the active binding scope or the
+/// exhaustive oracle establishes exactly one subject-preserving answer.
 pub fn derive_by_relation_transfer(
     brain: &mut Brain,
     query_pool: PoolId,
@@ -397,6 +392,34 @@ pub fn derive_by_relation_transfer(
         return (None, probes);
     };
 
+    // When the rewrite class cannot fit inside the caller's real probe
+    // budget, prove uniqueness over the bindings already routed by the active
+    // query firing scope. This visits the fabric's stored ordered frames once;
+    // it neither creates candidate rewrites nor observes them one by one.
+    let candidate_upper_bound = 1usize.saturating_add(query.len().saturating_mul(trained.len()));
+    if max_probes < probes.saturating_add(candidate_upper_bound) {
+        if probes >= max_probes {
+            return (None, probes);
+        }
+        probes += 1;
+        let mut answers = HashSet::new();
+        for (question, answer) in brain.active_binding_scope_pairs(query_pool, answer_pool) {
+            if answer != base_answer
+                && span.admits(query, &trained, &question)
+                && brain.is_trained_frame(query_pool, &question)
+            {
+                answers.insert(answer);
+                if answers.len() > 1 {
+                    return (None, probes);
+                }
+            }
+        }
+        return match answers.into_iter().next() {
+            Some(answer) => (Some(answer), probes),
+            None => (None, probes),
+        };
+    }
+
     let mut seen: HashSet<Vec<u8>> = HashSet::new();
     // EVERY distinct answer reachable at the ceiling inside the budget, not the
     // first one. See `UNIQUENESS` below for why the first one is not safe.
@@ -407,7 +430,6 @@ pub fn derive_by_relation_transfer(
     // Did the search END, or did it merely STOP? See `TRUNCATION` at the accept.
     let mut truncated = false;
     let candidates = candidate_rewrites(query, &trained);
-    let max_probes = max_probes.max(candidates.len() + probes);
     for rewrite in candidates {
         if probes >= max_probes {
             truncated = true;

@@ -577,32 +577,22 @@ the obvious next idea:
   the class it was asked to exhaust was not. Both halves are now measured and the second is
   fixed below.
 
-#### The scale-32 reading, which is the one that settles it
-
-The clean one-hop result is a **scale-1 artefact**, not a property of hop count:
+#### Fabric-side uniqueness matches full evidence within the scorecard budget
 
 ```text
-s8   beside_next  base 0 right 0 wrong 24 empty  ->  fallback 6 right 0 wrong  0 empty
-s32  beside_next  base 0 right 0 wrong 24 empty  ->  fallback 4 right 3 WRONG 17 empty
-
-s8   ALL FAMILIES base 42/54  (77.8%) wrong 0  ->  48/54  (88.9%) wrong 3   NET 42 -> 45
-s32  ALL FAMILIES base 167/216 (77.3%) wrong 0  ->  171/216 (79.2%) wrong 4  NET 167 -> 167
+s8   beside_next  budget 32:  6 right 0 wrong 0 empty; 18 net probes / 6 answers
+s32  beside_next  budget 32: 24 right 0 wrong 0 empty; 72 net probes / 24 answers
 ```
 
-With 32 rooms instead of 8 there are more trained questions reachable at the ceiling, so
-the chain stops being unique for the *same* family — and the net contribution at that scale
-is **exactly zero**: +4 right bought with +4 wrong. Recall is 100 % throughout (186/186 and
-744/744).
-
-**That reading is superseded, and it was the one that killed this mechanism twice.** With
-the completeness condition live and the evidence actually complete, the same world at the
-same scale reads **4 right, 0 WRONG, 20 empty** (Cove, `6b38dd4`,
-`tests/relation_transfer_public_api.rs`): every correct answer kept, all three inventions
-converted to silence. So the accept rule is not a scale-1 artefact and `wrong` is 0 at both
-measured scales. What is left is affordability, which is a different problem: 3,311 fallback
-probes per answer at 8 rooms and 547 per question at 32, against a **1-probe** plain recall
-and the stated 3× ceiling. Finding the answer and *proving no second one exists* are two
-jobs sharing one loop, and only the proving is unaffordable.
+The earlier room-count-32 result, **4 right, 3 wrong, 17 empty**, is superseded and is not
+the current full-evidence result. This test holds the production baseline fixed and compares
+the active-scope proof with exhaustive evidence: both return 6/6 at 8 rooms and 24/24 at
+32 rooms, with wrong 0. The proof scans
+exact ordered bindings already routed by the query's active firing scope, filters them by
+the subject-preserving transfer span, and accepts only one distinct answer. That scope has
+10 active query neurons and routes 186 bindings at 8 rooms, and 10 / 512 at 32 rooms. Net of
+the production derivation, the transfer uses three probes per returned answer (18/6 and
+72/24), against the 3× ceiling over one plain recall.
 
 #### Measured through the production entry, 2026-10-01, and it is still not safe
 
@@ -660,17 +650,17 @@ order-sensitive admission moved nothing — so the four wrong rewrites are **byt
 trained questions, present in the ordered digest, keeping the query’s own subject**. They
 are legitimate taught text asking *the wrong question*.
 
-**The fourth condition is where the one-hop family's inventions actually were.** The
+**The fourth condition was measured in the earlier production-entry run.** The
 function opened by returning the query's own best answer whenever it scored at the
 ceiling, commented as recall — and “at the ceiling” is only recall if the *query* was
 taught, which the score cannot establish. Uniqueness, subject preservation and ordered
 trained-frame identity all sit *below* that line, so anything taking it was returned with
 no accept rule at all. Gating it on `Brain::is_trained_frame` for the query itself takes
-scale-4 `beside_next` from **4 right / 3 wrong / 17 silent to 4 right / 0 wrong / 20
-silent** — every invention in the one-hop family removed, all four of its correct answers
-kept. So the “s32 beside_next 4 right 3 WRONG” reading above, recorded as uniqueness
-ceasing to hold at scale, was never uniqueness failing: it was three probes that never
-reached the uniqueness test. It changes nothing for `on_material` or `next_on_material`.
+the historical scale-4 `beside_next` read from **4 right / 3 wrong / 17 silent to 4 right /
+0 wrong / 20 silent** — every invention in that run removed, all four correct answers kept.
+The current public API comparison above is a separate measurement: at 32 rooms it returns
+24 right, 0 wrong, 0 silent for the one-hop family. The older room-count-32 read is not the
+current uniqueness result. It changes nothing for `on_material` or `next_on_material`.
 
 That makes the limit semantic for the COMPOSITION families, and no accept rule on the
 rewrite reaches it: the only

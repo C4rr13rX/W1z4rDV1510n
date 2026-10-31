@@ -6009,6 +6009,58 @@ impl Brain {
         routed_ids
     }
 
+    /// Return the exact ordered question/answer frames reachable from the
+    /// current query firing scope. This lets callers check a transfer against
+    /// bindings already active in the fabric without observing a generated
+    /// rewrite for every possible span.
+    pub fn active_binding_scope_pairs(
+        &mut self,
+        query_pool: PoolId,
+        target_pool: PoolId,
+    ) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let candidate_ids = self.hydrate_active_binding_scope(&[query_pool], target_pool);
+        let Some(binding_handle) = self.fabric.pool(self.binding_pool_id) else {
+            return Vec::new();
+        };
+        let Some(query_handle) = self.fabric.pool(query_pool) else {
+            return Vec::new();
+        };
+        let Some(target_handle) = self.fabric.pool(target_pool) else {
+            return Vec::new();
+        };
+        let bindings = binding_handle.read();
+        let query = query_handle.read();
+        let target = target_handle.read();
+        candidate_ids
+            .into_iter()
+            .filter_map(|binding_id| {
+                let binding = bindings.get(binding_id)?;
+                let query_members: Vec<NeuronRef> = binding
+                    .members
+                    .iter()
+                    .filter(|member| member.pool == query_pool)
+                    .copied()
+                    .collect();
+                let target_members: Vec<NeuronRef> = binding
+                    .members
+                    .iter()
+                    .filter(|member| member.pool == target_pool)
+                    .copied()
+                    .collect();
+                if query_members.is_empty() || target_members.is_empty() {
+                    return None;
+                }
+                let question = query.decode_concept_members(&query_members);
+                let answer = target.decode_concept_members(&target_members);
+                if question.is_empty() || answer.is_empty() {
+                    None
+                } else {
+                    Some((question, answer))
+                }
+            })
+            .collect()
+    }
+
     /// Rank learned actions whose feature atoms are fully covered by a larger
     /// compositional query. Returned target bytes remain verbatim learned
     /// evidence; callers may integrate structured artifacts such as manifests.
