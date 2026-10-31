@@ -429,6 +429,9 @@ fn check(scale: usize, floors: &[(&str, usize)]) {
 /// parity with production, while keeping wrong answers at zero.
 #[test]
 fn the_wired_transfer_answers_beside_next_and_composing_it_twice_changes_nothing() {
+    // Scale 4 is the required 32-room cross-check (8 rooms per scale unit).
+    // Keep scale 1 and 32 rooms in this same run: uniqueness at the small
+    // world does not imply uniqueness once the candidate world grows.
     for scale in [1, 4, 16] {
         let base = measure(scale);
         let with = measure_via(scale, infer_via_transfer);
@@ -452,6 +455,14 @@ fn the_wired_transfer_answers_beside_next_and_composing_it_twice_changes_nothing
                 (bc, bw, bs),
                 (wc, ww, ws),
                 "s{scale} {name}: composing the transfer over a path that already contains it              changed the answer, so the fallback is wired in more than one place"
+            );
+            assert_eq!(
+                *bw, 0,
+                "s{scale} {name}: production invented {bw} of {probes}; silence is preferable to an ungrounded answer"
+            );
+            assert_eq!(
+                *ww, 0,
+                "s{scale} {name}: composed path invented {ww} of {probes}; silence is preferable to an ungrounded answer"
             );
         }
         // WHAT THE WIRED PATH MEASURES. The scorecard's own training and probe

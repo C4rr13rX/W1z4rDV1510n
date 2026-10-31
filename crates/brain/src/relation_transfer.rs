@@ -1,18 +1,15 @@
-//! SUBJECT-PRESERVING RELATION TRANSFER -- the derivation step that answers the
-//! one integration family that is 0.0 % at EVERY scale.
+//! SUBJECT-PRESERVING RELATION TRANSFER -- a bounded fallback for held-out
+//! relation questions, guarded by the production derivation's negative verdict.
 //!
-//! # Why this exists as a module rather than as a test helper
+//! # Production fallback
 //!
-//! The mechanism was designed and measured in
-//! `tests/relation_transfer_derivation.rs`, where it is a private `fn` with no
-//! caller outside that file -- so it shipped no value. Every call it makes is
-//! already public (`observe_fabric_read_only`, `best_binding_match_v2`,
-//! `decode_best_trained_binding`), which is why promoting it is a MOVE and not
-//! a port: nothing here reaches into `Brain`'s internals, and the function
-//! takes its two pool ids as arguments so it is not tied to the scorecard's
-//! world.
+//! `derive_by_relation_transfer` is called by `Brain::integrate_autonomous`
+//! only after substitution returns no answer and reports a completed negative
+//! taught-subquestion verdict. This keeps the scorecard and node answer routes
+//! on the same path. The public composition wrapper remains for route parity
+//! checks and callers that need explicit probe accounting.
 //!
-//! # The measurement that makes it the next change
+//! # Historical measurement that motivated this mechanism
 //!
 //! At the scale-1 symbol world, composed as a FALLBACK behind the existing
 //! `derive_by_substitution` (fires only when that returns nothing):
@@ -590,23 +587,23 @@ fn preserves_subject(query: &[u8], trained: &[u8], rewrite: &[u8]) -> bool {
     rewrite.get(p) == query.get(p)
 }
 
-/// THE ANSWER ENTRY POINT: the production derivation first, this module's
-/// transfer only when that returned nothing.
+/// Public composition helper for comparing substitution plus relation
+/// transfer with independently accounted probes. Production calls the bounded
+/// transfer from `Brain::integrate_autonomous` after its negative verdict.
 ///
-/// # Why the composition lives here and not inside `derive_by_substitution`
+/// # Why this measured wrapper remains outside `derive_by_substitution`
 ///
 /// `f16e499d` specified the wiring as a fallback *inside*
 /// `derive_by_substitution_profiled`. That would have put it in `brain.rs`,
 /// and two measured properties argue for this placement instead of that one.
 ///
-/// First, `tests/relation_transfer_derivation.rs` asserts that the transfer
-/// derives at least one `beside_next` **the production derivation cannot**. A
-/// fallback inside `derive_by_substitution_profiled` makes the production
-/// derivation able to do it, so that assertion becomes a statement about
-/// itself and stops discriminating -- the exact shape CLAUDE.md records for
-/// `relation_transfer_derivation` going red when production improved (three
-/// times: `2a1c445`, `70bba62`, pass 16). Composed one level out, the inner
-/// function is untouched and the comparison stays meaningful.
+/// When this wrapper was introduced, `tests/relation_transfer_derivation.rs`
+/// needed to compare the transfer against substitution alone: the transfer
+/// derived at least one `beside_next` that substitution could not. A fallback
+/// inside `derive_by_substitution_profiled` would have made that comparison
+/// self-referential. Production now composes the mechanisms in
+/// `integrate_autonomous`; this wrapper remains for independent probe
+/// accounting and the historical comparison.
 ///
 /// Second, `derive_by_substitution_profiled` owns the probe accounting the
 /// starvation work reads (`derivation_starved`, probes/attempt). Folding a

@@ -41,6 +41,9 @@ pub const POOL_IMAGE: PoolId = 2;
 pub const POOL_AUDIO: PoolId = 3;
 pub const POOL_ACTION: PoolId = 4;
 pub const POOL_TURN: PoolId = 5;
+/// Minimum query-binding precision required before a trained decode is
+/// reported as grounded. Keep in sync with the derivation reply gate.
+pub(crate) const TRAINED_BINDING_PRECISION_FLOOR: f32 = 0.70;
 
 /// Motif score a recall-derived route must clear when no intent label applies.
 ///
@@ -1026,9 +1029,17 @@ async fn h_integrate(
     // atom-coverage selection truncates / mis-routes when a single extra
     // atom is in the query frame).  Encode bytes as base64url so the
     // JSON wire format is consistent across all callers.
+    let precision = brain.best_binding_match_v2(qp).precision;
     let legacy = brain.integrate(qp, tp);
-    let authoritative = brain.decode_best_trained_binding(qp, tp);
-    let answer_bytes = authoritative.or(legacy.answer);
+    let grounded = precision >= TRAINED_BINDING_PRECISION_FLOOR;
+    let authoritative = grounded
+        .then(|| brain.decode_best_trained_binding(qp, tp))
+        .flatten();
+    let answer_bytes = if grounded {
+        authoritative.or(legacy.answer)
+    } else {
+        None
+    };
     let answer_b64 = answer_bytes.as_ref().map(|b| b64_url_no_pad(b));
     let paged_neurons_released = match brain.finish_read_only_inference() {
         Ok(count) => count,
@@ -1043,7 +1054,7 @@ async fn h_integrate(
         "eem_confidence":        legacy.grounding.eem_confidence,
         "annealer_confidence":   legacy.grounding.annealer_confidence,
         "integrated_confidence": legacy.grounding.integrated_confidence,
-        "outside_grounding":     legacy.grounding.outside_grounding,
+        "outside_grounding":     !grounded || legacy.grounding.outside_grounding,
         "speculation_flag":      legacy.grounding.speculation_flag,
         "paged_neurons_released": paged_neurons_released,
     }))
@@ -1071,9 +1082,18 @@ async fn h_predict(
         .or_else(|| brain.action_pool_id())
         .unwrap_or(POOL_ACTION);
     let fired = brain.activate_for_prediction(qp, &frame);
+    let precision = brain.best_binding_match_v2(qp).precision;
     let legacy = brain.integrate(qp, tp);
-    let authoritative = brain.decode_best_trained_binding(qp, tp);
-    let answer = authoritative.or(legacy.answer).map(|b| b64_url_no_pad(&b));
+    let grounded = precision >= TRAINED_BINDING_PRECISION_FLOOR;
+    let authoritative = grounded
+        .then(|| brain.decode_best_trained_binding(qp, tp))
+        .flatten();
+    let answer = if grounded {
+        authoritative.or(legacy.answer)
+    } else {
+        None
+    }
+    .map(|b| b64_url_no_pad(&b));
     let paged_neurons_released = match brain.finish_read_only_inference() {
         Ok(count) => count,
         Err(error) => {
@@ -1083,7 +1103,7 @@ async fn h_predict(
     Json(json!({
         "answer": answer, "known_atom_count": fired.len(),
         "integrated_confidence": legacy.grounding.integrated_confidence,
-        "outside_grounding": legacy.grounding.outside_grounding || fired.is_empty(),
+        "outside_grounding": !grounded || legacy.grounding.outside_grounding || fired.is_empty(),
         "speculation_flag": legacy.grounding.speculation_flag,
         "learning": false,
         "paged_neurons_released": paged_neurons_released,
@@ -3634,7 +3654,7 @@ pub(crate) fn derived_by_substitution_reply(
     // Same gate, same floor, same single source of truth as
     // `integrate_autonomous`: the binding match owns "is this prompt
     // grounded" and nothing downstream re-decides it.
-    if brain.best_binding_match_v2(query_pool).precision < 0.70 {
+    if brain.best_binding_match_v2(query_pool).precision < TRAINED_BINDING_PRECISION_FLOOR {
         return None;
     }
     let derived = brain
@@ -4466,7 +4486,9 @@ async fn h_brain_chat(
         // wake a second broad character-overlap population. Feature ranking
         // and the bounded motif route below retain the raw evidence needed
         // for disambiguation. Raw-only prompts still use fuzzy recall here.
-        if chat_query_pools.len() == 1 {
+        if chat_query_pools.len() == 1
+            && brain.best_binding_match_v2(POOL_TEXT).precision >= TRAINED_BINDING_PRECISION_FLOOR
+        {
             brain.decode_best_trained_binding_with_context(
                 POOL_TEXT,
                 action_pool,
@@ -6260,15 +6282,24 @@ pub async fn run_thinking_loop(state: BrainApiState) {
             // The same pair every other answer route in this binary uses --
             // api.rs:8021, brain_api.rs:1029 and :1074, bin/brain_server.rs:867
             // -- the authoritative decoder FIRST and the legacy integrate only
-            // as a fallback. This loop had `integrate` as its ONLY source, and
+            // as a fallback, after the same 0.70 precision gate used by the
+            // HTTP answer routes. This loop had `integrate` as its ONLY source,
+            // and
             // `brain.integrate` answers 0 of 16 questions it WAS TRAINED ON on a
             // scorecard-shaped brain while `decode_best_trained_binding` answers
             // 16 of 16 on the same brain in the same test
             // (crates/brain/tests/ask_route_integrate_parity.rs). So this
             // published `None` to `state.thinking.last_answer` every ~250 ms for
             // the node's whole uptime, on every seed, trained or not.
-            let legacy = brain.integrate(qp, tp).answer;
-            let answer = brain.decode_best_trained_binding(qp, tp).or(legacy);
+            let grounded =
+                brain.best_binding_match_v2(qp).precision >= TRAINED_BINDING_PRECISION_FLOOR;
+            let answer = if grounded {
+                brain
+                    .decode_best_trained_binding(qp, tp)
+                    .or_else(|| brain.integrate(qp, tp).answer)
+            } else {
+                None
+            };
             // And give back what the probe paged in. Every other route calls
             // this; a loop that runs forever and never does is the one place
             // where a missed release is unbounded in TIME rather than in
@@ -6650,6 +6681,111 @@ class Model:
         ));
     }
 
+    #[test]
+    fn answer_path_low_precision_trained_decode_is_abstained() {
+        let mut brain = build_default_brain().unwrap();
+        for room in 0..8 {
+            let material = if room % 2 == 0 {
+                b"oak".as_slice()
+            } else {
+                b"steel".as_slice()
+            };
+            brain.pretrain_binding_episode(&[
+                (POOL_TEXT, format!("r{room:03} lamp on?").into_bytes()),
+                (POOL_ACTION, b"desk".to_vec()),
+            ]);
+            brain.pretrain_binding_episode(&[
+                (POOL_TEXT, format!("r{room:03} desk material?").into_bytes()),
+                (POOL_ACTION, material.to_vec()),
+            ]);
+        }
+
+        // An unknown prompt must not inherit a partial trained target through
+        // either authoritative decoding or the legacy fallback. This is the
+        // same predicate used by the HTTP answer routes above.
+        brain.activate_for_prediction(POOL_TEXT, b"quasarithmetic zxqv");
+        let precision = brain.best_binding_match_v2(POOL_TEXT).precision;
+        assert!(
+            precision < TRAINED_BINDING_PRECISION_FLOOR,
+            "fixture precision was {precision}"
+        );
+        assert!(
+            brain
+                .decode_best_trained_binding(POOL_TEXT, POOL_ACTION)
+                .is_some(),
+            "fixture no longer reproduces a spurious trained decode"
+        );
+        let state = BrainApiState {
+            brain: Arc::new(Mutex::new(brain)),
+            thinking: Arc::new(ThinkingState::default()),
+            http_profile: Arc::new(HttpProfile::default()),
+        };
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let response = runtime
+            .block_on(h_integrate(
+                State(state.clone()),
+                Json(json!({"query_pool": POOL_TEXT, "target_pool": POOL_ACTION})),
+            ))
+            .0;
+        assert_eq!(
+            response["outside_grounding"], true,
+            "route marked gibberish grounded"
+        );
+        assert!(
+            response["answer"].is_null(),
+            "route returned a gibberish answer"
+        );
+        let response = runtime
+            .block_on(h_predict(
+                State(state.clone()),
+                Json(json!({
+                    "query_pool": POOL_TEXT,
+                    "target_pool": POOL_ACTION,
+                    "frame": b64_url_no_pad(b"quasarithmetic zxqv"),
+                })),
+            ))
+            .0;
+        assert_eq!(
+            response["outside_grounding"], true,
+            "predict route marked gibberish grounded"
+        );
+        assert!(
+            response["answer"].is_null(),
+            "predict route returned a gibberish answer"
+        );
+
+        // A taught question remains on the same route and above the floor.
+        {
+            let mut brain = state.brain.blocking_lock();
+            brain.activate_for_prediction(POOL_TEXT, b"r000 lamp on?");
+            let precision = brain.best_binding_match_v2(POOL_TEXT).precision;
+            assert!(
+                precision >= TRAINED_BINDING_PRECISION_FLOOR,
+                "taught precision was {precision}"
+            );
+        }
+        let response = runtime
+            .block_on(h_integrate(
+                State(state),
+                Json(json!({"query_pool": POOL_TEXT, "target_pool": POOL_ACTION})),
+            ))
+            .0;
+        assert_eq!(response["outside_grounding"], false);
+        assert_eq!(response["answer"], b64_url_no_pad(b"desk"));
+        let response = runtime
+            .block_on(h_predict(
+                State(state),
+                Json(json!({
+                    "query_pool": POOL_TEXT,
+                    "target_pool": POOL_ACTION,
+                    "frame": b64_url_no_pad(b"r000 lamp on?"),
+                })),
+            ))
+            .0;
+        assert_eq!(response["outside_grounding"], false);
+        assert_eq!(response["answer"], b64_url_no_pad(b"desk"));
+    }
+
     /// Answering through the node's OWN brain topology must not grow the
     /// per-pool concept-emergence ledger.
     ///
@@ -6726,7 +6862,7 @@ class Model:
     /// The world is two hops and the asked question is never taught, so a
     /// mechanism that only retrieves scores zero here.
     #[test]
-    fn the_chat_route_derives_an_answer_it_was_never_trained_on() {
+    fn answer_path_chat_route_derives_an_answer_it_was_never_trained_on() {
         let mut brain = build_default_brain().unwrap();
         // "r000 lamp on? -> desk" and "r000 desk material? -> oak", so
         // "r000 lamp on material?" is oak and is never taught.
@@ -6792,6 +6928,25 @@ class Model:
             None,
             "a zero probe budget did not disable the derivation",
         );
+
+        // Exercise the actual HTTP chat handler: a fuzzy raw decoder result
+        // must not prevent the composite prompt from reaching derivation.
+        brain.set_derivation_probe_budget(32);
+        let state = BrainApiState {
+            brain: Arc::new(Mutex::new(brain)),
+            thinking: Arc::new(ThinkingState::default()),
+            http_profile: Arc::new(HttpProfile::default()),
+        };
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let response = runtime
+            .block_on(h_brain_chat(
+                State(state),
+                Json(json!({"text": "r000 lamp on material?"})),
+            ))
+            .0;
+        assert_eq!(response["decoder"], "derived_substitution");
+        assert_eq!(response["reply"], "oak");
+        assert_eq!(response["grounding"]["outside_grounding"], false);
     }
 
     #[test]

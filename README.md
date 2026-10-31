@@ -488,12 +488,13 @@ budget, which is what `f1bd9c76`'s "7× wall" was measuring.
 
 ### Subject-preserving relation transfer (`crates/brain/src/relation_transfer.rs`, 2026-10-01)
 
-Current gated measurements (`python tools/gate.py`, pass 736) report this held-out family
+Current gated measurements (`python tools/gate.py`, pass 741) report this held-out family
 at **6/6, 22/24, 60/96, and 49/384** for scales 1, 4, 16, and 64, with **zero wrong** at
 every scale. The remaining misses are silent: 335 at scale 64. Overall integration is
 100.00%, 99.07%, 95.83%, and 90.31%, with recall 100% at all scales. Against the committed
 baseline, integration rises from 88.89% to 95.83% at scale 16 and to 90.31% at scale 64;
-peak RAM is 26.8 MB versus 27.0 MB and 49.0 MB versus 49.3 MB, respectively. The family
+peak RAM is 27.4 MB versus 27.0 MB at scale 16 and 48.4 MB versus 49.3 MB at scale 64.
+The family
 still has substantial scale-64 headroom, but the former 0/384 claim is no longer current.
 
 The cause is measured, not assumed. Every match in this world is precision × recall over
@@ -604,7 +605,7 @@ the subject-preserving transfer span, and accepts only one distinct answer. That
 the production derivation, the transfer uses three probes per returned answer (18/6 and
 72/24), against the 3× ceiling over one plain recall.
 
-#### Measured through the production entry, 2026-10-01, and it is still not safe
+#### Historical composition measurement before the completed-negative gate
 
 Everything above was measured with the composition written inside a test. The module now
 exports the composition itself — `answer_with_relation_transfer`, production derivation
@@ -729,7 +730,19 @@ it tracks question *length* and not world size. What remains is the class the me
 argument is about, bounded by `1 + |q| |T|`, and the transfer's probe bound is now that class
 so the search ends.
 
-#### What it measures with the arm ON, and why the arm is OFF
+#### Historical arm-on measurement, superseded by the completed-negative gate
+
+The measurements below were taken before the production path required a
+completed negative taught-sub-question verdict. They explain why the earlier
+version was unsafe; they do not describe the current default. Relation transfer
+is now enabled by default after substitution completes and proves that it found
+no exact ordered taught sub-question. The current acceptance test measures the
+same per-family rows at scale 1 and at 32 rooms (scale 4), requires wrong to be
+zero for every family on both production and the composed parity path, and also
+checks scales 16 and 64 through the full gate. Recall and peak RAM remain gated
+by `tools/gate.py`.
+
+#### What the earlier arm-on measurement showed, and why its gate changed
 
 `tools/scorecard.py --stress`, arm on, against the committed baseline. Recall is **100.0 at
 every scale** and no family loses a correct answer:
@@ -1227,7 +1240,7 @@ Side-effect: on a winning decode, the query pool's `decode_precision_ema` is upd
 `integrate_autonomous(query_pool, target_pool, fabric_threshold, chain_max_depth, chain_max_visit)` is the entry point Wizard-chat hits via `/chat`:
 
 1. **OOV gate** — `best_binding_match(query_pool)` returns precision/recall of the strongest binding against currently-firing atoms.  If precision < `binding_match_threshold` (0.70), returns `outside_grounding=true, answer=None`.  Fixed the "Hello → color" hallucination.
-2. **Fabric retrieval** — calls the legacy `integrate(query_pool, target_pool)` for legacy compatibility, but the **answer bytes are then overridden** by `decode_best_trained_binding` (Stage 16).
+2. **Fabric retrieval** — calls the legacy `integrate(query_pool, target_pool)` for confidence and compatibility. Node `/brain/integrate`, `/brain/predict`, `/brain/chat`, and standalone `/integrate`, `/integrate_concept_first`, and `/chat` only accept trained decodes when `best_binding_match_v2` precision is at least 0.70; below that floor they abstain instead of allowing a legacy partial match to return an answer. `/brain/chat` then continues to grounded composition/derivation when appropriate.
 3. **EEM chain explorer** — when fabric retrieval is weak, walks `Eem::chain_explore` over the grounded-fact graph (auto-populated by Stage 8 binding consolidation).
 4. **Annealer-guided pick** — weighs chain candidates by `chain_confidence + 0.5 × annealer_predicted_activation`.
 5. **Decode + tier** — returns `AnswerWithGrounding` with `ConfidenceTier` set per `(fabric_confidence, eem_confidence, annealer_confidence)`.

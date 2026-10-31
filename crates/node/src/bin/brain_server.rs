@@ -813,8 +813,14 @@ async fn integrate_concept_first(
     Json(req): Json<IntegrateRequest>,
 ) -> Json<IntegrateConceptFirstResponse> {
     let brain = s.brain.lock().await;
-    let scored = brain.integrate_concept_first(req.query_pool, req.target_pool);
-    let trained = brain.decode_best_trained_binding(req.query_pool, req.target_pool);
+    let grounded = brain.best_binding_match_v2(req.query_pool).precision
+        >= brain_api::TRAINED_BINDING_PRECISION_FLOOR;
+    let scored = grounded
+        .then(|| brain.integrate_concept_first(req.query_pool, req.target_pool))
+        .flatten();
+    let trained = grounded
+        .then(|| brain.decode_best_trained_binding(req.query_pool, req.target_pool))
+        .flatten();
     let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
     let (b64, utf8) = match &scored {
         Some(b) => (
@@ -831,6 +837,7 @@ async fn integrate_concept_first(
         None => (None, None),
     };
     Json(IntegrateConceptFirstResponse {
+        outside_grounding: !grounded,
         answer_b64: b64,
         answer_utf8: utf8,
         trained_answer_b64: tb64,
@@ -840,6 +847,7 @@ async fn integrate_concept_first(
 
 #[derive(Serialize, Debug)]
 struct IntegrateConceptFirstResponse {
+    outside_grounding: bool,
     answer_b64: Option<String>,
     answer_utf8: Option<String>,
     /// Decoded bytes of the best-matching binding's target-pool
@@ -864,9 +872,17 @@ async fn integrate(
     // floor that lifts /chat to 32/32.  Without this, /integrate's
     // older atom-coverage routing picks wrong-category bindings or
     // truncates decodes (e.g. fish->'anim', hand->'aturena').
+    let precision = brain.best_binding_match_v2(req.query_pool).precision;
     let legacy = brain.integrate(req.query_pool, req.target_pool);
-    let authoritative = brain.decode_best_trained_binding(req.query_pool, req.target_pool);
-    let answer_bytes = authoritative.or(legacy.answer);
+    let grounded = precision >= brain_api::TRAINED_BINDING_PRECISION_FLOOR;
+    let authoritative = grounded
+        .then(|| brain.decode_best_trained_binding(req.query_pool, req.target_pool))
+        .flatten();
+    let answer_bytes = if grounded {
+        authoritative.or(legacy.answer)
+    } else {
+        None
+    };
     let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
     Json(IntegrateResponse {
         answer: answer_bytes.as_ref().map(|b| engine.encode(b)),
@@ -875,7 +891,7 @@ async fn integrate(
         eem_confidence: legacy.grounding.eem_confidence,
         annealer_confidence: legacy.grounding.annealer_confidence,
         integrated_confidence: legacy.grounding.integrated_confidence,
-        outside_grounding: legacy.grounding.outside_grounding,
+        outside_grounding: !grounded || legacy.grounding.outside_grounding,
         speculation_flag: legacy.grounding.speculation_flag,
     })
 }
@@ -2388,8 +2404,11 @@ async fn chat(State(s): State<AppState>, Json(req): Json<ChatRequest>) -> Json<C
     // trained response — 30/32 EXACT on toddler categorical
     // (animal/food/vehicle/color/toy/nature/body) without decoder
     // residual.
-    let trained_decode: Option<String> = brain
-        .decode_best_trained_binding(POOL_TEXT, POOL_ACTION)
+    let trained_binding_grounded = brain.best_binding_match_v2(POOL_TEXT).precision
+        >= brain_api::TRAINED_BINDING_PRECISION_FLOOR;
+    let trained_decode: Option<String> = trained_binding_grounded
+        .then(|| brain.decode_best_trained_binding(POOL_TEXT, POOL_ACTION))
+        .flatten()
         .map(|b| String::from_utf8_lossy(&b).into_owned());
 
     // SECONDARY: autonomous critical-thinking integrate.  Used as
@@ -2439,7 +2458,9 @@ async fn chat(State(s): State<AppState>, Json(req): Json<ChatRequest>) -> Json<C
     // out-of-grounding signal, regardless of what xpool's softer
     // OOV heuristic concluded.  Keep xpool's flag as a secondary
     // signal only when reply is non-empty.
-    let outside_grounding = reply.is_empty() || xpool.grounding.outside_grounding;
+    let outside_grounding = !trained_binding_grounded
+        || reply.is_empty()
+        || xpool.grounding.outside_grounding;
     let g = ChatGrounding {
         fabric_confidence: xpool.grounding.fabric_confidence,
         integrated_confidence: xpool.grounding.integrated_confidence,
@@ -2800,4 +2821,105 @@ async fn main() -> Result<()> {
         .await
         .context("axum serve")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod answer_path_grounding_tests {
+    use super::*;
+
+    fn state_with_fixture() -> AppState {
+        let mut brain = build_fresh_brain().unwrap();
+        for room in 0..8 {
+            brain.pretrain_binding_episode(&[
+                (POOL_TEXT, format!("r{room:03} lamp on?").into_bytes()),
+                (POOL_ACTION, b"desk".to_vec()),
+            ]);
+            brain.pretrain_binding_episode(&[
+                (POOL_TEXT, format!("r{room:03} desk material?").into_bytes()),
+                (
+                    POOL_ACTION,
+                    if room % 2 == 0 {
+                        b"oak".to_vec()
+                    } else {
+                        b"steel".to_vec()
+                    },
+                ),
+            ]);
+        }
+        AppState {
+            brain: Arc::new(Mutex::new(brain)),
+            checkpoint_path: PathBuf::new(),
+            thinking: Arc::new(ApiThinkingState::default()),
+            sleep_status: Arc::new(std::sync::Mutex::new(None)),
+            cluster: Arc::new(std::sync::Mutex::new(ClusterMembership::default())),
+        }
+    }
+
+    #[test]
+    fn standalone_integrate_and_chat_abstain_on_low_precision_but_recall_taught_answers() {
+        let state = state_with_fixture();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        {
+            let mut brain = state.brain.blocking_lock();
+            brain.activate_for_prediction(POOL_TEXT, b"quasarithmetic zxqv");
+            assert!(
+                brain.best_binding_match_v2(POOL_TEXT).precision
+                    < brain_api::TRAINED_BINDING_PRECISION_FLOOR
+            );
+            assert!(
+                brain
+                    .decode_best_trained_binding(POOL_TEXT, POOL_ACTION)
+                    .is_some()
+            );
+        }
+        let integrated = runtime
+            .block_on(integrate(
+                State(state.clone()),
+                Json(IntegrateRequest {
+                    query_pool: POOL_TEXT,
+                    target_pool: POOL_ACTION,
+                }),
+            ))
+            .0;
+        assert!(integrated.outside_grounding);
+        assert!(integrated.answer.is_none());
+        {
+            let mut brain = state.brain.blocking_lock();
+            brain.activate_for_prediction(POOL_TEXT, b"quasarithmetic zxqv");
+        }
+        let concept_first = runtime
+            .block_on(integrate_concept_first(
+                State(state.clone()),
+                Json(IntegrateRequest {
+                    query_pool: POOL_TEXT,
+                    target_pool: POOL_ACTION,
+                }),
+            ))
+            .0;
+        assert!(concept_first.outside_grounding);
+        assert!(concept_first.trained_answer_b64.is_none());
+
+        let unknown = runtime
+            .block_on(chat(
+                State(state.clone()),
+                Json(ChatRequest {
+                    text: "quasarithmetic zxqv".to_string(),
+                    max_steps: None,
+                }),
+            ))
+            .0;
+        assert!(unknown.grounding.outside_grounding);
+        assert!(unknown.reply.is_empty());
+
+        let taught = runtime
+            .block_on(chat(
+                State(state),
+                Json(ChatRequest {
+                    text: "r000 lamp on?".to_string(),
+                    max_steps: None,
+                }),
+            ))
+            .0;
+        assert_eq!(taught.reply, "desk");
+    }
 }
