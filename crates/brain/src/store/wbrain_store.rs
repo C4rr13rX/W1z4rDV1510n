@@ -1697,8 +1697,13 @@ mod tests {
         let path = tmpfile("concept-member-sleep");
         let file = WbrainFile::open(&path).unwrap();
         let store = file.pool(3);
+        let config = PoolConfig::defaults("test", 3);
+        assert_eq!(
+            config.pretrain_emergence_max_run, 3,
+            "sleeping concepts must use the shipped bounded pretraining-emergence default"
+        );
         let mut pool = Pool::new(
-            PoolConfig::defaults("test", 3),
+            config,
             Box::new(BytePassthroughEncoding {
                 prefix: "byte".into(),
             }),

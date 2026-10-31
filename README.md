@@ -310,7 +310,9 @@ add ~1,071 permanent ledger keys per question and took scale 16 from 28.3 MB to
 546.7 MB.
 
 Emergence now runs on the training path, frame-locally, bounded by
-`pretrain_emergence_max_run` (default 3 — bigrams and trigrams). The bound is a
+`pretrain_emergence_max_run`, which `PoolConfig::defaults` enables at 3
+(bigrams and trigrams). The direct-pretraining guards require bounded
+within-pool concept birth while preserving exact trained-answer recall. The bound is a
 separate field from `max_concept_member_count` (8 by default, 32 in the node, 64
 in the scorecard) because the bound decides the **growth class**, not the
 discount: a ledger key is a byte *run*, and the number of distinct short runs is

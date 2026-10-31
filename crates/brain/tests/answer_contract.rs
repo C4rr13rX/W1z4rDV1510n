@@ -254,7 +254,7 @@ fn reordered_sequences_form_distinct_binding_episodes() {
 }
 
 #[test]
-fn direct_pretrain_binding_is_atom_grounded_without_within_pool_concept_birth() {
+fn direct_pretrain_binding_is_atom_grounded_with_bounded_concept_birth() {
     let (mut brain, input, output) = build_two_pool_brain();
     brain.designate_action_pool(output);
 
@@ -263,10 +263,12 @@ fn direct_pretrain_binding_is_atom_grounded_without_within_pool_concept_birth() 
         (output, b"def greet():\n    return 'hello'\n".to_vec()),
     ]);
     assert!(binding.is_some());
-    assert_eq!(brain.fabric().pool(input).unwrap().read().concept_count(), 0);
-    // A unique action stays as its original byte atoms. Only recurrence causes
-    // a reusable atom-grounded action concept to emerge.
-    assert_eq!(brain.fabric().pool(output).unwrap().read().concept_count(), 0);
+    let input_concepts = brain.fabric().pool(input).unwrap().read().concept_count();
+    let action_concepts = brain.fabric().pool(output).unwrap().read().concept_count();
+    assert!(
+        input_concepts + action_concepts > 0,
+        "bounded bigram/trigram emergence must run during direct pretraining"
+    );
 
     brain.activate_for_prediction(input, b"write a greeting");
     assert!(brain.has_exact_trained_binding(input, output));
@@ -277,7 +279,7 @@ fn direct_pretrain_binding_is_atom_grounded_without_within_pool_concept_birth() 
 }
 
 #[test]
-fn direct_pretrain_reuses_atom_grounded_action_frame_across_paraphrases() {
+fn direct_pretrain_reuses_action_frames_and_emerges_bounded_runs_across_paraphrases() {
     let (mut brain, input, output) = build_two_pool_brain();
     brain.designate_action_pool(output);
     let response = b"def greet():\n    return 'hello'\n".to_vec();
@@ -292,7 +294,11 @@ fn direct_pretrain_reuses_atom_grounded_action_frame_across_paraphrases() {
     ]);
     assert!(first.is_some() && second.is_some());
     assert_ne!(first, second);
-    assert_eq!(brain.fabric().pool(output).unwrap().read().concept_count(), 1);
+    let action_concepts = brain.fabric().pool(output).unwrap().read().concept_count();
+    assert!(
+        action_concepts > 1,
+        "repeated responses must form the full-frame concept plus bounded recurring runs"
+    );
     for (binding, expected_action_members) in [
         (first.unwrap(), response.len()),
         (second.unwrap(), 1),
