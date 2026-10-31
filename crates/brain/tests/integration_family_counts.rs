@@ -454,14 +454,13 @@ fn the_wired_transfer_answers_beside_next_and_composing_it_twice_changes_nothing
                 "s{scale} {name}: composing the transfer over a path that already contains it              changed the answer, so the fallback is wired in more than one place"
             );
         }
-        // WHAT THE WIRING BUYS, as an absolute floor and not as a margin over
-        // an arm. `beside_next` is a held-out SYNONYM of a trained relation,
-        // so the span it needs appears only inside a trained QUESTION and
-        // `derive_by_substitution` cannot reach it at any budget: measured
-        // 0 of 384 at scale 64 at budgets 32, 64 AND 128, byte-identical.
-        // Relation transfer is the only mechanism in the library that supplies
-        // it, so a non-zero here is the one reading that says it is reachable
-        // from the product.
+        // WHAT THE WIRED PATH MEASURES. The scorecard's own training and probe
+        // order now reads beside_next 6/6 at scale 1, 22/24 at scale 4, and
+        // 60/96 at scale 16, with wrong 0 throughout. The active-binding-scope
+        // proof is what lets the transfer establish uniqueness without asking
+        // every generated rewrite. A separate public-API full-evidence test
+        // checks the same proof against exhaustive candidates at 8 and 32
+        // rooms and measures exactly 3 fallback probes per answer.
         let (_, beside_correct, beside_wrong, _, beside_probes) = base
             .iter()
             .find(|(n, _, _, _, _)| *n == "beside_next")
@@ -474,33 +473,16 @@ fn the_wired_transfer_answers_beside_next_and_composing_it_twice_changes_nothing
                 (6, 6),
                 "the isolated one-hop relation-transfer control must remain reachable"
             );
+        } else if scale == 4 {
+            assert!(
+                beside_correct > 0,
+                "the scorecard path must answer at least one unique beside_next case at scale 4"
+            );
         }
-        // REACHABILITY IS ASSERTED AT THE SCALE WHERE THE EVIDENCE EXISTS, AND
-        // THE LARGER SCALE IS PRINTED RATHER THAN ASSERTED. The accept rule
-        // returns an answer only when exactly ONE ceiling-reachable answer was
-        // found by a search that ENDED, and whether a second one exists is a
-        // property of the world and not of the wiring. Measured 2026-10-02 with
-        // the candidate class bounded to `1 + |q| |T|` so the search can end:
-        //
-        //   scale 1 (8 rooms)   beside_next 6/6   wrong 0   integration 98.15 %
-        //   scale 4 (32 rooms)  beside_next 0/24  wrong 0   integration 85.65 %
-        //
-        // At 32 rooms a second trained question is reachable at the ceiling
-        // inside that class, so the chain is not unique and the mechanism
-        // abstains -- which is the required behaviour, not a regression. Cove
-        // measured the same world under FULL evidence (every span-over-span
-        // candidate, 547 probes per question against a 1-probe recall) and got
-        // 4/24 wrong 0: the four answers are there and proving their uniqueness
-        // is what costs, which is backlog work and not a floor this test may
-        // demand. Asserting `> 0` at scale 4 would therefore be asserting an
-        // affordability decision, and it would red the gate for a mechanism
-        // behaving exactly as PRIORITY ZERO requires.
-        // NO FLOOR ABOVE 0 IS CONTRACTED FOR THIS FAMILY, and that is a
-        // decision with a four-scale measurement behind it rather than a gap.
-        // The default answer path enables the transfer, but only after the
-        // completed-negative verdict. The historical arm-on/off table above
-        // predates that gate; current reachability is measured by the scorecard.
-        // Whatever this path answers, it may never be wrong.
+        // The 2026-10-02 0/24 scale-4 result predates the active-scope proof and
+        // is superseded by this scorecard-order measurement. The default
+        // answer path runs transfer only after a completed negative
+        // sub-question verdict; whatever it answers, wrong must remain 0.
         assert_eq!(
             beside_wrong, 0,
             "s{scale}: the relation-transfer fallback invented {beside_wrong} beside_next              answers; a brain with no grounded answer has NO answer"
@@ -508,8 +490,9 @@ fn the_wired_transfer_answers_beside_next_and_composing_it_twice_changes_nothing
     }
 }
 
-/// `beside_next` carries no floor above 0 at either scale: it is 0 at every
-/// scale and the mechanism that would fix it is not this file's subject.
+/// The baseline helper keeps a zero floor for historical comparisons; the
+/// wired-path contract above separately requires scale 1 and scale 4 to answer
+/// at least one beside_next case with wrong held at 0.
 #[test]
 fn scale_one_integration_families_hold_their_baseline() {
     check(1, &[("on_material", 22), ("next_color", 16), ("next_on_material", 2),
