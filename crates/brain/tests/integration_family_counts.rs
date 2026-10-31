@@ -396,7 +396,7 @@ fn check(scale: usize, floors: &[(&str, usize)]) {
 /// all", which `derive_by_substitution_profiled` does not report today.
 #[test]
 fn the_wired_transfer_answers_beside_next_and_composing_it_twice_changes_nothing() {
-    for scale in [1, 4] {
+    for scale in [1, 4, 16] {
         let base = measure(scale);
         let with = measure_via(scale, infer_via_transfer);
         for ((name, bc, bw, bs, probes), (_, wc, ww, ws, _)) in base.iter().zip(with.iter()) {
@@ -435,6 +435,13 @@ fn the_wired_transfer_answers_beside_next_and_composing_it_twice_changes_nothing
             .copied()
             .expect("beside_next is a scorecard family");
         println!("  s{scale} beside_next {beside_correct}/{beside_probes} wrong {beside_wrong}");
+        if scale == 1 {
+            assert_eq!(
+                (beside_correct, beside_probes),
+                (6, 6),
+                "the isolated one-hop relation-transfer control must remain reachable"
+            );
+        }
         // REACHABILITY IS ASSERTED AT THE SCALE WHERE THE EVIDENCE EXISTS, AND
         // THE LARGER SCALE IS PRINTED RATHER THAN ASSERTED. The accept rule
         // returns an answer only when exactly ONE ceiling-reachable answer was

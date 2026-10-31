@@ -3637,8 +3637,20 @@ pub(crate) fn derived_by_substitution_reply(
     if brain.best_binding_match_v2(query_pool).precision < 0.70 {
         return None;
     }
-    let derived =
-        brain.derive_by_substitution(query_pool, action_pool, prompt.as_bytes(), 3, budget)?;
+    let derived = brain
+        .derive_by_substitution(\n            query_pool,\n            action_pool,\n            prompt.as_bytes(),\n            w1z4rd_brain::ANSWER_CHAIN_MAX_DEPTH,\n            budget,\n        )
+        .or_else(|| {
+            w1z4rd_brain::answer_with_relation_transfer(
+                brain,
+                query_pool,
+                action_pool,
+                prompt.as_bytes(),
+                w1z4rd_brain::ANSWER_FABRIC_CONFIDENCE_THRESHOLD,
+                w1z4rd_brain::ANSWER_CHAIN_MAX_DEPTH,
+                w1z4rd_brain::ANSWER_CHAIN_MAX_VISIT,
+            )
+            .0
+        })?;
     if derived.is_empty() || !prompt_derived_feature_artifact_compatible(labels, prompt, &derived) {
         return None;
     }

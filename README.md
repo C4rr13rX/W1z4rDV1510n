@@ -488,12 +488,13 @@ budget, which is what `f1bd9c76`'s "7× wall" was measuring.
 
 ### Subject-preserving relation transfer (`crates/brain/src/relation_transfer.rs`, 2026-10-01)
 
-One held-out integration family — a question of the shape `<subject> <relation>?` whose
-phrasing was trained for *other* subjects — measures **0.0 %, at every scale**: 0/6, 0/24,
-0/96, 0/384. It is a one-hop family, so at scale 1 its six probes cannot be a budget
-problem, and the pass that solved two other families outright (candidate-set fix,
-`dea50bd`) left it **byte-identical**. That makes it 384 of the 785 misses remaining at
-scale 64, or **48.9 % of everything left**.
+Current gated measurements (`python tools/gate.py`, pass 736) report this held-out family
+at **6/6, 22/24, 60/96, and 49/384** for scales 1, 4, 16, and 64, with **zero wrong** at
+every scale. The remaining misses are silent: 335 at scale 64. Overall integration is
+100.00%, 99.07%, 95.83%, and 90.31%, with recall 100% at all scales. Against the committed
+baseline, integration rises from 88.89% to 95.83% at scale 16 and to 90.31% at scale 64;
+peak RAM is 26.8 MB versus 27.0 MB and 49.0 MB versus 49.3 MB, respectively. The family
+still has substantial scale-64 headroom, but the former 0/384 claim is no longer current.
 
 The cause is measured, not assumed. Every match in this world is precision × recall over
 the **unordered distinct byte set**. Modelling the matcher's own scorer over the 186
@@ -511,6 +512,14 @@ decode back into the query pool. The accept rule is the existing one, so nothing
 invented: a rewrite is returned only when it scores at the exact ceiling (an exact trained
 binding) *and* resolves to something other than the answer the query had already landed
 on. Everything else returns no answer.
+
+The scorecard calls `answer_with_relation_transfer` after observing the query. The node's
+`derived_by_substitution_reply` keeps its existing derivation first, then calls the same
+wrapper only when that derivation is silent; the wrapper preserves any answer from
+`integrate_autonomous` and admits relation transfer only when the deletion scan concluded
+without a taught sub-question. `integration_family_counts` checks that composing the wrapper
+again leaves answers unchanged at scales 1, 4, and 16. The gate checks scorecard recall,
+wrong answers, integration, and RAM through scale 64.
 
 Alignment alone does **not** separate the subject from the relation, which a unit test
 established against the first version of this description: for query `r001 beside?`
