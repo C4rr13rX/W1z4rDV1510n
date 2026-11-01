@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-train_deterministic_innovation.py — Bind the 30-Year Digital Innovation Continuum
+train_deterministic_innovation.py — Bind the Pre-1980 Foundations and the 30-Year Digital Innovation Continuum
 into the W1z4rD multi-pool Hebbian neural fabric.
 """
 from __future__ import annotations
@@ -11,8 +11,24 @@ import urllib.request
 
 INNOVATION_CURRICULUM: list[tuple[str, str]] = [
     (
+        "what would embarrass your parents if discovered living in 1980 and missing from quantitative trading",
+        "Missing the Kelly Criterion (1956 J.L. Kelly Jr.), Ed Thorp's quantitative market-neutral hedge fund and delta hedging (1966 Beat the Dealer, 1969 Princeton Newport Partners), Harry Markowitz's Mean-Variance Efficient Frontier (1952), Benoit Mandelbrot's Pareto fat-tail risk (1963), and Black-Scholes-Merton option pricing (1973). Without Kelly sizing f* = (bp - q)/b, trading with positive edge leads to ruin or sub-optimal geometric growth.",
+    ),
+    (
+        "what is epoch 0 of digital innovation",
+        "Epoch 0 (Pre-1980) established the mathematical bedrock of quantitative finance and information theory: Markowitz mean-variance optimization (1952), the Kelly Criterion for geometric capital growth (1956), Mandelbrot fat-tailed Pareto distributions (1963), Thorp convertible arbitrage (1969), and the Black-Scholes continuous delta hedge formula (1973).",
+    ),
+    (
+        "what is the kelly criterion and half kelly",
+        "Formulated by John Larry Kelly Jr. at Bell Labs in 1956 and applied to financial markets by Edward Thorp, the Kelly Criterion f* = (b*p - q)/b calculates the fraction of bankroll to allocate to maximize asymptotic log-wealth growth without risking gambler's ruin. Half-Kelly halves the fraction to safeguard against parameter uncertainty and Mandelbrot heavy tails.",
+    ),
+    (
+        "how do pre 1980 foundations graduate strategies to live trading",
+        "By applying Half-Kelly sizing and Mandelbrot fat-tail Expected Shortfall hurdles, strategies clear real DEX gas costs, achieve positive net expectancy with t-stat >= 2.0, and satisfy the live readiness gate.",
+    ),
+    (
         "what is the deterministic path of digital innovation",
-        "The deterministic continuum traverses graph topology (PageRank), distributed content DAGs (Git/Merkle), cryptographic conservation invariants (AMMs), continuous latent manifold attention (Transformers), and neuro-symbolic self-healing autonomy.",
+        "The deterministic continuum traverses Epoch 0 quantitative foundations (Kelly/Thorp/Mandelbrot), graph topology (PageRank), distributed content DAGs (Git/Merkle), cryptographic conservation invariants (AMMs), continuous latent manifold attention (Transformers), and neuro-symbolic self-healing autonomy.",
     ),
     (
         "what is epoch 1 of digital innovation",
@@ -36,7 +52,7 @@ INNOVATION_CURRICULUM: list[tuple[str, str]] = [
     ),
     (
         "how does the deterministic innovation core protect capital",
-        "It calculates the Shannon entropy of incoming sensory attention, validates the cryptographic Merkle audit trail, and simulates constant-product AMM slippage before permitting trade execution.",
+        "It calculates the Shannon entropy of incoming sensory attention, validates the cryptographic Merkle audit trail, sizes positions via Half-Kelly, and simulates constant-product AMM slippage before permitting trade execution.",
     ),
     (
         "how does w1z4rd synthesize digital innovation",
