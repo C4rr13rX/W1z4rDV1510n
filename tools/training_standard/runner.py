@@ -59,7 +59,7 @@ _DEFAULT_EVENTS = Path(
 )
 NODE_URL = os.environ.get("W1Z4RD_NODE_URL", "http://127.0.0.1:8090")
 _BRAIN_PREFIX = "" if os.environ.get(
-    "WIZARD_USE_BRAIN_PREFIX", "1"
+    "WIZARD_USE_BRAIN_PREFIX", "0"
 ).strip().lower() in {"0", "false", "no"} else "/brain"
 
 
@@ -99,26 +99,29 @@ def read_events(path: Path = _DEFAULT_EVENTS) -> list[dict[str, Any]]:
 def _probe_node(prompt: str, timeout: float = 30.0) -> tuple[str, str]:
     """Send `prompt` to the node's /chat endpoint.  Returns (response, error).
     On HTTP failure response is '' and error is set."""
-    url = f"{NODE_URL.rstrip('/')}{_BRAIN_PREFIX}/chat"
     body = json.dumps({"text": prompt}).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=body, method="POST",
-        headers={"Content-Type": "application/json"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            raw = r.read().decode("utf-8", errors="replace")
+    paths = [f"{_BRAIN_PREFIX}/chat", "/chat" if _BRAIN_PREFIX else "/brain/chat"]
+    last_exc = None
+    for p in paths:
+        url = f"{NODE_URL.rstrip('/')}{p}"
+        req = urllib.request.Request(
+            url, data=body, method="POST",
+            headers={"Content-Type": "application/json"},
+        )
         try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                raw = r.read().decode("utf-8", errors="replace")
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                return raw, ""
+            for key in ("answer", "response", "reply", "text", "output"):
+                if isinstance(data.get(key), str):
+                    return data[key], ""
             return raw, ""
-        # Common keys produced by the node — accept whichever is present.
-        for key in ("answer", "response", "reply", "text", "output"):
-            if isinstance(data.get(key), str):
-                return data[key], ""
-        return raw, ""
-    except (urllib.error.URLError, ConnectionError, OSError) as exc:
-        return "", str(exc)
+        except (urllib.error.URLError, ConnectionError, OSError) as exc:
+            last_exc = exc
+    return "", str(last_exc)
 
 
 # ── Benchmark execution ────────────────────────────────────────────────────
