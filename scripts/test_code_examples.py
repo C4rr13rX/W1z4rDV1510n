@@ -180,7 +180,7 @@ def compile_only_cpp(code: str, tmpdir: Path, std='c++11') -> dict:
     """Compile C++ but do not run -- for Arduino compile-check."""
     f = tmpdir / 'prog.cpp'
     f.write_text(code, encoding='utf-8')
-    out = tmpdir / 'prog.exe'
+    out = tmpdir / 'snippet_runner_bin.exe'
     return run_cmd(
         [TOOLS['g++'], str(f), f'-std={std}', '-Wall', '-o', str(out)],
         timeout=30,
@@ -189,7 +189,7 @@ def compile_only_cpp(code: str, tmpdir: Path, std='c++11') -> dict:
 def run_c(code: str, tmpdir: Path, std='c89') -> dict:
     f = tmpdir / 'prog.c'
     f.write_text(code, encoding='utf-8')
-    out = tmpdir / 'prog.exe'
+    out = tmpdir / 'snippet_runner_bin.exe'
     comp = run_cmd(
         [TOOLS['gcc'], str(f), f'-std={std}', '-Wall', '-o', str(out)],
         timeout=30,
@@ -207,7 +207,7 @@ def run_c(code: str, tmpdir: Path, std='c89') -> dict:
 def run_cpp(code: str, tmpdir: Path, std='c++98') -> dict:
     f = tmpdir / 'prog.cpp'
     f.write_text(code, encoding='utf-8')
-    out = tmpdir / 'prog.exe'
+    out = tmpdir / 'snippet_runner_bin.exe'
     comp = run_cmd(
         [TOOLS['g++'], str(f), f'-std={std}', '-Wall', '-o', str(out)],
         timeout=30,
@@ -236,7 +236,7 @@ def run_qb64(code: str, tmpdir: Path) -> dict:
     if 'SYSTEM' not in code.upper() and 'END' not in code.upper():
         full_code += '\nSYSTEM'
     f.write_text(full_code, encoding='utf-8')
-    out = tmpdir / 'prog.exe'
+    out = tmpdir / 'snippet_runner_bin.exe'
     comp = run_cmd([TOOLS['qb64'], '-x', str(f), '-o', str(out)], timeout=90)
     if comp['exit_code'] != 0:
         return comp
