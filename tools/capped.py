@@ -126,26 +126,207 @@ def target_dir(root: Path) -> Path:
 class BuildSlot:
     """The machine-wide right to run cargo, held for the life of the command."""
 
-    PATH = Path(tempfile.gettempdir()) / "w1z4rd-cargo-build.lock"
+    LOCK_PATH = Path(tempfile.gettempdir()) / "w1z4rd-cargo-build.lock"
+    HOLDER_PATH = Path(tempfile.gettempdir()) / "w1z4rd-cargo-build-holder.json"
+    QUEUE_DIR = Path(tempfile.gettempdir()) / "w1z4rd-cargo-build-queue"
+    # Legacy alias for compatibility with code expecting PATH
+    PATH = LOCK_PATH
+
+    def __init__(self, cmd: list[str] | None = None, tgt_dir: Path | None = None, prefix: str = "w1z4rd-cargo-build"):
+        self.cmd = list(cmd) if cmd else ["cargo"]
+        self.tgt_dir = str(tgt_dir) if tgt_dir else ""
+        self.lock_path = Path(tempfile.gettempdir()) / f"{prefix}.lock"
+        self.holder_path = Path(tempfile.gettempdir()) / f"{prefix}-holder.json"
+        self.queue_dir = Path(tempfile.gettempdir()) / f"{prefix}-queue"
+        self._f = None
+        self._ticket_path = None
 
     def __enter__(self):
-        self._f = open(self.PATH, "a+b")
-        waited = time.time()
+        self.queue_dir.mkdir(parents=True, exist_ok=True)
+        # High-resolution monotonic arrival ticket
+        ticket_id = f"{time.time():018.6f}_{time.perf_counter_ns():020d}_{os.getpid()}"
+        self._ticket_path = self.queue_dir / f"{ticket_id}.ticket"
+        ticket_data = {
+            "pid": os.getpid(),
+            "cmd": self.cmd,
+            "target_dir": self.tgt_dir,
+            "arrived_at": time.time(),
+        }
+        self._ticket_path.write_text(json.dumps(ticket_data), encoding="utf-8")
+
+        self._f = open(self.lock_path, "a+b")
+        waited_start = time.time()
+        last_report = 0.0
+
         while True:
-            try:
-                msvcrt.locking(self._f.fileno(), msvcrt.LK_NBLCK, 1)
-                break
-            except OSError:
-                time.sleep(2)
-        if time.time() - waited > 5:
-            print(f"capped: waited {time.time() - waited:.0f}s for the build slot", file=sys.stderr)
+            # Clean up dead tickets in queue_dir
+            active_tickets = []
+            for tp in sorted(self.queue_dir.glob("*.ticket")):
+                try:
+                    t_pid = int(tp.stem.split("_")[-1])
+                    if not is_pid_alive(t_pid):
+                        tp.unlink(missing_ok=True)
+                        continue
+                    active_tickets.append(tp)
+                except Exception:
+                    pass
+
+            is_our_turn = bool(active_tickets and active_tickets[0] == self._ticket_path)
+
+            if is_our_turn:
+                try:
+                    msvcrt.locking(self._f.fileno(), msvcrt.LK_NBLCK, 1)
+                    holder_info = {
+                        "pid": os.getpid(),
+                        "cmd": self.cmd,
+                        "target_dir": self.tgt_dir,
+                        "acquired_at": time.time(),
+                    }
+                    try:
+                        self.holder_path.write_text(json.dumps(holder_info), encoding="utf-8")
+                    except Exception:
+                        pass
+                    break
+                except OSError:
+                    pass
+
+            # Read holder details for diagnostics
+            holder_pid = None
+            holder_cmd = []
+            holder_elapsed = 0.0
+            if self.holder_path.exists():
+                try:
+                    hinfo = json.loads(self.holder_path.read_text(encoding="utf-8"))
+                    h_pid = int(hinfo.get("pid", 0))
+                    if is_pid_alive(h_pid):
+                        holder_pid = h_pid
+                        holder_cmd = hinfo.get("cmd", [])
+                        if hinfo.get("acquired_at"):
+                            holder_elapsed = time.time() - hinfo["acquired_at"]
+                    else:
+                        self.holder_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+            now = time.time()
+            if last_report == 0.0 or now - last_report >= 5.0:
+                queue_pos = active_tickets.index(self._ticket_path) if self._ticket_path in active_tickets else 0
+                cmd_str = " ".join(holder_cmd) if holder_cmd else "cargo"
+                if holder_pid:
+                    print(
+                        f"capped: waiting for build slot held by PID {holder_pid} ({cmd_str}) "
+                        f"for {holder_elapsed:.0f}s (queue position {queue_pos}/{len(active_tickets)})",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"capped: waiting for build slot (queue position {queue_pos}/{len(active_tickets)})...",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                last_report = now
+
+            time.sleep(0.5)
+
+        total_waited = time.time() - waited_start
+        if total_waited > 5:
+            print(f"capped: waited {total_waited:.0f}s for the build slot", file=sys.stderr, flush=True)
         return self
 
     def __exit__(self, *exc):
         try:
+            self.holder_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        if self._ticket_path:
+            self._ticket_path.unlink(missing_ok=True)
+        try:
             msvcrt.locking(self._f.fileno(), msvcrt.LK_UNLCK, 1)
+        except Exception:
+            pass
         finally:
             self._f.close()
+
+
+def is_pid_alive(pid: int) -> bool:
+    """Return True if a process with this PID is currently running."""
+    if pid <= 0:
+        return False
+    try:
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        SYNCHRONIZE = 0x00100000
+        h = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, False, pid)
+        if not h:
+            return False
+        exit_code = wintypes.DWORD()
+        res = ctypes.windll.kernel32.GetExitCodeProcess(h, ctypes.byref(exit_code))
+        ctypes.windll.kernel32.CloseHandle(h)
+        STILL_ACTIVE = 259
+        return bool(res != 0 and exit_code.value == STILL_ACTIVE)
+    except Exception:
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+
+
+class ActiveInvocation:
+    """Guards against duplicate invocations from the same worktree with identical cmd and target_dir."""
+    DIR = Path(tempfile.gettempdir()) / "w1z4rd-active-invocations"
+
+    def __init__(self, cmd: list[str], worktree: Path, tgt_dir: Path):
+        self.cmd = list(cmd)
+        self.worktree = str(worktree.resolve())
+        self.tgt_dir = str(tgt_dir.resolve())
+        self.pid = os.getpid()
+        self.path = self.DIR / f"{self.pid}.json"
+
+    def check_duplicate(self) -> int | None:
+        """Returns existing PID if a duplicate invocation is already running, else None."""
+        self.DIR.mkdir(parents=True, exist_ok=True)
+        for p in list(self.DIR.glob("*.json")):
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                other_pid = int(data.get("pid", 0))
+                if not is_pid_alive(other_pid):
+                    p.unlink(missing_ok=True)
+                    continue
+                if other_pid == self.pid:
+                    continue
+                if (data.get("worktree") == self.worktree
+                        and data.get("target_dir") == self.tgt_dir
+                        and data.get("cmd") == self.cmd):
+                    return other_pid
+            except Exception:
+                pass
+        return None
+
+    def __enter__(self):
+        existing_pid = self.check_duplicate()
+        if existing_pid is not None:
+            cmd_str = " ".join(self.cmd)
+            print(
+                f"capped: refusing duplicate invocation; PID {existing_pid} is already running "
+                f"'{cmd_str}' in {self.worktree} with target {self.tgt_dir}",
+                file=sys.stderr,
+                flush=True,
+            )
+            sys.exit(1)
+        self.DIR.mkdir(parents=True, exist_ok=True)
+        record = {
+            "pid": self.pid,
+            "cmd": self.cmd,
+            "worktree": self.worktree,
+            "target_dir": self.tgt_dir,
+            "started_at": time.time(),
+        }
+        self.path.write_text(json.dumps(record), encoding="utf-8")
+        return self
+
+    def __exit__(self, *exc):
+        self.path.unlink(missing_ok=True)
 
 
 def main() -> int:
@@ -159,19 +340,21 @@ def main() -> int:
     if not cmd:
         ap.error("no command given")
     is_cargo = Path(cmd[0]).stem.lower() == "cargo"
+    tgt_dir = target_dir(ROOT)
     if is_cargo:
-        os.environ["CARGO_TARGET_DIR"] = str(target_dir(ROOT))
-    job = MemoryCappedJob(args.mb)
-    with BuildSlot() if is_cargo else nullcontext():
-        t0 = time.time()
-        proc = subprocess.Popen(cmd)
-        timed_out = False
-        try:
-            code = proc.wait(timeout=args.timeout or None)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
-            code = proc.wait()
+        os.environ["CARGO_TARGET_DIR"] = str(tgt_dir)
+    with ActiveInvocation(cmd, ROOT, tgt_dir):
+        job = MemoryCappedJob(args.mb)
+        with BuildSlot(cmd, tgt_dir) if is_cargo else nullcontext():
+            t0 = time.time()
+            proc = subprocess.Popen(cmd)
+            timed_out = False
+            try:
+                code = proc.wait(timeout=args.timeout or None)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
+                code = proc.wait()
     peak = job.peak_mb()
     hit_cap = peak >= args.mb * 0.97 and code != 0
     result = {"exit": code, "peak_mb": round(peak, 1), "cap_mb": args.mb,
