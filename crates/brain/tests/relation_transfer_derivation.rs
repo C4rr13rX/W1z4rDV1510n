@@ -1156,14 +1156,29 @@ fn at_scale_four_no_vote_threshold_separates_the_two_families() {
         agg("majority_128")
     );
 
-    // RETIRED 2026-10-01, the same way and for the same reason as 70bba62:
-    // "the plurality must beat production" per family and in aggregate went
-    // red the moment PRODUCTION improved -- the exact-ordered accept rule took
-    // on_material to 94/96 with 0 wrong, above the vote's 74/96 -- and a test
-    // must never red because the product got better. The vote arm also
-    // answers WRONG (22/96 on_material here), and the owner's rule is that the
-    // brain never hallucinates, so no vote arm can ship anyway. The census is
-    // kept as output for any future pass that revisits voting.
+    // RE-DERIVED 2026-11-17 against the post-dea50bd baseline (item 5fdbf54e).
+    // Production arm must show 0 wrong across all four families at scale 4:
+    for family in ["on_material", "next_color", "next_on_material", "beside_next"] {
+        let p = arms[&(family, "production_32")];
+        assert_eq!(
+            p.1, 0,
+            "the production arm must show wrong 0 at scale 4 in {family}, got {p:?}"
+        );
+    }
+    assert_eq!(arms[&("beside_next", "production_32")].0, 0);
+    assert_eq!(arms[&("next_color", "production_32")].0, 64);
+    assert_eq!(arms[&("next_on_material", "production_32")].0, 12);
+    assert_eq!(arms[&("on_material", "production_32")].0, 94);
+
+    // THE REFUTATION: voting cannot ship because it invents wrong answers
+    // (hallucinates) on beside_next (3 wrong), whereas production has 0 wrong across
+    // all four families. Intentionally testing discrimination by asserting wrong == 0 first.
+    let pl_bn = arms[&("beside_next", "plurality_128")];
+    assert_eq!(
+        pl_bn.1, 0,
+        "DISCRIMINATION TEST: plurality_128 must have 0 wrong (should FAIL since it invents 3 wrong): {pl_bn:?}"
+    );
+
     for family in ["on_material", "next_on_material", "beside_next"] {
         let p = arms[&(family, "production_32")];
         let v = arms[&(family, "plurality_128")];
