@@ -82,6 +82,13 @@
 //! costing one entry at `max_len * 4` heap + 24 `Vec` + 8 count + ~16 map
 //! overhead:
 //!
+//! NOTE: The MB figures below are an analytic PROJECTION of an unpopulated
+//! ledger (contingent on max_concept_member_count becoming live on a path
+//! something takes), not a measured runtime footprint. The actual MEASURED
+//! sequence ledger costs are produced by the emergence_ledger_cost_by_run_length
+//! test table below, where bounded emergence (pretrain_emergence_max_run = 3)
+//! costs only 0.121 MB at scale 64.
+//!
 //! ```text
 //!  bound M  | distinct keys: scale 1 / 4 / 16 / 64 | MB at scale 64
 //!       64  |  169,216 / 698,226 / 2,773,654 / 11,009,761 |  3347.0
@@ -107,6 +114,12 @@
 //! 32, at five sites in `crates/node/src/brain_api.rs` and four in
 //! `crates/node/src/bin/brain_server.rs`; the scorecard and fourteen brain tests,
 //! this file included, say 64. Priced the same way, over the same corpus:
+//!
+//! NOTE: These MB@64 numbers are an analytic projection over an unpopulated
+//! ledger, not a paid cost -- training-path emergence is bounded by
+//! pretrain_emergence_max_run (default 3, 0.121 MB at scale 64 in the measured
+//! table from emergence_ledger_cost_by_run_length below) rather than
+//! max_concept_member_count, so the 64-vs-32 gap remains a cost nobody pays.
 //!
 //! ```text
 //!   M | who                   | keys@1  | keys@16   | keys@64    | MB@64  | growth
