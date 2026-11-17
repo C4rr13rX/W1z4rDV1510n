@@ -52,7 +52,25 @@ STEPS = [
 
 
 def run(cmd: list[str]) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    proc = subprocess.Popen(
+        cmd,
+        cwd=ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+    )
+    captured = []
+    if proc.stdout:
+        for line in proc.stdout:
+            captured.append(line)
+            sys.stdout.write(line)
+            sys.stdout.flush()
+    proc.wait()
+    full_output = "".join(captured)
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout=full_output, stderr="")
 
 
 def failing_tests(out: str) -> list[str]:
@@ -87,6 +105,7 @@ def with_no_fail_fast(cmd: list[str]) -> list[str]:
 def main() -> int:
     failed = []
     for name, cmd in STEPS:
+        print(f"==> STEP: {name} (started at {time.strftime('%H:%M:%S')})", flush=True)
         t0 = time.time()
         proc = run(cmd)
         ok = proc.returncode == 0
