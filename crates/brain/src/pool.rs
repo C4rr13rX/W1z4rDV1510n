@@ -1480,6 +1480,88 @@ struct WbrainPoolMetadata {
     total_terminals: usize,
 }
 
+/// Legacy `.wbrain` pool metadata predating `PoolConfig::max_atom_fanout`
+/// (e.g., long-lived production containers whose positional bincode stream
+/// serialized `max_concept_member_count` followed immediately by
+/// `concept_emergence_threshold`). Trying current [`WbrainPoolMetadata`] first
+/// and falling back here preserves 100% of both committed fixtures and multi-GB
+/// production `.wbrain` stores without re-creating or losing neurons.
+#[derive(serde::Deserialize)]
+struct LegacyPoolConfigWithoutFanout {
+    name: String,
+    id: PoolId,
+    frame_rate: u32,
+    recent_atoms_window: usize,
+    max_concept_member_count: usize,
+    concept_emergence_threshold: u32,
+    max_weight: f32,
+    decay_rate: f32,
+    prune_floor: f32,
+    plasticity_baseline: f32,
+    sparsity_mode: ControlMode,
+    sparsity_min_neurons: usize,
+    heterosynaptic_ltd_mode: ControlMode,
+    predict_gate_mode: ControlMode,
+}
+
+#[derive(serde::Deserialize)]
+struct LegacyWbrainPoolMetadata {
+    config: LegacyPoolConfigWithoutFanout,
+    recent_atoms: VecDeque<NeuronId>,
+    sequences: Vec<(SequenceFingerprint, u32)>,
+    legacy_sequence_ledger: Option<AuxiliaryRecordRef>,
+    concept_multiset_to_id: Vec<(Vec<NeuronId>, NeuronId)>,
+    concept_sequence_to_id: Vec<(Vec<NeuronId>, NeuronId)>,
+    legacy_concept_sequence_index: Option<AuxiliaryRecordRef>,
+    neuron_kinds: Vec<NeuronKind>,
+    concept_slots: Vec<bool>,
+    born_ticks: Vec<u64>,
+    concept_count: usize,
+    total_terminals: usize,
+}
+
+fn deserialize_wbrain_pool_metadata(blob: &[u8]) -> std::io::Result<WbrainPoolMetadata> {
+    match bincode::deserialize::<WbrainPoolMetadata>(blob) {
+        Ok(meta) => Ok(meta),
+        Err(primary_err) => {
+            let legacy: LegacyWbrainPoolMetadata = bincode::deserialize(blob).map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, primary_err)
+            })?;
+            Ok(WbrainPoolMetadata {
+                config: PoolConfig {
+                    name: legacy.config.name,
+                    id: legacy.config.id,
+                    frame_rate: legacy.config.frame_rate,
+                    recent_atoms_window: legacy.config.recent_atoms_window,
+                    max_concept_member_count: legacy.config.max_concept_member_count,
+                    max_atom_fanout: default_max_atom_fanout(),
+                    pretrain_emergence_max_run: default_pretrain_emergence_max_run(),
+                    concept_emergence_threshold: legacy.config.concept_emergence_threshold,
+                    max_weight: legacy.config.max_weight,
+                    decay_rate: legacy.config.decay_rate,
+                    prune_floor: legacy.config.prune_floor,
+                    plasticity_baseline: legacy.config.plasticity_baseline,
+                    sparsity_mode: legacy.config.sparsity_mode,
+                    sparsity_min_neurons: legacy.config.sparsity_min_neurons,
+                    heterosynaptic_ltd_mode: legacy.config.heterosynaptic_ltd_mode,
+                    predict_gate_mode: legacy.config.predict_gate_mode,
+                },
+                recent_atoms: legacy.recent_atoms,
+                sequences: legacy.sequences,
+                legacy_sequence_ledger: legacy.legacy_sequence_ledger,
+                concept_multiset_to_id: legacy.concept_multiset_to_id,
+                concept_sequence_to_id: legacy.concept_sequence_to_id,
+                legacy_concept_sequence_index: legacy.legacy_concept_sequence_index,
+                neuron_kinds: legacy.neuron_kinds,
+                concept_slots: legacy.concept_slots,
+                born_ticks: legacy.born_ticks,
+                concept_count: legacy.concept_count,
+                total_terminals: legacy.total_terminals,
+            })
+        }
+    }
+}
+
 /// Rewrite every container offset held inside a serialized pool metadata blob.
 ///
 /// Compaction moves records, so any `AuxiliaryRecordRef` that survives the move
@@ -1500,8 +1582,7 @@ pub(crate) fn remap_pool_metadata_refs(
     if blob.is_empty() {
         return Ok(Vec::new());
     }
-    let decoded: WbrainPoolMetadata = bincode::deserialize(blob)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let decoded: WbrainPoolMetadata = deserialize_wbrain_pool_metadata(blob)?;
     let WbrainPoolMetadata {
         config,
         recent_atoms,
@@ -2749,8 +2830,7 @@ impl Pool {
         encoding: Box<dyn AtomEncoding>,
         store: Arc<WbrainNeuronStore>,
     ) -> std::io::Result<Self> {
-        let metadata: WbrainPoolMetadata = bincode::deserialize(&store.pool_metadata())
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        let metadata: WbrainPoolMetadata = deserialize_wbrain_pool_metadata(&store.pool_metadata())?;
         let mut label_to_id = AHashMap::new();
         for (label, id) in store.labels_snapshot() {
             label_to_id.insert(label, id);
