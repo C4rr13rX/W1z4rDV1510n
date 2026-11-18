@@ -624,8 +624,7 @@ fn top_input_match_concept(
             1.0
         } else {
             let cmem: std::collections::HashSet<String> = neuron.members.iter()
-                .filter_map(|mid| pool.get_hot(*mid as usize))
-                .filter_map(|n| n.label.clone())
+                .filter_map(|mid| pool.label_for(*mid))
                 .collect();
             if cmem.is_empty() { continue; }
             let inter = input_set.intersection(&cmem).count() as f32;
@@ -1097,6 +1096,40 @@ impl NeuronPool {
         };
         // Sanitize characters invalid in Windows filenames (the dir_part prefix
         // should already be clean, but sanitize the suffix to be safe).
+        //
+        // Case-escaping: atom payloads are URL-safe base64, which is CASE-
+        // SENSITIVE (`txt:cg` = 'r', `txt:Cg` = '\n').  Windows / macOS
+        // filesystems are case-INSENSITIVE, so without escaping both labels
+        // map to the same file and a warmed neuron silently adopts the other
+        // label (r<->\n, q<->\t, u<->\r swaps in decoded output).  Every
+        // uppercase ASCII letter is written as `^` + lowercase, which is
+        // unique on any filesystem.
+        let mut safe = String::with_capacity(file_part.len() + 8);
+        for c in file_part.chars() {
+            match c {
+                '\\' | '/' | '*' | '?' | '"' | '<' | '>' | '|' => safe.push('_'),
+                '^' => safe.push_str("^^"),
+                c if c.is_ascii_uppercase() => {
+                    safe.push('^');
+                    safe.push(c.to_ascii_lowercase());
+                }
+                c => safe.push(c),
+            }
+        }
+        Some(base.join(dir_part).join(format!("{}.json", safe)))
+    }
+
+    /// Pre-fix (unescaped) cold path.  Read-only fallback so neurons evicted
+    /// before case-escaping still load — but only when the stored label
+    /// matches exactly (see `ensure_hot`), since these files may hold a
+    /// case-colliding neighbour's data.
+    fn cold_path_for_label_legacy_case(&self, label: &str) -> Option<PathBuf> {
+        let base = self.cold_dir.as_ref()?;
+        let (dir_part, file_part) = if let Some(pos) = label.find(':') {
+            (&label[..pos], &label[pos + 1..])
+        } else {
+            ("misc", label)
+        };
         let safe: String = file_part.chars().map(|c| match c {
             '\\' | '/' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
             c => c,
@@ -1159,9 +1192,20 @@ impl NeuronPool {
         // Try label-based path first; fall back to legacy shard path for old files.
         let path = self.cold_path_for_label(&label)
             .filter(|p| p.exists())
+            .or_else(|| self.cold_path_for_label_legacy_case(&label).filter(|p| p.exists()))
             .or_else(|| self.cold_path_legacy(id).filter(|p| p.exists()));
 
-        let raw_json: Option<String> = path.as_ref().and_then(|p| std::fs::read_to_string(p).ok());
+        let mut raw_json: Option<String> = path.as_ref().and_then(|p| std::fs::read_to_string(p).ok());
+        // Guard against case-insensitive filesystem collisions: a file found
+        // via the pre-escaping path may belong to a different label
+        // (`txt:Cg@5` vs `txt:cg@5`).  Never adopt another neuron's identity.
+        if let Some(ref json) = raw_json {
+            if let Ok(cold) = serde_json::from_str::<ColdNeuron>(json) {
+                if cold.label != label {
+                    raw_json = None;
+                }
+            }
+        }
 
         let mut neuron = if let Some(ref json) = raw_json {
             // Try new cluster-portable format first.
@@ -1314,9 +1358,16 @@ impl NeuronPool {
         let hot_max = self.hot_tier_max;
 
         // Collect IDs to evict: idle + activation below threshold.
+        // Concept / composite neurons (members non-empty) are NEVER evicted to
+        // cold storage: their labels are concatenated base64 hashes of all
+        // member atoms (hundreds of chars -> >1000-byte filenames that fail
+        // MAX_PATH on Windows/Linux), and multi-pool recall requires concepts
+        // to remain hot so `top_input_match_concept` and target concept walks
+        // can inspect `n.members` during propagation.
         // We collect first to avoid borrow issues during mutation.
         let to_evict: Vec<u32> = self.neurons.iter().enumerate().filter_map(|(idx, slot)| {
             if let NeuronSlot::Hot(n) = slot {
+                if !n.members.is_empty() { return None; }
                 let idle = current_step.saturating_sub(n.last_active_step);
                 // Evict if idle long enough AND activation has decayed to near zero.
                 if idle >= idle_threshold && n.activation < 0.005 && n.trace < 0.005 {
@@ -1330,11 +1381,13 @@ impl NeuronPool {
             self.evict_to_cold(id);
         }
 
-        // Hard cap: if still over hot_tier_max, evict by LRU (oldest last_active_step first).
+        // Hard cap: if still over hot_tier_max, evict leaf atoms by LRU (oldest last_active_step first).
         if self.hot_count > hot_max {
             let mut hot_ids: Vec<(u64, u32)> = self.neurons.iter().enumerate().filter_map(|(idx, slot)| {
                 if let NeuronSlot::Hot(n) = slot {
-                    Some((n.last_active_step, idx as u32))
+                    if n.members.is_empty() {
+                        Some((n.last_active_step, idx as u32))
+                    } else { None }
                 } else { None }
             }).collect();
             hot_ids.sort_unstable_by_key(|(ts, _)| *ts); // oldest first
@@ -1509,20 +1562,28 @@ impl NeuronPool {
                     }
                 }
             } else {
-                // Label-based format: filename IS the label suffix.
+                // Label-based format.  Prefer the authoritative `"label"`
+                // field stored inside the file: filenames are case-escaped
+                // (and pre-escaping files may hold a case-colliding label),
+                // so the filename is only a fallback.
                 for file_entry in files.flatten() {
                     let file_path = file_entry.path();
                     if file_path.extension().and_then(|e| e.to_str()) != Some("json") { continue; }
-                    let suffix = file_path.file_stem()
-                        .map(|s| s.to_string_lossy().to_string())
-                        .unwrap_or_default();
-                    let label = if prefix_name == "misc" {
-                        suffix
-                    } else {
-                        format!("{}:{}", prefix_name, suffix)
-                    };
-                    let step = std::fs::read_to_string(&file_path).ok()
-                        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                    let parsed = std::fs::read_to_string(&file_path).ok()
+                        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+                    let stored_label = parsed.as_ref()
+                        .and_then(|v| v.get("label")?.as_str().map(|s| s.to_string()));
+                    let label = stored_label.unwrap_or_else(|| {
+                        let suffix = file_path.file_stem()
+                            .map(|s| s.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        if prefix_name == "misc" {
+                            suffix
+                        } else {
+                            format!("{}:{}", prefix_name, suffix)
+                        }
+                    });
+                    let step = parsed.as_ref()
                         .and_then(|v| v.get("last_active_step")?.as_u64())
                         .unwrap_or(0);
                     index.insert(label, step);
@@ -2795,9 +2856,7 @@ impl NeuronPool {
         let mut source: Option<String> = None;
         let mut payload = String::new();
         for &id in members {
-            let label = self.get_hot(id as usize)
-                .and_then(|n| n.label.as_ref())
-                .cloned()?;
+            let label = self.label_for(id)?;
             let (src, pay) = label.split_once(':')?;
             match &source {
                 None => source = Some(src.to_string()),
@@ -2824,10 +2883,9 @@ impl NeuronPool {
         if neuron.members.is_empty() {
             return vec![label.to_string()];
         }
-        // Snapshot member labels then recurse — avoids holding a borrow.
+        // Snapshot member labels (hot or cold) then recurse — avoids holding a borrow.
         let member_labels: Vec<String> = neuron.members.iter()
-            .filter_map(|mid| self.get_hot(*mid as usize)
-                .and_then(|n| n.label.clone()))
+            .filter_map(|mid| self.label_for(*mid))
             .collect();
         for ml in member_labels {
             out.extend(self.composite_constituents(&ml));
@@ -7314,9 +7372,10 @@ impl NeuroRuntime {
         min_activation: f32,
     ) -> Option<(String, f32)> {
         if atoms.is_empty() { return None; }
-        let guard = self.inner.lock();
-        let src_pool = guard.multi_pool.pool(src_pool_id)?;
-        let tgt_pool = guard.multi_pool.pool(tgt_pool_id)?;
+        let mut guard = self.inner.lock();
+        if guard.multi_pool.pool(src_pool_id).is_none() || guard.multi_pool.pool(tgt_pool_id).is_none() {
+            return None;
+        }
 
         // 1. Position-augment + propagate within the source pool.
         //    Sum-without-clamp gives concepts whose ALL members fire higher
@@ -7327,6 +7386,17 @@ impl NeuroRuntime {
             atoms, self.use_bigrams(), self.use_trigrams());
         let mut src_seeds: HashMap<String, f32> = HashMap::new();
         for a in &pos_atoms { src_seeds.insert(a.clone(), 1.0); }
+        // Warm any cold input atoms so they participate in source propagation
+        // and member-atom Jaccard calculation.
+        if let Some(src_pool_mut) = guard.multi_pool.pool_mut(src_pool_id) {
+            for a in &pos_atoms {
+                if let Some(&id) = src_pool_mut.label_to_id.get(a) {
+                    src_pool_mut.ensure_hot(id);
+                }
+            }
+        }
+        let src_pool = guard.multi_pool.pool(src_pool_id)?;
+        let tgt_pool = guard.multi_pool.pool(tgt_pool_id)?;
         // Only one hop for source propagation: chars activate concepts they
         // are members of, and that's it.  A second hop would let the
         // char-to-char Hebbian edges (built within a single training pair
@@ -7387,8 +7457,7 @@ impl NeuroRuntime {
                         if !is_hierarchical {
                             let concept_atoms: std::collections::HashSet<String> =
                                 neuron.members.iter()
-                                    .filter_map(|mid| src_pool.get_hot(*mid as usize))
-                                    .filter_map(|n| n.label.clone())
+                                    .filter_map(|mid| src_pool.label_for(*mid))
                                     .collect();
                             let input_atoms: std::collections::HashSet<String> =
                                 pos_atoms.iter().cloned().collect();

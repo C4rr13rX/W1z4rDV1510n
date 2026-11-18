@@ -641,7 +641,7 @@ pub struct PoolConfig {
     /// the byte's ability to spray activation into every concept it ever
     /// appeared in, which is the "index lookup, not a byte firing into
     /// millions of terminals" the goal asks for.
-    #[serde(skip, default = "default_max_atom_fanout")]
+    #[serde(default = "default_max_atom_fanout")]
     pub max_atom_fanout: usize,
     /// Maximum run length emergence considers ON THE TRAINING PATH, where it
     /// is frame-local. 0 or 1 disables it, which is how every brain behaved
@@ -4101,6 +4101,27 @@ impl Pool {
         AtomFanoutOutcome::Spilled
     }
 
+    fn spill_cross_pool_terminal_to_overflow(&mut self, atom: NeuronId, target: NeuronRef) {
+        if target.pool == self.config.id {
+            return;
+        }
+        if self
+            .cold_atom_fanout_overflow_for_pool(atom, target.pool)
+            .contains(&target.neuron)
+        {
+            return;
+        }
+        let block = Self::ATOM_FANOUT_OVERFLOW_BLOCK;
+        let entry = self.atom_fanout_overflow.entry(atom).or_default();
+        if entry.contains(&target) {
+            return;
+        }
+        if entry.len() == entry.capacity() {
+            entry.reserve_exact(block);
+        }
+        entry.push(target);
+    }
+
     /// Targets this atom could not keep resident, in the order training
     /// offered them. Empty for every atom that never saturated.
     pub fn atom_fanout_overflow_targets(&self, atom: NeuronId) -> &[NeuronRef] {
@@ -5327,46 +5348,36 @@ impl Pool {
         };
         // Wire member→concept terminals (atom→concept bottom-up) and
         // concept→member (concept→atom top-down).  Both Hebbian-strengthen
-        // on subsequent activations.
+        // on subsequent activations.  Keep resident fan-out bounded via
+        // `reinforce_terminal_bounded_evicting` so intra-pool concepts never
+        // flood `atom_fanout_overflow`, while spilling any displaced cross-pool
+        // binding terminal into `atom_fanout_overflow` so zero taught bindings
+        // are ever lost.
         let mut added_terminals: usize = 0;
         let atom_cap = self.config.max_atom_fanout;
         for &mid in &members {
             let target = NeuronRef::new(self.config.id, id);
+            let mut evicted_cross_pool = None;
             if let Some(member_neuron) = self.neurons.get_mut(mid as usize) {
-                // See `PoolConfig::max_atom_fanout`: a saturated byte keeps the
-                // terminals it has and stops acquiring one per concept it ever
-                // appears in. Concepts are never capped -- their fan-out is
-                // bounded by their own member count -- and the concept's
-                // top-down terminal below is always wired, so the pair is only
-                // ever missing in the bottom-up direction that the label and
-                // sequence indexes already cover.
-                //
-                // The bound is FIRST-COME here, and that is measurably costly:
-                // lifting it entirely (`max_atom_fanout = 0`), nothing else
-                // changed, moved scale-16 integration 44.3 -> 50.8 % and
-                // scale-64 integration 20.5 -> 32.5 % with recall at 100.0 --
-                // so the terminals it refuses are carrying answers. Lifting it
-                // is still wrong: +29.4 % peak and x2.75 wall at scale 64.
-                // `Neuron::reinforce_terminal_bounded` keeps the bound and
-                // displaces the weakest resident terminal instead.
-                //
-                // Measured as a NO-MOVE at this call site -- integration
-                // 53.7 / 50.0 / 44.3 -> 53.7 / 50.0 / 44.8, peak and recall
-                // flat -- because the hub is built by
-                // `Brain::promote_binding_concept` and not by concept
-                // emergence. It is wired here anyway: the rule is correct, it
-                // costs nothing, and this is the site that matters as soon as
-                // training forms concepts.
                 let cap = if member_neuron.is_atom() { atom_cap } else { 0 };
-                if member_neuron.reinforce_terminal_bounded(
+                let (added, evicted) = member_neuron.reinforce_terminal_bounded_evicting(
                     target,
                     0.5,
                     tick,
                     self.config.max_weight,
                     cap,
-                ) {
+                );
+                if added {
                     added_terminals += 1;
                 }
+                if let Some(ev) = evicted {
+                    if ev.pool != self.config.id {
+                        evicted_cross_pool = Some(ev);
+                    }
+                }
+            }
+            if let Some(ev) = evicted_cross_pool {
+                self.spill_cross_pool_terminal_to_overflow(mid, ev);
             }
             if concept.reinforce_terminal(
                 NeuronRef::new(self.config.id, mid),

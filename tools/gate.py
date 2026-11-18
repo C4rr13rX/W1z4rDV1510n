@@ -41,6 +41,9 @@ STEPS = [
     ("node compiles", CAPPED + ["cargo", "check", "-p", "w1z4rdv1510n-node", "--release", "-j", "2",
                                 "--bin", "w1z4rdv1510n-node", "--bin", "w1z4rd_brain_server",
                                 "--bin", "w1z4rd_brain_migrate"]),
+    ("node chat derivation test", CAPPED + ["cargo", "test", "-p", "w1z4rdv1510n-node", "--release", "-j", "2",
+                                            "--bin", "w1z4rdv1510n-node", "brain_api::tests::answer_path", "--",
+                                            "--test-threads=1"]),
     # --stress is NOT optional here. Without it the scorecard step runs scales
     # 1, 4 and 16 only, so the gate could never see a scale-64 RAM regression --
     # and it did not: a +5.3 MB scale-64 growth landed green on 2026-10-01 and

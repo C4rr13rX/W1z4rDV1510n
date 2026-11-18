@@ -329,6 +329,40 @@ class ActiveInvocation:
         self.path.unlink(missing_ok=True)
 
 
+def compute_polite_allowance(requested_mb: int) -> tuple[int, int | None]:
+    """Scale the job's memory cap and cargo parallelism to fit nicely within
+    the PC's live available RAM, always leaving a >=7.5 GB polite reserve +
+    12% under-cap margin so crypto strategies and desktop apps run unimpeded,
+    while expanding up to `requested_mb` when free RAM is abundant."""
+    class _MemStatusEx(ctypes.Structure):
+        _fields_ = [
+            ("dwLength", wintypes.DWORD),
+            ("dwMemoryLoad", wintypes.DWORD),
+            ("ullTotalPhys", ctypes.c_uint64),
+            ("ullAvailPhys", ctypes.c_uint64),
+            ("ullTotalPageFile", ctypes.c_uint64),
+            ("ullAvailPageFile", ctypes.c_uint64),
+            ("ullTotalVirtual", ctypes.c_uint64),
+            ("ullAvailVirtual", ctypes.c_uint64),
+            ("ullAvailExtendedVirtual", ctypes.c_uint64),
+        ]
+
+    try:
+        ms = _MemStatusEx()
+        ms.dwLength = ctypes.sizeof(_MemStatusEx)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(ms)):
+            total_mb = int(ms.ullTotalPhys // (1024 * 1024))
+            avail_mb = int(ms.ullAvailPhys // (1024 * 1024))
+            reserve_mb = max(7680, int(total_mb * 0.25)) if total_mb >= 24576 else int(total_mb * 0.25)
+            usable_mb = int(max(0, avail_mb - reserve_mb) * 0.88)
+            effective_mb = min(requested_mb, max(2200, usable_mb))
+            jobs_override = 1 if usable_mb < 3200 else None
+            return effective_mb, jobs_override
+    except Exception:
+        pass
+    return requested_mb, None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--mb", type=int, default=2048, help="committed-memory cap for the whole tree")
@@ -336,15 +370,21 @@ def main() -> int:
     ap.add_argument("--json", help="also write the result line to this file")
     ap.add_argument("cmd", nargs=argparse.REMAINDER)
     args = ap.parse_args()
-    cmd = args.cmd[1:] if args.cmd[:1] == ["--"] else args.cmd
+    cmd = list(args.cmd[1:] if args.cmd[:1] == ["--"] else args.cmd)
     if not cmd:
         ap.error("no command given")
+    effective_cap_mb, jobs_override = compute_polite_allowance(args.mb)
     is_cargo = Path(cmd[0]).stem.lower() == "cargo"
+    if is_cargo and jobs_override == 1:
+        for idx, tok in enumerate(cmd[:-1]):
+            if tok == "-j":
+                cmd[idx + 1] = "1"
+                break
     tgt_dir = target_dir(ROOT)
     if is_cargo:
         os.environ["CARGO_TARGET_DIR"] = str(tgt_dir)
     with ActiveInvocation(cmd, ROOT, tgt_dir):
-        job = MemoryCappedJob(args.mb)
+        job = MemoryCappedJob(effective_cap_mb)
         with BuildSlot(cmd, tgt_dir) if is_cargo else nullcontext():
             t0 = time.time()
             proc = subprocess.Popen(cmd)
@@ -356,8 +396,9 @@ def main() -> int:
                 subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
                 code = proc.wait()
     peak = job.peak_mb()
-    hit_cap = peak >= args.mb * 0.97 and code != 0
-    result = {"exit": code, "peak_mb": round(peak, 1), "cap_mb": args.mb,
+    hit_cap = peak >= effective_cap_mb * 0.97 and code != 0
+    result = {"exit": code, "peak_mb": round(peak, 1), "cap_mb": effective_cap_mb,
+              "requested_cap_mb": args.mb,
               "secs": round(time.time() - t0, 1), "hit_cap": hit_cap, "timed_out": timed_out}
     line = json.dumps(result)
     print(line, file=sys.stderr)

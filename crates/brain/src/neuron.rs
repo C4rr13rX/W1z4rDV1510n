@@ -489,8 +489,19 @@ impl Neuron {
         max_weight: f32,
         cap:        usize,
     ) -> bool {
+        self.reinforce_terminal_bounded_evicting(target, delta, tick, max_weight, cap).0
+    }
+
+    pub fn reinforce_terminal_bounded_evicting(
+        &mut self,
+        target:     NeuronRef,
+        delta:      f32,
+        tick:       u64,
+        max_weight: f32,
+        cap:        usize,
+    ) -> (bool, Option<NeuronRef>) {
         if cap == 0 || self.terminals.len() < cap || self.find_terminal(&target).is_some() {
-            return self.reinforce_terminal(target, delta, tick, max_weight);
+            return (self.reinforce_terminal(target, delta, tick, max_weight), None);
         }
         // Saturated, and this target is new. Find the weakest displaceable
         // resident terminal. Ties keep the EARLIER index so the choice is a
@@ -510,10 +521,10 @@ impl Neuron {
         let Some((idx, weakest_weight)) = weakest else {
             // Every resident terminal is consolidation-locked. Refuse rather
             // than evict a locked one -- recall outranks derivation.
-            return false;
+            return (false, None);
         };
         if newcomer <= weakest_weight {
-            return false;
+            return (false, None);
         }
         let evicted = self.terminals[idx].target;
         self.terminals[idx] = Terminal::new(target, newcomer, tick);
@@ -521,7 +532,7 @@ impl Neuron {
             m.remove(&evicted);
             m.insert(target, idx);
         }
-        false
+        (false, Some(evicted))
     }
 
     pub fn rebuild_terminal_idx(&mut self) {

@@ -203,17 +203,31 @@ fn refused_hub_terminals_are_retained_on_store_and_paged_by_goal() {
     teach_world(&mut brain, rooms);
 
     let binding_pool_id = brain.stats().binding_pool_id;
-    let r_atom = {
+    let (r_atom, pre_idle_overflow_len) = {
         let query_handle = brain.fabric().pool(QUERY_POOL).unwrap();
         let query = query_handle.read();
         let r_atom = query.label_to_id("q:cg").expect("'r' atom must exist");
-        let resident_len = query.get(r_atom).unwrap().terminals.len();
-        let overflow_len = query.atom_fanout_overflow_targets(r_atom).len();
+        let resident_terminals = &query.get(r_atom).unwrap().terminals;
+        let resident_len = resident_terminals.len();
+        let resident_binding = resident_terminals
+            .iter()
+            .filter(|t| t.target.pool == binding_pool_id)
+            .count();
+        let overflow_targets = query.atom_fanout_overflow_targets(r_atom);
+        let overflow_len = overflow_targets.len();
+        let overflow_binding = overflow_targets
+            .iter()
+            .filter(|t| t.pool == binding_pool_id)
+            .count();
         assert_eq!(resident_len, 512, "resident fan-out must stay capped at 512");
         assert_eq!(
-            overflow_len,
-            total_facts - 512,
-            "refused hub terminals must be kept in overflow instead of dropped"
+            resident_binding + overflow_binding,
+            total_facts,
+            "refused hub binding terminals must be kept in overflow instead of dropped"
+        );
+        assert!(
+            overflow_len >= total_facts - 512,
+            "overflow must hold all refused binding + intra-pool emergence terminals"
         );
         for binding_id in 0..total_facts as u32 {
             assert!(
@@ -221,7 +235,7 @@ fn refused_hub_terminals_are_retained_on_store_and_paged_by_goal() {
                 "every taught fact's binding ({binding_id}) must be reachable from hub atom before idle"
             );
         }
-        r_atom
+        (r_atom, overflow_len)
     };
 
     brain.serialize_all_neurons_for_idle().unwrap();
@@ -244,7 +258,7 @@ fn refused_hub_terminals_are_retained_on_store_and_paged_by_goal() {
         let paged_overflow = query.atom_fanout_overflow_targets_paged(r_atom);
         assert_eq!(
             paged_overflow.len(),
-            total_facts - 512,
+            pre_idle_overflow_len,
             "all refused terminals must be retained on the .wbrain store"
         );
         let routes = query.binding_routes_from(r_atom, binding_pool_id);

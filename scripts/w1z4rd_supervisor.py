@@ -74,7 +74,7 @@ DEFAULT_CONFIG = {
         # (one thread had burned 39 h of CPU in PageIn wait) while /health
         # kept answering instantly from a static struct -- so the watchdog
         # saw a healthy node while nothing could learn.
-        "min_sys_avail_mb": 4096,
+        "min_sys_avail_mb": 8192,
         # Autocheckpoint cadence (seconds), also mirroring start_node.ps1.
         "autocheckpoint_secs": 900,
         # Explicit brain directory (exported as W1Z4RD_NODE_BRAIN_DIR).

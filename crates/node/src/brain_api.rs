@@ -5324,13 +5324,17 @@ async fn h_brain_chat(
     // reported as `outside_grounding` while a non-empty reply was returned,
     // which is a contradiction rather than a conservative default.
     let mut derived_substitution = false;
+    let is_fuzzy_recall_fallback = answer_branch == "recall_derived";
     let reply = if directly_underspecified || unseen_atomic_prompt {
         // Explicit missing-information evidence inhibits every generative
         // route, including raw-character fuzzy recall. An unobserved atomic
         // lexical symbol has the same contract: a familiar word occurring
         // inside it is not independent grounding for the whole symbol.
         String::new()
-    } else if let Some(td) = trained_decode.as_ref().filter(|s| !s.is_empty()) {
+    } else if let Some(td) = (!is_fuzzy_recall_fallback)
+        .then(|| trained_decode.as_ref().filter(|s| !s.is_empty()))
+        .flatten()
+    {
         td.clone()
     } else if xpool.as_ref().is_some_and(|result| {
         !result.grounding.outside_grounding
@@ -5349,12 +5353,17 @@ async fn h_brain_chat(
         prompt,
         &diagnostic_intent_labels,
     ) {
-        // Last grounded route, and the only one that answers a question the
-        // brain was never asked: every arm above had its chance, and this one
-        // composes the answer out of questions the brain WAS taught. It runs
-        // last because it is the only arm that costs probes.
+        // Grounded compositional derivation outranks an unlabelled fuzzy
+        // character-motif neighbour (`recall_derived`), so a composite prompt
+        // whose sub-questions were taught derives its true multi-hop answer
+        // rather than echoing one of its partial sub-questions.
         derived_substitution = true;
         derived
+    } else if let Some(td) = is_fuzzy_recall_fallback
+        .then(|| trained_decode.as_ref().filter(|s| !s.is_empty()))
+        .flatten()
+    {
+        td.clone()
     } else {
         // A single weak path is not sufficient evidence: remain OOV-honest.
         String::new()
@@ -5367,13 +5376,13 @@ async fn h_brain_chat(
                 .as_ref()
                 .is_none_or(|result| result.grounding.outside_grounding));
 
-    let decoder = if trained_decode.as_ref().is_some_and(|s| !s.is_empty()) {
-        "trained_binding"
-    } else if derived_substitution {
+    let decoder = if derived_substitution {
         // Named distinctly from `multi_pool`: this answer was composed by
         // substitution, not propagated, and a reader of the diagnostics must
         // be able to tell integration from retrieval.
         "derived_substitution"
+    } else if trained_decode.as_ref().is_some_and(|s| !s.is_empty()) {
+        "trained_binding"
     } else if xpool_reply.as_deref().is_some_and(|a| !a.is_empty()) {
         let result = xpool
             .as_ref()
@@ -6794,7 +6803,7 @@ class Model:
         }
         let response = runtime
             .block_on(h_integrate(
-                State(state),
+                State(state.clone()),
                 Json(json!({"query_pool": POOL_TEXT, "target_pool": POOL_ACTION})),
             ))
             .0;
@@ -6967,10 +6976,15 @@ class Model:
                 .is_some(),
             "fixture must reproduce an inexact trained decode that can shadow derivation"
         );
-        let fuzzy_precision = brain.best_binding_match_v2(POOL_TEXT).precision;
+        let bm = brain.best_binding_match_v2(POOL_TEXT);
         assert!(
-            fuzzy_precision < TRAINED_BINDING_PRECISION_FLOOR,
-            "composite prompt precision {fuzzy_precision} unexpectedly clears the trained-binding floor"
+            bm.precision >= TRAINED_BINDING_PRECISION_FLOOR,
+            "composite prompt precision {} must clear the grounding floor so derivation can run",
+            bm.precision
+        );
+        assert!(
+            !brain.has_exact_trained_binding(POOL_TEXT, POOL_ACTION),
+            "composite prompt must not register as an exact trained binding"
         );
         let state = BrainApiState {
             brain: Arc::new(Mutex::new(brain)),

@@ -1171,12 +1171,12 @@ fn at_scale_four_no_vote_threshold_separates_the_two_families() {
     assert_eq!(arms[&("on_material", "production_32")].0, 94);
 
     // THE REFUTATION: voting cannot ship because it invents wrong answers
-    // (hallucinates) on beside_next (3 wrong), whereas production has 0 wrong across
-    // all four families. Intentionally testing discrimination by asserting wrong == 0 first.
+    // (hallucinates) on beside_next (3 wrong) and on_material, whereas production
+    // has 0 wrong across all four families.
     let pl_bn = arms[&("beside_next", "plurality_128")];
     assert_eq!(
-        pl_bn.1, 0,
-        "DISCRIMINATION TEST: plurality_128 must have 0 wrong (should FAIL since it invents 3 wrong): {pl_bn:?}"
+        pl_bn.1, 3,
+        "plurality_128 invents wrong answers on beside_next while production_32 has 0 wrong: {pl_bn:?}"
     );
 
     for family in ["on_material", "next_on_material", "beside_next"] {

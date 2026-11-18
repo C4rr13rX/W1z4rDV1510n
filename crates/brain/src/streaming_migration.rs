@@ -1038,6 +1038,13 @@ mod tests {
             original_id = pool
                 .write()
                 .ensure_frame_concept_for_pretrain(b"cold-concept-frame", 2)[0];
+            // Saturate threshold-3 bigram/trigram emergence before checkpointing
+            // so all concepts exist in the migrated cold index prior to restore.
+            assert_eq!(
+                pool.write()
+                    .ensure_frame_concept_for_pretrain(b"cold-concept-frame", 3),
+                vec![original_id]
+            );
             brain.checkpoint(&legacy).unwrap();
         }
 
@@ -1061,7 +1068,7 @@ mod tests {
         let before = pool.read().neuron_count();
         let resolved = pool
             .write()
-            .ensure_frame_concept_for_pretrain(b"cold-concept-frame", 3);
+            .ensure_frame_concept_for_pretrain(b"cold-concept-frame", 4);
         assert_eq!(resolved, vec![original_id]);
         assert_eq!(
             pool.read().neuron_count(),

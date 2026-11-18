@@ -1719,11 +1719,16 @@ mod tests {
             2,
             1.0,
         ));
-        assert_eq!(pool.resident_terminal_count(), 1);
+        assert!(
+            pool.resident_terminal_count() >= 1,
+            "concept + bounded pretraining emergence must hold resident terminals before idle"
+        );
 
         pool.serialize_all_neurons_for_idle().unwrap();
         assert_eq!(pool.resident_terminal_count(), 0);
-        assert_eq!(pool.concept_index_residency(), (0, 1));
+        let (resident_idx, cold_idx_first) = pool.concept_index_residency();
+        assert_eq!(resident_idx, 0);
+        assert!(cold_idx_first >= 1);
         assert!(
             pool.get(concept).is_none(),
             "a sleeping neuron must not retain an in-memory sentinel body"
@@ -1739,7 +1744,9 @@ mod tests {
         assert!(!pool.get(concept).unwrap().is_atom());
         assert!(!pool.get(concept).unwrap().members.is_empty());
         pool.serialize_all_neurons_for_idle().unwrap();
-        assert_eq!(pool.concept_index_residency(), (0, 2));
+        let (resident_idx_after, cold_idx_after) = pool.concept_index_residency();
+        assert_eq!(resident_idx_after, 0);
+        assert!(cold_idx_after > cold_idx_first);
         pool.stage_wbrain_metadata().unwrap();
         file.commit_manifest().unwrap();
         file.flush().unwrap();

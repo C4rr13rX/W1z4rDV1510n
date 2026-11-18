@@ -8515,17 +8515,38 @@ impl Brain {
             .collect();
         if target_candidates.is_empty() {
             // Chain found nothing in target pool → return the fabric
-            // attempt (which may have low confidence; honest signal).
-            return if fabric_has_answer
+            // attempt (which may have low confidence; honest signal), or
+            // decode the exact taught binding when precision & recall are 1.0
+            // ([1e5045b9]: pretrain_binding_episode populates trained bindings
+            // without populating the EEM byte-fact graph).
+            if fabric_has_answer
                 && recalled_exactly
                 && fabric_ans.grounding.fabric_confidence >= fabric_confidence_threshold
             {
-                fabric_ans
-            } else {
-                let mut rejected = fabric_ans;
-                rejected.answer = None;
-                rejected
-            };
+                return fabric_ans;
+            }
+            if recalled_exactly && bm.precision >= 0.999 {
+                if let Some(recalled_ans) = self.decode_best_trained_binding(query_pool, target_pool) {
+                    if !recalled_ans.is_empty() {
+                        let mut g = fabric_ans.grounding;
+                        g.input_atom_coverage = bm.recall;
+                        g.strongest_match_jaccard = binding_score;
+                        g.fabric_confidence = binding_score;
+                        g.integrated_confidence = binding_score;
+                        g.outside_grounding = false;
+                        g.speculation_flag = false;
+                        return AnswerWithGrounding {
+                            answer: Some(recalled_ans),
+                            confidence_tier: ConfidenceTier::from_confidence(binding_score, false, false),
+                            grounding: g,
+                            next_steps_if_ungrounded: Vec::new(),
+                        };
+                    }
+                }
+            }
+            let mut rejected = fabric_ans;
+            rejected.answer = None;
+            return rejected;
         }
         target_candidates
             .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));

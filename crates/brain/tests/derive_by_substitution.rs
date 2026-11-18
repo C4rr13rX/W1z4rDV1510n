@@ -432,6 +432,10 @@ fn the_production_answer_path_derives_untrained_answers() {
         trained_recall_ok, trained_total,
         "recall through the scorecard's own recall path regressed"
     );
+    assert_eq!(
+        trained_ok, trained_total,
+        "integrate_autonomous must answer all taught bindings when precision & recall are 1.0 ([1e5045b9])"
+    );
     assert_eq!(wrong, 0, "the derivation answered {wrong} untrained questions WRONGLY");
     assert_eq!(
         hits, asked,

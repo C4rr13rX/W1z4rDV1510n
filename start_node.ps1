@@ -9,8 +9,8 @@
 #    to brain-data\brain.bin on this cadence so restarts never lose the fabric.
 param(
     [string]$Addr = "127.0.0.1:8090",
-    [int]$MinSysAvailMb = 4096,
-    [int]$CheckpointSecs = 900,
+    [int]$MinSysAvailMb = 8192,
+    [int]$CheckpointSecs = 0,
     # Explicit brain directory. Without it the node resolves
     # <W1Z4RDV1510N_DATA_DIR>/brain when that env var is set (bin\start_node.cmd
     # and the supervisor both set it), so the same binary would load a
@@ -26,6 +26,7 @@ param(
 
 $env:W1Z4RD_TIER_MIN_SYS_AVAIL_MB = "$MinSysAvailMb"
 $env:W1Z4RD_BRAIN_AUTOCHECKPOINT_SECS = "$CheckpointSecs"
+$env:W1Z4RD_HQ_DERIVE = "0"
 if ($BrainDir) { $env:W1Z4RD_NODE_BRAIN_DIR = $BrainDir }
 if ($Identity)   { $env:W1Z4RD_BRAIN_IDENTITY   = (Join-Path $PSScriptRoot $Identity) }
 if ($Deployment) { $env:W1Z4RD_BRAIN_DEPLOYMENT = (Join-Path $PSScriptRoot $Deployment) }
@@ -38,7 +39,7 @@ $nodeBin = Join-Path $root "bin\w1z4rd_node.exe"
 $outLog  = Join-Path $logDir "node-$stamp.out.log"
 $errLog  = Join-Path $logDir "node-$stamp.err.log"
 $envPairs = @()
-foreach ($key in @("W1Z4RD_TIER_MIN_SYS_AVAIL_MB","W1Z4RD_BRAIN_AUTOCHECKPOINT_SECS","W1Z4RD_NODE_BRAIN_DIR","W1Z4RD_BRAIN_IDENTITY","W1Z4RD_BRAIN_DEPLOYMENT")) {
+foreach ($key in @("W1Z4RD_TIER_MIN_SYS_AVAIL_MB","W1Z4RD_BRAIN_AUTOCHECKPOINT_SECS","W1Z4RD_HQ_DERIVE","W1Z4RD_NODE_BRAIN_DIR","W1Z4RD_BRAIN_IDENTITY","W1Z4RD_BRAIN_DEPLOYMENT")) {
     $val = [Environment]::GetEnvironmentVariable($key, "Process")
     if ($val) { $envPairs += "set `"$key=$val`"" }
 }
