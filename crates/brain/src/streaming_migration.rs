@@ -483,7 +483,7 @@ pub(super) fn is_raw_complete(destination: &Path) -> bool {
     };
     let metadata = file.brain_metadata();
     decode_progress(&metadata).ok().flatten().is_none()
-        && bincode::deserialize::<WbrainBrainMetadata>(&metadata).is_ok()
+        && super::wbrain_metadata::deserialize_wbrain_brain_metadata(&metadata).is_ok()
         && !file.pool_ids().is_empty()
 }
 

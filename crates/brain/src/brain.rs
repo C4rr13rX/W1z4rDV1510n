@@ -11079,10 +11079,12 @@ impl Brain {
         path: P,
         mut encodings: std::collections::HashMap<PoolId, Box<dyn AtomEncoding>>,
     ) -> std::io::Result<(Self, Vec<PoolId>)> {
-        use self::wbrain_metadata::{PersistedMomentFingerprint, WbrainBrainMetadata};
+        use self::wbrain_metadata::{
+            PersistedMomentFingerprint, WbrainBrainMetadata, deserialize_wbrain_brain_metadata,
+        };
         let file = crate::store::WbrainFile::open(path)?;
-        let metadata: WbrainBrainMetadata = bincode::deserialize(&file.brain_metadata())
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        let metadata: WbrainBrainMetadata =
+            deserialize_wbrain_brain_metadata(&file.brain_metadata())?;
         let restore_fingerprint = |fingerprint: PersistedMomentFingerprint| -> FpKey {
             let members_extra = MomentFingerprint::extra_from_full(
                 &fingerprint.ordered_per_pool,

@@ -1487,7 +1487,7 @@ struct WbrainPoolMetadata {
 /// and falling back here preserves 100% of both committed fixtures and multi-GB
 /// production `.wbrain` stores without re-creating or losing neurons.
 #[derive(serde::Deserialize)]
-struct LegacyPoolConfigWithoutFanout {
+pub(crate) struct LegacyPoolConfigWithoutFanout {
     name: String,
     id: PoolId,
     frame_rate: u32,
@@ -1502,6 +1502,29 @@ struct LegacyPoolConfigWithoutFanout {
     sparsity_min_neurons: usize,
     heterosynaptic_ltd_mode: ControlMode,
     predict_gate_mode: ControlMode,
+}
+
+impl LegacyPoolConfigWithoutFanout {
+    pub(crate) fn into_pool_config(self) -> PoolConfig {
+        PoolConfig {
+            name: self.name,
+            id: self.id,
+            frame_rate: self.frame_rate,
+            recent_atoms_window: self.recent_atoms_window,
+            max_concept_member_count: self.max_concept_member_count,
+            max_atom_fanout: default_max_atom_fanout(),
+            pretrain_emergence_max_run: default_pretrain_emergence_max_run(),
+            concept_emergence_threshold: self.concept_emergence_threshold,
+            max_weight: self.max_weight,
+            decay_rate: self.decay_rate,
+            prune_floor: self.prune_floor,
+            plasticity_baseline: self.plasticity_baseline,
+            sparsity_mode: self.sparsity_mode,
+            sparsity_min_neurons: self.sparsity_min_neurons,
+            heterosynaptic_ltd_mode: self.heterosynaptic_ltd_mode,
+            predict_gate_mode: self.predict_gate_mode,
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -1528,24 +1551,7 @@ fn deserialize_wbrain_pool_metadata(blob: &[u8]) -> std::io::Result<WbrainPoolMe
                 std::io::Error::new(std::io::ErrorKind::InvalidData, primary_err)
             })?;
             Ok(WbrainPoolMetadata {
-                config: PoolConfig {
-                    name: legacy.config.name,
-                    id: legacy.config.id,
-                    frame_rate: legacy.config.frame_rate,
-                    recent_atoms_window: legacy.config.recent_atoms_window,
-                    max_concept_member_count: legacy.config.max_concept_member_count,
-                    max_atom_fanout: default_max_atom_fanout(),
-                    pretrain_emergence_max_run: default_pretrain_emergence_max_run(),
-                    concept_emergence_threshold: legacy.config.concept_emergence_threshold,
-                    max_weight: legacy.config.max_weight,
-                    decay_rate: legacy.config.decay_rate,
-                    prune_floor: legacy.config.prune_floor,
-                    plasticity_baseline: legacy.config.plasticity_baseline,
-                    sparsity_mode: legacy.config.sparsity_mode,
-                    sparsity_min_neurons: legacy.config.sparsity_min_neurons,
-                    heterosynaptic_ltd_mode: legacy.config.heterosynaptic_ltd_mode,
-                    predict_gate_mode: legacy.config.predict_gate_mode,
-                },
+                config: legacy.config.into_pool_config(),
                 recent_atoms: legacy.recent_atoms,
                 sequences: legacy.sequences,
                 legacy_sequence_ledger: legacy.legacy_sequence_ledger,
