@@ -47,7 +47,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.market_memory_guard import VerifiedWorkingSetReclaimer
+from scripts.market_memory_guard import (
+    VerifiedWorkingSetReclaimer,
+    system_available_memory_gb,
+)
 
 FEATURE_SCHEMA = 5
 # 15: profit-first objective (2026-08-17). curriculum_fitness was rewritten
@@ -1076,7 +1079,7 @@ def claim_service(state_dir: Path) -> Path:
 
 
 def available_memory_gb() -> float:
-    return (psutil.virtual_memory().available / 1024**3 if psutil is not None else 999.0)
+    return system_available_memory_gb(psutil)
 
 
 def wait_for_memory_floor(

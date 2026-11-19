@@ -30,7 +30,10 @@ DEFAULT_GHOST_STACK_ROOT = ROOT.parent / "CoolCryptoUtilities"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.market_memory_guard import VerifiedWorkingSetReclaimer
+from scripts.market_memory_guard import (
+    VerifiedWorkingSetReclaimer,
+    system_available_memory_gb,
+)
 
 
 def utc_now() -> str:
@@ -39,7 +42,7 @@ def utc_now() -> str:
 
 
 def available_memory_gb() -> float:
-    return psutil.virtual_memory().available / 1024**3 if psutil else 999.0
+    return system_available_memory_gb(psutil)
 
 
 def process_alive(pid: int) -> bool:
@@ -107,12 +110,17 @@ def validated_profit_factor(state_dir: Path, required_folds: int = 3) -> float |
         return None
 
 
-def ghost_stack_healthy(stack_root: Path, timeout: float = 3.0,
+def ghost_stack_healthy(stack_root: Path, timeout: float = 8.0,
                         heartbeat_max_age: float = 150.0) -> bool:
-    """Require both Django HTTP and a fresh production-manager heartbeat."""
+    """Require both lightweight Django HTTP liveness and a fresh manager heartbeat.
+
+    Uses /health/guardian/ (matching start_ghost_stack.py) rather than
+    /api/wizard-chat/status/, which fans out to w1z4rd_node and stalls >3s under
+    brain load, causing false-positive ghost stack relaunches every cooldown.
+    """
     try:
         with urllib.request.urlopen(
-            "http://127.0.0.1:8001/api/wizard-chat/status/", timeout=timeout,
+            "http://127.0.0.1:8001/health/guardian/", timeout=timeout,
         ) as response:
             if not 200 <= response.status < 300:
                 return False
@@ -235,7 +243,7 @@ def main() -> int:
     parser.add_argument(
         "--state-dir", type=Path, default=ROOT / "runtime/market-evolution",
     )
-    parser.add_argument("--min-free-memory-gb", type=float, default=3.5)
+    parser.add_argument("--min-free-memory-gb", type=float, default=6.0)
     parser.add_argument("--memory-poll-seconds", type=float, default=15.0)
     parser.add_argument("--memory-reclaim-after-polls", type=int, default=4)
     parser.add_argument("--memory-reclaim-process-name", default="w1z4rd_node.exe")

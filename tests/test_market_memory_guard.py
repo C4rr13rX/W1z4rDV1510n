@@ -1,6 +1,10 @@
 from types import SimpleNamespace
 
-from scripts.market_memory_guard import VerifiedWorkingSetReclaimer
+import scripts.market_memory_guard as memory_guard
+from scripts.market_memory_guard import (
+    VerifiedWorkingSetReclaimer,
+    system_available_memory_gb,
+)
 
 
 class FakeProcess:
@@ -51,3 +55,15 @@ def test_reclaimer_fails_closed_on_ambiguous_identity():
     assert reclaimer.attempt() == {
         "outcome": "identity_rejected", "match_count": 2,
     }
+
+
+def test_system_available_memory_gb_is_bounded_by_windows_commit_headroom(monkeypatch):
+    fake_psutil = SimpleNamespace(
+        virtual_memory=lambda: SimpleNamespace(available=12 * 1024**3)
+    )
+    monkeypatch.setattr(
+        memory_guard,
+        "windows_commit_and_phys_available_bytes",
+        lambda: (12 * 1024**3, 2 * 1024**3),
+    )
+    assert system_available_memory_gb(fake_psutil) == 2.0

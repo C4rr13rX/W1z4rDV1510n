@@ -71,16 +71,17 @@ port = 8001
 health_url = "http://127.0.0.1:8001/"
 health_timeout = 10.0
 health_misses_before_restart = 5
+warmup_secs = 90.0
 # 8 threads was the smoking gun for the "Django takes long to load then
 # quietly crashes" pattern: the SPA's parallel polls + each Django request
 # blocking on the node's inner lock saturated waitress and the task queue
-# piled up >16 deep before the panel went dark.  24 covers the worst
-# observed concurrency comfortably.
+# piled up >16 deep before the panel went dark.  48 covers parallel SPA +
+# trading telemetry + wizard chat comfortably alongside 0.5 ms GIL slicing.
 #
 # This lived under [training] until 2026-08-17, where the supervisor never
 # read it -- so WAITRESS_THREADS stayed at the default 8 and the fix this
 # comment describes was never actually in effect.
-threads = 24
+threads = 48
 
 [training]
 # Disable the legacy bash curriculum.  It uses `word_*` labels (in

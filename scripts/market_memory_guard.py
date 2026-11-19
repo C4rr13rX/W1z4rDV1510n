@@ -26,6 +26,54 @@ except ImportError:  # pragma: no cover
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
+def windows_commit_and_phys_available_bytes() -> tuple[int, int] | None:
+    """Return (ullAvailPhys, ullAvailPageFile) on Windows via GlobalMemoryStatusEx."""
+    if os.name != "nt":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    class _MemoryStatusEx(ctypes.Structure):
+        _fields_ = [
+            ("dwLength", wintypes.DWORD),
+            ("dwMemoryLoad", wintypes.DWORD),
+            ("ullTotalPhys", ctypes.c_uint64),
+            ("ullAvailPhys", ctypes.c_uint64),
+            ("ullTotalPageFile", ctypes.c_uint64),
+            ("ullAvailPageFile", ctypes.c_uint64),
+            ("ullTotalVirtual", ctypes.c_uint64),
+            ("ullAvailVirtual", ctypes.c_uint64),
+            ("ullAvailExtendedVirtual", ctypes.c_uint64),
+        ]
+
+    status = _MemoryStatusEx()
+    status.dwLength = ctypes.sizeof(_MemoryStatusEx)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    if not kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+        return None
+    return int(status.ullAvailPhys), int(status.ullAvailPageFile)
+
+
+def system_available_memory_gb(psutil_module: Any = psutil) -> float:
+    """Return conservative available memory (GB), bounded by Windows commit headroom.
+
+    Checking physical RAM alone (`ullAvailPhys`) misses Windows commit-limit
+    exhaustion (`ullAvailPageFile` -> 0) when background processes allocate
+    paged-out virtual memory and cause system-wide allocation aborts.
+    """
+    candidates: list[float] = []
+    if psutil_module is not None:
+        try:
+            candidates.append(float(psutil_module.virtual_memory().available) / 1024**3)
+        except Exception:
+            pass
+    win_counts = windows_commit_and_phys_available_bytes()
+    if win_counts is not None:
+        avail_phys, avail_commit = win_counts
+        candidates.append(min(avail_phys, avail_commit) / 1024**3)
+    return min(candidates) if candidates else 999.0
+
+
 def local_http_healthy(url: str, timeout: float = 3.0) -> bool:
     """Probe only an explicit loopback HTTP endpoint."""
     parsed = urllib.parse.urlparse(url)

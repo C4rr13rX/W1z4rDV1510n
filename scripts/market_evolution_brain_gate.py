@@ -384,7 +384,7 @@ def run_fold(fold: int, cutoff: float, genome: Genome, dataset: dict[str, Any], 
         "W1Z4RD_NODE_BRAIN_DIR": str(fold_root.resolve()),
         "W1Z4RD_BRAIN_IDENTITY": str(identity.resolve()),
         "W1Z4RD_BRAIN_PORT": str(port), "W1Z4RD_BRAIN_BIND": "127.0.0.1",
-        "W1Z4RD_TIER_MIN_SYS_AVAIL_MB": "4096",
+        "W1Z4RD_TIER_MIN_SYS_AVAIL_MB": "6144",
     })
     creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     with (fold_root / "stdout.log").open("wb") as stdout, \
@@ -480,10 +480,14 @@ def main() -> int:
                         default=Path(r"D:\Projects\CoolCryptoUtilities\data\news\historical_deduplicated.json"))
     parser.add_argument("--identity-template", type=Path,
                         default=ROOT / "brains/market_predictor_evolution.identity.toml")
-    parser.add_argument("--binary", type=Path,
-                        default=ROOT / "target/debug/w1z4rd_brain_server.exe")
-    parser.add_argument("--migration-binary", type=Path,
-                        default=ROOT / "target/debug/w1z4rd_brain_migrate.exe")
+    default_binary = ROOT / "target/release/w1z4rd_brain_server.exe"
+    if not default_binary.exists():
+        default_binary = ROOT / "target/debug/w1z4rd_brain_server.exe"
+    default_migrate = ROOT / "target/release/w1z4rd_brain_migrate.exe"
+    if not default_migrate.exists():
+        default_migrate = ROOT / "target/debug/w1z4rd_brain_migrate.exe"
+    parser.add_argument("--binary", type=Path, default=default_binary)
+    parser.add_argument("--migration-binary", type=Path, default=default_migrate)
     parser.add_argument("--runtime", type=Path, default=ROOT / "runtime/market-evolution/brain-gates")
     parser.add_argument("--dataset-cache", type=Path,
                         default=ROOT / "runtime/cache/market-evolution-dataset-v4.joblib")
